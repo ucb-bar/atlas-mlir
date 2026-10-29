@@ -56,7 +56,7 @@ LogicalResult timeBlock(const AtlasStream &s, size_t block,
   };
   std::unique_ptr<TimingReservations> table = replay();
   if (!fault.empty())
-    return ops[begin]->emitOpError(p.diagnostic(fault));
+    return ops[begin]->emitOpError(fault);
   int nextFree = 0;
 
   auto name = [&](size_t i) { return ops[i]->getName().getStringRef().str(); };
@@ -97,7 +97,7 @@ LogicalResult timeBlock(const AtlasStream &s, size_t block,
     for (int start = cycle;; ++cycle) {
       std::string why = fits(cycle);
       if (!fault.empty())
-        return ops[i]->emitOpError(p.diagnostic(fault));
+        return ops[i]->emitOpError(fault);
       if (why.empty())
         return success();
       reason = why;
@@ -110,7 +110,7 @@ LogicalResult timeBlock(const AtlasStream &s, size_t block,
     const Instr &in = instrs[i];
     Footprint f = p.footprint(in, regs);
     if (!f.error.empty())
-      return ops[i]->emitOpError(p.diagnostic(f.error));
+      return ops[i]->emitOpError(f.error);
     std::string reason;
     int cycle = earliest(in, f, nextFree, reason);
 
@@ -135,7 +135,7 @@ LogicalResult timeBlock(const AtlasStream &s, size_t block,
       }
       place(i, f, cycle, reason);
       if (!fault.empty())
-        return ops[i]->emitOpError(p.diagnostic(fault));
+        return ops[i]->emitOpError(fault);
       continue;
     }
 
@@ -149,7 +149,7 @@ LogicalResult timeBlock(const AtlasStream &s, size_t block,
       applyScalar(in, after);
       Footprint sf = p.footprint(slot, after);
       if (!sf.error.empty())
-        return ops[s.delaySlots ? slotIndex : i]->emitOpError(p.diagnostic(sf.error));
+        return ops[s.delaySlots ? slotIndex : i]->emitOpError(sf.error);
       if (drained() - p.frontendSpacing.successorGap() > cycle) {
         cycle = drained() - p.frontendSpacing.successorGap();
         reason = "this block finishes before the branch's successors start";
@@ -180,7 +180,7 @@ LogicalResult timeBlock(const AtlasStream &s, size_t block,
       if (s.delaySlots)
         place(slotIndex, sf, cycle + p.frontendSpacing.ordinaryGap, "");
       if (!fault.empty())
-        return ops[i]->emitOpError(p.diagnostic(fault));
+        return ops[i]->emitOpError(fault);
       if (s.delaySlots)
         i = slotIndex;
       continue;
@@ -191,7 +191,7 @@ LogicalResult timeBlock(const AtlasStream &s, size_t block,
       return failure();
     place(i, f, cycle, reason);
     if (!fault.empty())
-      return ops[i]->emitOpError(p.diagnostic(fault));
+      return ops[i]->emitOpError(fault);
   }
 
   // A block that neither branches nor halts drains before the next block, or

@@ -516,7 +516,7 @@ FailureOr<std::vector<Cost>> costsOf(const BlockGraph &g, const timing::TimingPr
       bool store = isa<VirtualOutputBF16Op, VirtualDMAStoreBF16Op, VirtualDMAStoreFP8Op>(op);
       int registers = isa<VirtualDMALoadBF16Op, VirtualDMAStoreBF16Op>(op) ? registersOf(false) : 1;
       auto estimate = provider.dmaEstimate(int64_t(registers) * kAtlasRegisterBytes, store);
-      if (!estimate.error.empty()) return op->emitOpError(provider.diagnostic(estimate.error));
+      if (!estimate.error.empty()) return op->emitOpError(estimate.error);
       if (estimate.value < 1) return op->emitOpError("provider returned a nonpositive DMA proposal estimate");
       transfer = estimate.value;
     }

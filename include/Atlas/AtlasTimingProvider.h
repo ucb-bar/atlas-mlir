@@ -54,7 +54,7 @@ struct MachineOpTiming {
 // names policy, not RTL qualification.
 struct TimingProvider {
   std::string id;
-  // Format a model refusal when a consumer emits its diagnostic.
+  // Add recovery guidance to a new model refusal.
   std::string diagnostic(llvm::StringRef error) const;
   unsigned packRelayoutRows = 0; // Explicit compiler code-size policy override.
   FrontendSpacing frontendSpacing;

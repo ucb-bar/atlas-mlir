@@ -504,8 +504,16 @@ TimingProvider mlir::atlas::timing::modelTimingProvider(std::shared_ptr<const Mo
   p.frontendSpacing = facts->frontend;
   p.fillPendingDelaySlots = true;
   p.waitReusedDMASlots = true;
-  p.validateScope = modelScope;
-  p.footprint = [facts](const Instr &in, const RegValues &regs) { return modelFootprint(in, regs, *facts); };
+  p.validateScope = [](const AtlasStream &stream) {
+    auto error = modelScope(stream);
+    return error.empty() ? error : modelTimingDiagnostic(error);
+  };
+  p.footprint = [facts](const Instr &in, const RegValues &regs) {
+    auto footprint = modelFootprint(in, regs, *facts);
+    if (!footprint.error.empty())
+      footprint.error = modelTimingDiagnostic(footprint.error);
+    return footprint;
+  };
   p.dependence = [tables = facts->timing](const Instr &a, const Footprint &fa, const Instr &b, const Footprint &fb) {
     return TimingRuleResult<Dependence>{dependence(a, fa, b, fb, *tables), {}};
   };
@@ -515,32 +523,43 @@ TimingProvider mlir::atlas::timing::modelTimingProvider(std::shared_ptr<const Mo
     return TimingRuleResult<DMACompletionConflict>{result, {}};
   };
   p.issueGap = [tables = facts->timing](const Instr &in) {
-    if (!in.op) return TimingRuleResult<int>{0, "invalid instruction"};
+    if (!in.op) return TimingRuleResult<int>{0, modelTimingDiagnostic("invalid instruction")};
     return TimingRuleResult<int>{naturalGap(in, *tables), {}};
   };
   p.createReservations = [tables = facts->timing] {
     return TimingRuleResult<std::unique_ptr<TimingReservations>>{
         createTimingReservations(tables), {}};
   };
-  p.dmaEstimate = [facts](int64_t bytes, bool store) { return facts->dma.estimate(bytes, store); };
+  p.dmaEstimate = [facts](int64_t bytes, bool store) {
+    auto estimate = facts->dma.estimate(bytes, store);
+    if (!estimate.error.empty())
+      estimate.error = modelTimingDiagnostic(estimate.error);
+    return estimate;
+  };
   p.dmaProposal = [facts](int latency, int issue, std::optional<int> previous) {
-    return facts->dma.propose(latency, issue, previous);
+    auto proposal = facts->dma.propose(latency, issue, previous);
+    if (!proposal.error.empty())
+      proposal.error = modelTimingDiagnostic(proposal.error);
+    return proposal;
   };
   return p;
 }
 
 TimingRuleResult<TimingProvider> mlir::atlas::timing::modelTimingProviderFactory(ModuleOp module) {
+  auto fail = [](const std::string &error) {
+    return TimingRuleResult<TimingProvider>{{}, modelTimingDiagnostic(error)};
+  };
   auto selection = module ? module->getAttrOfType<DictionaryAttr>(kAtlasModelEvidence) : DictionaryAttr{};
-  if (!selection) return {{}, "model requires selected atlas.model_evidence"};
+  if (!selection) return fail("model requires selected atlas.model_evidence");
   auto path = selection.getAs<StringAttr>("op_timing"), hash = selection.getAs<StringAttr>("op_timing_sha256");
   auto provider = selection.getAs<StringAttr>("provider");
   if (!path || !hash || !provider || provider.getValue() != kModelTimingProviderId)
-    return {{}, "incomplete model evidence selection"};
+    return fail("incomplete model evidence selection");
   auto facts = loadModelTimingTables(path.getValue(), hash.getValue());
-  if (!facts) return {{}, llvm::toString(facts.takeError())};
+  if (!facts) return fail(llvm::toString(facts.takeError()));
   auto result = modelTimingProvider(std::make_shared<ModelTimingTables>(std::move(*facts)));
   if (auto error = fillMachineTiming(result); !error.empty())
-    return {{}, result.diagnostic(error)};
+    return {{}, error};
   return {std::move(result), {}};
 }
 

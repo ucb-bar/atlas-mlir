@@ -1409,7 +1409,7 @@ TimingRuleResult<std::vector<int64_t>> mlir::atlas::timing::criticalHeights(
           if (!proposal.error.empty()) return {{}, proposal.error};
           d = std::max(d, int64_t(proposal.value.waitIssue));
         } else if (g.footprints[i].dmaCycles > 0)
-          return {{}, "timing provider lacks DMA proposal policy"};
+          return {{}, p.diagnostic("timing provider lacks DMA proposal policy")};
       }
       height[i] = std::max(height[i], d + height[ed.to]);
     }

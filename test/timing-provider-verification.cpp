@@ -4,7 +4,6 @@
 #include "Atlas/AtlasModelTables.h"
 #include "Atlas/AtlasScheduling.h"
 #include "Atlas/AtlasStream.h"
-#include "Atlas/AtlasVirtualScheduling.h"
 #include "VerificationTestSupport.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include <cstdlib>
@@ -560,54 +559,21 @@ void testDMAEstimates() {
   }
 }
 
-void testModelDiagnostics(MLIRContext &context) {
-  registerScheduleAtlasVirtualPass();
-  auto once = [] {
-    StringRef text(diagnostics), pointer("docs/model-timing.md");
+void testModelDiagnostics(MLIRContext &) {
+  auto facts = std::make_shared<ModelTimingTables>();
+  facts->timing = std::make_shared<TimingTables>();
+  auto p = modelTimingProvider(facts);
+  for (const auto &error : {p.footprint({}, unknownRegs()).error,
+                            machineTimingOf(p, "lw").error,
+                            machineTimingOf(p, "unknown").error,
+                            fillMachineTiming(p), p.dmaEstimate(0, false).error,
+                            p.dmaProposal(-1, 0, std::nullopt).error,
+                            modelTimingProviderFactory({}).error}) {
+    StringRef text(error), pointer("docs/model-timing.md");
     size_t at = text.find(pointer);
-    return at != StringRef::npos && text.find(pointer, at + pointer.size()) == StringRef::npos;
-  };
-  auto p = toy();
-  p.id = "synthetic-model-footprint-error";
-  p.model = std::make_shared<TimingTables>();
-  p.footprint = [](const Instr &, const RegValues &) {
-    Footprint f;
-    f.error = "uncovered model footprint";
-    return f;
-  };
-  registerPolicy(p);
-  for (const char *pass : {"schedule-atlas-stream", "insert-atlas-delays"}) {
-    diagnostics.clear();
-    check(!runPipeline(context, kCopy, std::string(pass) + "{provider=" + p.id + "}") &&
-              diagnosed("uncovered model footprint") && once(),
-          "physical pass adds model recovery guidance once", diagnostics);
+    check(at != StringRef::npos && text.find(pointer, at + pointer.size()) == StringRef::npos,
+          "model refusal adds recovery guidance once", error);
   }
-  auto module = parseSourceString<ModuleOp>(kCopy, &context);
-  diagnostics.clear();
-  auto cost = machineTimingOf(p, "lw");
-  if (module && !cost.error.empty())
-    (*module)->emitError(p.diagnostic(cost.error));
-  check(module && !cost.error.empty() && once(),
-        "virtual footprint refusal adds model recovery guidance once", diagnostics);
-  p = toy();
-  p.id = "synthetic-model-dma-error";
-  p.model = std::make_shared<TimingTables>();
-  p.dmaEstimate = [](int64_t, bool) {
-    return TimingRuleResult<int>{0, "uncovered model DMA estimate"};
-  };
-  registerPolicy(p);
-  const char *source = R"mlir(module { func.func @dma_cost() -> !atlas.virtual_state {
-    %s0 = "atlas.virtual_start"() : () -> !atlas.virtual_state
-    %s1, %x = "atlas.virtual_input_bf16"(%s0) {index = 0 : i32}
-      : (!atlas.virtual_state) -> (!atlas.virtual_state, !atlas.virtual_bf16)
-    %s2 = "atlas.virtual_output_bf16"(%s1, %x) {index = 0 : i32}
-      : (!atlas.virtual_state, !atlas.virtual_bf16) -> !atlas.virtual_state
-    return %s2 : !atlas.virtual_state
-  } })mlir";
-  diagnostics.clear();
-  check(!runPipeline(context, source, "schedule-atlas-virtual{provider=" + p.id + "}") &&
-            diagnosed("uncovered model DMA estimate") && once(),
-        "virtual DMA refusal adds model recovery guidance once", diagnostics);
 }
 
 // Each verification boundary decodes and encodes the lowered artifact once.

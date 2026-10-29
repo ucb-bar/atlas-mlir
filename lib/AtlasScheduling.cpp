@@ -127,7 +127,7 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block, bool generated,
 
   auto heights = criticalHeights(g, p);
   if (!heights.error.empty())
-    return op(0)->emitOpError(p.diagnostic(heights.error));
+    return op(0)->emitOpError(heights.error);
   std::vector<int64_t> height = std::move(heights.value);
   std::vector<int> earliest(n, 0), waitingPreds(n, 0), issue(n, -1);
   std::vector<std::string> why(n), reason(n);
@@ -237,10 +237,10 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block, bool generated,
       table.extendForWait(cycle);
     if (g.footprints[best].dmaCycles > 0) {
       if (!p.dmaProposal)
-        return op(best)->emitOpError("timing provider lacks DMA proposal policy");
+        return op(best)->emitOpError(p.diagnostic("timing provider lacks DMA proposal policy"));
       auto proposal = p.dmaProposal(g.footprints[best].dmaCycles, cycle, dmaQueueEnd);
       if (!proposal.error.empty())
-        return op(best)->emitOpError(p.diagnostic(proposal.error));
+        return op(best)->emitOpError(proposal.error);
       dmaQueueEnd = proposal.value.queueEnd;
       channelRelease[nodes[best].op->channel] = proposal.value.waitIssue;
     }
