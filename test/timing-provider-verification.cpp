@@ -426,7 +426,49 @@ void testSchedulerReservations(MLIRContext &context) {
   p.issueGap = [](const Instr &) { return TimingRuleResult<int>{0, {}}; };
   check(!schedule("synthetic-scheduler-zero-gap", p) && diagnosed("positive cycle domain"),
         "scheduler rejects nonpositive issue gaps", diagnostics);
-
+  p = afterWait(false);
+  p.footprint = [](const Instr &in, const RegValues &regs) {
+    Footprint f = occupied(in, regs);
+    if (in.op->opClass == OpClass::DmaLoad)
+      f.dmaCycles = 1;
+    return f;
+  };
+  p.dmaProposal = [](int, int, std::optional<int>) {
+    int end = std::numeric_limits<int>::max();
+    return TimingRuleResult<DMAProposal>{{end, end}, {}};
+  };
+  check(bool(schedule("synthetic-scheduler-large-dma-release", p, waiting)),
+        "DMA queue estimates do not advance the physical issue cycle", diagnostics);
+  p = toy();
+  p.issueGap = [](const Instr &) {
+    return TimingRuleResult<int>{std::numeric_limits<int>::max(), {}};
+  };
+  check(!schedule("synthetic-scheduler-large-gap", p) &&
+            diagnosed("block schedule exceeds cycle domain"),
+        "scheduler refuses an issue gap that leaves no room for the block", diagnostics);
+  p = toy();
+  p.footprint = [](const Instr &, const RegValues &) {
+    Footprint f;
+    f.doneAge = std::numeric_limits<int>::max() - 1;
+    return f;
+  };
+  check(!schedule("synthetic-scheduler-large-age", p) &&
+            diagnosed("block schedule exceeds cycle domain"),
+        "scheduler refuses a completion age that leaves no room for the block", diagnostics);
+  p = toy();
+  p.dependence = [](const Instr &, const Footprint &, const Instr &, const Footprint &) {
+    Dependence d{std::numeric_limits<int>::max(), EdgeKind::Order,
+                 "long dependence"};
+    return TimingRuleResult<Dependence>{d, {}};
+  };
+  check(!schedule("synthetic-scheduler-large-distance", p) &&
+            diagnosed("block schedule exceeds cycle domain"),
+        "scheduler refuses a dependence distance that leaves no room for the block", diagnostics);
+  p = toy();
+  p.frontendSpacing.ordinaryGap = std::numeric_limits<int>::max();
+  check(!schedule("synthetic-scheduler-large-frontend-gap", p) &&
+            diagnosed("frontend spacing exceeds positive cycle domain"),
+        "scheduler refuses overflowing frontend spacing", diagnostics);
 }
 
 void registerPolicy(TimingProvider provider) {
