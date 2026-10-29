@@ -161,23 +161,23 @@ registry](../include/Atlas/AtlasTimingProvider.h). The provider supplies
 operation costs, dependence distances, issue gaps, reservations, DMA conflicts
 and verification; unknown IDs, missing rules or conflicting retained metadata
 fail. Legacy ID `npu-model-rtl-match-v1` aliases `builtin`; timed MLIR/program
-JSON record `builtin`. `model` consumes derived facts and qualified overlap
-evidence.
-The schedulers estimate a DMA transfer with npu_model main's DRAM model
+JSON record `builtin`. `model` reads extracted timing tables and engine
+resources. The default provider estimates DMA with its calibrated DRAM costs
 (`timing::dmaTransferCycles`: 30 cycles, then a 32-byte beat per 23.46 cycles
-loading or 21.68 storing); no check depends on that estimate, since every
-transfer completes at an explicit `dma.wait`.
+loading or 21.68 storing). Model estimates use extracted startups and a
+conservative curve bound. Matching `dma.wait` operations establish transfer
+completion for both providers.
 Emission and LLVM handoff of generated programs need `"timed"` state and the
 provider name; hand-written streams need no timing metadata.
 
-`--select-atlas-model-evidence="facts=DIR"` selects source-derived
-operation/overlap rules selected by `DIR/facts.lock.json`.
+`--select-atlas-model-evidence="facts=DIR"` loads timing tables selected by
+`DIR/facts.lock.json`.
 Set `provider=model` explicitly in virtual/physical scheduling; selecting
-evidence leaves the default unchanged. Missing coverage, unsupported
-operands/configurations, stale hashes and replacing timed evidence fail.
+facts leaves the default unchanged. Missing events, unsupported geometry,
+stale hashes, and replacing timed facts fail.
 Verification, emission and LLVM handoff retain selection. See [model
-timing](model-timing.md) for derivation, representative validation, admission,
-scalar PACK proofs, regeneration and model-scored search.
+timing](model-timing.md) for extraction, resource checks, scalar PACK proofs,
+regeneration, and model-scored search.
 
 ## Machine operations
 
