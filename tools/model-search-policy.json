@@ -19,7 +19,6 @@
       "search_group_evaluations": 0,
       "search_patience": 0,
       "bank_candidates": false,
-      "pack_reload_candidates": false,
       "pack_preload_candidates": false
     },
     "full": {
@@ -27,7 +26,6 @@
       "search_group_evaluations": 204,
       "search_patience": 96,
       "bank_candidates": true,
-      "pack_reload_candidates": true,
       "pack_preload_candidates": true
     }
   },
@@ -45,7 +43,6 @@
     "api_max_candidates": 32,
     "api_search_group_evaluations": 0,
     "api_search_patience": 0,
-    "api_pack_reload_candidates": false,
     "api_pack_preload_candidates": false
   },
   "pools": {

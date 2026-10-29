@@ -60,7 +60,6 @@ class Candidate:
     wait_placement: str = "default"
     virtual_orders: tuple[tuple[int, ...], ...] = ()
     mreg_ranks: tuple[int, ...] = ()
-    pack_reload_after_weight: bool = False
     pack_weight_before_pack: bool = False
 
     def __post_init__(self) -> None:
@@ -76,8 +75,6 @@ class Candidate:
             raise ValueError("MREG ranks must be unsigned 32-bit integers")
         if self.wait_placement not in ("default", "source", "preloaded"):
             raise ValueError("wait-placement must be default, source or preloaded")
-        if self.pack_reload_after_weight and self.pack_weight_before_pack:
-            raise ValueError("PACK weight placement options are mutually exclusive")
         if self.wait_placement == "preloaded" and not self.pack_weight_before_pack:
             raise ValueError("preloaded wait placement requires PACK weight preloading")
 
@@ -108,7 +105,6 @@ def candidate_options(candidate: Candidate, provider: str, spill: bool, *, graph
         (candidate.random_seed is not None, f"random-seed={candidate.random_seed}"),
         (candidate.store_windows, "store-windows='" + ",".join(map(str, candidate.store_windows)) + "'"),
         (candidate.mreg_ranks, "mreg-ranks='" + ",".join(map(str, candidate.mreg_ranks)) + "'"),
-        (candidate.pack_reload_after_weight, "pack-reload-after-weight=true"),
         (candidate.pack_weight_before_pack, "pack-weight-before-pack=true"),
         (candidate.wait_placement != "default", "wait-placement=" + candidate.wait_placement),
     ):
@@ -184,7 +180,6 @@ class SelectionConfig:
     mreg_candidates: tuple[tuple[int, ...], ...] | None
     search_group_evaluations: int
     search_patience: int
-    pack_reload_candidates: bool
     pack_preload_candidates: bool
 
     def resolved(self) -> SelectionConfig:
@@ -214,7 +209,7 @@ class SelectionConfig:
             store_window_candidates=[list(ranks) for ranks in self.store_window_candidates],
             mreg_candidates=[list(ranks) for ranks in self.mreg_candidates],
             search_group_evaluations=self.search_group_evaluations,
-            search_patience=self.search_patience, pack_reload_candidates=self.pack_reload_candidates,
+            search_patience=self.search_patience,
             pack_preload_candidates=self.pack_preload_candidates,
             objective=POLICY["objectives"][self.profile],
             scoring_implementation="native_model" if standard_scorer else "caller_callback"))
@@ -241,7 +236,6 @@ class Selection:
             "max_candidates": config.max_candidates, "workers": config.workers,
             "search_group_evaluations": config.search_group_evaluations,
             "search_patience": config.search_patience,
-            "pack_reload_candidates": config.pack_reload_candidates,
             "pack_preload_candidates": config.pack_preload_candidates,
             "source_sha256": hashlib.sha256(self.source.read_bytes()).hexdigest(),
             "search_policy": effective_policy,
@@ -461,11 +455,8 @@ class Selection:
                      elapsed_seconds=time.monotonic() - search_started)
 
     def search_pack(self) -> None:
-        if self.config.pack_reload_candidates:
-            self.evaluate_batch([(replace(self.winner(), pack_reload_after_weight=True), "pack-reload-order")],
-                                len(self.receipt["candidates"]) + 1)
         if self.config.pack_preload_candidates:
-            preloaded = replace(self.winner(), pack_reload_after_weight=False, pack_weight_before_pack=True)
+            preloaded = replace(self.winner(), pack_weight_before_pack=True)
             candidate = replace(preloaded, wait_placement=CANDIDATES["pack_preload_wait_placement"])
             self.evaluate_batch([(candidate, "pack-preload-waits")], len(self.receipt["candidates"]) + 1)
 
@@ -512,7 +503,6 @@ def select_program(source: Path, output_dir: Path, atlas_bin_dir: Path, *,
                    mreg_candidates: tuple[tuple[int, ...], ...] | None = (),
                    search_group_evaluations: int = DEFAULTS["api_search_group_evaluations"],
                    search_patience: int = DEFAULTS["api_search_patience"],
-                   pack_reload_candidates: bool = DEFAULTS["api_pack_reload_candidates"],
                    pack_preload_candidates: bool = DEFAULTS["api_pack_preload_candidates"],
                    scorer: Callable | None = None,
                    search_policy=None) -> dict:
@@ -524,7 +514,7 @@ def select_program(source: Path, output_dir: Path, atlas_bin_dir: Path, *,
         max_candidates=max_candidates, random_seeds=random_seeds, workers=workers,
         store_window_candidates=store_window_candidates,
         mreg_candidates=mreg_candidates, search_group_evaluations=search_group_evaluations,
-        search_patience=search_patience, pack_reload_candidates=pack_reload_candidates,
+        search_patience=search_patience,
         pack_preload_candidates=pack_preload_candidates).resolved()
     effective_policy = config.policy(scorer is None)
     if search_policy is not None and search_policy != effective_policy:
@@ -552,8 +542,6 @@ def add_model_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--search-patience", type=int,
                         help="stop a phase after this many nonimproving attempts, "
                              "checked after each batch; zero disables")
-    parser.add_argument("--pack-reload-candidates", action=argparse.BooleanOptionalAction, default=None,
-                        help="score loading a pending weight before an adjacent PACK reload")
     parser.add_argument("--pack-preload-candidates", action=argparse.BooleanOptionalAction, default=None,
                         help="score preloading disjoint weights before PACK with selective source waits")
     parser.add_argument("--store-windows", action="append", default=[], metavar="RANKS",

@@ -55,19 +55,19 @@ def load_policy() -> dict:
          "engineering dma_proposal validation execution_contract", "definition")
     keys(policy["presets"], "selection full", "presets")
     for name, preset in policy["presets"].items():
-        keys(preset, "max_candidates search_group_evaluations search_patience bank_candidates pack_reload_candidates pack_preload_candidates", name)
+        keys(preset, "max_candidates search_group_evaluations search_patience bank_candidates pack_preload_candidates", name)
         for key, value in preset.items():
             if key.endswith("candidates") and key != "max_candidates":
                 if type(value) is not bool:
                     raise ValueError("invalid preset boolean: " + key)
             elif type(value) is not int or value < (1 if key == "max_candidates" else 0):
                 raise ValueError("invalid preset budget: " + key)
-    keys(policy["defaults"], "lower_provider selection_provider model_profile builtin_profile search_budget workers guarded_pack spill spill_mxu boundary api_max_candidates api_search_group_evaluations api_search_patience api_pack_reload_candidates api_pack_preload_candidates", "defaults")
+    keys(policy["defaults"], "lower_provider selection_provider model_profile builtin_profile search_budget workers guarded_pack spill spill_mxu boundary api_max_candidates api_search_group_evaluations api_search_patience api_pack_preload_candidates", "defaults")
     defaults = policy["defaults"]
     for name in ("workers", "api_max_candidates", "api_search_group_evaluations", "api_search_patience"):
         if type(defaults[name]) is not int or defaults[name] < (1 if name in ("workers", "api_max_candidates") else 0):
             raise ValueError("invalid API default budget: " + name)
-    for name in ("guarded_pack", "spill", "spill_mxu", "api_pack_reload_candidates", "api_pack_preload_candidates"):
+    for name in ("guarded_pack", "spill", "spill_mxu", "api_pack_preload_candidates"):
         if type(defaults[name]) is not bool:
             raise ValueError("invalid API boolean: " + name)
     if (defaults["lower_provider"] not in ("builtin", "model") or defaults["selection_provider"] not in ("builtin", "model")

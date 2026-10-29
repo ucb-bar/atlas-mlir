@@ -127,9 +127,9 @@ class ModelSelectionTest(SelectionFixture, unittest.TestCase):
             self.assertEqual(values["mreg_candidates"], None if budget == "full" else ())
         values = model_arguments(parser.parse_args(["--provider", "model", "--workers", "4",
             "--search-group-evaluations", "72", "--profile", "fifo43", "--no-bank-candidates",
-            "--no-pack-reload-candidates", "--no-pack-preload-candidates"]))
+            "--no-pack-preload-candidates"]))
         self.assertEqual((values["search_group_evaluations"], values["profile"], values["mreg_candidates"]), (72, "fifo43", ()))
-        self.assertFalse(values["pack_reload_candidates"] or values["pack_preload_candidates"])
+        self.assertFalse(values["pack_preload_candidates"])
         builtin = model_arguments(parser.parse_args([]))
         self.assertEqual((builtin["profile"], builtin["search_group_evaluations"],
                           builtin["mreg_candidates"]), ("fifo43", 204, None))
@@ -237,18 +237,18 @@ class ModelSelectionTest(SelectionFixture, unittest.TestCase):
         self.assertNotIn(whole_chain, set(group_order_neighbors([chain], interleaved, max_nodes=4)))
 
 
-    def test_patience_stops_at_batch_boundary_and_still_checks_pack_alternatives(self):
+    def test_patience_stops_at_batch_boundary(self):
         receipt = self.select(runner=self.graph_run([[], [0], *[[] for _ in range(14)]]), max_candidates=1,
                               search_group_evaluations=100, search_patience=12, workers=4,
-                              pack_reload_candidates=True, pack_preload_candidates=True)
+                              pack_preload_candidates=True)
         self.assertEqual(receipt["group_search"]["evaluations"], 12)
         self.assertTrue(receipt["group_search"]["stopped_for_patience"])
         self.assertEqual(receipt["group_search"]["accepted_indices"], [])
-        self.assertEqual([row["class"] for row in receipt["candidates"]][-2:],
-                         ["pack-reload-order", "pack-preload-waits"])
+        self.assertEqual([row["class"] for row in receipt["candidates"]][-1:],
+                         ["pack-preload-waits"])
         self.assertEqual(receipt["selected_index"], 0)
         self.assertEqual(receipt["score_cache_entries"], 1)
-        self.assertEqual(receipt["score_cache_hits"], 14)
+        self.assertEqual(receipt["score_cache_hits"], 13)
 
     def test_invalid_search_controls_reject_before_tools(self):
         for options, diagnostic in (
@@ -461,20 +461,8 @@ class ModelSelectionTest(SelectionFixture, unittest.TestCase):
         self.assertEqual(fifo[0].wait_placement, "preloaded")
         self.assertTrue(fifo[0].pack_weight_before_pack)
 
-    def test_pack_reload_candidate_requires_strict_improvement(self):
-        for cycles in (4, 5, 6):
-            with self.subTest(cycles=cycles):
-                receipt = self.select(name=str(cycles), runner=self.override_run("pack-reload-after-weight=true", 99, cycles), max_candidates=3,
-                                      provider="builtin", pack_reload_candidates=True)
-            candidate = receipt["candidates"][-1]
-            self.assertEqual(candidate["class"], "pack-reload-order")
-            self.assertEqual(candidate["options"]["random_seed"], 1)
-            self.assertTrue(candidate["options"]["pack_reload_after_weight"])
-            self.assertEqual(receipt["selected_index"], 3 if cycles < 5 else 2)
-
-    def test_preload_candidates_replace_reload_and_compare_wait_placements(self):
-        for options in ({"pack_reload_after_weight": True, "pack_weight_before_pack": True},
-                        {"wait_placement": "preloaded"}):
+    def test_preload_wait_placements(self):
+        for options in ({"wait_placement": "preloaded"},):
             with self.assertRaises(ValueError):
                 Candidate(**options)
         def compile_placement(argv, **kwargs):
@@ -482,19 +470,17 @@ class ModelSelectionTest(SelectionFixture, unittest.TestCase):
             if candidate_command(argv):
                 flags = " ".join(argv)
                 cycles = (2 if "wait-placement=preloaded" in flags else
-                          3 if "pack-weight-before-pack=true" in flags else
-                          4 if "pack-reload-after-weight=true" in flags else None)
+                          3 if "pack-weight-before-pack=true" in flags else None)
                 if cycles is not None:
                     self.programs[kwargs["cwd"]] = {"instructions": [{"word_u32": 100 + cycles}], "cycles": cycles}
             return result
-        receipt = self.select(runner=compile_placement, provider="builtin", max_candidates=3, pack_reload_candidates=True,
+        receipt = self.select(runner=compile_placement, provider="builtin", max_candidates=3,
                               pack_preload_candidates=True)
-        self.assertEqual(receipt["selected_index"], 4)
+        self.assertEqual(receipt["selected_index"], 3)
         self.assertEqual(receipt["selected_cycles"], 2)
         self.assertEqual(receipt["candidates"][-1]["class"], "pack-preload-waits")
         for row in receipt["candidates"][-1:]:
             self.assertEqual(row["options"]["random_seed"], 1)
-            self.assertFalse(row["options"]["pack_reload_after_weight"])
             self.assertTrue(row["options"]["pack_weight_before_pack"])
         self.assertEqual(receipt["candidates"][-1]["options"]["wait_placement"], "preloaded")
 
@@ -626,7 +612,6 @@ class ModelSelectionKnobsTest(unittest.TestCase):
             "--schedule-atlas-virtual=provider=builtin lookahead=1",
             "--lower-atlas-virtual-to-machine=provider=builtin store-windows=1",
             "--lower-atlas-virtual-to-machine=provider=builtin mreg-ranks=1",
-            "--lower-atlas-virtual-to-machine=provider=builtin pack-reload-after-weight=true",
             "--lower-atlas-virtual-to-machine=provider=builtin pack-weight-before-pack=true",
             "--schedule-atlas-stream=provider=builtin wait-placement=source",
             "--schedule-atlas-stream=provider=builtin wait-placement=preloaded",
@@ -656,7 +641,6 @@ class ModelSelectionKnobsTest(unittest.TestCase):
         for option, diagnostic in (
             ("--schedule-atlas-virtual=lookahead=3", "lookahead must be"),
             ("--schedule-atlas-stream=wait-placement=unknown", "wait-placement must be"),
-            ("--lower-atlas-virtual-to-machine=pack-reload-after-weight=true pack-weight-before-pack=true", "mutually exclusive"),
         ):
             with self.subTest(option=option):
                 source = "module {}" if "wait-placement" in option else EXAMPLE.read_text()
@@ -677,7 +661,7 @@ class ModelSelectionKnobsTest(unittest.TestCase):
         for ordinary, explicit in (
             ("--schedule-atlas-virtual", "--schedule-atlas-virtual=provider=builtin lookahead=0"),
             ("--lower-atlas-virtual-to-machine", "--lower-atlas-virtual-to-machine=provider=builtin "
-             "pack-reload-after-weight=false pack-weight-before-pack=false"),
+             "pack-weight-before-pack=false"),
         ):
             with self.subTest(ordinary=ordinary):
                 before = run("atlas-opt", source, ordinary)
@@ -721,29 +705,6 @@ class ModelOrderReplayTest(unittest.TestCase):
         replay = self.schedule(provider="builtin", order_file=self.order_path)
         self.assertEqual(replay.returncode, 0, replay.stderr)
         self.assertEqual(ordinary.stdout, replay.stdout)
-
-    def test_pack_reload_moves_only_the_trailing_same_block_reload(self):
-        pack = f'%packed = "atlas.virtual_pack_fp8"(%tile) {{scale_code = 127 : i32}} : ({T}) -> {F}'
-        matmul = f'%result = "atlas.virtual_mxu_matmul"(%packed, %weight) {{unit = 1 : i32}} : ({F}, {F}) -> {T}'
-        prefix = [start(), inp("io0", "s1", "tile", 0), inp("s1", "s2", "weight", 1, "fp8"), pack]
-        tail = [matmul, outp("s2", "s3", "result", 0), f"return %s3 : {S}"]
-        source = function("reload", prefix + tail)
-        def lower(text, enabled):
-            result = run("atlas-opt", text, self.evidence, "--lower-atlas-virtual-boundary-to-dma",
-                         "--verify-atlas-virtual-stream",
-                         "--lower-atlas-virtual-to-machine=provider=model pack-reload-after-weight=" + str(enabled).lower(),
-                         "--insert-atlas-dma-waits", "--verify-atlas-machine-stream")
-            self.assertEqual(result.returncode, 0, result.stderr)
-            return result.stdout
-        before, after = lower(source, False), lower(source, True)
-        self.assertNotEqual(before, after)
-        def operations(text):
-            return [re.sub(r'%[0-9]+', '%state', line.strip()) for line in text.splitlines() if '"atlas.' in line]
-        self.assertEqual(Counter(operations(before)), Counter(operations(after)))
-        # An emitted operation between PACK and its consumer forbids suffix motion.
-        intervening = outp("s2", "s4", "tile", 1)
-        blocked = function("blocked", prefix + [intervening] + [line.replace("%s2", "%s4") for line in tail])
-        self.assertEqual(lower(blocked, False), lower(blocked, True))
 
     def test_preloaded_wait_ids_are_checked_and_empty_selection_preserves_default(self):
         source = function("copy", [start(), inp("io0", "s1", "tile", 0),
