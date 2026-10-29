@@ -444,16 +444,6 @@ void testSchedulerReservations(MLIRContext &context) {
   };
   check(bool(schedule("synthetic-scheduler-large-dma-release", largeRelease, waiting)),
         "DMA queue estimates do not advance the physical issue cycle", diagnostics);
-  auto changed = std::make_shared<TimingTables>(*tables);
-  changed->ordinaryIssueGap = std::numeric_limits<int>::max();
-  check(!schedule("synthetic-scheduler-large-gap", policy(changed), scalar) &&
-            diagnosed("same-unit issue interval exceeds bounded timing search"),
-        "provider construction refuses an issue gap beyond the timing search", diagnostics);
-  changed = std::make_shared<TimingTables>(*tables);
-  changed->scalarWriteAge = std::numeric_limits<int>::max() - 100001;
-  check(!schedule("synthetic-scheduler-large-age", policy(changed), scalar) &&
-            diagnosed("block schedule exceeds cycle domain"),
-        "scheduler refuses a completion age that leaves no room for the block", diagnostics);
   const char *forwarding = R"mlir(module {
     %s0 = "atlas.start"() : () -> !atlas.state
     %s1 = "atlas.mxu_push"(%s0) {kind = "acc_fp8", unit = 1 : i32, src = 0 : i32, slot = 0 : i32}
@@ -462,16 +452,30 @@ void testSchedulerReservations(MLIRContext &context) {
       acc_slot = 0 : i32, accumulate = true} : (!atlas.state) -> !atlas.state
     %s3 = "atlas.trap"(%s2) {kind = "ecall"} : (!atlas.state) -> !atlas.state
   })mlir";
-  changed = std::make_shared<TimingTables>(*tables);
-  changed->mxu[1].accumulatorForwardGap = std::numeric_limits<int>::max();
-  check(!schedule("synthetic-scheduler-large-distance", policy(changed), forwarding) &&
-            diagnosed("block schedule exceeds cycle domain"),
-        "scheduler refuses a dependence distance that leaves no room for the block", diagnostics);
-  auto p = policy(tables);
-  p.frontendSpacing.ordinaryGap = std::numeric_limits<int>::max();
-  check(!schedule("synthetic-scheduler-large-frontend-gap", p, scalar) &&
-            diagnosed("frontend spacing exceeds positive cycle domain"),
-        "scheduler refuses overflowing frontend spacing", diagnostics);
+  struct DomainCase {
+    const char *id, *source, *diagnostic;
+    std::function<void(TimingTables &, TimingProvider &)> mutate;
+  };
+  const int maxCycle = std::numeric_limits<int>::max();
+  const DomainCase cases[] = {
+      {"large-gap", scalar, "same-unit issue interval exceeds bounded timing search",
+       [=](auto &t, auto &) { t.ordinaryIssueGap = maxCycle; }},
+      // Leave room for interval probing before the block bound refuses.
+      {"large-age", scalar, "block schedule exceeds cycle domain",
+       [=](auto &t, auto &) { t.scalarWriteAge = maxCycle - 100001; }},
+      {"large-distance", forwarding, "block schedule exceeds cycle domain",
+       [=](auto &t, auto &) { t.mxu[1].accumulatorForwardGap = maxCycle; }},
+      {"large-frontend-gap", scalar, "frontend spacing exceeds positive cycle domain",
+       [=](auto &, auto &p) { p.frontendSpacing.ordinaryGap = maxCycle; }},
+  };
+  for (const auto &test : cases) {
+    auto changed = std::make_shared<TimingTables>(*tables);
+    auto p = policy(changed);
+    test.mutate(*changed, p);
+    std::string id = std::string("synthetic-scheduler-") + test.id;
+    check(!schedule(id.c_str(), p, test.source) && diagnosed(test.diagnostic),
+          "scheduler refuses an overflowing cycle domain", diagnostics);
+  }
 }
 
 void registerPolicy(TimingProvider provider) {

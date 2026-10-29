@@ -3,6 +3,7 @@
 #include "llvm/Support/JSON.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include <cstdlib>
+#include <initializer_list>
 
 using namespace mlir::atlas::timing;
 using namespace atlas_test;
@@ -234,27 +235,28 @@ void loaderRefusal(llvm::StringRef bytes) {
   auto document = llvm::json::parse(bytes);
   check(bool(document), "facts are JSON");
   if (!document) { llvm::consumeError(document.takeError()); return; }
-  auto *root = document->getAsObject();
-  auto *architecture = root->getObject("architecture");
-  if (architecture) {
-    (*architecture)["mreg_count"] = 63;
-    auto bad = parseModelTimingTables(jsonText(*document));
-    check(!bad, "unsupported geometry refuses");
+  struct Mutation {
+    std::initializer_list<const char *> path;
+    llvm::json::Value replacement;
+    const char *message;
+  };
+  const Mutation mutations[] = {
+      {{"architecture", "mreg_count"}, 63, "unsupported geometry refuses"},
+      {{"architecture", "bf16_registers_per_tile"}, 3,
+       "unsupported BF16 span refuses"},
+      {{"frontend_timing", "instructions", "addi", "reads"}, llvm::json::Array{},
+       "changed scalar operand roles refuse"},
+  };
+  for (const auto &mutation : mutations) {
+    auto changed = *document;
+    auto *value = &changed;
+    for (const char *key : mutation.path)
+      value = &(*value->getAsObject())[key];
+    *value = mutation.replacement;
+    auto bad = parseModelTimingTables(jsonText(changed));
+    check(!bad, mutation.message);
     if (!bad) llvm::consumeError(bad.takeError());
-    (*architecture)["mreg_count"] = mlir::atlas::kAtlasTensorRegisters;
-    (*architecture)["bf16_registers_per_tile"] = 3;
-    auto span = parseModelTimingTables(jsonText(*document));
-    check(!span, "unsupported BF16 span refuses");
-    if (!span) llvm::consumeError(span.takeError());
   }
-  document = llvm::json::parse(bytes);
-  if (!document) { llvm::consumeError(document.takeError()); return; }
-  auto *instructions = document->getAsObject()->getObject("frontend_timing")->getObject("instructions");
-  auto *add = instructions->getObject("addi");
-  (*add)["reads"] = llvm::json::Array{};
-  auto roles = parseModelTimingTables(jsonText(*document));
-  check(!roles, "changed scalar operand roles refuse");
-  if (!roles) llvm::consumeError(roles.takeError());
   auto malformed = parseModelTimingTables("{}");
   check(!malformed, "missing timing tables refuse");
   if (!malformed) llvm::consumeError(malformed.takeError());
