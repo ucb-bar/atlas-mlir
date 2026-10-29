@@ -43,8 +43,8 @@ def check_model_semantics(model):
     return checked
 
 
-def source_pins(model):
-    """Recompute source contracts without importing the selected checkout."""
+def source_pins(model, *, mask_timing=True):
+    """Recompute pins; facts retain the timing literals that acceptance masks."""
     check_python()
     from atlas_derive_vpu import source_shape as vpu_shape
     from atlas_derive_mxu import source_shape as mxu_shape
@@ -53,7 +53,14 @@ def source_pins(model):
     shapes = {}
     for name in GUARDS["source_shapes"]:
         source = read_source(root / "hardware" / name)
-        shapes[name] = (vpu_shape(source) if name == "vpu.py" else
+        shapes[name] = (_digest(ast.parse(source)) if not mask_timing else
+                        vpu_shape(source) if name == "vpu.py" else
                         mxu_shape(source) if name == "mxu.py" else
                         _digest(ast.parse(source)))
     return dict(files=files, source_shapes=shapes)
+
+
+def check_model_import(model):
+    import npu_model
+    if Path(npu_model.__file__).resolve() != (Path(model) / "npu_model/__init__.py").resolve():
+        raise UnsupportedModelTiming("imported npu_model differs from --npu-model")

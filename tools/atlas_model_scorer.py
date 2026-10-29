@@ -7,7 +7,8 @@ import sys
 from types import SimpleNamespace
 
 from atlas_derive_curve import resolve_curve_path
-from atlas_model_timing import configuration, sha256
+from atlas_model_semantics import check_model_import, source_pins
+from atlas_model_timing import configuration, encoded, sha256
 from check_program_decode import decode_binary
 
 
@@ -84,16 +85,24 @@ class ModelScorer:
     def __call__(self, document, profile="curve"):
         if sys.flags.optimize:
             raise ValueError("model scoring requires Python assertions; disable -O/PYTHONOPTIMIZE")
+        evidence = document.get("model_evidence", {})
+        if evidence:
+            facts = Path(evidence["op_timing"]).read_bytes()
+            if sha256(facts) != evidence["op_timing_sha256"]:
+                raise ValueError("scoring facts differ from provider evidence")
+            identity = json.loads(facts).get("model", {})
+            if source_pins(self.model, mask_timing=False) != identity.get("source_pins"):
+                raise ValueError("scoring model source differs from provider facts")
         if str(self.model) not in sys.path:
             sys.path.insert(0, str(self.model))
-        import npu_model
-        if Path(npu_model.__file__).parent.parent.absolute() != self.model:
-            raise ValueError("imported npu_model differs from --npu-model")
-        cfg, _ = configuration()
+        check_model_import(self.model)
+        cfg, config = configuration()
+        if evidence and sha256(encoded(config)) != identity.get("configuration_sha256"):
+            raise ValueError("scoring model configuration differs from provider facts")
         if profile == "fifo43":
             bind_fifo43_configuration(cfg)
         elif profile == "curve":
-            bind_curve_configuration(cfg, document.get("model_evidence", {}))
+            bind_curve_configuration(cfg, evidence)
         else:
             raise ValueError("unsupported memory profile")
         import torch

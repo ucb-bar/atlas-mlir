@@ -13,8 +13,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 from atlas_model_scorer import (ModelScorer, bind_curve_configuration,
                                 bind_fifo43_configuration, model_instruction)
-from atlas_derive_curve import resolve_curve_path
-from atlas_model_timing import configuration, sha256
+from atlas_model_timing import sha256
 from check_program_decode import decode_binary
 from model_evidence import NativeModelFixture
 
@@ -52,6 +51,17 @@ class ScorerGuardsTest(unittest.TestCase):
 
 @unittest.skipUnless(os.environ.get("ATLAS_DERIVE_MODEL_ROOT"), "set ATLAS_DERIVE_MODEL_ROOT")
 class ModelScorerTest(NativeModelFixture, unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        from atlas_model_facts import regenerate
+        temporary = tempfile.TemporaryDirectory()
+        cls.addClassCleanup(temporary.cleanup)
+        facts = Path(temporary.name) / "facts/model-timing.json"
+        regenerate(os.environ["ATLAS_DERIVE_MODEL_ROOT"], facts.parent)
+        cls.evidence = dict(op_timing=str(facts), op_timing_sha256=sha256(facts.read_bytes()),
+                            dma_curve_sha256=json.loads(facts.read_text())["dma_timing"]["curve_sha256"])
+
     def setUp(self):
         super().setUp()
         self.root = Path(os.environ["ATLAS_DERIVE_MODEL_ROOT"])
@@ -80,7 +90,7 @@ class ModelScorerTest(NativeModelFixture, unittest.TestCase):
 
     def test_completion_and_drain(self):
         program = self.program("addi x1, x0, 1\necall")
-        program["model_evidence"] = dict(dma_curve_sha256=sha256(resolve_curve_path(self.cfg).read_bytes()))
+        program["model_evidence"] = self.evidence
         for profile in ("curve", "fifo43"):
             self.assertEqual(self.scorer(program, profile), 2)
         with self.assertRaisesRegex(ValueError, "exhausted before ECALL"):

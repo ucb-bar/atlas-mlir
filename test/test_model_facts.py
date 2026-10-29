@@ -19,7 +19,7 @@ sys.path.insert(0, str(TOOLS))
 from atlas_derive_arch import derive_arch
 from atlas_derive_costs import check_timing_conditions, derive_costs
 from atlas_model_source import UPDATE_GUIDANCE, UnsupportedModelTiming, model_timing_cli
-from atlas_model_timing import compress, validate_derived
+from atlas_model_timing import compress, sha256, validate_derived
 from model_evidence import NativeModelFixture, model_evidence_available
 
 
@@ -256,6 +256,63 @@ class Regeneration(unittest.TestCase):
             with self.subTest(mutation=old), self.mutation(relative, old, new):
                 self.assertEqual(source_pins(self.model)["source_shapes"], expected)
 
+    def test_scoring_binds_selected_facts(self):
+        facts = self.root / "facts-1/model-timing.json"
+        evidence = dict(op_timing=str(facts), op_timing_sha256=sha256(facts.read_bytes()),
+                        dma_curve_sha256=self.facts["dma_timing"]["curve_sha256"])
+        code = """
+import json, sys
+from pathlib import Path
+from unittest.mock import patch
+sys.path.insert(0, sys.argv[1])
+sys.path.insert(0, sys.argv[2])
+from atlas_model_scorer import ModelScorer
+scorer = ModelScorer(Path(sys.argv[2]))
+document = json.loads(sys.argv[3])
+if sys.argv[5] == "guard":
+    with patch("npu_model.hardware.core.Core", side_effect=AssertionError("native scoring started")):
+        scorer(document, sys.argv[4])
+else:
+    print(scorer(document, sys.argv[4]))
+"""
+
+        def score(profile="fifo43", selected=evidence, *, native=False):
+            document = dict(instructions=[dict(word_u32=0x100093), dict(word_u32=0x73)],
+                            model_evidence=selected)
+            return subprocess.run([sys.executable, "-B", "-c", code, str(TOOLS), str(self.model),
+                                   json.dumps(document), profile, "native" if native else "guard"],
+                                  cwd=self.root, env=self.env,
+                                  text=True, capture_output=True)
+
+        for profile in ("curve", "fifo43"):
+            result = score(profile, native=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout.strip(), "2")
+        for relative, old, new, reason in (
+                ("hardware/core.py", "", "FACTS_TEST_CHANGE = 1\n", "source"),
+                ("hardware/vpu.py", '"vli.one": 33', '"vli.one": 34', "source"),
+                ("hardware/mxu.py", "compute_first = 63", "compute_first = 64", "source"),
+                ("hardware/config.py", "dma_max_in_flight: int = 64", "dma_max_in_flight: int = 63",
+                 "configuration")):
+            with self.subTest(mutation=new), self.mutation(relative, old, new):
+                result = score()
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("scoring model " + reason + " differs from provider facts", result.stderr)
+                if relative in ("hardware/vpu.py", "hardware/mxu.py"):
+                    with tempfile.TemporaryDirectory(dir=self.root) as directory:
+                        updated = Path(directory) / "facts"
+                        result = self.regenerate(updated)
+                        self.assertEqual(result.returncode, 0, result.stderr)
+                        current = updated / "model-timing.json"
+                        selected = dict(evidence, op_timing=str(current),
+                                        op_timing_sha256=sha256(current.read_bytes()))
+                        result = score(selected=selected, native=True)
+                        self.assertEqual(result.returncode, 0, result.stderr)
+                        self.assertEqual(result.stdout.strip(), "2")
+        result = score(selected=dict(evidence, op_timing_sha256="stale"))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("scoring facts differ from provider evidence", result.stderr)
+
     def test_source_pin_writer(self):
         from contextlib import redirect_stdout
         from io import StringIO
@@ -267,7 +324,8 @@ class Regeneration(unittest.TestCase):
         target = self.root / "model-pins.json"
         target.write_text(json.dumps(baseline, sort_keys=True, indent=2) + "\n")
         original = target.read_bytes()
-        with patch.object(driver, "PIN_PATH", target), patch.object(driver, "GUARDS", baseline):
+        with (patch.object(driver, "PIN_PATH", target), patch.object(driver, "GUARDS", baseline),
+              patch.object(driver, "regenerate", side_effect=AssertionError("writer ran regeneration"))):
             output = StringIO()
             with redirect_stdout(output):
                 driver.accept_source(self.model)

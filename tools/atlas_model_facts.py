@@ -11,7 +11,7 @@ import subprocess
 sys.dont_write_bytecode = True
 
 from atlas_model_source import GUARDS, PIN_PATH, UnsupportedModelTiming, model_timing_cli
-from atlas_model_semantics import check_model_semantics, source_pins
+from atlas_model_semantics import check_model_import, check_model_semantics, source_pins
 from atlas_model_timing import configuration, encoded, sha256, validate_derived
 
 
@@ -63,9 +63,7 @@ def regenerate(model, out):
         raise ValueError("--out must be a new directory")
     check_model_semantics(model)
     sys.path.insert(0, str(model))
-    import npu_model
-    if Path(npu_model.__file__).resolve() != (model / "npu_model/__init__.py").resolve():
-        raise UnsupportedModelTiming("imported npu_model differs from --npu-model")
+    check_model_import(model)
     import torch
     from atlas_derive_vpu import derive_vpu
     from atlas_derive_mxu import derive_mxu, derive_weight_timing
@@ -89,8 +87,8 @@ def regenerate(model, out):
     names = list(blocks)
     if set(releases) != set(blocks):
         raise UnsupportedModelTiming("source derivation does not cover the selected ISA")
-    revision = subprocess.check_output(["git", "-C", str(model), "rev-parse", "HEAD"], text=True).strip()
-    payload = dict(model=dict(revision=revision, configuration_sha256=sha256(encoded(config))),
+    payload = dict(model=dict(source_pins=source_pins(model, mask_timing=False),
+                              configuration_sha256=sha256(encoded(config))),
                    architecture=architecture,
                    op_timing=[blocks[name] for name in names], reservation_releases=releases,
                    dma_timing=derive_curve(cfg), mxu_weight_timing=derive_weight_timing(cfg),
