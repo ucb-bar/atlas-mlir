@@ -1,128 +1,125 @@
 # NPU Model timing
 
-A provider supplies the timing rules used by scheduling and verification.
-The default provider uses handwritten rules ported from npu_model. The
-`model` provider uses the same rule functions with timing tables extracted
-from an npu_model checkout. Scheduling, waits, delay slots, and lowering
-use those tables. Model selection compiles candidates, runs them on
-npu_model, and keeps the fastest program. A candidate is one combination
-of scheduling and allocation choices. The default provider is unchanged.
+A timing provider supplies the rules used by scheduling, waits, delay slots,
+and lowering. The default `builtin` provider uses handwritten rules ported
+from npu_model. The `model` provider reads facts extracted from a selected
+npu_model checkout. A candidate is one compiled program; selection runs
+candidates on npu_model and keeps the one with the fewest cycles. A profile
+chooses the memory behavior used to score those programs.
 
 ## Regenerating the facts
 
-Facts are the timing values extracted from the model source and its default
-configuration. Use Python 3.14 with the model dependencies and generate them
-into a new directory with one command:
+Use Python 3.14 with the model's dependencies available:
 
 ```sh
-python -B tools/atlas_model_facts.py --npu-model /path/to/npu_model \
-  --out /path/to/new-facts
+python -B tools/atlas_model_facts.py --npu-model PATH --out NEW_DIR
 ```
 
-Regeneration takes about ten seconds on the tested checkout.
-`model-timing.json` contains the operation events, release ages, frontend
-values, engine resources, weight windows, architecture, and DMA estimates.
-`facts.lock.json` selects the timing file by its content hash.
-`validation-report.json` records the native VPU row-sweep check.
-The check compares actual port events and drain with the extracted values
-and rejects a wrong fact. `tools/model-timing.lock.json` pins the tested
-model revision. Regenerate when changing revisions instead of editing the
-facts by hand. See `tools/atlas_model_facts.py` for the extraction entry point
-and `lib/AtlasModelTables.cpp` for the compiler reader.
+The output directory must be new. The command writes one file,
+`model-timing.json`, containing operation events and the parameters consumed
+by the compiler. Regenerate it when changing the model checkout or supported
+configuration. The tested checkout is npu_model revision
+`74982e7c68bd28ba6505b4df37290f198102ccce`.
+
+One guard table, `tools/model-semantics.json`, records helper and binding
+fingerprints for 17 modules and whole-engine shapes for seven other files.
+The checks ignore comments; helper contracts also ignore docstrings while
+retaining the structure each extractor interprets. Configuration limits are
+checked before extraction.
+
+| Guarded npu_model input | Facts the compiler consumes |
+| --- | --- |
+| ISA, Core, scalar unit, and fetch unit | Operand roles, issue ages, delays |
+| Architecture and bank mapping | Register spans, sizes, and VMEM layout |
+| VPU planners and issue logic | Event ages, releases, groups, and capacity |
+| MXU planners and weight helpers | Events, ports, capacities, row windows |
+| LSU and XLU paths | Memory events, releases, and load response spacing |
+| DMA, backend, configuration, and curve | Startups, issue spacing, costs |
+
+Regeneration also runs one isolated native instruction for each of the 49
+operation timing blocks. It compares every emitted event stream and the
+first age at which the unit has no instruction in flight. A mismatch refuses
+regeneration. Reservation releases, MXU weight windows, DMA estimates, and
+concurrent issue rely on their guarded extraction and compiler checks.
 
 ## What comes from npu_model and what the compiler chooses
 
-| Origin | Values |
-| --- | --- |
-| Model source and configuration | Operation events, release windows, and frontend timing |
-| Model source and configuration | Geometry, engine capacities, ports, and VPU groups |
-| Model source and configuration | MXU weight endpoints and sequencer windows; DMA curve costs |
-| Compiler policy | Search budgets, seeds, and one-cycle DMA estimate serialization |
-| Compiler policy | Two-row PACK grouping, eight-slot DMA command ring wait, and synthetic fifo43 scoring |
+Timing facts retain their source or configuration derivation. Scalar reads
+and writes at age zero follow the guarded issue-edge methods. The loader
+checks scalar operand roles against compiler metadata and architecture
+values against target limits. Cost-probe operands use the loaded BF16 span.
+Missing events or unsupported values fail rather than borrow default rules.
 
-The model provider reads every timing value used by its shared rules from
-these extracted tables. Recognized changes to ages or capacities flow into
-the compiler when facts are regenerated. The original calibrated DMA
-estimator belongs to the default provider. Model estimates use the extracted
-startups and conservative per-beat curve bound. Both endpoints of each
-MXU weight-use row are retained, including the final systolic use.
+The compiler chooses these policies:
 
-DMA estimates guide ordering and wait placement. A matching wait still
-establishes completion, and the command ring wait remains a separate RTL
-rule. The compiler checks supported geometry and event shapes before using
-the tables. Missing events, invalid lifetimes, and unsupported geometry
-produce a diagnostic instead of using another provider's timing values.
+- Search budgets, seeds, candidate pools, group size, and batch width.
+- One cycle of serialization between DMA estimates.
+- Two logical rows per PACK relayout iteration for model lowering.
+- A wait before reusing an eight-slot DMA command-ring entry, an RTL rule.
+- The synthetic `fifo43` target: latency 43, one cycle per beat, and four
+  accepted cycles in each eleven-cycle period.
+
+DMA costs conservatively bound the selected curve for ordering. Matching
+`dma.wait` operations establish completion; an estimate cannot replace them.
 
 ## Compiling with the model provider
 
-Compile and select a program using the generated facts:
-
 ```sh
-python -B tools/lower_atlas_program.py input.mlir \
-  --output-dir selected --atlas-bin-dir build/bin \
-  --provider model --npu-model /path/to/npu_model \
-  --model-facts /path/to/new-facts --profile curve \
-  --model-region /path/to/expected-region.json
+python -B tools/lower_atlas_program.py source.mlir --provider model \
+  --npu-model PATH --model-facts NEW_DIR --profile curve \
+  --search-budget full --output-dir OUT
 ```
 
-Omitting `--model-facts` regenerates facts into the output directory. A
-profile is the memory configuration used to score candidates. `curve` uses
-the configured memory curves. `fifo43` uses fixed latency and a periodic
-readiness pattern for comparison. Both profiles use the same extracted
-compiler timing tables.
+Omitting `--model-facts` regenerates facts under the output directory.
+`--profile curve|fifo43` changes scoring memory behavior. `--guarded-pack`
+converts proven-finite PACK inputs through MXU0 for exact results.
+`--model-region FILE` supplies a DRAM address, initial bytes, and optional
+expected bytes; repeat it to check outputs, inputs, and guards during scoring.
 
-The main selection options are:
-
-- `--profile curve|fifo43` chooses the scoring configuration.
-- `--search-budget full|single` chooses full search or one default candidate.
-- `--max-candidates` limits initial attempts in full mode (default: 18).
-- `--search-group-evaluations` limits group attempts in full mode (default: 134).
-- `--guarded-pack` enables exact PACK for supported finite inputs.
-- `--model-region` supplies an expected memory region for numerical checks.
-
-The output directory contains `selection.json`, `program.hex`,
-`program.json`, `allocation.json`, and the selected candidate's IR.
-Candidate directories retain the compiled programs and their diagnostics.
-The selection file records attempts, cycle counts, and the winning index.
+The output contains `selection.json`, `program.hex`, `program.json`,
+`allocation.json`, and `final.mlir`, plus `commands.txt`, `log.txt`, and each
+attempted candidate's files. The selected words are exactly the scored words.
+The compiler hashes the selected facts file and checks it again on reload.
+Choose a fresh output directory to prevent stale program artifacts.
 
 ## How selection works
 
-1. Build candidates in a fixed order from fixed seeds and number them before
-   parallel work. Full mode tries random scheduling orders, source wait
-   placement, and MREG bank choices. Single mode tries only the default.
-2. Compile each candidate and run the normal compiler verifiers.
-3. Run each candidate on npu_model through drained ECALL and check the
-   supplied output regions.
-4. Keep the lowest cycle count, breaking ties by the lowest candidate index.
-5. Search dependency-group moves from the current winner while the configured
-   budget allows it.
+1. Prepare the source once, then try the default candidate and fixed random
+   seeds. Try source-wait placement from the current winner, then MREG rank
+   vectors. Candidate numbers are assigned before parallel compilation.
+2. Compile and verify every candidate. Execute legal words natively through
+   ECALL, require drained engines and DMA, and check supplied DRAM regions.
+3. Keep the lowest cycle count, breaking ties by the earliest candidate
+   number. Duplicate words reuse their score within the same selection.
+4. Move groups of up to four dependent operations from the winning order.
+   Evaluate batches of twelve, including default/source wait siblings for
+   the curve profile, and restart from an improved winner.
 
-Compiler refusals count toward the budget. Native execution faults and
-numerical mismatches stop selection. Scores for identical instruction words
-are reused within one search. Full mode allows 18 initial attempts and 134
-group attempts, with batches of twelve and moves of up to four operations.
-Single mode uses one initial attempt and no group or bank search; its mode
-takes precedence over budget overrides. Both modes are deterministic for
-the same inputs, facts, and flags at any worker count or machine load. The
-winner's words are exactly the scored words.
+`--search-budget full` allows 18 initial attempts and 134 group attempts.
+`--max-candidates` changes the initial limit; `--search-group-evaluations`
+changes the group limit. Refusals consume attempts; native scoring faults
+stop the search. Exhausting legal neighbors may end it before the limit.
+`--search-budget single` tries exactly the default candidate, with no MREG
+or group search. Both modes use fixed seeds and index-based ties, so worker
+count and machine load do not change the candidate order or winner.
 
 ## Updating for NPU Model changes
 
-Supported latency, curve, startup, and capacity changes regenerate from the
-model. The extractors refuse helper structures they cannot interpret and
-configuration or geometry outside the supported set. For example, a changed
-MXU row schedule can report "unsupported MXU sequencer geometry (requires
-32 cycles)". A diagnostic identifies the helper or condition to inspect.
-Update the corresponding `tools/atlas_derive_*.py` extractor and, when its
-supported shape changes, the compiler reader. Then regenerate twice, run
-CTest and the native tests, compare consumed timing values, and rerun
-representative selections with exact numerical checks.
+Supported numerical changes regenerate through the same extractors, such as
+latency literals and positive curve costs. Unsupported helper structure,
+ISA changes, or geometry outside compiler limits refuse with a diagnostic.
+For example: `unsupported semantics: hardware/core.py:Core._tick_s1`.
+
+When refusal fires, inspect the named file and helper. Update the matching
+`tools/atlas_derive_*.py` interpretation and guard entry; update the C++ reader
+if its supported representation changes. Regenerate, run full CTest, and
+rerun selections with exact numerical checks before using the new facts.
+See [the extractor](../tools/atlas_model_facts.py) and
+[the loader](../lib/AtlasModelTables.cpp) for the implementation.
 
 ## Limits
 
-npu_model is not RTL. Isolated events and extracted engine resources feed
-shared dependence and reservation rules; native scoring checks each actual
-candidate. Structural guards can refuse a harmless source refactor. The VPU
-spot check is bounded and does not cover every concurrent instruction stream.
-Curve estimates ignore address effects, so close rankings can reverse on
-hardware.
+npu_model is a software model, so its cycles are not RTL measurements.
+Isolated native event checks do not test arbitrary concurrent programs.
+Curve estimates ignore address effects, and close rankings can reverse on
+the SoC. Exactness depends on the chosen numerical policy and input regions.

@@ -155,28 +155,14 @@ that with every pending transfer. A transfer may stay pending across a block
 boundary only into or out of such a loop, so a PACK does not complete earlier
 transfers ([DMA across loops](loop-dma-analysis.md)).
 
-Scheduling and timing passes take `provider=<id>` (default: module
-`atlas.timing_provider`, else `builtin`) from the [provider
-registry](../include/Atlas/AtlasTimingProvider.h). The provider supplies
-operation costs, dependence distances, issue gaps, reservations, DMA conflicts
-and verification; unknown IDs, missing rules or conflicting retained metadata
-fail. `model` reads extracted timing tables and engine resources. The default
-provider estimates DMA with its calibrated DRAM costs
-(`timing::dmaTransferCycles`: 30 cycles, then a 32-byte beat per 23.46 cycles
-loading or 21.68 storing). Model estimates use extracted startups and a
-conservative curve bound. Matching `dma.wait` operations establish transfer
-completion for both providers.
-Emission and LLVM handoff of generated programs need `"timed"` state and the
-provider name; hand-written streams need no timing metadata.
-
-`--select-atlas-model-evidence="facts=DIR"` loads timing tables selected by
-`DIR/facts.lock.json`.
-Set `provider=model` explicitly in virtual/physical scheduling; selecting
-facts leaves the default unchanged. Missing events, unsupported geometry,
-stale hashes, and replacing timed facts fail.
-Verification, emission and LLVM handoff retain selection. See [model
-timing](model-timing.md) for extraction, resource checks, scalar PACK proofs,
-regeneration, and model-scored search.
+Scheduling and timing passes take `provider=<id>` (default: the module's
+`atlas.timing_provider`, else `builtin`) from the
+[registry](../include/Atlas/AtlasTimingProvider.h).
+The `model` provider loads `model-timing.json` through
+`--select-atlas-model-evidence="facts=DIR"`, and timing, verification, and
+emission bind the selected file's bytes.
+See [NPU Model timing](model-timing.md) for regeneration, timing rules, DMA
+estimates, and native program selection.
 
 ## Machine operations
 
@@ -223,7 +209,7 @@ numerical policy, or availability across the stream.
 | `--atlas-compile-unscheduled` | pipeline | The native binding's qualification lowering: spilling, lowering, DMA waits and in-order delays, with the same verifiers, but no boundary DMA or scheduling. |
 | `--verify-atlas-virtual-stream` | pass | Check virtual types, state edges, output indices, and that no machine op is mixed in. |
 | `--lower-atlas-virtual-boundary-to-dma` | pass | Convert boundary FP8/BF16 inputs and BF16 outputs to explicit DMA loads and stores using the input and output DRAM bases and 2-KiB slot stride; run before virtual scheduling to expose prefetching and overlap. |
-| `--schedule-atlas-virtual` | pass | Reorder each virtual block before spilling and allocation by a latency-aware list schedule that charges estimated spill cycles for values beyond the registers, keeping SSA, handle, and memory order. Run `--spill-atlas-virtual` after it. `random-seed=N` picks a random legal order. `provider=<id>` selects machine-operation timing for costs, spill costs included; lowering recipes and DMA queue estimates remain compiler heuristics. Missing cost coverage fails. |
+| `--schedule-atlas-virtual` | pass | Reorder each virtual block before spilling and allocation by a latency-aware list schedule that charges estimated spill cycles for values beyond the registers, keeping SSA, handle, and memory order. Run `--spill-atlas-virtual` after it. `random-seed=N` picks a random legal order. `provider=<id>` selects machine-operation timing for costs, spill costs included; lowering recipes and DMA serialization remain compiler policy. Missing cost coverage fails. |
 | `--spill-atlas-mxu-state` | pass | Save and reload completed MXU accumulator/weight state when local slots are exhausted, before virtual scheduling. |
 | `--spill-atlas-virtual` | pass | Recover MXU/tensor/scalar pressure, lower memory edge copies, place spills and scratch, and retry the existing allocator. See [register spilling](register-spilling.md) for the storage operations, control ABI and limits. |
 | `--lower-atlas-virtual-to-machine` | pass | Allocate and emit untimed machine IR with resource contracts: tiles, controls, MXU, pack, block-argument copies, branches, DMA launches with VLOADs moved to first use. Leaves waits to the next pass, and delay slots to the timing passes (`atlas.delay_slots_pending`). `allocation-report=<file>` writes the plan as JSON, even on failure. |
