@@ -61,6 +61,7 @@ def regenerate(model, out):
     model, out = Path(model).absolute(), Path(out).absolute()
     if out.exists():
         raise ValueError("--out must be a new directory")
+    pins = source_pins(model, mask_timing=False)
     check_model_semantics(model)
     sys.path.insert(0, str(model))
     check_model_import(model)
@@ -87,8 +88,7 @@ def regenerate(model, out):
     names = list(blocks)
     if set(releases) != set(blocks):
         raise UnsupportedModelTiming("source derivation does not cover the selected ISA")
-    payload = dict(model=dict(source_pins=source_pins(model, mask_timing=False),
-                              configuration_sha256=sha256(encoded(config))),
+    payload = dict(model=dict(source_pins=pins, configuration_sha256=sha256(encoded(config))),
                    architecture=architecture,
                    op_timing=[blocks[name] for name in names], reservation_releases=releases,
                    dma_timing=derive_curve(cfg), mxu_weight_timing=derive_weight_timing(cfg),
@@ -97,8 +97,10 @@ def regenerate(model, out):
     required = {"VectorExecutionUnit", "CrossLaneExecutionUnit", "LoadStoreUnit"}
     if any(list(cfg.execution_units.values()).count(name) != 1 for name in required):
         raise UnsupportedModelTiming("engine admission requires unique independent native units")
-    out.mkdir(parents=True)
     native_blocks = validate_derived(cfg, blocks)
+    if source_pins(model, mask_timing=False) != pins:
+        raise UnsupportedModelTiming("model source changed during regeneration")
+    out.mkdir(parents=True)
     write(out, "model-timing.json", payload)
     print(json.dumps(dict(operations=len(blocks), native_blocks=native_blocks, passed=True)), flush=True)
     return payload

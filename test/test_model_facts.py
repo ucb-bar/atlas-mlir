@@ -131,6 +131,15 @@ class CostProbes(NativeModelFixture, unittest.TestCase):
             with self.assertRaisesRegex(UnsupportedModelTiming, "imported npu_model differs"):
                 regenerate(os.environ["ATLAS_DERIVE_MODEL_ROOT"], Path(directory) / "facts")
 
+    def test_native_failure_keeps_output_new(self):
+        import atlas_model_facts as driver
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "facts"
+            with (patch.object(driver, "validate_derived", side_effect=UnsupportedModelTiming("native mismatch")),
+                  self.assertRaisesRegex(UnsupportedModelTiming, "native mismatch")):
+                driver.regenerate(os.environ["ATLAS_DERIVE_MODEL_ROOT"], output)
+            self.assertFalse(output.exists())
+
 
 @unittest.skipUnless(os.environ.get("ATLAS_DERIVE_MODEL_ROOT"), "set ATLAS_DERIVE_MODEL_ROOT")
 class Regeneration(unittest.TestCase):
@@ -293,12 +302,12 @@ else:
                 ("hardware/vpu.py", '"vli.one": 33', '"vli.one": 34', "source"),
                 ("hardware/mxu.py", "compute_first = 63", "compute_first = 64", "source"),
                 ("hardware/config.py", "dma_max_in_flight: int = 64", "dma_max_in_flight: int = 63",
-                 "configuration")):
+                 "source")):
             with self.subTest(mutation=new), self.mutation(relative, old, new):
                 result = score()
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn("scoring model " + reason + " differs from provider facts", result.stderr)
-                if relative in ("hardware/vpu.py", "hardware/mxu.py"):
+                if relative in ("hardware/vpu.py", "hardware/mxu.py", "hardware/config.py"):
                     with tempfile.TemporaryDirectory(dir=self.root) as directory:
                         updated = Path(directory) / "facts"
                         result = self.regenerate(updated)
@@ -312,6 +321,15 @@ else:
         result = score(selected=dict(evidence, op_timing_sha256="stale"))
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("scoring facts differ from provider evidence", result.stderr)
+        with tempfile.TemporaryDirectory(dir=self.root) as directory:
+            changed = deepcopy(self.facts)
+            changed["model"]["configuration_sha256"] = "stale"
+            path = Path(directory) / "facts.json"
+            path.write_text(json.dumps(changed))
+            result = score(selected=dict(evidence, op_timing=str(path),
+                                         op_timing_sha256=sha256(path.read_bytes())))
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("scoring model configuration differs from provider facts", result.stderr)
 
     def test_source_pin_writer(self):
         from contextlib import redirect_stdout
@@ -346,6 +364,43 @@ else:
                         self.assertEqual(differences, [(group, name)])
                         self.assertEqual(changed["model_revision"], baseline["model_revision"])
                         self.assertEqual(output.getvalue(), "changed pin: " + name + "\n")
+
+    def test_source_changed_during_regeneration(self):
+        code = """
+from pathlib import Path
+import sys
+sys.path.insert(0, sys.argv[1])
+import atlas_model_facts as driver
+validate = driver.validate_derived
+source = Path(sys.argv[2]) / "npu_model" / sys.argv[4]
+old, new = sys.argv[5:7]
+def mutate(cfg, blocks):
+    result = validate(cfg, blocks)
+    source.write_text(source.read_text().replace(old, new, 1))
+    return result
+driver.validate_derived = mutate
+sys.argv = [sys.argv[0], "--npu-model", sys.argv[2], "--out", sys.argv[3]]
+driver.main()
+"""
+        for relative, old, new in (("hardware/core.py", "", "FACTS_TEST_CHANGE = 1\n"),
+                                   ("hardware/vpu.py", '"vli.one": 33', '"vli.one": 34'),
+                                   ("hardware/config.py", "dma_max_in_flight: int = 64",
+                                    "dma_max_in_flight: int = 63")):
+            source = self.model / "npu_model" / relative
+            original = source.read_text()
+            with self.subTest(file=relative), tempfile.TemporaryDirectory(dir=self.root) as directory:
+                output = Path(directory) / "facts"
+                try:
+                    result = subprocess.run([sys.executable, "-B", "-c", code, str(TOOLS), str(self.model),
+                                             str(output), relative, old, new], cwd=self.root, env=self.env,
+                                            text=True, capture_output=True)
+                finally:
+                    source.write_text(original)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("model source changed during regeneration", result.stderr)
+                self.assertIn(UPDATE_GUIDANCE, result.stderr)
+                self.assertNotIn("Traceback", result.stderr)
+                self.assertFalse(output.exists())
 
     def test_every_guarded_source_refuses(self):
         files = json.loads((TOOLS / "model-pins.json").read_text())["files"]

@@ -49,7 +49,10 @@ def source_pins(model, *, mask_timing=True):
     from atlas_derive_vpu import source_shape as vpu_shape
     from atlas_derive_mxu import source_shape as mxu_shape
     root = Path(model) / "npu_model"
-    files = {name: module_contract(read_source(root / name)) for name in GUARDS["files"]}
+    filenames = tuple(GUARDS["files"])
+    if not mask_timing:
+        filenames += ("hardware/config.py", "configs/hardware/default.py")
+    files = {name: module_contract(read_source(root / name)) for name in filenames}
     shapes = {}
     for name in GUARDS["source_shapes"]:
         source = read_source(root / "hardware" / name)
