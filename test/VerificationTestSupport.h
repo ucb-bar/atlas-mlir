@@ -251,7 +251,6 @@ void runDMAHelper(MLIRContext &);
 void runMXUAllocation(MLIRContext &);
 void runMXUContract(MLIRContext &);
 void runPackLoop(MLIRContext &);
-void runScalarTimingContext(MLIRContext &);
 void runSourceMemoryContract(MLIRContext &);
 void runTileContract(MLIRContext &);
 void runTimingProvider(MLIRContext &);

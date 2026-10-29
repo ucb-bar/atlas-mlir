@@ -117,7 +117,6 @@ constexpr llvm::StringLiteral kBuiltinTimingProviderId = "builtin";
 inline bool fillsDelaySlots(const TimingProvider &provider) {
   return provider.fillPendingDelaySlots;
 }
-inline llvm::StringRef canonicalTimingProviderId(llvm::StringRef id) { return id; }
 // Built-in rules ported from npu_model's rtl-match mode.
 TimingProvider builtinTimingProvider();
 // Module-scoped factory; its returned ID must match the registered ID.

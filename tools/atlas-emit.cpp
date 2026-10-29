@@ -122,7 +122,7 @@ int main(int argc, char **argv) {
     if (auto state = (*module)->getAttrOfType<StringAttr>(kAtlasTimingState))
       root["timing_state"] = state.getValue().str();
     if (auto provider = (*module)->getAttrOfType<StringAttr>(kAtlasTimingProvider))
-      root["timing_provider"] = timing::canonicalTimingProviderId(provider.getValue()).str();
+      root["timing_provider"] = provider.getValue().str();
     if (auto selected = (*module)->getAttrOfType<DictionaryAttr>(kAtlasModelEvidence)) {
       llvm::json::Object evidence;
       for (NamedAttribute entry : selected) {
