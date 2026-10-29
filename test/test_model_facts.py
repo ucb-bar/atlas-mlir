@@ -75,16 +75,18 @@ class CostProbes(NativeModelFixture, unittest.TestCase):
 
     def test_operands_and_capacity(self):
         architecture = derive_arch(self.cfg)
-        pairs = derive_costs(self.cfg, architecture)
-        self.assertEqual(len(pairs), 89)
-        self.assertEqual(pairs["vadd.bf16"][1], dict(rd=6, rs1=8, rs2=10, imm=0))
-        self.assertEqual(pairs["vmatpop.bf16.acc.mxu0"][1], dict(rd=2, rs1=0, rs2=1, imm=0))
-        wider = derive_costs(self.cfg, dict(architecture, bf16_registers_per_tile=4))
-        self.assertEqual(wider["vpack.bf16.fp8"][1]["rs2"], 20)
+        derive_costs(self.cfg, architecture)
+        derive_costs(self.cfg, dict(architecture, bf16_registers_per_tile=4))
         for values, reason in ((dict(architecture, mreg_count=4), "cost probes exceed"),
                                (dict(architecture, bf16_registers_per_tile=0), "register span must be positive")):
             with self.subTest(reason=reason), self.assertRaisesRegex(UnsupportedModelTiming, reason):
                 derive_costs(self.cfg, values)
+
+    def test_scalar_probe_capacity(self):
+        architecture = derive_arch(self.cfg)
+        self.cfg.arch_state_config.num_x_registers = 6
+        with self.assertRaisesRegex(UnsupportedModelTiming, "cost probes exceed"):
+            derive_costs(self.cfg, architecture)
 
     def test_imported_model_path_refuses(self):
         import npu_model

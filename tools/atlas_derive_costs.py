@@ -1,8 +1,7 @@
-"""Derive representative cost operands from ISA metadata and register geometry."""
+"""Check register invariance and capacity for representative compiler probes."""
 from __future__ import annotations
 
 import ast
-from dataclasses import fields
 import inspect
 import textwrap
 
@@ -66,57 +65,12 @@ def _invariance():
     # source guard pins their control flow and these VPU planner definitions.
 
 
-def _parameters(cls):
-    names = dict(vd="rd", vs1="rs1", vs2="rs2", es1="rs1",
-                 rd="rd", rs1="rs1", rs2="rs2", imm="imm")
-    signature = inspect.signature(cls).parameters
-    result = [(field.name, names.get(field.name), field.type)
-              for field in fields(cls) if field.name in signature]
-    if {name for name, _, _ in result} != set(signature) or any(field is None for _, field, _ in result):
-        raise UnsupportedModelTiming("unsupported cost operands for " + cls.mnemonic)
-    return result
-
-
 def derive_costs(cfg, architecture):
-    """Check the geometry-based compiler probes against the selected ISA."""
-    from npu_model.isa import EXU
-    from npu_model.isa_types import MatrixReg, ScalarReg, ExponentReg, WeightBuffer
-
+    """Check the loaded geometry used by representativeProbes."""
     _invariance()
     stride = architecture["bf16_registers_per_tile"]
     if type(stride) is not int or stride <= 0:
         raise UnsupportedModelTiming("cost probe register span must be positive")
-    arch = cfg.arch_state_config
-    limits = {MatrixReg: architecture["mreg_count"], ScalarReg: arch.num_x_registers,
-              ExponentReg: arch.num_e_registers, WeightBuffer: arch.num_wb_registers}
-    selected = {EXU.SCALAR, EXU.VECTOR, EXU.MATRIX_SYSTOLIC, EXU.MATRIX_INNER, EXU.XLU}
-    positions = dict(rd=0, rs1=1, rs2=2)
-    probes = {}
-    for name, cls in sorted(cfg.isa.operations.items()):
-        if cls.exu not in selected and name not in {"lw", "sw", "seld", "vload", "vstore"}:
-            continue
-        operands = _parameters(cls)
-        mxu = cls.exu in {EXU.MATRIX_SYSTOLIC, EXU.MATRIX_INNER}
-        pair = [dict(rd=0, rs1=0, rs2=0, imm=0) for _ in range(2)]
-        if cls.exu == EXU.SCALAR:
-            pair[1]["rd"] = stride * len(positions)
-        for parameter, field, kind in operands:
-            if field == "imm":
-                continue
-            capacity = min(kind.upper_bound, limits.get(kind, kind.upper_bound))
-            if kind.lower_bound != 0 or capacity <= 0:
-                raise UnsupportedModelTiming("unsupported cost operand capacity " + name + "." + field)
-            if mxu:
-                first, second = 0, stride if kind is MatrixReg else 0 if kind is ExponentReg else 1
-            else:
-                first = stride * positions[field]
-                second = stride * (positions[field] + len(positions))
-            # Reserve a complete source pair even for instructions using one half.
-            extent = stride if kind is MatrixReg else 1
-            if first + extent > capacity or second + extent > capacity:
-                raise UnsupportedModelTiming("cost probes exceed " + name + "." + field)
-            pair[0][field], pair[1][field] = first, second
-        for probe in pair:
-            cls(**{parameter: probe[field] for parameter, field, _ in operands})
-        probes[name] = pair
-    return probes
+    # representativeProbes uses six disjoint spans and scalar destination 3*stride.
+    if 6 * stride > architecture["mreg_count"] or 3 * stride + 1 > cfg.arch_state_config.num_x_registers:
+        raise UnsupportedModelTiming("cost probes exceed configured registers")
