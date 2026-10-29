@@ -35,7 +35,6 @@ POLICY = load_policy()
 def generated_header() -> str:
     compiler = POLICY["engineering"]["compiler"]
     lookaheads = ", ".join(str(value) + "u" for value in POLICY["pools"]["virtual_scheduler_lookaheads"])
-    supported = ", ".join(str(value) + "u" for value in POLICY["pools"]["supported_lookaheads"])
     dma = json.dumps(POLICY["dma_proposal"], sort_keys=True, separators=(",", ":"))
     return f'''// Generated from tools/model-search-policy.json; do not edit.
 #ifndef ATLAS_SEARCH_POLICY_H
@@ -45,7 +44,6 @@ inline constexpr int kTimingSearchCycles = {compiler["timing_search_cycles"]};
 inline constexpr unsigned kGeneratedWordLimit = {compiler["generated_word_limit"]};
 inline constexpr unsigned kSpillRewriteLimit = {compiler["spill_rewrite_limit"]};
 inline constexpr unsigned kVirtualLookaheads[] = {{{lookaheads}}};
-inline constexpr unsigned kSupportedLookaheads[] = {{{supported}}};
 inline constexpr char kProposalOperandPlacement[] = "{POLICY["algorithms"]["proposal_operand_placement"]}";
 inline constexpr int kDMAProposalSerializationCycles = {POLICY["dma_proposal"]["intercommand_serialization_cycles"]};
 inline constexpr char kDMAProposalPolicyJson[] = R"atlas_policy({dma})atlas_policy";

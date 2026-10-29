@@ -143,15 +143,14 @@ class ModelSelectionTest(SelectionFixture, unittest.TestCase):
                 self.assertTrue(select.call_args.kwargs["guarded_pack"])
 
     def test_candidate_options_and_validation(self):
-        self.assertIn("lookahead=4", candidate_options(Candidate(lookahead=4), "model", True)[0])
         self.assertEqual(candidate_options(Candidate(mreg_ranks=(31, 0, 7),
                                                       wait_placement="source"), "model", True),
                          ["--atlas-compile-candidate=provider=model spill=true allocation-report=allocation.json "
                           "pack-relayout-rows=2 wait-reused-dma-slots=true "
                           "mreg-ranks='31,0,7' wait-placement=source"])
         self.assertNotIn("wait-placement", candidate_options(Candidate(), "model", True)[0])
-        for invalid in ({"lookahead": 3}, {"lookahead": 1, "random_seed": 0},
-                        {"lookahead": 1, "virtual_orders": ((0,),)},
+        for invalid in ({"random_seed": -1},
+                        {"random_seed": 1, "virtual_orders": ((0,),)},
                         {"mreg_ranks": (-1,)}, {"wait_placement": "other"}):
             with self.subTest(invalid=invalid), self.assertRaises(ValueError):
                 Candidate(**invalid)
@@ -161,7 +160,6 @@ class ModelSelectionTest(SelectionFixture, unittest.TestCase):
         rows = receipt["candidates"]
         self.assertEqual([row["class"] for row in rows], ["default"] + ["random-seed"] * 8)
         self.assertEqual([row["options"]["random_seed"] for row in rows[1:]], list(range(8)))
-        self.assertTrue(all(row["options"]["lookahead"] == 0 for row in rows))
         self.assertEqual(rows[3]["status"], "FAIL")
 
     def test_seeded_register_pool_preserves_prefix_and_budget(self):
@@ -415,7 +413,6 @@ class ModelSelectionTest(SelectionFixture, unittest.TestCase):
             self.assertEqual([row["status"] for row in rows], statuses)
             self.assertEqual(receipt["group_search"]["evaluations"], len(rows))
             self.assertEqual(receipt["selected_index"], 0)
-            self.assertTrue(all(row["options"]["lookahead"] == 0 for row in receipt["candidates"]))
 
     def bundle(self):
         bundle = self.directory / "facts"
@@ -540,7 +537,6 @@ class ModelSelectionKnobsTest(unittest.TestCase):
         from test_delay_insertion import nop, program
 
         for option in (
-            "--schedule-atlas-virtual=provider=builtin lookahead=1",
             "--lower-atlas-virtual-to-machine=provider=builtin mreg-ranks=1",
             "--schedule-atlas-stream=provider=builtin wait-placement=source",
         ):
@@ -565,7 +561,6 @@ class ModelSelectionKnobsTest(unittest.TestCase):
 
     def test_invalid_candidate_controls_fail(self):
         for option, diagnostic in (
-            ("--schedule-atlas-virtual=lookahead=3", "lookahead must be"),
             ("--schedule-atlas-stream=wait-placement=unknown", "wait-placement must be"),
         ):
             with self.subTest(option=option):
@@ -585,7 +580,7 @@ class ModelSelectionKnobsTest(unittest.TestCase):
     def test_explicit_defaults_preserve_builtin_ir(self):
         source = EXAMPLE.read_text()
         for ordinary, explicit in (
-            ("--schedule-atlas-virtual", "--schedule-atlas-virtual=provider=builtin lookahead=0"),
+            ("--schedule-atlas-virtual", "--schedule-atlas-virtual=provider=builtin"),
             ("--lower-atlas-virtual-to-machine",
              "--lower-atlas-virtual-to-machine=provider=builtin"),
         ):
@@ -679,7 +674,7 @@ class ModelOrderReplayTest(unittest.TestCase):
             with self.subTest(order=bad):
                 self.assertNotEqual(self.replay(bad).returncode, 0)
         self.order_path.write_text(json.dumps([order]))
-        for option in ({"lookahead": 1}, {"random_seed": 1}):
+        for option in ({"random_seed": 1},):
             result = self.schedule(order_file=self.order_path, **option)
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("order-file excludes", result.stderr)

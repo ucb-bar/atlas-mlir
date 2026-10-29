@@ -38,19 +38,16 @@ DEFAULTS = POLICY["defaults"]
 
 @dataclass(frozen=True)
 class Candidate:
-    lookahead: int = 0
     random_seed: int | None = None
     wait_placement: str = "default"
     virtual_orders: tuple[tuple[int, ...], ...] = ()
     mreg_ranks: tuple[int, ...] = ()
 
     def __post_init__(self) -> None:
-        if self.lookahead not in POOLS["supported_lookaheads"]:
-            raise ValueError("lookahead must be 0, 1, 2, 4, or 8")
-        if self.random_seed is not None and (self.random_seed < 0 or self.lookahead):
-            raise ValueError("random-seed must be nonnegative and excludes lookahead")
-        if self.virtual_orders and (self.lookahead or self.random_seed is not None):
-            raise ValueError("explicit virtual orders exclude lookahead and random-seed")
+        if self.random_seed is not None and (self.random_seed < 0):
+            raise ValueError("random-seed must be nonnegative")
+        if self.virtual_orders and self.random_seed is not None:
+            raise ValueError("explicit virtual orders exclude random-seed")
         if any(rank < 0 or rank > 0xFFFFFFFF for rank in self.mreg_ranks):
             raise ValueError("MREG ranks must be unsigned 32-bit integers")
         if self.wait_placement not in ("default", "source"):
@@ -79,7 +76,6 @@ def candidate_options(candidate: Candidate, provider: str, spill: bool, *, graph
     for enabled, option in (
         (candidate.virtual_orders, "order-file=order.json"),
         (graph_output, "graph-output=graph.json"),
-        (candidate.lookahead, f"lookahead={candidate.lookahead}"),
         (candidate.random_seed is not None, f"random-seed={candidate.random_seed}"),
         (candidate.mreg_ranks, "mreg-ranks='" + ",".join(map(str, candidate.mreg_ranks)) + "'"),
         (candidate.wait_placement != "default", "wait-placement=" + candidate.wait_placement),
@@ -367,7 +363,7 @@ class Selection:
             nonimproving = 0
             graphs = json.loads((self.output / parent["directory"] / "graph.json").read_text())
             orders = tuple(tuple(graph["order"]) for graph in graphs)
-            base = replace(self.winner(), lookahead=0, random_seed=None, virtual_orders=orders)
+            base = replace(self.winner(), random_seed=None, virtual_orders=orders)
             self.seen.add(base)
             proposed = group_order_neighbors(graphs, orders)
             pending = self.group_candidates(base, proposed, self.config.profile)

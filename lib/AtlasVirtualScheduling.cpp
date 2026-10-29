@@ -1017,7 +1017,6 @@ LogicalResult scheduleBlock(Block &block, unsigned index,
                             const Liveness &liveness,
                             const KindCounts &capacity,
                             std::optional<unsigned> randomSeed,
-                            unsigned forcedLookahead,
                             const timing::TimingProvider &provider) {
   FailureOr<BlockGraph> graph = buildGraph(block);
   if (failed(graph))
@@ -1055,10 +1054,6 @@ LogicalResult scheduleBlock(Block &block, unsigned index,
   };
   if (randomSeed) {
     reorder(block, opsOf(scheduler.randomOrder(*randomSeed + index)));
-    return success();
-  }
-  if (forcedLookahead) {
-    reorder(block, opsOf(scheduler.listSchedule(capacity, forcedLookahead)));
     return success();
   }
 
@@ -1107,10 +1102,6 @@ struct ScheduleAtlasVirtualPass
       llvm::cl::desc("Timing provider (default: atlas.timing_provider, else builtin)"),
       llvm::cl::init("")};
 
-  Option<unsigned> lookahead{
-      *this, "lookahead", llvm::cl::desc("Force an existing list schedule (0, 1, 2, 4, or 8)"),
-      llvm::cl::init(0)};
-
   Option<std::string> orderFile{
       *this, "order-file", llvm::cl::desc("Explicit per-block topological orders as JSON"),
       llvm::cl::init("")};
@@ -1130,12 +1121,8 @@ struct ScheduleAtlasVirtualPass
     FailureOr<timing::TimingProvider> selected = selectAtlasTimingProvider(module, provider.getValue());
     if (failed(selected))
       return signalPassFailure();
-    if (lookahead != 0 && !llvm::is_contained(search_policy::kSupportedLookaheads, lookahead))
-      return refuse("lookahead must be 0, 1, 2, 4, or 8");
-    if (lookahead && randomSeed >= 0)
-      return refuse("lookahead and random-seed are mutually exclusive");
-    if (!orderFile.empty() && (lookahead || randomSeed >= 0))
-      return refuse("order-file excludes lookahead and random-seed");
+    if (!orderFile.empty() && randomSeed >= 0)
+      return refuse("order-file excludes random-seed");
     if (packRelayoutRows && packRelayoutRows != 1 && packRelayoutRows != 2)
       return refuse("pack-relayout-rows must be 0, 1, or 2");
     selected->packRelayoutRows = packRelayoutRows;
@@ -1190,7 +1177,8 @@ struct ScheduleAtlasVirtualPass
             ops.push_back(graph->nodes[*node]);
           }
           reorder(block, ops);
-        } else if (failed(scheduleBlock(block, index, liveness, capacity, seed, lookahead, *selected))) {
+        } else if (failed(scheduleBlock(block, index, liveness,
+                                        capacity, seed, *selected))) {
           return signalPassFailure();
         }
         if (!graphOutput.empty()) {
@@ -1245,12 +1233,11 @@ void mlir::atlas::registerScheduleAtlasVirtualPass() {
   PassRegistration<ScheduleAtlasVirtualPass>();
 }
 
-std::unique_ptr<Pass> mlir::atlas::createScheduleAtlasVirtualPass(StringRef provider, unsigned lookahead, int randomSeed,
-                                                                   StringRef orderFile, StringRef graphOutput,
-                                                                   unsigned packRelayoutRows) {
+std::unique_ptr<Pass> mlir::atlas::createScheduleAtlasVirtualPass(
+    StringRef provider, int randomSeed, StringRef orderFile,
+    StringRef graphOutput, unsigned packRelayoutRows) {
   auto pass = std::make_unique<ScheduleAtlasVirtualPass>();
   pass->provider = provider.str();
-  pass->lookahead = lookahead;
   pass->randomSeed = randomSeed;
   pass->orderFile = orderFile.str();
   pass->graphOutput = graphOutput.str();

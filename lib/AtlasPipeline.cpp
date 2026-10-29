@@ -35,8 +35,9 @@ void buildBoundaryStage(OpPassManager &pm, const AtlasCompileOptions &options) {
 }
 
 void buildVirtualScheduleStage(OpPassManager &pm, const AtlasCompileOptions &options) {
-  pm.addPass(createScheduleAtlasVirtualPass(options.provider, options.lookahead, options.randomSeed,
-                                           options.orderFile, options.graphOutput, options.packRelayoutRows));
+  pm.addPass(createScheduleAtlasVirtualPass(
+      options.provider, options.randomSeed, options.orderFile,
+      options.graphOutput, options.packRelayoutRows));
   pm.addPass(createVerifyAtlasVirtualStreamPass());
 }
 

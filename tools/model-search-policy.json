@@ -32,7 +32,6 @@
     "api_search_patience": 0
   },
   "pools": {
-    "supported_lookaheads": [0, 1, 2, 4, 8],
     "virtual_scheduler_lookaheads": [1, 2, 4, 8],
     "random_seeds": [0, 1, 2, 3, 4, 5, 6, 7],
     "neighbor_shuffle_seed": 0,

@@ -22,7 +22,6 @@ struct AtlasCompileOptions : PassPipelineOptions<AtlasCompileOptions> {
       llvm::cl::values(clEnumValN(Boundary::All, "boundary", "Convert boundary tiles"),
                        clEnumValN(Boundary::None, "none", "Keep boundary tiles")),
       llvm::cl::init(Boundary::All)};
-  Option<unsigned> lookahead{*this, "lookahead", llvm::cl::desc("Virtual lookahead"), llvm::cl::init(0)};
   Option<int> randomSeed{*this, "random-seed", llvm::cl::desc("Virtual schedule seed"), llvm::cl::init(-1)};
   Option<std::string> waitPlacement{*this, "wait-placement", llvm::cl::desc("Wait policy"), llvm::cl::init("default")};
   Option<std::string> provider{*this, "provider", llvm::cl::desc("Timing provider"), llvm::cl::init("")};
