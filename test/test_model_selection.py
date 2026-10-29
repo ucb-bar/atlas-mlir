@@ -125,12 +125,8 @@ class ModelSelectionTest(SelectionFixture, unittest.TestCase):
         self.assertNotIn(whole_chain, set(group_order_neighbors([chain], interleaved, max_nodes=4)))
 
     def test_invalid_search_controls_reject_before_tools(self):
-        for options, diagnostic in (
-            ({"search_group_evaluations": -1}, "search-group-evaluations"),
-            ({"boundary": "inputs"}, "boundary must be boundary or none"),
-        ):
-            with self.subTest(options=options), self.assertRaisesRegex(ValueError, diagnostic):
-                self.select(**options)
+        with self.assertRaisesRegex(ValueError, "search-group-evaluations"):
+            self.select(search_group_evaluations=-1)
         self.assertEqual(self.invocations, [])
 
     def test_builtin_scores_and_selects_alternatives(self) -> None:

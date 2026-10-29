@@ -26,9 +26,6 @@ import time
 from typing import Callable
 
 
-ROOT = Path(__file__).resolve().parents[1]
-
-
 # Compiler policy: candidate pools and search work limits.
 RANDOM_SEEDS = tuple(range(8))
 MREG_SEEDS = tuple(range(8))
@@ -136,8 +133,6 @@ class SelectionConfig:
     model: Path | None = None
     model_regions: tuple[Path, ...] = ()
     spill: bool = True
-    spill_mxu: bool = True
-    boundary: str = "boundary"
     guarded_pack: bool = False
     model_facts: Path | None = None
     max_candidates: int = API_INITIAL_ATTEMPTS
@@ -150,16 +145,10 @@ class SelectionConfig:
         profile = self.profile
         if profile is None:
             profile = "curve" if self.provider == "model" else "fifo43"
-        if self.provider not in ("builtin", "model"):
-            raise ValueError("provider must be builtin or model")
-        if profile not in ("fifo43", "curve"):
-            raise ValueError("profile must be fifo43 or curve")
         if self.max_candidates < 1:
             raise ValueError("max-candidates must be positive")
         if self.workers < 1:
             raise ValueError("workers must be positive")
-        if self.boundary not in ("boundary", "none"):
-            raise ValueError("boundary must be boundary or none")
         if self.search_group_evaluations < 0:
             raise ValueError("search-group-evaluations must be nonnegative")
         mreg_candidates = self.mreg_candidates
@@ -206,10 +195,7 @@ class Selection:
             self.command([sys.executable, "-B", str(Path(__file__).with_name("atlas_model_facts.py")),
                           "--npu-model", str(self.config.model), "--out", str(model_facts)], self.output)
         options = evidence_option(model_facts)
-        options.append("--atlas-compile-prepare=" +
-                       f"spill-mxu-state={str(self.config.spill_mxu).lower()} boundary={self.config.boundary}")
-        if self.config.guarded_pack:
-            options[-1] += " guarded-pack=true"
+        options.append("--atlas-compile-prepare" + ("=guarded-pack=true" if self.config.guarded_pack else ""))
         self.command([str(self.binaries / "atlas-opt"), str(self.source), *options,
                       "--mlir-print-op-on-diagnostic=false", "-o", str(self.prepared)], self.output)
 
@@ -400,35 +386,7 @@ def model_arguments(args: argparse.Namespace) -> SelectionConfig:
     return SelectionConfig(
         provider=args.provider, profile=args.profile, model=args.npu_model,
         model_regions=tuple(args.model_region), model_facts=args.model_facts, workers=args.workers,
-        boundary=getattr(args, "boundary", "boundary"), spill=not getattr(args, "no_spill", False),
         guarded_pack=getattr(args, "guarded_pack", False),
         mreg_candidates=() if single or not args.bank_candidates else None,
         max_candidates=1 if single else args.max_candidates,
         search_group_evaluations=0 if single else args.search_group_evaluations)
-
-
-def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("source", type=Path)
-    parser.add_argument("--output-dir", type=Path, required=True)
-    parser.add_argument("--atlas-bin-dir", type=Path,
-                        default=Path(os.environ.get("ATLAS_OOT_BIN_DIR", ROOT / "build/bin")))
-    parser.add_argument("--boundary", choices=("boundary", "none"), default="boundary")
-    parser.add_argument("--no-spill", action="store_true", default=False)
-    parser.add_argument("--guarded-pack", action="store_true", default=False)
-    add_model_arguments(parser)
-    parser.set_defaults(provider="model")
-    args = parser.parse_args()
-    try:
-        result = select_program(args.source, args.output_dir, args.atlas_bin_dir,
-                                model_arguments(args))
-    except (OSError, ValueError) as error:
-        print(error, file=sys.stderr)
-        return 1
-    print(json.dumps({key: result[key] for key in ("selected_index", "selected_class", "default_cycles",
-                                                 "selected_cycles", "elapsed_seconds")}))
-    return 0
-
-
-if __name__ == "__main__":
-    sys.exit(main())
