@@ -150,7 +150,6 @@ class SelectionConfig:
     workers: int
     mreg_candidates: tuple[tuple[int, ...], ...] | None
     search_group_evaluations: int
-    search_patience: int
 
     def resolved(self) -> SelectionConfig:
         profile = self.profile
@@ -160,10 +159,8 @@ class SelectionConfig:
             raise ValueError("unsupported provider or memory profile")
         if self.max_candidates < 1 or self.workers < 1 or self.boundary not in ("boundary", "none"):
             raise ValueError("candidate and worker counts must be positive and boundary must be boundary or none")
-        for name, value in (("search-group-evaluations", self.search_group_evaluations),
-                            ("search-patience", self.search_patience)):
-            if value < 0:
-                raise ValueError(name + " must be nonnegative")
+        if self.search_group_evaluations < 0:
+            raise ValueError("search-group-evaluations must be nonnegative")
         mreg_candidates = self.mreg_candidates
         if mreg_candidates is None:
             mreg_candidates = tuple(tuple(random.Random(seed).choices(
@@ -178,7 +175,6 @@ class SelectionConfig:
             random_seeds=list(self.random_seeds), workers=self.workers,
             mreg_candidates=[list(ranks) for ranks in self.mreg_candidates],
             search_group_evaluations=self.search_group_evaluations,
-            search_patience=self.search_patience,
         )}
 
 
@@ -201,7 +197,6 @@ class Selection:
             "guarded_pack": config.guarded_pack,
             "max_candidates": config.max_candidates, "workers": config.workers,
             "search_group_evaluations": config.search_group_evaluations,
-            "search_patience": config.search_patience,
             "source_sha256": hashlib.sha256(self.source.read_bytes()).hexdigest(),
             "search_policy": effective_policy,
             "candidates": []}
@@ -357,10 +352,9 @@ class Selection:
         initial_count = len(self.receipt["candidates"])
         limit = initial_count + self.config.search_group_evaluations
         phase = self.receipt["group_search"] = {
-            "start_index": self.best["index"], "accepted_indices": [], "stopped_for_patience": False}
+            "start_index": self.best["index"], "accepted_indices": []}
         while len(self.receipt["candidates"]) < limit:
             parent = self.best
-            nonimproving = 0
             graphs = json.loads((self.output / parent["directory"] / "graph.json").read_text())
             orders = tuple(tuple(graph["order"]) for graph in graphs)
             base = replace(self.winner(), random_seed=None, virtual_orders=orders)
@@ -384,10 +378,6 @@ class Selection:
                     row["parent_index"] = parent["index"]
                 if self.best["index"] != parent["index"]:
                     phase["accepted_indices"].append(self.best["index"])
-                    break
-                nonimproving += len(self.receipt["candidates"]) - before
-                if self.config.search_patience and nonimproving >= self.config.search_patience:
-                    phase["stopped_for_patience"] = True
                     break
             if self.best["index"] == parent["index"]:
                 break
@@ -434,7 +424,6 @@ def select_program(source: Path, output_dir: Path, atlas_bin_dir: Path, *,
                    random_seeds: tuple[int, ...] = tuple(POOLS["random_seeds"]), workers: int = DEFAULTS["workers"],
                    mreg_candidates: tuple[tuple[int, ...], ...] | None = (),
                    search_group_evaluations: int = DEFAULTS["api_search_group_evaluations"],
-                   search_patience: int = DEFAULTS["api_search_patience"],
                    scorer: Callable | None = None) -> dict:
     """Verify candidates and publish the lowest-cycle program in canonical order."""
     config = SelectionConfig(
@@ -442,8 +431,7 @@ def select_program(source: Path, output_dir: Path, atlas_bin_dir: Path, *,
         spill=spill, spill_mxu=spill_mxu, boundary=boundary,
         guarded_pack=guarded_pack, model_facts=model_facts,
         max_candidates=max_candidates, random_seeds=random_seeds, workers=workers,
-        mreg_candidates=mreg_candidates, search_group_evaluations=search_group_evaluations,
-        search_patience=search_patience).resolved()
+        mreg_candidates=mreg_candidates, search_group_evaluations=search_group_evaluations).resolved()
     effective_policy = config.policy()
     return Selection(source, output_dir, atlas_bin_dir, config, scorer, effective_policy).run()
 
@@ -465,9 +453,6 @@ def add_model_arguments(parser: argparse.ArgumentParser) -> None:
                         help="score eight legal MREG rank vectors")
     parser.add_argument("--search-group-evaluations", type=int,
                         help="additional verified dependency-group attempts after knob selection")
-    parser.add_argument("--search-patience", type=int,
-                        help="stop a phase after this many nonimproving attempts, "
-                             "checked after each batch; zero disables")
 
 
 def model_arguments(args: argparse.Namespace) -> dict:

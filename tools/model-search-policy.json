@@ -6,13 +6,11 @@
     "selection": {
       "max_candidates": 24,
       "search_group_evaluations": 0,
-      "search_patience": 0,
       "bank_candidates": false
     },
     "full": {
       "max_candidates": 32,
       "search_group_evaluations": 204,
-      "search_patience": 96,
       "bank_candidates": true
     }
   },
@@ -28,8 +26,7 @@
     "spill_mxu": true,
     "boundary": "boundary",
     "api_max_candidates": 32,
-    "api_search_group_evaluations": 0,
-    "api_search_patience": 0
+    "api_search_group_evaluations": 0
   },
   "pools": {
     "virtual_scheduler_lookaheads": [1, 2, 4, 8],

@@ -111,10 +111,10 @@ class ModelSelectionTest(SelectionFixture, unittest.TestCase):
     def test_explicit_overrides(self):
         parser = argparse.ArgumentParser()
         add_model_arguments(parser)
-        for budget, expected in (("full", (32, 204, 96)), ("selection", (24, 0, 0))):
+        for budget, expected in (("full", (32, 204)), ("selection", (24, 0))):
             values = model_arguments(parser.parse_args(["--provider", "model", "--search-budget", budget]))
             self.assertEqual(tuple(values[key] for key in
-                                   ("max_candidates", "search_group_evaluations", "search_patience")), expected)
+                                   ("max_candidates", "search_group_evaluations")), expected)
             self.assertEqual(values["profile"], "curve")
             self.assertEqual(values["mreg_candidates"], None if budget == "full" else ())
         values = model_arguments(parser.parse_args(["--provider", "model", "--workers", "4",
@@ -222,11 +222,10 @@ class ModelSelectionTest(SelectionFixture, unittest.TestCase):
         self.assertNotIn(whole_chain, set(group_order_neighbors([chain], interleaved, max_nodes=4)))
 
 
-    def test_patience_stops_at_batch_boundary(self):
+    def test_group_budget(self):
         receipt = self.select(runner=self.graph_run([[], [0], *[[] for _ in range(14)]]), max_candidates=1,
-                              search_group_evaluations=100, search_patience=12, workers=4)
+                              search_group_evaluations=12, workers=4)
         self.assertEqual(receipt["group_search"]["evaluations"], 12)
-        self.assertTrue(receipt["group_search"]["stopped_for_patience"])
         self.assertEqual(receipt["group_search"]["accepted_indices"], [])
         self.assertEqual(receipt["selected_index"], 0)
         self.assertEqual(receipt["score_cache_entries"], 1)
@@ -234,7 +233,6 @@ class ModelSelectionTest(SelectionFixture, unittest.TestCase):
 
     def test_invalid_search_controls_reject_before_tools(self):
         for options, diagnostic in (
-            ({"search_patience": -1}, "search-patience"),
             ({"search_group_evaluations": -1}, "search-group-evaluations"),
             ({"boundary": "inputs"}, "boundary must be boundary or none"),
         ):

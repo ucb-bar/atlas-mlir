@@ -91,7 +91,7 @@ The selection file records attempts, cycle counts, and the winning index.
    supplied output regions.
 4. Keep the lowest cycle count, breaking ties by the lowest candidate index.
 5. Search dependency-group moves from the current winner while the configured
-   budget and patience allow it.
+   budget allows it.
 
 Compiler refusals count toward the budget. Native execution faults and
 numerical mismatches stop selection. Scores for identical instruction words
