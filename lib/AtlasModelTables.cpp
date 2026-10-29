@@ -154,7 +154,7 @@ void readFrontend(Reader &r, const Object &root, TimingTables &tables,
   }
 }
 
-void readGeometry(Reader &r, const Object &root, ModelTimingTables &facts) {
+void readGeometry(Reader &r, const Object &root, TimingTables &tables) {
   const Object *arch = r.object(&root, "architecture");
   for (auto [key, expected] : std::initializer_list<std::pair<const char *, int>>{
       {"mreg_count", kAtlasTensorRegisters}, {"mreg_rows", kAtlasMregRows},
@@ -168,10 +168,9 @@ void readGeometry(Reader &r, const Object &root, ModelTimingTables &facts) {
   if (!arch || arch->getInteger("dram_base") != 0x80000000LL ||
       arch->getInteger("dram_bytes") != 0x1000000000LL)
     r.fail("unsupported DRAM geometry");
-  facts.dmaChannels = r.integer(arch, "dma_channels", 1, kAtlasDMAChannels);
   if (r.integer(arch, "mreg_bytes", 1) != kAtlasRegisterBytes)
     r.fail("unsupported architecture mreg_bytes");
-  facts.geometry.bf16Registers = r.integer(arch, "bf16_registers_per_tile", 1);
+  tables.bf16RegistersPerTile = r.integer(arch, "bf16_registers_per_tile", 1);
 }
 
 void readDMA(Reader &r, const Object &root, ModelDMATiming &dma) {
@@ -329,7 +328,7 @@ llvm::Expected<ModelTimingTables> mlir::atlas::timing::parseModelTimingTables(ll
   ModelTimingTables result;
   auto tables = std::make_shared<TimingTables>();
   readOperations(r, *root, *tables);
-  readGeometry(r, *root, result);
+  readGeometry(r, *root, *tables);
   readFrontend(r, *root, *tables, result);
   readDMA(r, *root, result.dma);
   const Object *resources = r.object(root, "resources");
@@ -520,8 +519,6 @@ TimingProvider mlir::atlas::timing::modelTimingProvider(std::shared_ptr<const Mo
   p.id = kModelTimingProviderId.str();
   p.model = facts->timing;
   p.frontendSpacing = facts->frontend;
-  p.proposalGeometry = facts->geometry;
-  p.proposalDMACapacity = facts->dmaChannels;
   p.fillPendingDelaySlots = true;
   p.waitReusedDMASlots = true;
   p.validateScope = modelScope;

@@ -148,14 +148,14 @@ TimingRuleResult<DepGraph> mlir::atlas::timing::buildTimingGraph(
 
 namespace {
 std::pair<Instr, Instr> representativeProbes(const OpInfo *op,
-                                           const ProposalGeometry *geometry) {
+                                           const TimingTables *tables) {
   const bool mxu = op->engine == Engine::Mxu0 || op->engine == Engine::Mxu1;
-  if (!geometry) {
+  if (!tables) {
     if (mxu)
       return {{op, 0, 0, 0}, {op, 1, 2, 1}};
     return {{op, 0, 2, 4}, {op, 6, 8, 10}};
   }
-  const int stride = geometry->bf16Registers;
+  const int stride = tables->bf16RegistersPerTile;
   Instr first{op}, second{op};
   if (op->engine == Engine::Scalar)
     second.rd = 3 * stride;
@@ -191,7 +191,7 @@ mlir::FailureOr<MachineOpTiming> mlir::atlas::timing::machineTimingOf(
   if (!missing.empty()) return error(missing);
   const OpInfo *op = findOp(name);
   if (!op) return error("unknown machine operation");
-  auto [first, second] = representativeProbes(op, p.model ? &p.proposalGeometry : nullptr);
+  auto [first, second] = representativeProbes(op, p.model.get());
   Footprint a = p.footprint(first, unknownRegs());
   Footprint b = p.footprint(second, unknownRegs());
   for (const Footprint *f : {&a, &b}) {

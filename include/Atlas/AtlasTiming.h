@@ -142,6 +142,7 @@ struct MxuRules {
 };
 struct TimingTables {
   std::map<std::string, OperationTiming> operations;
+  int bf16RegistersPerTile = 0;
   int ordinaryIssueGap = 0, delayBaseGap = 0, delayImmediateMask = 0;
   int scalarReadAge = 0, scalarWriteAge = 0, controlReadAge = 0;
   int scalarLoadGap = 0;

@@ -2,7 +2,6 @@
 #define ATLAS_TIMING_PROVIDER_H
 
 #include "Atlas/AtlasTiming.h"
-#include "Atlas/AtlasTarget.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "llvm/ADT/StringRef.h"
 #include <functional>
@@ -41,20 +40,6 @@ public:
 std::unique_ptr<TimingReservations> createTimingReservations(
     std::shared_ptr<const TimingTables> tables = {});
 
-// Geometry used by lowering templates. The model fills these fields from
-// checked architecture facts.
-struct ProposalGeometry {
-  int registerBytes = kAtlasRegisterBytes;
-  int rowBytes = kAtlasMregRowBytes;
-  int rows = kAtlasMregRows;
-  int scalarBytes = 4;
-  int bf16Registers = kAtlasBF16Registers;
-  int bf16ElementBytes = 2;
-  int fp8RegisterCount = 1, fp8ElementBytes = 1;
-  int fp8Registers() const { return fp8RegisterCount; }
-  int packRowWords() const { return rowBytes / scalarBytes; }
-};
-
 // Frontend issue spacing and the number of delay slots.
 struct FrontendSpacing {
   int ordinaryGap = 1, delaySlots = 1;
@@ -68,11 +53,9 @@ struct TimingProvider {
   std::string id;
   // Format a model refusal when a consumer emits its diagnostic.
   std::string diagnostic(llvm::StringRef error) const;
-  ProposalGeometry proposalGeometry;
   unsigned packRelayoutRows = 0; // Explicit compiler code-size policy override.
   FrontendSpacing frontendSpacing;
   std::shared_ptr<const TimingTables> model;
-  int proposalDMACapacity = 0; // Zero keeps the default scheduler's bound.
   std::function<std::string(const AtlasStream &)> validateScope;
   FootprintResolver footprint;
   std::function<TimingRuleResult<Dependence>(

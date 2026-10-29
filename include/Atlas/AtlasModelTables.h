@@ -23,8 +23,6 @@ struct ModelTimingTables {
   std::shared_ptr<const TimingTables> timing;
   ModelDMATiming dma;
   FrontendSpacing frontend;
-  ProposalGeometry geometry;
-  int dmaChannels = 0;
   std::vector<std::string> frontendInstructions;
 };
 

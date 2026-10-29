@@ -206,6 +206,32 @@ void dmaValues(const ModelTimingTables &facts) {
   }
 }
 
+void probeGeometry(const ModelTimingTables &facts, MLIRContext &context) {
+  auto provider = modelTimingProvider(std::make_shared<ModelTimingTables>(facts));
+  auto module = mlir::ModuleOp::create(mlir::UnknownLoc::get(&context));
+  auto footprint = provider.footprint;
+  std::vector<Instr> probes;
+  provider.footprint = [&](const Instr &in, const RegValues &regs) {
+    probes.push_back(in);
+    return footprint(in, regs);
+  };
+  check(facts.timing->bf16RegistersPerTile == mlir::atlas::kAtlasBF16Registers,
+        "BF16 probe span loads from architecture facts");
+  for (int span : {facts.timing->bf16RegistersPerTile,
+                    2 * facts.timing->bf16RegistersPerTile}) {
+    auto tables = std::make_shared<TimingTables>(*facts.timing);
+    tables->bf16RegistersPerTile = span;
+    provider.model = tables;
+    probes.clear();
+    auto cost = machineTimingOf(provider, "vadd.bf16", module);
+    check(succeeded(cost) && probes.size() == 2 &&
+              probes[0].rd == 0 && probes[0].rs1 == span && probes[0].rs2 == 2 * span &&
+              probes[1].rd == 3 * span && probes[1].rs1 == 4 * span && probes[1].rs2 == 5 * span,
+          "representative operands use the loaded BF16 span");
+  }
+  module.erase();
+}
+
 void loaderRefusal(llvm::StringRef bytes) {
   auto document = llvm::json::parse(bytes);
   check(bool(document), "facts are JSON");
@@ -217,6 +243,11 @@ void loaderRefusal(llvm::StringRef bytes) {
     auto bad = parseModelTimingTables(jsonText(*document));
     check(!bad, "unsupported geometry refuses");
     if (!bad) llvm::consumeError(bad.takeError());
+    (*architecture)["mreg_count"] = mlir::atlas::kAtlasTensorRegisters;
+    (*architecture)["bf16_registers_per_tile"] = 3;
+    auto span = parseModelTimingTables(jsonText(*document));
+    check(!span, "unsupported BF16 span refuses");
+    if (!span) llvm::consumeError(span.takeError());
   }
   document = llvm::json::parse(bytes);
   if (!document) { llvm::consumeError(document.takeError()); return; }
@@ -235,7 +266,7 @@ void loaderRefusal(llvm::StringRef bytes) {
 }
 } // namespace
 
-void atlas_test::runModelTables(MLIRContext &) {
+void atlas_test::runModelTables(MLIRContext &context) {
   const char *directory = std::getenv("ATLAS_TEST_MODEL_FACTS");
   if (!directory) {
     llvm::outs() << "Set ATLAS_TEST_MODEL_FACTS to test regenerated timing tables\n";
@@ -256,6 +287,7 @@ void atlas_test::runModelTables(MLIRContext &) {
   frontendValues(*facts->timing);
   reservationValues(*facts->timing);
   dmaValues(*facts);
+  probeGeometry(*facts, context);
   loaderRefusal((*file)->getBuffer());
   auto wrongHash = loadModelTimingTables(path, std::string(64, '0'));
   check(!wrongHash, "selected facts hash mismatch refuses");

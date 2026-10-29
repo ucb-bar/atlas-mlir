@@ -398,7 +398,6 @@ FailureOr<int64_t> scalarSlotCycles(bool store, int64_t word, Operation *at,
 // An operation costs the machine operations it lowers to, as they issue in
 // order on the unit doing its work.
 FailureOr<Cost> costOf(Operation *op, const timing::TimingProvider &provider) {
-  const auto &geometry = provider.proposalGeometry;
   auto registerCount = [&](bool fp8) { return fp8 ? 1 : kAtlasBF16Registers; };
   const int registerWords = kAtlasRegisterBytes / 4;
   auto transferCycles = [&](int64_t bytes, bool store) -> FailureOr<int> {
@@ -552,8 +551,8 @@ FailureOr<Cost> costOf(Operation *op, const timing::TimingProvider &provider) {
     if (failed(vload)) return failure();
     const int groupedRows = provider.packRelayoutRows ? provider.packRelayoutRows :
         atlasPackRelayoutRowsPerIteration(provider.model != nullptr);
-    const int rowWords = geometry.packRowWords() * groupedRows;
-    const int rows = geometry.rows / groupedRows;
+    const int rowWords = kAtlasMregRowBytes / 4 * groupedRows;
+    const int rows = kAtlasMregRows / groupedRows;
     // Policy: this proposal omits general scalar setup and assumes the
     // destination increment can fill the slot when filling is enabled.
     // The physical scheduler separately proves an actual available filler.
