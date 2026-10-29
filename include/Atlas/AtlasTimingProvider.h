@@ -15,13 +15,6 @@ struct AtlasStream;
 
 namespace timing {
 
-// Missing coverage is an error, distinct from a covered rule that reports no
-// dependence or no resource conflict. No generic consumer fills missing rules.
-template <typename T> struct TimingRuleResult {
-  T value{};
-  std::string error;
-};
-
 struct DMACompletionConflict {
   bool conflict = false;
   EdgeKind kind = EdgeKind::Order;

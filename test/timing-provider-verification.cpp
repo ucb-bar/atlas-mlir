@@ -610,6 +610,35 @@ void testVirtualCosts(MLIRContext &context) {
         "an actual tile load still requires its selected timing fact", diagnostics);
 }
 
+void testDMAEstimates() {
+  TimingTables tables;
+  for (const char *name : {"dma.load.ch0", "dma.store.ch0"}) {
+    Instr in{findOp(name), 1, 2, 3};
+    RegValues regs = unknownRegs();
+    regs[1] = regs[2] = 0;
+    tables.dmaEstimate = [](long long, bool) {
+      return TimingRuleResult<int>{0, "uncovered DMA transfer"};
+    };
+    auto unknown = footprintOf(in, regs, tables);
+    check(unknown.error == "model DMA requires a known transfer size",
+          "unknown model DMA size refuses before estimating");
+    regs[3] = 32;
+    auto refused = footprintOf(in, regs, tables);
+    check(refused.error == "uncovered DMA transfer" && refused.dmaCycles == 0,
+          "DMA estimator errors reach the footprint");
+    tables.dmaEstimate = [](long long bytes, bool store) {
+      return TimingRuleResult<int>{int(bytes) + (store ? 3 : 1), {}};
+    };
+    auto covered = footprintOf(in, regs, tables);
+    check(covered.error.empty() && covered.dmaCycles ==
+              (in.op->opClass == OpClass::DmaStore ? 35 : 33),
+          "covered model DMA uses its estimate");
+    tables.dmaEstimate = {};
+    check(!footprintOf(in, regs, tables).error.empty(),
+          "missing model DMA estimator refuses");
+  }
+}
+
 // Each verification boundary decodes and encodes the lowered artifact once.
 void testVerificationContext(MLIRContext &context) {
   auto fixture = llvm::MemoryBuffer::getFile(ATLAS_GENERATED_FIXTURE);
@@ -642,5 +671,6 @@ void atlas_test::runTimingProvider(MLIRContext &context) {
   testProviderGraph(context);
   testSchedulerReservations(context);
   testVirtualCosts(context);
+  testDMAEstimates();
   testVerificationContext(context);
 }

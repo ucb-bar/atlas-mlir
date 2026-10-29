@@ -387,8 +387,7 @@ llvm::Expected<ModelTimingTables> mlir::atlas::timing::parseModelTimingTables(ll
   if (r.error.empty()) validateOperations(r, *tables);
   if (!r.error.empty()) return llvm::createStringError(llvm::inconvertibleErrorCode(), r.error);
   tables->dmaEstimate = [dma = result.dma](long long bytes, bool store) {
-    auto estimate = dma.estimate(bytes, store);
-    return estimate.error.empty() ? estimate.value : 0;
+    return dma.estimate(bytes, store);
   };
   result.timing = std::move(tables);
   return result;

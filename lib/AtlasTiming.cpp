@@ -1023,11 +1023,22 @@ static void dmaFootprint(Builder &b, const Instr &in, const RegValues &regs) {
     b.vmem(addr, bytes, load, 0, 0, true);
     if (addr && (*addr % 32 != 0))
       b.f.error = "DMA VMEM address must be 32-byte aligned";
-    b.f.dmaCycles = tables
-                        ? tables->dmaEstimate(bytes ? *bytes : kAtlasRegisterBytes,
-                                              !load)
-                        : dmaTransferCycles(bytes ? *bytes : kAtlasRegisterBytes,
-                                            !load);
+    if (tables) {
+      if (!bytes) {
+        b.f.error = "model DMA requires a known transfer size";
+      } else if (!tables->dmaEstimate) {
+        b.f.error = "model timing lacks DMA estimates";
+      } else {
+        auto estimate = tables->dmaEstimate(*bytes, !load);
+        if (!estimate.error.empty())
+          b.f.error = estimate.error;
+        else
+          b.f.dmaCycles = estimate.value;
+      }
+    } else {
+      b.f.dmaCycles = dmaTransferCycles(bytes ? *bytes : kAtlasRegisterBytes,
+                                        !load);
+    }
     break;
   }
   case OpClass::DmaConfig: {

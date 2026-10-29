@@ -17,6 +17,12 @@
 
 namespace mlir::atlas::timing {
 
+// A missing or unsupported rule returns an error instead of a timing value.
+template <typename T> struct TimingRuleResult {
+  T value{};
+  std::string error;
+};
+
 enum class Engine { Scalar, Lsu, Mxu0, Mxu1, Vpu, Xlu, Dma };
 
 enum class OpClass {
@@ -143,7 +149,7 @@ struct TimingTables {
   std::vector<std::string> vpuDouble;
   std::vector<std::vector<std::string>> vpuLogicGroups;
   std::array<MxuRules, 2> mxu;
-  std::function<int(long long, bool)> dmaEstimate;
+  std::function<TimingRuleResult<int>(long long, bool)> dmaEstimate;
 };
 
 int naturalGap(const Instr &in, const TimingTables &tables);
