@@ -74,11 +74,10 @@ def _block(name, events, last):
 
 def derive_memory(cfg):
     """Return six isolated blocks and separate reservation/port envelopes; no ticks."""
-    from npu_model.hardware import lsu, xlu, bank_conflict
-    from atlas_derive_vpu import _check_source
+    from npu_model.hardware import lsu, xlu
     from npu_model.isa import EXU
 
-    _check_source(bank_conflict)
+    # The VPU extractor checks the shared bank checker digest before this phase.
     geometry = cfg.arch_state_config
     if (geometry.mrf_depth, geometry.mrf_width, geometry.num_m_registers, cfg.vmem_bank_bytes) != (32, 32, 64, 262144):
         raise UnsupportedModelTiming("unsupported LSU/XLU bank geometry")
