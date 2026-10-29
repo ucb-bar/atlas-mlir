@@ -698,9 +698,8 @@ private:
 // is free.
 class Machine {
 public:
-  Machine(const BlockGraph &g, ArrayRef<Cost> costs,
-          unsigned dmaCapacity)
-      : g(g), costs(costs), finished(g.nodes.size(), 0), dmaCapacity(dmaCapacity) {}
+  Machine(const BlockGraph &g, ArrayRef<Cost> costs)
+      : g(g), costs(costs), finished(g.nodes.size(), 0) {}
 
   int start(unsigned node) const {
     const Cost &cost = costs[node];
@@ -716,9 +715,9 @@ public:
       for (int end : transfers)
         if (end > cycle)
           busy.push_back(end);
-      if (busy.size() >= dmaCapacity) {
+      if (busy.size() >= kMaxQueuedDMA) {
         llvm::sort(busy);
-        cycle = busy[busy.size() - dmaCapacity];
+        cycle = busy[busy.size() - kMaxQueuedDMA];
       }
     }
     return cycle;
@@ -760,15 +759,13 @@ private:
   // When each explicit transfer placed so far completes.
   SmallVector<int> transfers;
   int frontend = 0;
-  unsigned dmaCapacity;
 };
 
 class BlockScheduler {
 public:
   BlockScheduler(Block &block, const BlockGraph &g, const Liveness &liveness,
-                 std::vector<Cost> nodeCosts, const SpillCycles &spill,
-                 unsigned dmaCapacity)
-      : block(block), g(g), liveness(liveness), costs(std::move(nodeCosts)), spill(spill), dmaCapacity(dmaCapacity) {
+                 std::vector<Cost> nodeCosts, const SpillCycles &spill)
+      : block(block), g(g), liveness(liveness), costs(std::move(nodeCosts)), spill(spill) {
     unsigned n = g.nodes.size();
     // The earliest output each value reaches through non-state operands, or n
     // for none. Among equal starts, prefer it: shared operands load for their
@@ -804,7 +801,7 @@ public:
   }
 
   int makespan(ArrayRef<unsigned> order) const {
-    Machine machine(g, costs, dmaCapacity);
+    Machine machine(g, costs);
     for (unsigned node : order)
       machine.place(node);
     return machine.makespan;
@@ -890,7 +887,7 @@ private:
     for (unsigned i = 0; i < n; ++i)
       if ((waiting[i] = g.preds[i].size()) == 0)
         ready.push_back(i);
-    Machine machine(g, costs, dmaCapacity);
+    Machine machine(g, costs);
     while (!ready.empty()) {
       unsigned node = pick(machine, ready);
       ready.erase(llvm::find(ready, node));
@@ -911,7 +908,6 @@ private:
   SpillCycles spill;
   std::vector<int> heights;
   std::vector<unsigned> firstOutput;
-  unsigned dmaCapacity;
 };
 
 // Move `ops` before the terminator in order, and rethread the state chain
@@ -949,7 +945,7 @@ LogicalResult scheduleBlock(Block &block, unsigned index,
   auto costs = costsOf(g, provider);
   if (failed(costs)) return failure();
   BlockScheduler scheduler(block, g, liveness, std::move(*costs),
-                           spillCycles(provider), kMaxQueuedDMA);
+                           spillCycles(provider));
   auto opsOf = [&](ArrayRef<unsigned> order) {
     SmallVector<Operation *> ops;
     for (unsigned node : order)
