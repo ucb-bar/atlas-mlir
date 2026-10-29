@@ -451,23 +451,6 @@ Footprint modelFootprint(const Instr &in, const RegValues &regs,
   return f;
 }
 
-bool overlaps(const Access &a, const Access &b) {
-  return a.res == b.res && (a.anywhere || b.anywhere ||
-      (a.first < b.first + b.count && b.first < a.first + a.count));
-}
-
-DMACompletionConflict dmaConflict(const Footprint &dma, const Footprint &other) {
-  bool vectorMemory = std::any_of(other.holds.begin(), other.holds.end(), [](const Hold &hold) {
-    return hold.unit == Unit::VloadPath || hold.unit == Unit::VstorePath;
-  });
-  for (const auto &a : dma.accesses) if (a.atCompletion)
-    for (const auto &b : other.accesses)
-      if (overlaps(a, b) && (a.write || b.write || b.atCompletion || vectorMemory))
-        return {true, a.write && b.write ? EdgeKind::WAW : a.write ? EdgeKind::RAW :
-                      b.write ? EdgeKind::WAR : EdgeKind::Order};
-  return {};
-}
-
 std::string modelScope(const AtlasStream &stream) {
   if (stream.ops.size() > 32768) return "model program exceeds instruction memory";
   struct Transfer { uint64_t first, end; bool write, waited; };
@@ -526,8 +509,10 @@ TimingProvider mlir::atlas::timing::modelTimingProvider(std::shared_ptr<const Mo
   p.dependence = [tables = facts->timing](const Instr &a, const Footprint &fa, const Instr &b, const Footprint &fb) {
     return TimingRuleResult<Dependence>{dependence(a, fa, b, fb, *tables), {}};
   };
-  p.dmaConflict = [](const Footprint &dma, const Footprint &other) {
-    return TimingRuleResult<DMACompletionConflict>{dmaConflict(dma, other), {}};
+  p.dmaConflict = [tables = facts->timing](const Footprint &dma, const Footprint &other) {
+    DMACompletionConflict result;
+    result.conflict = conflictsAtCompletion(dma, other, result.kind, tables.get());
+    return TimingRuleResult<DMACompletionConflict>{result, {}};
   };
   p.issueGap = [tables = facts->timing](const Instr &in) {
     if (!in.op) return TimingRuleResult<int>{0, "invalid instruction"};

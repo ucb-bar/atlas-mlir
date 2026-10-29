@@ -61,21 +61,8 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block, bool generated,
   auto op = [&](int i) { return s.ops[std::min(begin + i, end - 1)]; };
   auto name = [&](int i) { return op(i)->getName().getStringRef().str(); };
 
-  // Keep the first provider error, including speculative checks.
-  std::string fault;
-  auto note = [&](const std::string &why) {
-    if (!why.empty() && fault.empty())
-      fault = why;
-  };
-  auto rule = [&](auto result) {
-    note(result.error);
-    return std::move(result.value);
-  };
-
-  auto built = buildGraph(nodes, s.entry[block], p);
-  if (!built.error.empty())
-    return op(0)->emitOpError(p.diagnostic(built.error));
-  DepGraph g = std::move(built.value);
+  const TimingTables *tables = p.model.get();
+  DepGraph g = buildGraph(nodes, s.entry[block], tables);
   if (sourceWaitPlacement)
     constrainSourceWaits(g);
   if (generated) {
@@ -109,15 +96,7 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block, bool generated,
       }
     }
   }
-  auto reservations = [&]() {
-    auto table = rule(p.createReservations());
-    if (!table)
-      note("timing provider returned no reservation state");
-    return table;
-  };
-  std::unique_ptr<TimingReservations> alone = reservations();
-  if (!fault.empty())
-    return op(0)->emitOpError(p.diagnostic(fault));
+  ReservationTable alone(p.model);
   if (p.frontendSpacing.ordinaryGap <= 0 || p.frontendSpacing.delaySlots < 0 ||
       (int64_t(p.frontendSpacing.delaySlots) + 1) *
               p.frontendSpacing.ordinaryGap > INT_MAX)
@@ -125,12 +104,8 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block, bool generated,
   int maxSpan = p.frontendSpacing.successorGap();
   std::vector<int> gaps(n);
   for (int i = 0; i < n; i++) {
-    std::string conflict = rule(alone->conflict(nodes[i], g.footprints[i], 0));
-    gaps[i] = rule(p.issueGap(nodes[i]));
-    if (gaps[i] <= 0)
-      note("timing provider issue gap exceeds positive cycle domain");
-    if (!fault.empty())
-      return op(i)->emitOpError(p.diagnostic(fault));
+    std::string conflict = alone.conflict(nodes[i], g.footprints[i], 0);
+    gaps[i] = tables ? naturalGap(nodes[i], *tables) : naturalGap(nodes[i]);
     if (!conflict.empty())
       return op(i)->emitOpError("can never issue: ") << conflict;
     maxSpan = std::max({maxSpan, gaps[i], g.footprints[i].doneAge + 1});
@@ -153,7 +128,7 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block, bool generated,
   auto heights = criticalHeights(g, p);
   if (!heights.error.empty())
     return op(0)->emitOpError(p.diagnostic(heights.error));
-  const auto &height = heights.value;
+  std::vector<int64_t> height = std::move(heights.value);
   std::vector<int> earliest(n, 0), waitingPreds(n, 0), issue(n, -1);
   std::vector<std::string> why(n), reason(n);
   for (const Edge &e : g.edges)
@@ -168,24 +143,9 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block, bool generated,
     return nodes[i].op->opClass == OpClass::DmaWait;
   };
 
-  std::unique_ptr<TimingReservations> table = reservations();
-  if (!fault.empty())
-    return op(0)->emitOpError(p.diagnostic(fault));
+  ReservationTable table(p.model);
   auto completion = [&](int i, int c) { return c + g.footprints[i].doneAge + 1; };
   auto nextIssue = [&](int i, int c) { return c + gaps[i]; };
-  auto busy = [&](int i, int c) {
-    if (!fault.empty())
-      return std::string();
-    return rule(table->conflict(nodes[i], g.footprints[i], c));
-  };
-  auto reserve = [&](TimingReservations &state, int i, int c) {
-    if (!fault.empty())
-      return;
-    std::string error = state.reserve(nodes[i], g.footprints[i], c);
-    if (error.empty() && isWait(i))
-      error = state.onWait(nodes[i], c);
-    note(error);
-  };
   int cycle = 0, placed = 0, nextFree = 0, lastPlaced = 0;
   while (placed < nb) {
     // Take the ready instruction on the longest path that fits this cycle.
@@ -199,7 +159,7 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block, bool generated,
       if (earliest[i] > cycle)
         continue;
       if (isWait(i)) {
-        if (!busy(i, cycle).empty())
+        if (!table.conflict(nodes[i], g.footprints[i], cycle).empty())
           continue;
         if (bestWait < 0 || release(i) < release(bestWait))
           bestWait = i;
@@ -207,7 +167,7 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block, bool generated,
       }
       if (best >= 0 && height[i] <= height[best])
         continue;
-      if (!busy(i, cycle).empty())
+      if (!table.conflict(nodes[i], g.footprints[i], cycle).empty())
         continue;
       best = i;
     }
@@ -237,10 +197,10 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block, bool generated,
           continue;
         int c = std::max(nextIssue(bestWait, cycle), earliest[t]);
         int start = c;
-        while (fault.empty() && !busy(t, c).empty()) {
+        while (!table.conflict(nodes[t], g.footprints[t], c).empty()) {
           c++;
           if (c - start > kMaxIdle)
-            note("scheduler found no free issue cycle for a DMA wait user");
+            return op(t)->emitOpError("scheduler found no free issue cycle for a DMA wait user");
         }
         if (critical < 0 || height[t] > height[critical] ||
             (height[t] == height[critical] && c < firstUse)) {
@@ -255,8 +215,6 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block, bool generated,
           firstUse - gaps[bestWait] <= cycle)
         best = bestWait;
     }
-    if (!fault.empty())
-      return op(0)->emitOpError(p.diagnostic(fault));
     if (best < 0) {
       cycle++;
       if (cycle - lastPlaced > kMaxIdle)
@@ -265,7 +223,7 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block, bool generated,
     }
 
     if (cycle > nextFree) {
-      std::string held = busy(best, cycle - 1);
+      std::string held = table.conflict(nodes[best], g.footprints[best], cycle - 1);
       if (earliest[best] == cycle)
         reason[best] = why[best];
       else if (!held.empty()) reason[best] = held;
@@ -274,13 +232,17 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block, bool generated,
                                     : "list scheduler priority";
     }
     issue[best] = cycle;
-    reserve(*table, best, cycle);
+    table.reserve(nodes[best], g.footprints[best], cycle);
+    if (isWait(best))
+      table.extendForWait(cycle);
     if (g.footprints[best].dmaCycles > 0) {
       if (!p.dmaProposal)
         return op(best)->emitOpError("timing provider lacks DMA proposal policy");
-      auto proposal = rule(p.dmaProposal(g.footprints[best].dmaCycles, cycle, dmaQueueEnd));
-      dmaQueueEnd = proposal.queueEnd;
-      channelRelease[nodes[best].op->channel] = proposal.waitIssue;
+      auto proposal = p.dmaProposal(g.footprints[best].dmaCycles, cycle, dmaQueueEnd);
+      if (!proposal.error.empty())
+        return op(best)->emitOpError(p.diagnostic(proposal.error));
+      dmaQueueEnd = proposal.value.queueEnd;
+      channelRelease[nodes[best].op->channel] = proposal.value.waitIssue;
     }
     for (int e : g.out[best]) {
       const Edge &ed = g.edges[e];
@@ -292,8 +254,6 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block, bool generated,
       waitingPreds[ed.to]--;
     }
     nextFree = nextIssue(best, cycle);
-    if (!fault.empty())
-      return op(best)->emitOpError(p.diagnostic(fault));
     lastPlaced = cycle;
     cycle = nextFree;
     placed++;
@@ -314,8 +274,7 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block, bool generated,
       slot = *filler;
       body.erase(std::next(filler).base());
       // Keep the chosen order, but reclaim the filler's old issue cycle.
-      table = reservations();
-      if (!fault.empty()) return op(0)->emitOpError(p.diagnostic(fault));
+      table = ReservationTable(p.model);
       nextFree = 0;
       earliest.assign(n, 0);
       why.assign(n, "");
@@ -323,7 +282,7 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block, bool generated,
         cycle = std::max(nextFree, earliest[i]);
         reason[i] = cycle > nextFree ? why[i] : "";
         for (;;) {
-          std::string busy = rule(table->conflict(nodes[i], g.footprints[i], cycle));
+          std::string busy = table.conflict(nodes[i], g.footprints[i], cycle);
           if (busy.empty())
             break;
           cycle++;
@@ -332,7 +291,9 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block, bool generated,
             return op(i)->emitOpError("scheduler made no progress");
         }
         issue[i] = cycle;
-        reserve(*table, i, cycle);
+        table.reserve(nodes[i], g.footprints[i], cycle);
+        if (isWait(i))
+          table.extendForWait(cycle);
         for (int e : g.out[i]) {
           const Edge &ed = g.edges[e];
           int ready = cycle + ed.distance;
@@ -342,7 +303,6 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block, bool generated,
           }
         }
         nextFree = nextIssue(i, cycle);
-        if (!fault.empty()) return op(i)->emitOpError(p.diagnostic(fault));
       }
     }
   }
@@ -352,7 +312,6 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block, bool generated,
   int drain = 0;
   for (int i : body)
     drain = std::max(drain, completion(i, issue[i]));
-  if (!fault.empty()) return op(0)->emitOpError(p.diagnostic(fault));
 
   int termCycle = nextFree;
   std::string termReason;
@@ -371,24 +330,21 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block, bool generated,
     if (slot >= 0)
       raise(earliest[slot] - p.frontendSpacing.ordinaryGap, "delay slot: " + why[slot]);
     for (;;) {
-      std::string held = busy(term, termCycle);
-      if (held.empty() && slot >= 0 && fault.empty()) {
+      std::string held = table.conflict(nodes[term], g.footprints[term], termCycle);
+      if (held.empty() && slot >= 0) {
         int slotCycle = nextIssue(term, termCycle);
         // Replay placements to check the slot with the branch reserved.
-        auto withBranch = reservations();
-        if (withBranch && fault.empty()) {
-          for (int i : body)
-            reserve(*withBranch, i, issue[i]);
-          if (fault.empty())
-            reserve(*withBranch, term, termCycle);
-          if (fault.empty())
-            held = rule(withBranch->conflict(nodes[slot], g.footprints[slot], slotCycle));
-          if (!held.empty())
-            held = "delay slot: " + held;
+        ReservationTable withBranch(p.model);
+        for (int i : body) {
+          withBranch.reserve(nodes[i], g.footprints[i], issue[i]);
+          if (isWait(i))
+            withBranch.extendForWait(issue[i]);
         }
+        withBranch.reserve(nodes[term], g.footprints[term], termCycle);
+        held = withBranch.conflict(nodes[slot], g.footprints[slot], slotCycle);
+        if (!held.empty())
+          held = "delay slot: " + held;
       }
-      if (!fault.empty())
-        return op(term)->emitOpError(p.diagnostic(fault));
       if (held.empty())
         break;
       termCycle++;
@@ -396,13 +352,11 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block, bool generated,
       if (termCycle - nextFree > kMaxIdle)
         return op(term)->emitOpError("found no free issue cycle: ") << held;
     }
-    reserve(*table, term, termCycle);
+    table.reserve(nodes[term], g.footprints[term], termCycle);
     int termEnd = nextIssue(term, termCycle);
     if (slot >= 0) {
-      reserve(*table, slot, termEnd);
+      table.reserve(nodes[slot], g.footprints[slot], termEnd);
     }
-    if (!fault.empty())
-      return op(term)->emitOpError(p.diagnostic(fault));
   }
 
   int free = 0;

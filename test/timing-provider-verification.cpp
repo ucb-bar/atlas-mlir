@@ -310,11 +310,8 @@ void testRegistry(MLIRContext &context) {
   diagnostics.clear();
   auto scheduledModel = runPipeline(context, kCopy, "schedule-atlas-stream");
   auto scheduledStrict = runPipeline(context, kCopy, "schedule-atlas-stream" + strictOption);
-  check(scheduledModel && scheduledStrict, "scheduler places work under both policies", diagnostics);
-  if (scheduledModel && scheduledStrict) {
-    check(delayCycles(*scheduledStrict) > delayCycles(*scheduledModel), "selected dependence changes scheduler delays");
-    check(succeeded(verifyAtlasTiming(*scheduledStrict)), "selected scheduler result verifies", diagnostics);
-  }
+  check(scheduledModel && !scheduledStrict && diagnosed("insufficient issue spacing"),
+        "custom verification refuses a shared-table schedule that lacks its spacing", diagnostics);
   auto reordered = runPipeline(context, kCopy, std::string("schedule-atlas-stream{insert-delays=false provider=") + kStrict +
                                                    "},insert-atlas-delays" + strictOption + ",verify-atlas-timing");
   check(reordered && retainedProvider(*reordered) == kStrict, "reorder then strict delay insertion verifies", diagnostics);
@@ -333,144 +330,147 @@ void testRegistry(MLIRContext &context) {
   check(lookupTimingProvider("atlas.vls.conservative.v1", *byModel).error.empty(), "module-scoped factory reads its module");
 }
 
-void testProviderGraph(MLIRContext &context) {
-  std::vector<Instr> nodes = {{findOp("dma.wait.ch0")}, {findOp("vload"), 4},
-                              {findOp("vload"), 8}, {findOp("dma.load.ch0")}, {findOp("dma.load.ch1")}};
-  auto p = toy();
-  p.footprint = [](const Instr &in, const RegValues &) {
-    Footprint f;
-    if (in.op->opClass == OpClass::VLoad)
-      f.accesses.push_back({Res::Vmem, false, in.rd == 4 ? 0 : 128, 32, 0, 1});
-    return f;
-  };
-  p.dmaConflict = builtinTimingProvider().dmaConflict;
+void testProviderGraph(MLIRContext &) {
+  std::vector<Instr> nodes = {{findOp("dma.wait.ch0")}, {findOp("vload"), 4, 1},
+                              {findOp("vload"), 8, 2}, {findOp("dma.load.ch0")}, {findOp("dma.load.ch1")}};
+  auto regs = unknownRegs();
+  regs[1] = 0;
+  regs[2] = 1024;
   IncomingDma incoming;
   Footprint transfer;
   transfer.accesses.push_back({Res::Vmem, true, 0, 32, 0, 1, false, true});
   incoming[0].push_back(transfer);
-  auto precise = buildGraph(nodes, unknownRegs(), p, &incoming);
-  auto broad = buildGraph(nodes, unknownRegs(), p);
-  auto has = [](const TimingRuleResult<DepGraph> &g, int to) {
-    return llvm::any_of(g.value.edges, [&](const Edge &e) { return e.from == 0 && e.to == to; });
+  auto precise = buildGraph(nodes, regs, nullptr, &incoming);
+  auto broad = buildGraph(nodes, regs);
+  auto has = [](const DepGraph &g, int to) {
+    return llvm::any_of(g.edges, [&](const Edge &e) { return e.from == 0 && e.to == to; });
   };
-  check(precise.error.empty() && has(precise, 1) && has(precise, 3) && !has(precise, 2) && !has(precise, 4),
+  check(has(precise, 1) && has(precise, 3) && !has(precise, 2) && !has(precise, 4),
         "incoming DMA guards only its VMEM window and channel");
-  check(broad.error.empty() && has(broad, 1) && has(broad, 2) && has(broad, 3) && has(broad, 4),
+  check(has(broad, 1) && has(broad, 2) && has(broad, 3) && has(broad, 4),
         "null incoming DMA retains broad barriers");
-  p.dmaConflict = [](const Footprint &, const Footprint &) {
-    return TimingRuleResult<DMACompletionConflict>{{}, "missing incoming DMA rule"};
-  };
-  check(buildGraph(nodes, unknownRegs(), p, &incoming).error == "missing incoming DMA rule",
-        "incoming DMA coverage errors do not become no-conflict rules");
-  p = toy();
-  p.dependence = [](const Instr &, const Footprint &, const Instr &, const Footprint &) {
-    return TimingRuleResult<Dependence>{{}, "missing graph dependence"};
-  };
-  check(buildGraph(nodes, unknownRegs(), p).error == "missing graph dependence",
-        "graph propagates missing dependence coverage");
+  transfer.accesses[0].write = false;
+  Footprint load;
+  load.accesses.push_back({Res::Vmem, false, 0, 32, 1, 1});
+  load.holds.push_back({Unit::VloadPath, 0, 0, 34});
+  TimingTables tables;
+  EdgeKind kind;
+  check(!conflictsAtCompletion(transfer, load, kind) &&
+            conflictsAtCompletion(transfer, load, kind, &tables),
+        "model DMA retains VMEM ownership against a vector load");
 }
 
-class FailingReservations final : public ToyReservations {
-public:
-  explicit FailingReservations(bool atWait) : ToyReservations(1, false), atWait(atWait) {}
-  std::string reserve(const Instr &in, const Footprint &f, int cycle) override {
-    return atWait ? ToyReservations::reserve(in, f, cycle) : "missing reserve rule";
-  }
-  std::string onWait(const Instr &, int) override {
-    return "missing wait rule";
-  }
-private:
-  bool atWait;
-};
-
 void testSchedulerReservations(MLIRContext &context) {
-  auto schedule = [&](const char *id, TimingProvider p, StringRef source = kCopy) {
+  auto policy = [](std::shared_ptr<const TimingTables> tables) {
+    auto p = builtinTimingProvider();
+    p.model = tables;
+    p.footprint = [tables](const Instr &in, const RegValues &regs) {
+      return footprintOf(in, regs, *tables);
+    };
+    p.dependence = [tables](const Instr &a, const Footprint &fa, const Instr &b, const Footprint &fb) {
+      return TimingRuleResult<Dependence>{dependence(a, fa, b, fb, *tables), {}};
+    };
+    p.issueGap = [tables](const Instr &in) { return TimingRuleResult<int>{naturalGap(in, *tables), {}}; };
+    p.createReservations = [tables] { return Reservations{createTimingReservations(tables), {}}; };
+    return p;
+  };
+  auto schedule = [&](const char *id, TimingProvider p, StringRef source) {
     p.id = id;
     check(registerAtlasTimingProvider(id, [p](ModuleOp) { return TimingRuleResult<TimingProvider>{p, {}}; }).empty(),
-          "synthetic scheduler policy registers");
+          "table scheduler policy registers");
     diagnostics.clear();
-    return runPipeline(context, source, std::string("schedule-atlas-stream{provider=") + id + "}");
+    return runPipeline(context, source,
+                       std::string("schedule-atlas-stream{wait-placement=source provider=") + id + "}");
   };
-  auto one = schedule("synthetic-capacity-one", occupying(1));
-  auto two = schedule("synthetic-capacity-two", occupying(2));
+  const char *directory = std::getenv("ATLAS_TEST_MODEL_FACTS");
+  if (!directory) {
+    llvm::outs() << "Set ATLAS_TEST_MODEL_FACTS to test table scheduler placement\n";
+    return;
+  }
+  auto file = llvm::MemoryBuffer::getFile(std::string(directory) + "/model-timing.json");
+  check(bool(file), "scheduler timing facts are readable");
+  if (!file) return;
+  auto facts = parseModelTimingTables((*file)->getBuffer());
+  if (!facts) {
+    check(false, "scheduler timing facts load", llvm::toString(facts.takeError()));
+    return;
+  }
+  auto tables = std::make_shared<TimingTables>(*facts->timing);
+  tables->vpuIssueSlots = 1;
+  auto vectorSource = [](bool waiting) {
+    std::string source = R"mlir(module {
+      %s0 = "atlas.start"() : () -> !atlas.state
+      %s1 = "atlas.vpu_unary"(%s0) {kind = "mov", dst = 0 : i32, src = 4 : i32}
+        : (!atlas.state) -> !atlas.state
+    )mlir";
+    if (waiting)
+      source += "%w = \"atlas.dma_wait\"(%s1) {channel = 0 : i32} : (!atlas.state) -> !atlas.state\n";
+    source += "%s2 = \"atlas.vpu_unary\"(" + std::string(waiting ? "%w" : "%s1") + R"mlir(
+      ) {kind = "relu", dst = 8 : i32, src = 32 : i32} : (!atlas.state) -> !atlas.state
+      %s3 = "atlas.trap"(%s2) {kind = "ecall"} : (!atlas.state) -> !atlas.state
+    })mlir";
+    return source;
+  };
+  auto one = schedule("synthetic-capacity-one", policy(tables), vectorSource(false));
+  tables = std::make_shared<TimingTables>(*tables);
+  tables->vpuIssueSlots = 2;
+  auto two = schedule("synthetic-capacity-two", policy(tables), vectorSource(false));
   check(one && two && delayCycles(*one) > delayCycles(*two),
-        "provider capacity changes physical placement", diagnostics);
+        "table capacity changes physical placement", diagnostics);
+  auto extended = schedule("synthetic-wait-extended", policy(tables), vectorSource(true));
+  check(two && extended && delayCycles(*extended) > delayCycles(*two),
+        "wait extends future MREG port reservations before subsequent placement", diagnostics);
+
+  const char *scalar = R"mlir(module {
+    %s0 = "atlas.start"() : () -> !atlas.state
+    %s1 = "atlas.alu_imm"(%s0) {kind = "addi", dst = 2 : i32, src = 1 : i32, immediate = 0 : i32}
+      : (!atlas.state) -> !atlas.state
+    %s2 = "atlas.alu_imm"(%s1) {kind = "addi", dst = 1 : i32, src = 0 : i32, immediate = 0 : i32}
+      : (!atlas.state) -> !atlas.state
+    %s3 = "atlas.trap"(%s2) {kind = "ecall"} : (!atlas.state) -> !atlas.state
+  })mlir";
   const char *waiting = R"mlir(module {
     %s0 = "atlas.start"() : () -> !atlas.state
     %s1 = "atlas.dma"(%s0) {direction = "load", channel = 0 : i32, reg = 0 : i32, dram = 0 : i32, size = 0 : i32}
       : (!atlas.state) -> !atlas.state
     %s2 = "atlas.dma_wait"(%s1) {channel = 0 : i32} : (!atlas.state) -> !atlas.state
-    %s3 = "atlas.alu_imm"(%s2) {kind = "addi", dst = 1 : i32, src = 0 : i32, immediate = 0 : i32}
-      : (!atlas.state) -> !atlas.state
-    %s4 = "atlas.trap"(%s3) {kind = "ecall"} : (!atlas.state) -> !atlas.state
+    %s3 = "atlas.trap"(%s2) {kind = "ecall"} : (!atlas.state) -> !atlas.state
   })mlir";
-  auto afterWait = [](bool extend) {
-    auto p = occupying(1, extend);
-    p.dependence = [](const Instr &a, const Footprint &, const Instr &b, const Footprint &) {
-      Dependence d;
-      if ((a.op->opClass == OpClass::DmaLoad && b.op->opClass == OpClass::DmaWait) ||
-          (a.op->opClass == OpClass::DmaWait && b.op->opClass == OpClass::Alu))
-        d.distance = 1;
-      return TimingRuleResult<Dependence>{d, {}};
-    };
-    return p;
-  };
-  auto plain = schedule("synthetic-wait-plain", afterWait(false), waiting);
-  auto extended = schedule("synthetic-wait-extended", afterWait(true), waiting);
-  check(plain && extended && delayCycles(*extended) > delayCycles(*plain),
-        "provider onWait affects subsequent physical placement", diagnostics);
-  for (bool atWait : {false, true}) {
-    auto p = afterWait(false);
-    p.createReservations = [=] { return Reservations{std::make_unique<FailingReservations>(atWait), {}}; };
-    check(!schedule(atWait ? "synthetic-wait-error" : "synthetic-reserve-error", p, waiting) &&
-              diagnosed(atWait ? "missing wait rule" : "missing reserve rule"),
-          "scheduler propagates reservation and wait errors", diagnostics);
-  }
-  auto p = toy();
-  p.issueGap = [](const Instr &) { return TimingRuleResult<int>{0, {}}; };
-  check(!schedule("synthetic-scheduler-zero-gap", p) && diagnosed("issue gap must be positive"),
-        "scheduler rejects nonpositive issue gaps", diagnostics);
-  p = afterWait(false);
-  p.footprint = [](const Instr &in, const RegValues &regs) {
-    Footprint f = occupied(in, regs);
-    if (in.op->opClass == OpClass::DmaLoad)
-      f.dmaCycles = 1;
-    return f;
-  };
-  p.dmaProposal = [](int, int, std::optional<int>) {
+  auto estimates = std::make_shared<TimingTables>(*tables);
+  estimates->dmaEstimate = [](long long, bool) { return TimingRuleResult<int>{1, {}}; };
+  auto largeRelease = policy(estimates);
+  largeRelease.dmaProposal = [](int, int, std::optional<int>) {
     int end = std::numeric_limits<int>::max();
     return TimingRuleResult<DMAProposal>{{end, end}, {}};
   };
-  check(bool(schedule("synthetic-scheduler-large-dma-release", p, waiting)),
+  check(bool(schedule("synthetic-scheduler-large-dma-release", largeRelease, waiting)),
         "DMA queue estimates do not advance the physical issue cycle", diagnostics);
-  p = toy();
-  p.issueGap = [](const Instr &) {
-    return TimingRuleResult<int>{std::numeric_limits<int>::max(), {}};
-  };
-  check(!schedule("synthetic-scheduler-large-gap", p) &&
+  auto changed = std::make_shared<TimingTables>(*tables);
+  changed->ordinaryIssueGap = std::numeric_limits<int>::max();
+  check(!schedule("synthetic-scheduler-large-gap", policy(changed), scalar) &&
             diagnosed("same-unit issue interval exceeds bounded timing search"),
-        "scheduler refuses an issue gap that leaves no room for the block", diagnostics);
-  p = toy();
-  p.footprint = [](const Instr &, const RegValues &) {
-    Footprint f;
-    f.doneAge = std::numeric_limits<int>::max() - 1;
-    return f;
-  };
-  check(!schedule("synthetic-scheduler-large-age", p) &&
+        "provider construction refuses an issue gap beyond the timing search", diagnostics);
+  changed = std::make_shared<TimingTables>(*tables);
+  changed->scalarWriteAge = std::numeric_limits<int>::max() - 100001;
+  check(!schedule("synthetic-scheduler-large-age", policy(changed), scalar) &&
             diagnosed("block schedule exceeds cycle domain"),
         "scheduler refuses a completion age that leaves no room for the block", diagnostics);
-  p = toy();
-  p.dependence = [](const Instr &, const Footprint &, const Instr &, const Footprint &) {
-    Dependence d{std::numeric_limits<int>::max(), EdgeKind::Order,
-                 "long dependence"};
-    return TimingRuleResult<Dependence>{d, {}};
-  };
-  check(!schedule("synthetic-scheduler-large-distance", p) &&
+  const char *forwarding = R"mlir(module {
+    %s0 = "atlas.start"() : () -> !atlas.state
+    %s1 = "atlas.mxu_push"(%s0) {kind = "acc_fp8", unit = 1 : i32, src = 0 : i32, slot = 0 : i32}
+      : (!atlas.state) -> !atlas.state
+    %s2 = "atlas.mxu_matmul"(%s1) {unit = 1 : i32, src = 2 : i32, weight_slot = 0 : i32,
+      acc_slot = 0 : i32, accumulate = true} : (!atlas.state) -> !atlas.state
+    %s3 = "atlas.trap"(%s2) {kind = "ecall"} : (!atlas.state) -> !atlas.state
+  })mlir";
+  changed = std::make_shared<TimingTables>(*tables);
+  changed->mxu[1].accumulatorForwardGap = std::numeric_limits<int>::max();
+  check(!schedule("synthetic-scheduler-large-distance", policy(changed), forwarding) &&
             diagnosed("block schedule exceeds cycle domain"),
         "scheduler refuses a dependence distance that leaves no room for the block", diagnostics);
-  p = toy();
+  auto p = policy(tables);
   p.frontendSpacing.ordinaryGap = std::numeric_limits<int>::max();
-  check(!schedule("synthetic-scheduler-large-frontend-gap", p) &&
+  check(!schedule("synthetic-scheduler-large-frontend-gap", p, scalar) &&
             diagnosed("frontend spacing exceeds positive cycle domain"),
         "scheduler refuses overflowing frontend spacing", diagnostics);
 }

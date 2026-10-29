@@ -194,7 +194,7 @@ Dependence dependence(const Instr &a, const Footprint &fa, const Instr &b,
 Dependence dependence(const Instr &a, const Footprint &fa, const Instr &b,
                       const Footprint &fb, const TimingTables &tables);
 bool conflictsAtCompletion(const Footprint &dma, const Footprint &other,
-                           EdgeKind &kind);
+                           EdgeKind &kind, const TimingTables *tables = nullptr);
 
 // b issues at least `distance` cycles after a.
 struct Edge {
@@ -216,9 +216,9 @@ struct DepGraph {
 using IncomingDma = std::array<std::vector<Footprint>, kAtlasDMAChannels>;
 
 struct TimingProvider;
-TimingRuleResult<DepGraph> buildGraph(
-    const std::vector<Instr> &instrs, const RegValues &entry,
-    const TimingProvider &provider, const IncomingDma *incomingDma = nullptr);
+DepGraph buildGraph(const std::vector<Instr> &instrs, const RegValues &entry,
+                    const TimingTables *tables = nullptr,
+                    const IncomingDma *incomingDma = nullptr);
 
 TimingRuleResult<std::vector<int64_t>> criticalHeights(
     const DepGraph &g, const TimingProvider &provider);

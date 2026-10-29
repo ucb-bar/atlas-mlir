@@ -5,7 +5,6 @@
 #include <cctype>
 #include <climits>
 #include <cstdio>
-#include <limits>
 
 using namespace mlir::atlas;
 using namespace mlir::atlas::timing;
@@ -1253,16 +1252,21 @@ static bool overlaps(const Access &x, const Access &y) {
 
 bool mlir::atlas::timing::conflictsAtCompletion(const Footprint &dma,
                                                 const Footprint &f,
-                                                EdgeKind &kind) {
+                                                EdgeKind &kind,
+                                                const TimingTables *tables) {
+  bool vectorMemory = tables && std::any_of(f.holds.begin(), f.holds.end(), [](const Hold &h) {
+    return h.unit == Unit::VloadPath || h.unit == Unit::VstorePath;
+  });
   for (const Access &x : dma.accesses) {
     if (!x.atCompletion)
       continue;
     for (const Access &y : f.accesses) {
-      // The model forbids queued VMEM overlap, even between stores.
-      bool queuedVmem = x.res == Res::Vmem && y.atCompletion;
+      // Queued transfers and model VLS paths retain their VMEM ownership.
+      bool queuedVmem = tables ? y.atCompletion || vectorMemory
+                               : x.res == Res::Vmem && y.atCompletion;
       if (!overlaps(x, y) || (!x.write && !y.write && !queuedVmem))
         continue;
-      if (x.res == Res::DmaBase && y.atCompletion)
+      if (!tables && x.res == Res::DmaBase && y.atCompletion)
         continue;
       kind = x.write && y.write ? EdgeKind::WAW
              : x.write          ? EdgeKind::RAW
@@ -1293,35 +1297,27 @@ struct EdgeSet {
 };
 } // namespace
 
-TimingRuleResult<DepGraph> mlir::atlas::timing::buildGraph(const std::vector<Instr> &instrs,
+DepGraph mlir::atlas::timing::buildGraph(const std::vector<Instr> &instrs,
                                          const RegValues &entry,
-                                         const TimingProvider &p,
+                                         const TimingTables *tables,
                                          const IncomingDma *incomingDma) {
-  std::string missing = validateTimingProvider(p);
-  if (!missing.empty()) return {{}, missing};
-  int issueGap = p.frontendSpacing.ordinaryGap;
+  int issueGap = tables ? tables->ordinaryIssueGap : 1;
   DepGraph g;
   g.nodes = instrs;
   int n = static_cast<int>(instrs.size());
   RegValues regs = entry;
   for (const Instr &in : instrs) {
-    Footprint f = p.footprint(in, regs);
-    if (!f.error.empty()) return {{}, f.error};
-    if (f.doneAge < 0 || f.doneAge == std::numeric_limits<int>::max())
-      return {{}, "timing provider completion age exceeds positive cycle domain"};
-    g.footprints.push_back(std::move(f));
+    g.footprints.push_back(footprintOf(in, regs, tables));
     applyScalar(in, regs);
   }
 
   EdgeSet edges{g, {}};
   for (int b = 0; b < n; b++)
     for (int a = 0; a < b; a++) {
-      auto d = p.dependence(g.nodes[a], g.footprints[a], g.nodes[b], g.footprints[b]);
-      if (!d.error.empty()) return {{}, d.error};
-      if (d.value.distance < 0)
-        return {{}, "timing provider returned a negative dependence distance"};
-      if (d.value.distance > 0)
-        edges.add(a, b, d.value.distance, d.value.kind, d.value.reason);
+      Dependence d =
+          dependence(g.nodes[a], g.footprints[a], g.nodes[b], g.footprints[b], tables);
+      if (d.distance > 0)
+        edges.add(a, b, d.distance, d.kind, d.reason);
     }
 
   // A DMA's completion is known only once its dma.wait issues, so later
@@ -1336,13 +1332,10 @@ TimingRuleResult<DepGraph> mlir::atlas::timing::buildGraph(const std::vector<Ins
           g.nodes[k].op->channel == op.channel)
         wait = k;
     for (int k = d + 1; k < n; k++) {
-      if (k == wait)
+      EdgeKind kind;
+      if (k == wait ||
+          !conflictsAtCompletion(g.footprints[d], g.footprints[k], kind, tables))
         continue;
-      auto conflict = p.dmaConflict(g.footprints[d], g.footprints[k]);
-      if (!conflict.error.empty()) return {{}, conflict.error};
-      if (!conflict.value.conflict)
-        continue;
-      EdgeKind kind = conflict.value.kind;
       if (wait >= 0 && wait < k)
         edges.add(wait, k, issueGap, kind,
                   std::string(edgeKindName(kind)) + " with " + op.name +
@@ -1373,9 +1366,8 @@ TimingRuleResult<DepGraph> mlir::atlas::timing::buildGraph(const std::vector<Ins
       if (incomingDma) {
         guarded = guarded && g.nodes[k].op->channel == op.channel;
         for (const Footprint &dma : (*incomingDma)[op.channel]) {
-          auto conflict = p.dmaConflict(dma, g.footprints[k]);
-          if (!conflict.error.empty()) return {{}, conflict.error};
-          guarded |= conflict.value.conflict;
+          EdgeKind kind;
+          guarded |= conflictsAtCompletion(dma, g.footprints[k], kind, tables);
         }
       } else {
         // The transfer latched its registers at launch, so only the VMEM it
@@ -1396,7 +1388,7 @@ TimingRuleResult<DepGraph> mlir::atlas::timing::buildGraph(const std::vector<Ins
     g.out[g.edges[e].from].push_back(e);
     g.in[g.edges[e].to].push_back(e);
   }
-  return {std::move(g), {}};
+  return g;
 }
 
 TimingRuleResult<std::vector<int64_t>> mlir::atlas::timing::criticalHeights(
