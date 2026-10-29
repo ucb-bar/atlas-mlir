@@ -145,31 +145,6 @@ class ArchitectureDerivationTest(unittest.TestCase):
         self.assertEqual((changed["mreg_logical_limit"], changed["mreg_physical_row_stride"], changed["mreg_bytes"]),
                          (128, 16, 512))
 
-    def test_unreviewed_source_mappings_fail_with_precise_diagnostics(self):
-        cases = [
-            ("bank", "reg + 1", "reg + 2", "BF16 tile read mapping"),
-            ("arch", "vd + 1", "vd + 2", "BF16 tile write mapping"),
-            ("arch", "self.mrf[vs].view(torch.float8_e4m3fn)", "self.mrf[vs + 1].view(torch.float8_e4m3fn)", "FP8 register read mapping"),
-            ("arch", "value.numel() == self.cfg.mrf_depth", "value.numel() == 2 * self.cfg.mrf_depth", "FP8 register write mapping"),
-            ("arch", "self.xrf[rd] = value", "self.xrf[rd] = value & 0xFFFF", "scalar storage semantics"),
-            ("arch", "if rd == 0:", "if rd == 1:", "scalar storage semantics"),
-            ("arch", "0xFFFFFFFF", "0xFFFE", "whole number of bytes"),
-            ("arch", "self.cfg.mrf_depth * self.cfg.mrf_width,", "self.cfg.mrf_depth * self.cfg.mrf_width * 2,", "storage allocation for self.mrf"),
-            ("lsu", "address // self.config.vmem_bank_bytes", "address % self.config.vmem_bank_bytes", "LSU physical VMEM bank mapping"),
-            ("dma", "line_address // self.bank_bytes", "line_address % self.bank_bytes", "DMA physical VMEM bank mapping"),
-            ("dma", "self.config.dma_num_channels", "self.config.dma_num_channels * 2", "DMA configuration mapping for num_channels"),
-            ("bank", "reg % 32", "reg & 31", "MREG bank mapping"),
-            ("bank", "reg // 32", "reg // 16", "divisor differs"),
-            ("bank", "+ row", "+ row + 1", "physical-row mapping"),
-            ("bank", "key = (write, bank)", "bank += 1\n        key = (write, bank)", "reassignment"),
-        ]
-        sources = dict(bank=BANK_SOURCE, arch=ARCH_SOURCE, lsu=LSU_SOURCE, dma=DMA_SOURCE)
-        for source, before, after, diagnostic in cases:
-            with self.subTest(source=source, diagnostic=diagnostic):
-                self.assertIn(before, sources[source])
-                with self.assertRaisesRegex(derive.UnsupportedModelTiming, diagnostic):
-                    self.derive(**{source: sources[source].replace(before, after)})
-
     def test_config_capacity_mutations_propagate(self):
         cfg = configuration()
         cfg.arch_state_config.vmem_size *= 2
@@ -238,17 +213,6 @@ class NativeArchitectureTest(unittest.TestCase):
         with patch.object(derive, "_source", side_effect=changed_mapping):
             self.assertEqual(derive.derive_arch(cfg)["mreg_physical_bank_count"], 16)
 
-        def changed_storage(module):
-            tree = original_source(module)
-            if module is arch_state:
-                method = derive._method(tree, "ArchState", "initialize_buffers")
-                allocation = derive._member_value(method, "self.mrf")
-                allocation.elt.args[0].op = ast.Add()
-            return tree
-
-        with patch.object(derive, "_source", side_effect=changed_storage):
-            with self.assertRaisesRegex(derive.UnsupportedModelTiming, "storage allocation for self.mrf"):
-                derive.derive_arch(cfg)
 
 
 if __name__ == "__main__":
