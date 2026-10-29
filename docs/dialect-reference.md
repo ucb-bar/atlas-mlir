@@ -160,9 +160,8 @@ Scheduling and timing passes take `provider=<id>` (default: module
 registry](../include/Atlas/AtlasTimingProvider.h). The provider supplies
 operation costs, dependence distances, issue gaps, reservations, DMA conflicts
 and verification; unknown IDs, missing rules or conflicting retained metadata
-fail. Legacy ID `npu-model-rtl-match-v1` aliases `builtin`; timed MLIR/program
-JSON record `builtin`. `model` reads extracted timing tables and engine
-resources. The default provider estimates DMA with its calibrated DRAM costs
+fail. `model` reads extracted timing tables and engine resources. The default
+provider estimates DMA with its calibrated DRAM costs
 (`timing::dmaTransferCycles`: 30 cycles, then a 32-byte beat per 23.46 cycles
 loading or 21.68 storing). Model estimates use extracted startups and a
 conservative curve bound. Matching `dma.wait` operations establish transfer

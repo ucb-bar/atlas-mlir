@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import unittest
 
 from test_delay_insertion import addi, nop, program
@@ -19,7 +18,6 @@ TAGS = ("atlas.virtual_dma_transfer", "atlas.virtual_mxu_command", "atlas.virtua
 CONTRACTS = ("dma", "mxu", "tile", "cfg", "source_memory")
 TWO_RESOURCE = {row.name: row.source for row in ROWS if row.name in ("two_dma_reverse_await", "two_chains_same_unit")}
 DEFAULT = "builtin"
-LEGACY = "npu-model-rtl-match-v1"
 VLOAD = ("vload", 'dst = 0 : i32, base = 6 : i32, offset = 0 : i32, format = "raw"')
 PUBLISH = ("csr", 'kind = "rrw", dst = 0 : i32, source = 0 : i32, address = 3088 : i32')
 HALT = ("trap", 'kind = "ecall"')
@@ -97,31 +95,12 @@ class UntimedPipelineTest(unittest.TestCase):
             with self.subTest(timing=timing):
                 implicit = checked(self, untimed, timing)
                 self.assertIn(PROVIDER, implicit)
-                for provider in (DEFAULT, LEGACY):
-                    self.assertEqual(checked(self, untimed, f"{timing}=provider={provider}"), implicit)
-                    self.assertEqual(checked(self, implicit, f"--verify-atlas-timing=provider={provider}"),
-                                     checked(self, implicit, "--verify-atlas-timing"))
+                self.assertEqual(checked(self, untimed, f"{timing}=provider={DEFAULT}"), implicit)
+                self.assertEqual(checked(self, implicit, f"--verify-atlas-timing=provider={DEFAULT}"),
+                                 checked(self, implicit, "--verify-atlas-timing"))
         source = (EXAMPLES / "virtual_bf16_shared_relu.mlir").read_text()
         implicit = checked(self, source, "--schedule-atlas-virtual")
-        for provider in (DEFAULT, LEGACY):
-            self.assertEqual(checked(self, source, f"--schedule-atlas-virtual=provider={provider}"), implicit)
-
-    def test_legacy_provider_metadata_is_accepted_and_recorded_as_builtin(self) -> None:
-        timed = lower(virtual_chain(1))
-        legacy = timed.replace(PROVIDER, f'atlas.timing_provider = "{LEGACY}"')
-        self.assertNotEqual(legacy, timed)
-        self.assertEqual(checked(self, legacy, tool="atlas-emit"), checked(self, timed, tool="atlas-emit"))
-        expected = json.loads(checked(self, timed, "--program-json", tool="atlas-emit"))
-        observed = json.loads(checked(self, legacy, "--program-json", tool="atlas-emit"))
-        self.assertEqual(observed, expected)
-        self.assertEqual(observed["timing_provider"], DEFAULT)
-        for provider in (DEFAULT, LEGACY):
-            verified = checked(self, legacy, f"--verify-atlas-timing=provider={provider}")
-            self.assertIn(PROVIDER, verified)
-            self.assertNotIn(f'atlas.timing_provider = "{LEGACY}"', verified)
-        structured = checked(self, legacy, "--convert-atlas-to-llvm-calls")
-        checked(self, structured, "--finalize-atlas-llvm-calls")
-        checked(self, legacy, "--convert-atlas-to-llvm")
+        self.assertEqual(checked(self, source, f"--schedule-atlas-virtual=provider={DEFAULT}"), implicit)
 
     def test_unregistered_or_different_provider_fails_without_fallback(self) -> None:
         untimed = lower((EXAMPLES / "virtual_dma_mxu.mlir").read_text(), timed=False)

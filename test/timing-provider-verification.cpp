@@ -269,11 +269,10 @@ StringRef retainedProvider(ModuleOp module) {
 
 void testRegistry(MLIRContext &context) {
   auto complete = [](ModuleOp) { return TimingRuleResult<TimingProvider>{builtinTimingProvider(), {}}; };
-  auto builtin = lookupTimingProvider("builtin"), legacy = lookupTimingProvider(kLegacyBuiltinTimingProviderId.str());
-  check(builtin.error.empty() && legacy.error.empty() && builtin.value.id == "builtin" && legacy.value.id == "builtin",
-        "built-in and legacy names resolve to the canonical identity");
+  auto builtin = lookupTimingProvider("builtin");
+  check(builtin.error.empty() && builtin.value.id == "builtin",
+        "default provider resolves to its registered identity");
   check(!registerAtlasTimingProvider("builtin", complete).empty(), "duplicate registration fails");
-  check(!registerAtlasTimingProvider(kLegacyBuiltinTimingProviderId.str(), complete).empty(), "alias registration collides");
   check(!registerAtlasTimingProvider("", complete).empty(), "empty registration id fails");
   check(!registerAtlasTimingProvider("synthetic-null-factory", {}).empty(), "null factory fails");
   check(registerAtlasTimingProvider("synthetic-renamed-policy", complete).empty() &&
@@ -330,16 +329,6 @@ void testRegistry(MLIRContext &context) {
   check(StringRef(withoutEvidence.error).contains("requires selected evidence"), "module-scoped factory sees no module", withoutEvidence.error);
   (*byModel)->setAttr("atlas.rtl_evidence", UnitAttr::get(&context));
   check(lookupTimingProvider("atlas.vls.conservative.v1", *byModel).error.empty(), "module-scoped factory reads its module");
-}
-
-void testProviderAliases(MLIRContext &context) {
-  auto module = runPipeline(context, kCopy, "insert-atlas-delays{provider=builtin}");
-  check(bool(module), "legacy identity fixture is timed", diagnostics);
-  if (!module) return;
-  (*module)->setAttr(kAtlasTimingProvider, StringAttr::get(&context, kLegacyBuiltinTimingProviderId));
-  auto selected = selectAtlasTimingProvider(*module, "builtin");
-  check(succeeded(selected) && selected->id == "builtin" && succeeded(verifyAtlasTiming(*module)),
-        "canonical selection and verification accept retained legacy identity", diagnostics);
 }
 
 void testProviderGraph(MLIRContext &context) {
@@ -437,6 +426,7 @@ void testSchedulerReservations(MLIRContext &context) {
   p.issueGap = [](const Instr &) { return TimingRuleResult<int>{0, {}}; };
   check(!schedule("synthetic-scheduler-zero-gap", p) && diagnosed("positive cycle domain"),
         "scheduler rejects nonpositive issue gaps", diagnostics);
+
 }
 
 void registerPolicy(TimingProvider provider) {
@@ -578,7 +568,7 @@ void testVirtualCosts(MLIRContext &context) {
         "an actual tile load still requires its selected timing fact", diagnostics);
 }
 
-// A real virtual program lowered in-process: each verification boundary decodes and encodes the artifact once.
+// Each verification boundary decodes and encodes the lowered artifact once.
 void testVerificationContext(MLIRContext &context) {
   auto fixture = llvm::MemoryBuffer::getFile(ATLAS_GENERATED_FIXTURE);
   auto module = fixture ? runPipeline(context, (*fixture)->getBuffer(), "lower-atlas-virtual-to-machine,insert-atlas-dma-waits,insert-atlas-delays")
@@ -607,7 +597,6 @@ void atlas_test::runTimingProvider(MLIRContext &context) {
   testBoundedScope(context);
   testRetainedProvider(context);
   testRegistry(context);
-  testProviderAliases(context);
   testProviderGraph(context);
   testSchedulerReservations(context);
   testVirtualCosts(context);

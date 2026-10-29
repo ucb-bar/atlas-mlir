@@ -118,15 +118,14 @@ FailureOr<MachineOpTiming> machineTimingOf(const TimingProvider &provider,
                                         const std::string &name, Operation *at);
 
 constexpr llvm::StringLiteral kBuiltinTimingProviderId = "builtin";
-constexpr llvm::StringLiteral kLegacyBuiltinTimingProviderId = "npu-model-rtl-match-v1";
 // Virtual costs and physical filling must use the same provider capability.
 inline bool fillsDelaySlots(const TimingProvider &provider) {
   return provider.fillPendingDelaySlots;
 }
-llvm::StringRef canonicalTimingProviderId(llvm::StringRef id);
+inline llvm::StringRef canonicalTimingProviderId(llvm::StringRef id) { return id; }
 // Built-in rules ported from npu_model's rtl-match mode.
 TimingProvider builtinTimingProvider();
-// Module-scoped factory; its returned ID must match the canonical registered ID.
+// Module-scoped factory; its returned ID must match the registered ID.
 using TimingProviderFactory =
     std::function<TimingRuleResult<TimingProvider>(mlir::ModuleOp module)>;
 // Adds `id` to the process-wide registry, which is seeded with the built-in
