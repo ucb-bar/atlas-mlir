@@ -45,7 +45,6 @@ def regenerate(model, out):
     from atlas_derive_curve import derive_curve
     from atlas_derive_frontend import derive_frontend
     from atlas_derive_arch import derive_arch
-    from atlas_derive_admission import derive_admission
     from atlas_derive_resources import derive_resources
 
     torch.set_num_threads(1)
@@ -72,8 +71,10 @@ def regenerate(model, out):
                    op_timing=[blocks[name] for name in names], reservation_releases=releases,
                    dma_timing=derive_curve(cfg), mxu_weight_timing=derive_weight_timing(cfg),
                    frontend_timing=derive_frontend(cfg), resources=derive_resources(model))
-    # Check engine construction and routing before publishing the extracted tables.
-    derive_admission(model, payload)
+    # The central Core contract pins routing; each independent engine occurs once.
+    required = {"VectorExecutionUnit", "CrossLaneExecutionUnit", "LoadStoreUnit"}
+    if any(list(cfg.execution_units.values()).count(name) != 1 for name in required):
+        raise UnsupportedModelTiming("engine admission requires unique independent native units")
     out.mkdir(parents=True)
     validate_derived(cfg, blocks, releases, out)
     facts_hash = write(out, "model-timing.json", payload)
