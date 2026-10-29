@@ -144,7 +144,7 @@ struct TimingTables {
   std::map<std::string, OperationTiming> operations;
   int ordinaryIssueGap = 0, delayBaseGap = 0, delayImmediateMask = 0;
   int scalarReadAge = 0, scalarWriteAge = 0, controlReadAge = 0;
-  int scalarLoadGap = 0, delaySlots = 0;
+  int scalarLoadGap = 0;
   unsigned vpuIssueSlots = 0;
   std::vector<std::string> vpuDouble;
   std::vector<std::vector<std::string>> vpuLogicGroups;
