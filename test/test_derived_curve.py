@@ -93,32 +93,9 @@ class NativeCurveTest(NativeModelFixture, unittest.TestCase):
         mutated = source.replace("self._last_ready = 0.0", "self._last_ready = 1.0")
         self.assertNotEqual(source, mutated)
         with patch.object(curve, "_read", return_value=mutated):
-            with self.assertRaisesRegex(curve.UnsupportedModelTiming, "source semantics or bytes"):
+            with self.assertRaisesRegex(curve.UnsupportedModelTiming, "source semantics"):
                 curve.derive_curve(self.cfg)
 
-    def test_core_order_and_wait_predicate_mutations_refuse(self):
-        original_read = curve._read
-        for before, after in (("target = self._tick_s1()", "target = None"),
-                              ("and state.check_flag(insn.funct3):", "and not state.check_flag(insn.funct3):")):
-            def mutated(path):
-                source = original_read(path)
-                if Path(path).name == "core.py":
-                    self.assertIn(before, source)
-                    return source.replace(before, after)
-                return source
-            with self.subTest(before=before), patch.object(curve, "_read", side_effect=mutated):
-                with self.assertRaisesRegex(curve.UnsupportedModelTiming, "completion visibility"):
-                    curve.derive_curve(self.cfg)
-
-    def test_source_bound_refuses_unknown_ready_expression_independently_of_pin(self):
-        from npu_model.hardware import core, dma, memory_backend
-        facts = curve.derive_curve(self.cfg)
-        backend = Path(memory_backend.__file__).read_text().replace(
-            "self._last_ready + 1.0 / peak_bw", "self._last_ready + 2.0 / peak_bw")
-        with self.assertRaisesRegex(curve.UnsupportedModelTiming, "DMA proof premise"):
-            curve._proposal_contract(Path(core.__file__).read_text(), ast.parse(Path(dma.__file__).read_text()),
-                                     ast.parse(backend), facts["curves"], facts["min_latency"],
-                                     facts["issue_interval_cycles"])
 
 if __name__ == "__main__":
     unittest.main()

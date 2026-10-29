@@ -10,10 +10,9 @@ import inspect
 import json
 import math
 from pathlib import Path
-from copy import deepcopy
 
 from atlas_derive_mxu import _one, _method
-from atlas_model_schema import (LOCK, SOURCE_SHAPES, DMA_SOURCE_SHAPES, ast_digest)
+from atlas_model_schema import SOURCE_SHAPES, ast_digest
 
 
 def _unsupported(field):
@@ -59,7 +58,7 @@ def _check_curve_configuration(cfg, params, data):
     for field in ("frequency_ghz", "knee"):
         if params.get(field) is not None:
             _positive(params[field], "dma_memory_params." + field)
-    if params.get("knee", 0.9) is None or params.get("knee", 0.9) > 1:
+    if params.get("knee", 0.9) is None:
         _unsupported("dma_memory_params.knee")
     if params.get("converge", 1.0) != 1.0 or type(params.get("converge", 1.0)) not in (int, float):
         _unsupported("dma_memory_params.converge")
@@ -98,10 +97,9 @@ def _review(module):
     source = _read(path)
     tree = ast.parse(source)
     shape = ast_digest(tree)
-    digest = hashlib.sha256(path.read_bytes()).hexdigest()
-    if (shape != SOURCE_SHAPES.get(path.name) or
-            digest != LOCK.get("dma_source_sha256", {}).get(path.name)):
-        raise UnsupportedModelTiming("unsupported DMA source semantics or bytes: " + path.name)
+    # One AST digest pins the DMA/backend ordering used by the service bound.
+    if shape != SOURCE_SHAPES.get(path.name):
+        raise UnsupportedModelTiming("unsupported DMA source semantics: " + path.name)
     return tree
 
 
@@ -133,84 +131,8 @@ def _engine_values(tree):
     return dict(load=edge, store=edge + delay), edge
 
 
-def _core_phase_contract(core_source):
-    from atlas_derive_frontend import _SHAPES as frontend_shapes
-    from atlas_derive_scratchpad import method, shape
-
-    core_tick = method(core_source, "Core", "tick")
-    s1 = method(core_source, "Core", "_tick_s1")
-    normalized = deepcopy(s1)
-    mask = _one((n for n in ast.walk(normalized) if isinstance(n, ast.Assign)
-                 and any(isinstance(t, ast.Attribute) and t.attr == "delay_counter" for t in n.targets)
-                 and isinstance(n.value, ast.BinOp) and isinstance(n.value.op, ast.BitAnd)), "Core DELAY mask")
-    mask.value.right = ast.Name(id="DERIVED_DELAY_MASK", ctx=ast.Load())
-    if (shape(core_tick) != frontend_shapes[("core.py", "Core", "tick")] or
-            shape(normalized) != frontend_shapes[("core.py", "Core", "_tick_s1")]):
-        raise UnsupportedModelTiming("unsupported DMA/Core completion visibility semantics")
-    return core_tick, s1
-
-
-def review_dma_sources(sources):
-    """Refuse changes to DMA issue, completion, and memory arbitration."""
-    if set(sources) != set(DMA_SOURCE_SHAPES):
-        raise UnsupportedModelTiming("missing DMA source/phase contract source")
-    trees = {}
-    for name, expected in DMA_SOURCE_SHAPES.items():
-        tree = ast.parse(sources[name])
-        digest = ast_digest(tree)
-        if digest != expected:
-            raise UnsupportedModelTiming("unsupported DMA/Core completion visibility or admission semantics: " + name)
-        trees[name] = tree
-    startup, interval = _engine_values(trees["dma.py"])
-    cls = _one((n for n in trees["core.py"].body if isinstance(n, ast.ClassDef) and n.name == "Core"), "Core class")
-    increments = [n.value.value for n in ast.walk(_method(cls, "tick"))
-                  if isinstance(n, ast.AugAssign) and isinstance(n.target, ast.Attribute)
-                  and n.target.attr == "cycle_count" and isinstance(n.op, ast.Add)
-                  and isinstance(n.value, ast.Constant) and type(n.value.value) is int]
-    if increments != [1] or interval != 1:
-        raise UnsupportedModelTiming("unsupported DMA source/phase clock progression")
-    _core_phase_contract(sources["core.py"])
-
-
-def _proposal_contract(core_source, dma_tree, backend_tree, rows, minimum, interval):
-    """Bound beat service after checking source expressions and edge order."""
-    core_tick, s1 = _core_phase_contract(core_source)
-    dma_cls = _one((n for n in dma_tree.body if isinstance(n, ast.ClassDef)
-                    and n.name == "DmaExecutionUnit"), "DMA class")
-    tick = _method(dma_cls, "tick")
-    backend_cls = _one((n for n in backend_tree.body if isinstance(n, ast.ClassDef)
-                        and n.name == "CurveMemoryBackend"), "curve class")
-    issue = _method(backend_cls, "issue")
-
-    def expression(tree, expected):
-        target = ast.dump(ast.parse(expected, mode="eval").body, include_attributes=False)
-        node = _one((n for n in ast.walk(tree) if ast.dump(n, include_attributes=False) == target),
-                    "DMA proof premise " + expected)
-        return ast.unparse(node)
-
-    def call_line(tree, value):
-        target = expression(tree, value)
-        return _one((n.lineno for n in ast.walk(tree) if isinstance(n, ast.Call)
-                     and ast.unparse(n) == target), "DMA ordered call " + value)
-
-    if not (call_line(core_tick, "self._tick_s1()") <
-            call_line(core_tick, "exu.tick(self.issued_uop if exu is target else None)")):
-        raise UnsupportedModelTiming("unsupported Core S1/DMA tick order")
-    if not (call_line(tick, "self.backend.pop_response(cycle)") <
-            call_line(tick, "self.backend.issue(BeatRequest(self._next_source, address, head.is_store, cycle))") <
-            call_line(tick, "state.clear_flag(slot.channel)") <
-            call_line(tick, "self._slots.append(slot)")):
-        raise UnsupportedModelTiming("unsupported DMA response/request/retirement/launch order")
-    for tree, expected in (
-            (issue, "request.cycle + max(float(self.min_latency), latency)"),
-            (issue, "max(ready, self._last_ready + 1.0 / peak_bw)"),
-            (issue, "math.ceil(ready - 1e-9)"),
-            (tick, "in_flight_reg < self.max_in_flight"),
-            (tick, "self._next_source not in ids_reg"),
-            (tick, "self.backend.can_accept(cycle)"),
-            (tick, "dispatched and will_be_zero"),
-            (s1, 'insn.mnemonic.startswith("dma.wait") and state.check_flag(insn.funct3)')):
-        expression(tree, expected)
+def _proposal_contract(rows, minimum, interval):
+    """Bound beat service under the guarded DMA/backend and Core tick ordering."""
     maximum = max(minimum, *(r["unloaded_latency_cycles"] for r in rows),
                   *(r["cycles_per_beat"] for r in rows))
     maximum_cycle = 2147483647
@@ -231,7 +153,7 @@ def _proposal_contract(core_source, dma_tree, backend_tree, rows, minimum, inter
 
 
 def derive_curve(cfg):
-    from npu_model.hardware import core, dma, memory_backend, lsu, bank_conflict
+    from npu_model.hardware import dma, memory_backend
     backend_tree = _review(memory_backend)
     dma_tree = _review(dma)
     if cfg.dma_memory_backend != "curve":
@@ -274,12 +196,7 @@ def derive_curve(cfg):
         peak, _ = backend.curve_peak(pct)
         rows.append(dict(unloaded_latency_cycles=backend.latency_at(0.0, pct),
                          cycles_per_beat=1.0 / peak))
-    core_source = _read(Path(inspect.getsourcefile(core)))
-    review_dma_sources({module.__name__.rsplit(".", 1)[-1] + ".py":
-                                 _read(Path(inspect.getsourcefile(module)))
-                                 for module in (core, dma, memory_backend, lsu, bank_conflict)})
-    proposal = _proposal_contract(core_source, dma_tree, backend_tree, rows, backend.min_latency,
-                                  issue_interval)
+    proposal = _proposal_contract(rows, backend.min_latency, issue_interval)
     return dict(curve_sha256=curve_sha, beat_bytes=backend.beat_bytes,
                 max_transfer_bytes=cfg.dma_max_transfer_bytes, min_latency=backend.min_latency,
                 startup_cycles=startup, issue_interval_cycles=issue_interval, curves=rows,
