@@ -2,21 +2,21 @@
 from __future__ import annotations
 
 from pathlib import Path
-from atlas_model_diagnostics import UnsupportedModelTiming
 
 import ast
 from collections import defaultdict
 import inspect
 from types import FunctionType, SimpleNamespace
 
-from atlas_model_schema import (SOURCE_SHAPES, VPU_BLOCKS, ast_digest, mreg_event,
-                                reservation, timing_block)
 from atlas_model_timing import compress
+
+from atlas_model_source import (SOURCE_SHAPES, UnsupportedModelTiming, VPU_BLOCKS, ast_digest,
+                                assignment as _assignment, method as _method, mreg_event,
+                                name as _name, one as _one, reservation, timing_block)
 
 
 def _normalize_slot_capacity(tree):
     """Read the reviewed ISSUE_SLOTS constant and guard its two consumers."""
-    from atlas_derive_mxu import _assignment, _method, _one, _name
     cls = _one((n for n in tree.body if isinstance(n, ast.ClassDef)
                 and n.name == "VectorExecutionUnit"), "VPU class")
     capacity = _assignment(tree, "ISSUE_SLOTS")

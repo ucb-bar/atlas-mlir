@@ -1,54 +1,27 @@
 """Extract LSU/XLU event predicates and reservation releases from their source AST."""
 from __future__ import annotations
 
-from atlas_model_diagnostics import UnsupportedModelTiming
-
 import ast
 from copy import deepcopy
 import inspect
-from atlas_derive_source import read_source
 
-from atlas_derive_mxu import _one, _method, _name
-from atlas_model_schema import SOURCE_SHAPES, ast_digest, reservation as _reservation, timing_block
-
-
-def _integer(node, rows):
-    if isinstance(node, ast.Constant) and type(node.value) is int:
-        return node.value
-    if _name(node, "rows"):
-        return rows
-    if isinstance(node, ast.BinOp) and isinstance(node.op, (ast.Add, ast.Sub)):
-        left, right = _integer(node.left, rows), _integer(node.right, rows)
-        return left + right if isinstance(node.op, ast.Add) else left - right
-    raise UnsupportedModelTiming("unsupported memory timing expression: " + ast.dump(node))
+from atlas_model_source import (UnsupportedModelTiming, age_window, assignment as _assignment,
+                                method as _method, module_tree, name as _name, one as _one,
+                                reservation as _reservation, timing_block)
 
 
 def _ages(predicate, rows):
-    if len(predicate.ops) == 1 and isinstance(predicate.ops[0], ast.Eq) and _name(predicate.left, "age"):
-        first = last = _integer(predicate.comparators[0], rows)
-    elif (len(predicate.ops) == 2 and _name(predicate.comparators[0], "age")
-          and all(isinstance(op, (ast.Lt, ast.LtE)) for op in predicate.ops)):
-        first = _integer(predicate.left, rows) + isinstance(predicate.ops[0], ast.Lt)
-        last = _integer(predicate.comparators[1], rows) - isinstance(predicate.ops[1], ast.Lt)
-    else:
-        raise UnsupportedModelTiming("unsupported memory timing predicate")
-    if not 0 <= first <= last < 4096:
-        raise UnsupportedModelTiming("memory timing predicate is outside the supported age range")
-    return dict(first_age=first, last_age=last, count=last - first + 1, step=1)
+    return age_window(predicate, {"rows": rows}, equality=True, operators=(ast.Add, ast.Sub))
 
 
 def _source(module):
     path = inspect.getsourcefile(module)
-    tree = ast.parse(read_source(path))
+    tree = module_tree(module, reviewed=True, label="LSU/XLU control-flow")
     # Only timing predicates are evaluated below. Everything else, including row
     # indexing, completion and reservation call sites, must keep its reviewed AST.
-    digest = ast_digest(tree)
-    if digest != SOURCE_SHAPES[path.rsplit("/", 1)[-1]]:
-        raise UnsupportedModelTiming("unsupported LSU/XLU control-flow semantics")
     if path.rsplit("/", 1)[-1] == "xlu.py":
         # The full AST above guards the declaration and every use. Resolve the
         # reviewed public duration before interpreting the age expressions.
-        from atlas_derive_mxu import _assignment
         duration = _assignment(tree, "TRANSPOSE_CYCLES").value
         if not isinstance(duration, ast.Constant) or type(duration.value) is not int:
             raise UnsupportedModelTiming("unsupported XLU transpose duration")

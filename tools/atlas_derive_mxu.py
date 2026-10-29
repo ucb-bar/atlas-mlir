@@ -1,16 +1,15 @@
 """Derive isolated MXU row windows and logical MREG releases from model source."""
 from __future__ import annotations
 
-from atlas_derive_source import read_source, shape
-from atlas_model_diagnostics import UnsupportedModelTiming
-
 import ast
 from copy import deepcopy
 import inspect
 from pathlib import Path
 
-from atlas_model_schema import MXU_BLOCKS
-from atlas_model_schema import SOURCE_SHAPES, reservation, timing_block
+from atlas_model_source import (MXU_BLOCKS, SOURCE_SHAPES, UnsupportedModelTiming, age_window,
+                                assignment as _assignment, literal, method as _method,
+                                name as _name, one as _one, positive_int, read_source, reservation, shape,
+                                timing_block)
 
 
 _CLASSES = ("_Operation", "_MatrixExecutionUnit", "MatrixExecutionUnitSystolic", "MatrixExecutionUnitInner")
@@ -22,52 +21,17 @@ def _source(cfg):
     return read_source(root / "hardware" / "mxu.py")
 
 
-def _one(values, label):
-    values = list(values)
-    if len(values) != 1:
-        raise UnsupportedModelTiming(f"unsupported MXU source: expected one {label}")
-    return values[0]
-
-
-def _name(node, name):
-    return isinstance(node, ast.Name) and node.id == name
-
-
-def _assignment(tree, name):
-    return _one((n for n in ast.walk(tree) if isinstance(n, ast.Assign)
-                 and len(n.targets) == 1 and _name(n.targets[0], name)), name)
-
-
-def _method(tree, name):
-    return _one((n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == name), name)
-
-
 def _shape(nodes):
     return shape(ast.Module(body=nodes, type_ignores=[]))
 
 
 def _integer(expr, compute_first):
-    if isinstance(expr, ast.Constant) and type(expr.value) is int:
-        return expr.value
-    if (isinstance(expr, ast.Attribute) and _name(expr.value, "self") and expr.attr == "compute_first"):
-        return compute_first
-    if isinstance(expr, ast.BinOp) and isinstance(expr.op, (ast.Add, ast.Sub, ast.Mult)):
-        left, right = _integer(expr.left, compute_first), _integer(expr.right, compute_first)
-        return (left + right if isinstance(expr.op, ast.Add) else
-                left - right if isinstance(expr.op, ast.Sub) else left * right)
-    raise UnsupportedModelTiming("unsupported MXU timing expression: " + ast.dump(expr, include_attributes=False))
+    return literal(expr, "MXU timing expression", env={"self.compute_first": compute_first},
+                   minimum=None, maximum=None)
 
 
 def _window(comparison, compute_first):
-    if (not isinstance(comparison, ast.Compare) or len(comparison.ops) != 2
-            or not _name(comparison.comparators[0], "age")
-            or not all(isinstance(op, (ast.Lt, ast.LtE)) for op in comparison.ops)):
-        raise UnsupportedModelTiming("unsupported MXU row window")
-    first = _integer(comparison.left, compute_first) + isinstance(comparison.ops[0], ast.Lt)
-    last = _integer(comparison.comparators[1], compute_first) - isinstance(comparison.ops[1], ast.Lt)
-    if not 0 <= first <= last < 4095:
-        raise UnsupportedModelTiming("unsupported MXU row window bounds")
-    return dict(count=last - first + 1, first_age=first, last_age=last, step=1)
+    return age_window(comparison, {"self.compute_first": compute_first}, maximum=4095)
 
 
 def _placeholder(name):
@@ -150,6 +114,8 @@ def _plan(source):
 
 def _validated(cfg):
     geometry = cfg.arch_state_config
+    for field in ("wb_width", "num_wb_registers"):
+        positive_int(getattr(geometry, field), "architecture configuration " + field)
     if (geometry.mrf_depth, geometry.mrf_width, geometry.wb_width, geometry.num_wb_registers) != (32, 32, 1024, 2):
         raise UnsupportedModelTiming("unsupported MXU configuration geometry")
     if geometry.num_m_registers != 64:

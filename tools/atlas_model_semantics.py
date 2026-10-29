@@ -5,9 +5,9 @@ import ast
 import sys
 from pathlib import Path
 
-from atlas_derive_source import read_source
-from atlas_model_diagnostics import UnsupportedModelTiming
-from atlas_model_schema import GUARDS, ast_digest as _digest, canonical, sha256
+from atlas_model_source import read_source
+from atlas_model_source import UnsupportedModelTiming
+from atlas_model_source import GUARDS, ast_digest as _digest, canonical, sha256
 
 
 # These reviewed classes do not inspect method-definition order. Other classes

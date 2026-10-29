@@ -2,30 +2,9 @@
 from __future__ import annotations
 
 import ast
-import inspect
 
-from pathlib import Path
-from atlas_model_diagnostics import UnsupportedModelTiming
-
-
-def _source(module):
-    value = inspect.getsourcefile(module)
-    if value is None:
-        raise UnsupportedModelTiming("architecture source file is unavailable")
-    path = Path(value)
-    return ast.parse(path.read_text())
-
-
-def _one(nodes, description):
-    items = list(nodes)
-    if len(items) != 1:
-        raise UnsupportedModelTiming("expected one " + description)
-    return items[0]
-
-
-def _method(tree, cls, name):
-    owner = _one((n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == cls), cls)
-    return _one((n for n in owner.body if isinstance(n, ast.FunctionDef) and n.name == name), cls + "." + name)
+from atlas_model_source import (UnsupportedModelTiming, assignment, method as _method, module_tree,
+                                named, one as _one, positive_int)
 
 
 def _same(node, expression):
@@ -35,39 +14,16 @@ def _same(node, expression):
     return ast.dump(node) == ast.dump(expected)
 
 
-def _int(node, description):
-    if not isinstance(node, ast.Constant) or type(node.value) is not int or node.value <= 0:
-        raise UnsupportedModelTiming(description + " must be a positive integer literal")
-    return node.value
-
-
-def _positive(owner, name):
-    value = getattr(owner, name, None)
-    if type(value) is not int or value <= 0:
-        raise UnsupportedModelTiming("architecture configuration " + name + " must be a positive integer")
-    return value
-
-
-def _assignment(method, name):
-    node = _one((n for n in ast.walk(method) if isinstance(n, ast.Assign)
-                 and len(n.targets) == 1 and _same(n.targets[0], name)), method.name + " assignment to " + name)
-    # A second or nested write would invalidate the extracted expression.
-    stores = [n for n in ast.walk(method) if isinstance(n, ast.Name) and n.id == name
-              and isinstance(n.ctx, ast.Store)]
-    if len(stores) != 1:
-        raise UnsupportedModelTiming("unsupported reassignment of " + name + " in " + method.name)
-    return node.value
-
-
 def _mreg_mapping(tree):
     # The bank_conflict.py digest pins the mapping around these source literals.
-    method = _method(tree, "BankConflictChecker", "access_mreg")
-    modulus = _int(_assignment(method, "bank").right, "MREG bank modulus")
-    physical = _assignment(method, "physical_row")
-    stride = _int(physical.left.right, "MREG physical-row stride")
-    reserve = _method(tree, "BankConflictChecker", "reserve_mreg")
+    method = _method(named(tree, "BankConflictChecker"), "access_mreg")
+    bank = assignment(method, "bank", single_write=True).value
+    modulus = positive_int(bank.right, "MREG bank modulus")
+    physical = assignment(method, "physical_row", single_write=True).value
+    stride = positive_int(physical.left.right, "MREG physical-row stride")
+    reserve = _method(named(tree, "BankConflictChecker"), "reserve_mreg")
     generator = _one((n for n in ast.walk(reserve) if isinstance(n, ast.GeneratorExp)), "MREG range guard")
-    limit = _int(generator.elt.values[1].comparators[0], "MREG logical-register upper bound")
+    limit = positive_int(generator.elt.values[1].comparators[0], "MREG logical-register upper bound")
     return modulus, stride, limit
 
 
@@ -76,23 +32,23 @@ def _bf16_mapping(bank_tree, arch_tree):
     pair = _one((n for n in bank_tree.body if isinstance(n, ast.FunctionDef) and n.name == "_pair"),
                 "BF16 register-pair helper")
     addition = next(n for n in ast.walk(pair) if isinstance(n, ast.BinOp) and isinstance(n.op, ast.Add))
-    read = _method(arch_tree, "ArchState", "read_mrf_bf16_tile")
+    read = _method(named(arch_tree, "ArchState"), "read_mrf_bf16_tile")
     count = sum(isinstance(n, ast.Call) and _same(n.func, "self.read_mrf_bf16") for n in ast.walk(read))
-    return count, _int(addition.right, "BF16 pair stride")
+    return count, positive_int(addition.right, "BF16 pair stride")
 
 
 def _fp8_mapping(tree):
-    read = _method(tree, "ArchState", "read_mrf_fp8")
+    read = _method(named(tree, "ArchState"), "read_mrf_fp8")
     return sum(isinstance(node, ast.Subscript) and _same(node.value, "self.mrf") for node in ast.walk(read))
 
 
 def _scalar_bytes(tree):
-    method = _method(tree, "ArchState", "write_xrf")
+    method = _method(named(tree, "ArchState"), "write_xrf")
     masks = [n for n in method.body if isinstance(n, ast.AugAssign) and _same(n.target, "value")]
     mask = _one(masks, "scalar-register width mask")
     if not isinstance(mask.op, ast.BitAnd):
         raise UnsupportedModelTiming("unsupported scalar-register width mask")
-    value = _int(mask.value, "scalar-register width mask")
+    value = positive_int(mask.value, "scalar-register width mask")
     bits = value.bit_length()
     if value != (1 << bits) - 1 or bits % 8:
         raise UnsupportedModelTiming("scalar-register mask must cover a whole number of bytes")
@@ -104,7 +60,7 @@ def derive_arch(cfg):
     from npu_model.hardware import arch_state, bank_conflict
     import torch
 
-    bank_tree, arch_tree = _source(bank_conflict), _source(arch_state)
+    bank_tree, arch_tree = module_tree(bank_conflict), module_tree(arch_state)
     # The central ArchState contract pins allocation, scalar width, and tile access shapes.
     banks, row_stride, logical_limit = _mreg_mapping(bank_tree)
     pair_count, pair_stride = _bf16_mapping(bank_tree, arch_tree)
@@ -116,7 +72,8 @@ def derive_arch(cfg):
         "vmem_bank_bytes": (cfg, "vmem_bank_bytes"),
         "dram_bytes": (arch, "dram_size"), "dma_channels": (cfg, "dma_num_channels"),
     }
-    facts = {name: _positive(owner, attribute) for name, (owner, attribute) in fields.items()}
+    facts = {name: positive_int(getattr(owner, attribute, None), "architecture configuration " + attribute)
+             for name, (owner, attribute) in fields.items()}
     base = getattr(arch, "dram_base", None)
     if type(base) is not int or base < 0:
         raise UnsupportedModelTiming("architecture configuration dram_base must be a nonnegative integer")

@@ -18,7 +18,7 @@ TOOLS = Path(__file__).resolve().parents[1] / "tools"
 sys.path.insert(0, str(TOOLS))
 from atlas_derive_arch import derive_arch
 from atlas_derive_costs import check_timing_conditions, derive_costs
-from atlas_model_diagnostics import UPDATE_GUIDANCE, UnsupportedModelTiming, model_timing_cli
+from atlas_model_source import UPDATE_GUIDANCE, UnsupportedModelTiming, model_timing_cli
 from atlas_model_timing import compress, validate_derived
 from model_evidence import NativeModelFixture, model_evidence_available
 
@@ -81,6 +81,41 @@ class CostProbes(NativeModelFixture, unittest.TestCase):
                                (dict(architecture, bf16_registers_per_tile=0), "register span must be positive")):
             with self.subTest(reason=reason), self.assertRaisesRegex(UnsupportedModelTiming, reason):
                 derive_costs(self.cfg, values)
+
+    def test_configuration_limits(self):
+        from atlas_model_facts import check_configuration
+        check_configuration(self.cfg)
+        for field in ("num_x_registers", "num_e_registers", "num_csrs", "numerics", "randomize_init",
+                      "fetch_width", "dma_memory_backend", "dma_max_in_flight", "isa"):
+            cfg = deepcopy(self.cfg)
+            owner = cfg.arch_state_config if hasattr(cfg.arch_state_config, field) else cfg
+            value = getattr(owner, field)
+            setattr(owner, field, not value if type(value) is bool else value + 1 if type(value) is int else None)
+            if field == "dma_max_in_flight":
+                setattr(owner, field, 0)
+            with self.subTest(field=field), self.assertRaisesRegex(UnsupportedModelTiming, field):
+                check_configuration(cfg)
+        from atlas_derive_mxu import derive_mxu
+        for field in ("wb_width", "num_wb_registers"):
+            cfg = deepcopy(self.cfg)
+            setattr(cfg.arch_state_config, field, float(getattr(cfg.arch_state_config, field)))
+            with self.subTest(field=field), self.assertRaisesRegex(UnsupportedModelTiming, field):
+                derive_mxu(cfg)
+        for outstanding in (1, 17, 129):
+            cfg = deepcopy(self.cfg)
+            cfg.dma_max_in_flight = outstanding
+            check_configuration(cfg)
+
+    def test_configuration_dispatch(self):
+        from atlas_model_facts import check_configuration
+        units = self.cfg.execution_units
+        for changed in (dict(reversed(list(units.items()))), dict(units, Extra="ScalarExecutionUnit"),
+                        dict(units, Scalar0="LoadStoreUnit")):
+            cfg = deepcopy(self.cfg)
+            cfg.execution_units = changed
+            with (self.subTest(units=changed),
+                  self.assertRaisesRegex(UnsupportedModelTiming, "dispatch order/membership")):
+                check_configuration(cfg)
 
     def test_scalar_probe_capacity(self):
         architecture = derive_arch(self.cfg)
@@ -159,9 +194,14 @@ class Regeneration(unittest.TestCase):
         finally:
             path.write_text(original)
 
-    def refuses(self, reason):
+    def refuses(self, reason, *, load=False):
         with tempfile.TemporaryDirectory(dir=self.root) as directory:
-            result = self.regenerate(Path(directory) / "facts")
+            facts = Path(directory) / "facts"
+            result = self.regenerate(facts)
+            if load:
+                from test_delay_insertion import OPT, run
+                self.assertEqual(result.returncode, 0, result.stderr)
+                result = run(OPT, "module {}", f"--select-atlas-model-evidence=facts={facts}")
         self.assertNotEqual(result.returncode, 0)
         self.assertRegex(result.stderr, reason)
         self.assertIn(UPDATE_GUIDANCE, result.stderr)
@@ -202,6 +242,19 @@ class Regeneration(unittest.TestCase):
         self.assertEqual(roles, dict(reads=[dict(resource="xreg", operand="rs1"),
                                            dict(resource="xreg", operand="rs2")],
                                     writes=[dict(resource="xreg", operand="rd")]))
+
+    def test_supported_engine_parameters_keep_pins(self):
+        from atlas_model_semantics import source_pins
+        expected = source_pins(self.model)["source_shapes"]
+        for relative, old, new in (
+                ("hardware/vpu.py", "ISSUE_SLOTS = 2", "ISSUE_SLOTS = 1"),
+                ("hardware/vpu.py", "ISSUE_SLOTS = 2", "ISSUE_SLOTS = 3"),
+                ("hardware/vpu.py", '"vli.one": 33', '"vli.one": 34'),
+                ("hardware/mxu.py", "compute_first = 63", "compute_first = 64"),
+                ("hardware/mxu.py", "inflight_depth = 3", "inflight_depth = 4"),
+                ("hardware/mxu.py", "95 if unit == 0 else 35", "96 if unit == 0 else 35")):
+            with self.subTest(mutation=old), self.mutation(relative, old, new):
+                self.assertEqual(source_pins(self.model)["source_shapes"], expected)
 
     def test_source_pin_writer(self):
         from contextlib import redirect_stdout
@@ -255,15 +308,17 @@ class Regeneration(unittest.TestCase):
             ("hardware/memory_backend.py", "self._last_ready = 0.0", "self._last_ready = 1.0", "DMA source semantics"),
             ("configs/isa_definition.py", "class VADD_BF16(", "class MISSING_VADD_BF16(",
              "isa_definition.py: module contract changed"),
-            ("configs/hardware/default.py", "mrf_depth=32", "mrf_depth=16", "arch_state_config.mrf_depth"),
-            ("hardware/config.py", "dma_beat_bytes: int = 32", "dma_beat_bytes: int = 16",
-             "capability: dma_beat_bytes"),
+            ("configs/hardware/default.py", "mrf_depth=32", "mrf_depth=16", "configured MREG rows"),
             ("hardware/config.py", '"curves": "ee290sim_vcs_probe.json"',
              '"curves": "ee290sim_vcs_probe.json", "latency_mode": "knee"', "dma_memory_params.latency_mode"),
         )
         for relative, old, new, reason in cases:
             with self.subTest(file=relative, mutation=old), self.mutation(relative, old, new):
                 self.refuses(reason)
+
+    def test_dma_geometry_refuses_at_load(self):
+        with self.mutation("hardware/config.py", "dma_beat_bytes: int = 32", "dma_beat_bytes: int = 16"):
+            self.refuses("unsupported DMA beat geometry", load=True)
 
     def test_cli_requires_new_output_directory(self):
         result = self.regenerate(self.root / "facts-1")

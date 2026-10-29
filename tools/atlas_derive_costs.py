@@ -5,7 +5,7 @@ import ast
 import inspect
 import textwrap
 
-from atlas_model_diagnostics import UnsupportedModelTiming
+from atlas_model_source import UnsupportedModelTiming
 
 
 def check_timing_conditions(node, register_fields):

@@ -10,11 +10,33 @@ import subprocess
 
 sys.dont_write_bytecode = True
 
-from atlas_model_diagnostics import UnsupportedModelTiming, model_timing_cli
-from atlas_model_capabilities import check_configuration
+from atlas_model_source import GUARDS, PIN_PATH, UnsupportedModelTiming, model_timing_cli
 from atlas_model_semantics import check_model_semantics, source_pins
-from atlas_model_schema import GUARDS, PIN_PATH
 from atlas_model_timing import configuration, encoded, sha256, validate_derived
+
+
+def check_configuration(cfg):
+    arch = getattr(cfg, "arch_state_config", None)
+    for owner, prefix, expected in (
+            (arch, "arch_state_config.", dict(num_x_registers=32, num_e_registers=32, num_csrs=4096,
+                                             numerics="rtl", randomize_init=False)),
+            (cfg, "", dict(fetch_width=1, dma_memory_backend="curve"))):
+        for field, value in expected.items():
+            actual = getattr(owner, field, None)
+            if type(actual) is not type(value) or actual != value:
+                raise UnsupportedModelTiming("unsupported capability: " + prefix + field)
+    outstanding = getattr(cfg, "dma_max_in_flight", None)
+    if type(outstanding) is not int or not 0 < outstanding <= 2147483647:
+        raise UnsupportedModelTiming("unsupported capability: dma_max_in_flight")
+    expected_units = dict(Scalar0="ScalarExecutionUnit", Matrix0="MatrixExecutionUnitSystolic",
+                          Matrix1="MatrixExecutionUnitInner", Vector0="VectorExecutionUnit",
+                          XLU="CrossLaneExecutionUnit", DMA0="DmaExecutionUnit", LSU="LoadStoreUnit")
+    units = getattr(cfg, "execution_units", None)
+    if not isinstance(units, dict) or tuple(units.items()) != tuple(expected_units.items()):
+        raise UnsupportedModelTiming("unsupported capability: execution_units dispatch order/membership")
+    isa = getattr(cfg, "isa", None)
+    if not isinstance(isa, type) or isa.__module__ + "." + isa.__qualname__ != "npu_model.isa.IsaSpec":
+        raise UnsupportedModelTiming("unsupported capability: isa")
 
 
 def write(directory, name, value):

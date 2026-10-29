@@ -42,7 +42,7 @@ class NativeModelFixture:
 
 def semantic_sources(model):
     """Read only reviewed relative source entries, checking paths before access."""
-    from atlas_derive_source import read_source
+    from atlas_model_source import read_source
     manifest = json.loads((Path(__file__).resolve().parents[1] / "tools/model-pins.json").read_text())
     sources = {}
     for relative in manifest["files"]:

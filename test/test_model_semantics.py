@@ -8,7 +8,7 @@ from unittest.mock import patch
 TOOLS = Path(__file__).resolve().parents[1] / "tools"
 sys.path.insert(0, str(TOOLS))
 import atlas_model_semantics as semantics
-from atlas_model_diagnostics import UnsupportedModelTiming
+from atlas_model_source import UnsupportedModelTiming
 
 
 class NormalizationTest(unittest.TestCase):

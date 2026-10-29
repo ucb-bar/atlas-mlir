@@ -24,8 +24,8 @@ configuration. The tested checkout is npu_model revision
 One guard table, `tools/model-pins.json`, records one digest for each of 17
 modules and whole-engine shapes for seven other files.
 The checks ignore comments; helper contracts also ignore docstrings while
-retaining the structure each extractor interprets. Configuration limits are
-checked before extraction. After reviewing source changes, update the pins
+retaining the structure each extractor interprets. Configuration and geometry limits are checked by extraction and the
+compiler loader. After reviewing source changes, update the pins
 with `python -B tools/atlas_model_facts.py --npu-model PATH --accept-source`.
 This separate command prints the changed pins; regeneration never updates
 them.

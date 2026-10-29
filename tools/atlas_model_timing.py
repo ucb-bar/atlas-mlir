@@ -2,7 +2,7 @@
 """Observe isolated operation timing from an explicitly selected model."""
 from __future__ import annotations
 
-from atlas_model_diagnostics import UnsupportedModelTiming
+from atlas_model_source import UnsupportedModelTiming
 
 from collections import defaultdict
 from contextlib import ExitStack, closing
@@ -10,7 +10,7 @@ import inspect
 from dataclasses import asdict, replace
 from unittest.mock import Mock, patch
 
-from atlas_model_schema import BINARY, mreg_event, canonical as encoded, sha256
+from atlas_model_source import BINARY, mreg_event, canonical as encoded, sha256
 
 
 def configuration():

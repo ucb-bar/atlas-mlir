@@ -8,58 +8,21 @@ import sys
 
 sys.dont_write_bytecode = True
 
-from atlas_derive_mxu import _assignment, _method, _one
-
-
-def _literal(node):
-    value = ast.literal_eval(node)
-    if type(value) is not int or not 0 <= value < 4096:
-        raise ValueError("unsupported source integer")
-    return value
-
-
-def _named(tree, name):
-    return _one((node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == name), name)
-
-
-def _age_bound(node, comparison):
-    """Read an age expression's literal right endpoint."""
-    return _one((_literal(n.comparators[0]) for n in ast.walk(node)
-                 if isinstance(n, ast.Compare) and len(n.ops) == 1
-                 and isinstance(n.ops[0], comparison) and isinstance(n.left, ast.BinOp)
-                 and isinstance(n.left.op, ast.Sub) and isinstance(n.comparators[0], ast.Constant)),
-                "source age endpoint")
-
-
-def _guard(method, diagnostic):
-    matches = []
-    for node in ast.walk(method):
-        if isinstance(node, ast.If) and any(isinstance(stmt, ast.Raise) and any(
-                isinstance(part, ast.Constant) and isinstance(part.value, str) and diagnostic in part.value
-                for part in ast.walk(stmt)) for stmt in node.body):
-            matches.append(node.test)
-    return _one(matches, diagnostic)
-
-
-def _source(root, name):
-    path = (root / "npu_model" / "hardware" / name)
-    source = path.read_text()
-    tree = ast.parse(source)
-    return source, tree
+from atlas_model_source import (assignment as _assignment, guard_literal, literal as _literal,
+                                method as _method, module_tree, named as _named)
 
 
 def derive_resources(model):
     """Read structural values after the engine extractors check their source digests."""
     model = Path(model)
-    _, mxu = _source(model, "mxu.py")
-    _, vpu = _source(model, "vpu.py")
-    _, lsu = _source(model, "lsu.py")
+    mxu, vpu, lsu = (module_tree(model / "npu_model" / "hardware" / filename)
+                     for filename in ("mxu.py", "vpu.py", "lsu.py"))
     base = _named(mxu, "_MatrixExecutionUnit")
     accept = _method(base, "_accept")
     active = _literal(_assignment(mxu, "PORT_CYCLES").value)
-    acc_push_last = _age_bound(_assignment(accept, "acc_pushes").value, ast.LtE)
-    weight_drain_last = _age_bound(_guard(accept, "same slot drained"), ast.LtE)
-    acc_forward = _age_bound(_guard(accept, "cycle after a push"), ast.Lt)
+    acc_push_last = guard_literal(_assignment(accept, "acc_pushes").value, None, ast.LtE)
+    weight_drain_last = guard_literal(accept, "same slot drained", ast.LtE)
+    acc_forward = guard_literal(accept, "cycle after a push", ast.Lt)
     # The MXU digest pins port selection and its shared single-push priority.
     choices = ast.literal_eval(_assignment(mxu, "PORT_CHOICES").value)
     fixed = ("compute", "push_bf16", "pop_bf16", "pop_fp8")
@@ -79,8 +42,8 @@ def derive_resources(model):
     groups = [sorted(group) for group in ast.literal_eval(_assignment(vpu, "_GROUPS").value)]
     double = sorted(ast.literal_eval(_assignment(vpu, "_TWO_INPUT").value) |
                     ast.literal_eval(_assignment(vpu, "_ROW_REDUCE").value))
-    scalar_gap = _age_bound(_guard(_method(_named(lsu, "LoadStoreUnit"), "_accept"),
-                                  "prior load response pending"), ast.Lt)
+    scalar_gap = guard_literal(_method(_named(lsu, "LoadStoreUnit"), "_accept"),
+                               "prior load response pending", ast.Lt)
     contract = dict(
         capacity=dict(sequencer_cycles=active, mxu0_compute=depths["mxu0"],
                       mxu1_compute=depths["mxu1"], vpu_slots=busy_count),

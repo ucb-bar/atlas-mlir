@@ -5,31 +5,17 @@ import ast
 import inspect
 from pathlib import Path
 
-from atlas_derive_source import method, read_source
-from atlas_model_diagnostics import UnsupportedModelTiming
+from atlas_model_source import (UnsupportedModelTiming, one as _one, positive_int, read_source,
+                                source_method)
 
 
 _METHODS = (("core.py", "Core", "tick"), ("core.py", "Core", "_tick_s1"),
             ("exu.py", "ScalarExecutionUnit", "tick"), ("ifu.py", "InstructionFetch", "tick"))
 
 
-def _one(values, label):
-    values = list(values)
-    if len(values) != 1:
-        raise UnsupportedModelTiming(f"unsupported frontend: expected one {label}")
-    return values[0]
-
-
 def _attr(node, base, attr):
     return (isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name)
             and node.value.id == base and node.attr == attr)
-
-
-def _positive(node, label, allow_zero=False):
-    if (not isinstance(node, ast.Constant) or type(node.value) is not int
-            or not int(not allow_zero) <= node.value < 65536):
-        raise UnsupportedModelTiming(f"unsupported frontend {label}")
-    return node.value
 
 
 def _operand(node):
@@ -63,18 +49,18 @@ def derive_frontend_sources(sources, scalar_classes, *, fetch_width):
     slots = {}
     methods = {}
     for filename, cls, name in _METHODS:
-        node = method(sources[filename], cls, name)
+        node = source_method(sources[filename], cls, name)
         methods[(filename, cls, name)] = node
         if (cls, name) == ("Core", "_tick_s1"):
             mask = _one((item for item in ast.walk(node) if isinstance(item, ast.Assign)
                          and len(item.targets) == 1 and _attr(item.targets[0], "self", "delay_counter")
                          and isinstance(item.value, ast.BinOp) and isinstance(item.value.op, ast.BitAnd)),
                         "DELAY mask assignment")
-            slots["delay_mask"] = _positive(mask.value.right, "DELAY mask", allow_zero=True)
+            slots["delay_mask"] = positive_int(mask.value.right, "frontend DELAY mask", minimum=0, maximum=65536)
             decrement = _one((item for item in ast.walk(node) if isinstance(item, ast.AugAssign)
                               and _attr(item.target, "self", "delay_counter")
                               and isinstance(item.op, ast.Sub)), "DELAY countdown decrement")
-            slots["decrement"] = _positive(decrement.value, "DELAY decrement")
+            slots["decrement"] = positive_int(decrement.value, "frontend DELAY decrement", maximum=65536)
             if slots["decrement"] != 1:
                 raise UnsupportedModelTiming(
                     "unsupported DELAY decrement: only unit countdown reaches zero for all immediates")
@@ -82,7 +68,8 @@ def derive_frontend_sources(sources, scalar_classes, *, fetch_width):
             delay = _one((item for item in ast.walk(node) if isinstance(item, ast.Assign)
                           and len(item.targets) == 1 and _attr(item.targets[0], "uop", "execute_delay")),
                          "scalar completion delay")
-            slots["completion"] = _positive(delay.value, "scalar completion delay")
+            slots["completion"] = positive_int(delay.value, "frontend scalar completion delay",
+                                                maximum=65536)
             if slots["completion"] != 1:
                 raise UnsupportedModelTiming("unsupported scalar execute_delay tag: deferred completion is one tick, "
                                           "but the source tag no longer agrees")
@@ -90,7 +77,7 @@ def derive_frontend_sources(sources, scalar_classes, *, fetch_width):
     increment = _one((item for item in ast.walk(tick) if isinstance(item, ast.AugAssign)
                       and _attr(item.target, "self", "cycle_count") and isinstance(item.op, ast.Add)),
                      "Core clock increment")
-    gap = _positive(increment.value, "Core clock increment")
+    gap = positive_int(increment.value, "frontend Core clock increment", maximum=65536)
     ifu = methods[("ifu.py", "InstructionFetch", "tick")]
     delay_slots = len([item for item in ast.walk(ifu) if isinstance(item, ast.Call)
                        and isinstance(item.func, ast.Name) and item.func.id == "Uop"])
