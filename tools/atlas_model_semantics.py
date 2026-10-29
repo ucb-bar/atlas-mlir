@@ -6,13 +6,9 @@ import json
 import sys
 from pathlib import Path
 
-from atlas_derive_scratchpad import read_source
+from atlas_derive_source import read_source
 from atlas_model_diagnostics import UnsupportedModelTiming
 from atlas_model_schema import ast_digest as _digest
-
-
-class UnsupportedModelSemantics(UnsupportedModelTiming):
-    """A behavior-bearing helper has no reviewed semantic interpretation."""
 
 
 CONTRACT = Path(__file__).with_name("model-semantics.json")
@@ -90,7 +86,7 @@ def _normalized(source):
                     run.append(member)
                     continue
                 if len({item.name for item in run}) != len(run):
-                    raise UnsupportedModelSemantics(f"unsupported semantics: duplicate method in {node.name}")
+                    raise UnsupportedModelTiming(f"unsupported semantics: duplicate method in {node.name}")
                 result.extend(sorted(run, key=lambda item: item.name))
                 run = []
                 if member is not None:
@@ -111,7 +107,7 @@ def module_contract(source):
             elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 name = prefix + node.name
                 if name in helpers:
-                    raise UnsupportedModelSemantics(f"unsupported semantics: duplicate helper {name}")
+                    raise UnsupportedModelTiming(f"unsupported semantics: duplicate helper {name}")
                 helpers[name] = _digest(node)
                 # Keep signature/decorators and definition placement in bindings.
                 node.body = [ast.Pass()]
@@ -123,7 +119,7 @@ def module_contract(source):
 def check_model_semantics(model):
     """Refuse unsupported source before importing or executing Core."""
     if sys.version_info[:2] != (3, 14):
-        raise UnsupportedModelSemantics(
+        raise UnsupportedModelTiming(
             "model timing requires Python 3.14 for reviewed AST fingerprints; "
             f"running {sys.version_info.major}.{sys.version_info.minor}")
     contract = json.loads(read_source(CONTRACT))
@@ -133,11 +129,11 @@ def check_model_semantics(model):
             source = read_source(Path(model) / "npu_model" / filename)
             actual = module_contract(source)
         except (OSError, SyntaxError) as error:
-            raise UnsupportedModelSemantics(f"unsupported semantics: {filename}: {error}") from error
+            raise UnsupportedModelTiming(f"unsupported semantics: {filename}: {error}") from error
         for helper in sorted(set(expected["helpers"]) | set(actual["helpers"])):
             if actual["helpers"].get(helper) != expected["helpers"].get(helper):
-                raise UnsupportedModelSemantics(f"unsupported semantics: {filename}:{helper}")
+                raise UnsupportedModelTiming(f"unsupported semantics: {filename}:{helper}")
         if actual["bindings"] != expected["bindings"]:
-            raise UnsupportedModelSemantics(f"unsupported semantics: {filename}:module/class bindings")
+            raise UnsupportedModelTiming(f"unsupported semantics: {filename}:module/class bindings")
         checked[filename] = actual
     return checked
