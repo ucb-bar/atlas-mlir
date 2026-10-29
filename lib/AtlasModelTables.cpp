@@ -222,16 +222,9 @@ void readGeometry(Reader &r, const Object &root, ModelTimingTables &facts) {
       arch->getInteger("dram_bytes") != 0x1000000000LL)
     r.fail("unsupported DRAM geometry");
   facts.dmaChannels = r.integer(arch, "dma_channels", 1, kAtlasDMAChannels);
-  facts.geometry.registerBytes = r.integer(arch, "mreg_bytes", 1);
-  facts.geometry.rowBytes = r.integer(arch, "mreg_row_bytes", 1);
-  facts.geometry.rows = r.integer(arch, "mreg_rows", 1);
-  facts.geometry.scalarBytes = r.integer(arch, "scalar_word_bytes", 1);
-  facts.geometry.bf16Registers = r.integer(arch, "bf16_registers_per_tile", 1);
-  facts.geometry.bf16ElementBytes = r.integer(arch, "bf16_element_bytes", 1);
-  facts.geometry.fp8RegisterCount = r.integer(arch, "fp8_registers_per_tile", 1);
-  facts.geometry.fp8ElementBytes = r.integer(arch, "fp8_element_bytes", 1);
-  if (facts.geometry.registerBytes != kAtlasRegisterBytes)
+  if (r.integer(arch, "mreg_bytes", 1) != kAtlasRegisterBytes)
     r.fail("unsupported architecture mreg_bytes");
+  facts.geometry.bf16Registers = r.integer(arch, "bf16_registers_per_tile", 1);
 }
 
 void readDMA(Reader &r, const Object &root, ModelDMATiming &dma) {

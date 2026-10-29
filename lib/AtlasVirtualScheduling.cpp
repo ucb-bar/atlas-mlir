@@ -375,7 +375,7 @@ FailureOr<int64_t> scalarSlotCycles(bool store, int64_t word, Operation *at,
                                   const timing::TimingProvider &provider) {
   if (provider.scalarSlotProposalCycles > 0)
     return provider.scalarSlotProposalCycles;
-  uint32_t address = static_cast<uint32_t>(word) * provider.proposalGeometry.scalarBytes;
+  uint32_t address = static_cast<uint32_t>(word) * 4;
   uint32_t upper = ((static_cast<uint64_t>(address) + 0x800) >> 12) & 0xfffff;
   bool unknown = word < 0;
   int64_t cycles = 0;
@@ -399,8 +399,8 @@ FailureOr<int64_t> scalarSlotCycles(bool store, int64_t word, Operation *at,
 // order on the unit doing its work.
 FailureOr<Cost> costOf(Operation *op, const timing::TimingProvider &provider) {
   const auto &geometry = provider.proposalGeometry;
-  auto registerCount = [&](bool fp8) { return fp8 ? geometry.fp8Registers() : geometry.bf16Registers; };
-  const int registerWords = geometry.registerBytes / geometry.scalarBytes;
+  auto registerCount = [&](bool fp8) { return fp8 ? 1 : kAtlasBF16Registers; };
+  const int registerWords = kAtlasRegisterBytes / 4;
   auto transferCycles = [&](int64_t bytes, bool store) -> FailureOr<int> {
     if (provider.dmaEstimate) {
       auto estimate = provider.dmaEstimate(bytes, store);
@@ -418,7 +418,7 @@ FailureOr<Cost> costOf(Operation *op, const timing::TimingProvider &provider) {
     auto vload = timing::machineTimingOf(provider, "vload", op);
     if (failed(vload))
       return failure();
-    auto transfer = transferCycles(geometry.registerBytes, false);
+    auto transfer = transferCycles(kAtlasRegisterBytes, false);
     if (failed(transfer)) return failure();
     return blocking(op, Unit::Dma, registerCount(isa<VirtualInputFP8Op>(op)) * (int64_t(*transfer) + vload->latency));
   }
@@ -426,7 +426,7 @@ FailureOr<Cost> costOf(Operation *op, const timing::TimingProvider &provider) {
     auto vstore = timing::machineTimingOf(provider, "vstore", op);
     if (failed(vstore))
       return failure();
-    auto transfer = transferCycles(geometry.registerBytes, true);
+    auto transfer = transferCycles(kAtlasRegisterBytes, true);
     if (failed(transfer)) return failure();
     return blocking(op, Unit::Dma, registerCount(false) * (int64_t(vstore->latency) + *transfer));
   }
@@ -439,7 +439,7 @@ FailureOr<Cost> costOf(Operation *op, const timing::TimingProvider &provider) {
     if (failed(vload))
       return failure();
     int registers = registerCount(isa<VirtualDMALoadFP8Op>(op));
-    auto cycles = transferCycles(registers * geometry.registerBytes, false);
+    auto cycles = transferCycles(registers * kAtlasRegisterBytes, false);
     if (failed(cycles)) return failure();
     int64_t loaded = int64_t(registers - 1) * vload->interval + vload->latency;
     return checkedCost(op, Unit::Dma, *cycles, *cycles + loaded, 1, true);
@@ -451,7 +451,7 @@ FailureOr<Cost> costOf(Operation *op, const timing::TimingProvider &provider) {
     // VSTOREs into the staging window, then the transfer once they land.
     int registers = registerCount(isa<VirtualDMAStoreFP8Op>(op));
     int64_t staged = int64_t(registers - 1) * vstore->interval + vstore->latency;
-    auto cycles = transferCycles(registers * geometry.registerBytes, true);
+    auto cycles = transferCycles(registers * kAtlasRegisterBytes, true);
     if (failed(cycles)) return failure();
     return checkedCost(op, Unit::Dma, *cycles, *cycles, staged + 1, true);
   }
@@ -1043,7 +1043,7 @@ LogicalResult scheduleBlock(Block &block, unsigned index,
   if (failed(spill))
     return failure();
   BlockScheduler scheduler(block, g, liveness, std::move(*costs), *spill,
-                           provider.proposalDMACapacity ? provider.proposalDMACapacity : kMaxQueuedDMA);
+                           kMaxQueuedDMA);
   auto opsOf = [&](ArrayRef<unsigned> order) {
     SmallVector<Operation *> ops;
     for (unsigned node : order)
