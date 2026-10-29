@@ -150,23 +150,10 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block, bool generated,
       if (g.edges[e].to == slot && g.edges[e].distance > gaps[term])
         return op(slot)->emitOpError("delay-slot dependence exceeds its fixed issue spacing: ") << g.edges[e].reason;
 
-  // Widen critical heights to avoid overflow.
-  std::vector<int64_t> height(n);
-  for (int i = n - 1; i >= 0; --i) {
-    height[i] = int64_t(g.footprints[i].doneAge) + 1;
-    for (int e : g.out[i]) {
-      const Edge &ed = g.edges[e];
-      int64_t distance = ed.distance;
-      if (nodes[ed.to].op->opClass == OpClass::DmaWait && nodes[ed.to].op->channel == nodes[i].op->channel) {
-        if (p.dmaProposal)
-          distance = std::max(distance, int64_t(rule(
-              p.dmaProposal(g.footprints[i].dmaCycles, 0, std::nullopt)).waitIssue));
-        else if (g.footprints[i].dmaCycles > 0)
-          note("timing provider lacks DMA proposal policy");
-      }
-      height[i] = std::max(height[i], distance + height[ed.to]);
-    }
-  }
+  auto heights = criticalHeights(g, p);
+  if (!heights.error.empty())
+    return op(0)->emitOpError(p.diagnostic(heights.error));
+  const auto &height = heights.value;
   std::vector<int> earliest(n, 0), waitingPreds(n, 0), issue(n, -1);
   std::vector<std::string> why(n), reason(n);
   for (const Edge &e : g.edges)

@@ -1395,6 +1395,32 @@ TimingRuleResult<DepGraph> mlir::atlas::timing::buildGraph(const std::vector<Ins
   return {std::move(g), {}};
 }
 
+TimingRuleResult<std::vector<int64_t>> mlir::atlas::timing::criticalHeights(
+    const DepGraph &g, const TimingProvider &p) {
+  int n = static_cast<int>(g.nodes.size());
+  std::vector<int64_t> height(n, 0);
+  for (int i = n - 1; i >= 0; i--) {
+    height[i] = int64_t(g.footprints[i].doneAge) + 1;
+    for (int e : g.out[i]) {
+      const Edge &ed = g.edges[e];
+      int64_t d = ed.distance;
+      // A dma.wait holds the frontend until the transfer completes.
+      const Instr &to = g.nodes[ed.to];
+      if (to.op->opClass == OpClass::DmaWait &&
+          to.op->channel == g.nodes[i].op->channel) {
+        if (p.dmaProposal) {
+          auto proposal = p.dmaProposal(g.footprints[i].dmaCycles, 0, std::nullopt);
+          if (!proposal.error.empty()) return {{}, proposal.error};
+          d = std::max(d, int64_t(proposal.value.waitIssue));
+        } else if (g.footprints[i].dmaCycles > 0)
+          return {{}, "timing provider lacks DMA proposal policy"};
+      }
+      height[i] = std::max(height[i], d + height[ed.to]);
+    }
+  }
+  return {std::move(height), {}};
+}
+
 static int unitKey(Unit u, int index) {
   return static_cast<int>(u) * 64 + index;
 }

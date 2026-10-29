@@ -219,6 +219,9 @@ TimingRuleResult<DepGraph> buildGraph(
     const std::vector<Instr> &instrs, const RegValues &entry,
     const TimingProvider &provider, const IncomingDma *incomingDma = nullptr);
 
+TimingRuleResult<std::vector<int64_t>> criticalHeights(
+    const DepGraph &g, const TimingProvider &provider);
+
 bool isBarrier(const Instr &in);
 bool vpuCanOverlap(const OpInfo &a, const OpInfo &b);
 bool vpuUsesBothSlots(const OpInfo &op);
