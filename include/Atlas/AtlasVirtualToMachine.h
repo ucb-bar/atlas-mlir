@@ -8,7 +8,8 @@ void registerLowerAtlasVirtualToMachinePass();
 std::unique_ptr<Pass>
 createLowerAtlasVirtualToMachinePass(llvm::StringRef allocationReport = "", llvm::StringRef provider = "",
                                      llvm::StringRef storeWindows = "", llvm::StringRef mregRanks = "",
-                                     bool packReloadAfterWeight = false, bool packWeightBeforePack = false);
+                                     bool packReloadAfterWeight = false, bool packWeightBeforePack = false,
+                                     unsigned packRelayoutRows = 0);
 }
 
 #endif

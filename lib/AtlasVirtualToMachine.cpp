@@ -1047,17 +1047,20 @@ struct LowerAtlasVirtualToMachinePass
   Option<std::string> provider{
       *this, "provider", llvm::cl::desc("Timing provider for model selection candidates"), llvm::cl::init("")};
   Option<std::string> storeWindows{
-      *this, "store-windows", llvm::cl::desc("Comma-separated free staging window ranks per DMA store (model only)"),
+      *this, "store-windows", llvm::cl::desc("Comma-separated free staging window ranks per DMA store"),
       llvm::cl::init("")};
 
   Option<std::string> mregRanks{
-      *this, "mreg-ranks", llvm::cl::desc("Cyclic free MREG color ranks (model only)"), llvm::cl::init("")};
+      *this, "mreg-ranks", llvm::cl::desc("Cyclic free MREG color ranks"), llvm::cl::init("")};
   Option<bool> packReloadAfterWeight{
-      *this, "pack-reload-after-weight", llvm::cl::desc("Load a pending weight before an adjacent PACK reload (model only)"),
+      *this, "pack-reload-after-weight", llvm::cl::desc("Load a pending weight before an adjacent PACK reload"),
       llvm::cl::init(false)};
   Option<bool> packWeightBeforePack{
-      *this, "pack-weight-before-pack", llvm::cl::desc("Preload a disjoint pending weight before adjacent PACK (model only)"),
+      *this, "pack-weight-before-pack", llvm::cl::desc("Preload a disjoint pending weight before adjacent PACK"),
       llvm::cl::init(false)};
+
+  Option<unsigned> packRelayoutRows{*this, "pack-relayout-rows",
+      llvm::cl::desc("PACK rows per iteration (0 keeps provider policy)"), llvm::cl::init(0)};
 
   void runOnOperation() override {
     ModuleOp module = getOperation();
@@ -1095,17 +1098,13 @@ struct LowerAtlasVirtualToMachinePass
     if (failed(selected))
       return signalPassFailure();
     const bool modelProvider = selected->id == timing::kModelTimingProviderId;
-    if ((packReloadAfterWeight || packWeightBeforePack) && !modelProvider)
-      return refuse(Twine(packWeightBeforePack ? "pack-weight-before-pack" : "pack-reload-after-weight") +
-                    " requires the model timing provider");
-    if (!storeWindows.empty() && !modelProvider)
-      return refuse("store-windows requires the model timing provider");
-    if (!mregRanks.empty() && !modelProvider)
-      return refuse("mreg-ranks requires the model timing provider");
     reuseAtlasImmutableWeights(function);
-    unsigned packRelayoutRows = atlasPackRelayoutRowsPerIteration(modelProvider);
+    if (packRelayoutRows && packRelayoutRows != 1 && packRelayoutRows != 2)
+      return refuse("pack-relayout-rows must be 0, 1, or 2");
+    unsigned rows = packRelayoutRows ? packRelayoutRows.getValue() :
+        atlasPackRelayoutRowsPerIteration(modelProvider);
     VirtualPlanner planner(module, function, storeWindowRanks, registerRanks, packReloadAfterWeight,
-                           packWeightBeforePack, packRelayoutRows);
+                           packWeightBeforePack, rows);
     if (allocationReport.empty()) {
       if (failed(planner.plan()) || failed(planner.materialize()))
         signalPassFailure();
@@ -1160,7 +1159,8 @@ void mlir::atlas::registerLowerAtlasVirtualToMachinePass() {
 std::unique_ptr<Pass>
 mlir::atlas::createLowerAtlasVirtualToMachinePass(StringRef allocationReport, StringRef provider,
                                                                    StringRef storeWindows, StringRef mregRanks,
-                                                                   bool packReloadAfterWeight, bool packWeightBeforePack) {
+                                                                   bool packReloadAfterWeight, bool packWeightBeforePack,
+                                                                   unsigned packRelayoutRows) {
   auto pass = std::make_unique<LowerAtlasVirtualToMachinePass>();
   pass->allocationReport = allocationReport.str();
   pass->provider = provider.str();
@@ -1168,5 +1168,6 @@ mlir::atlas::createLowerAtlasVirtualToMachinePass(StringRef allocationReport, St
   pass->mregRanks = mregRanks.str();
   pass->packReloadAfterWeight = packReloadAfterWeight;
   pass->packWeightBeforePack = packWeightBeforePack;
+  pass->packRelayoutRows = packRelayoutRows;
   return pass;
 }

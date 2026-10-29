@@ -68,7 +68,7 @@ def main() -> int:
                         help="opt in to bit-exact PACK via MXU0 for proven-finite sources")
     add_model_arguments(parser)
     args = parser.parse_args()
-    if args.provider == "model":
+    if args.provider == "model" or args.npu_model is not None:
         try:
             select_program(args.source, args.output_dir, args.atlas_bin_dir,
                            spill=POLICY["defaults"]["spill"], spill_mxu=POLICY["defaults"]["spill_mxu"], guarded_pack=args.guarded_pack, **model_arguments(args))

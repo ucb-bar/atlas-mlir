@@ -554,7 +554,8 @@ FailureOr<Cost> costOf(Operation *op, const timing::TimingProvider &provider) {
       return failure();
     auto vload = timing::machineTimingOf(provider, "vload", op);
     if (failed(vload)) return failure();
-    const int groupedRows = atlasPackRelayoutRowsPerIteration(provider.id == timing::kModelTimingProviderId);
+    const int groupedRows = provider.packRelayoutRows ? provider.packRelayoutRows :
+        atlasPackRelayoutRowsPerIteration(provider.id == timing::kModelTimingProviderId);
     const int rowWords = geometry.packRowWords() * groupedRows;
     const int rows = geometry.rows / groupedRows;
     // Policy: this proposal omits general scalar setup and assumes the
@@ -1109,16 +1110,19 @@ struct ScheduleAtlasVirtualPass
       llvm::cl::init("")};
 
   Option<unsigned> lookahead{
-      *this, "lookahead", llvm::cl::desc("Force an existing list schedule (0, 1, 2, 4, or 8; model only)"),
+      *this, "lookahead", llvm::cl::desc("Force an existing list schedule (0, 1, 2, 4, or 8)"),
       llvm::cl::init(0)};
 
   Option<std::string> orderFile{
-      *this, "order-file", llvm::cl::desc("Explicit per-block topological orders as JSON (model only)"),
+      *this, "order-file", llvm::cl::desc("Explicit per-block topological orders as JSON"),
       llvm::cl::init("")};
 
   Option<std::string> graphOutput{
-      *this, "graph-output", llvm::cl::desc("Write dependence graphs and selected orders as JSON (model only)"),
+      *this, "graph-output", llvm::cl::desc("Write dependence graphs and selected orders as JSON"),
       llvm::cl::init("")};
+
+  Option<unsigned> packRelayoutRows{*this, "pack-relayout-rows",
+      llvm::cl::desc("PACK rows per iteration (0 keeps provider policy)"), llvm::cl::init(0)};
 
   void runOnOperation() override {
     ModuleOp module = getOperation();
@@ -1130,16 +1134,24 @@ struct ScheduleAtlasVirtualPass
       return signalPassFailure();
     if (lookahead != 0 && !llvm::is_contained(search_policy::kSupportedLookaheads, lookahead))
       return refuse("lookahead must be 0, 1, 2, 4, or 8");
-    if (lookahead && selected->id != timing::kModelTimingProviderId)
-      return refuse("lookahead requires the model timing provider");
     if (lookahead && randomSeed >= 0)
       return refuse("lookahead and random-seed are mutually exclusive");
     if (selected->id == timing::kModelTimingProviderId && (!selected->proposalReplay || !selected->proposalDMACapacity))
       return refuse("model virtual scheduling requires source-bound replay and DMA capacity");
-    if ((!orderFile.empty() || !graphOutput.empty()) && selected->id != timing::kModelTimingProviderId)
-      return refuse("explicit orders and graph output require the model timing provider");
     if (!orderFile.empty() && (lookahead || randomSeed >= 0))
       return refuse("order-file excludes lookahead and random-seed");
+    if (packRelayoutRows && packRelayoutRows != 1 && packRelayoutRows != 2)
+      return refuse("pack-relayout-rows must be 0, 1, or 2");
+    selected->packRelayoutRows = packRelayoutRows;
+    // Replay metadata only ranks proposals; costs and admissions stay selected.
+    timing::TimingProvider proposal = *selected;
+    if (!graphOutput.empty() && !proposal.proposalReplay) {
+      auto metadata = timing::modelTimingProviderFactory(module);
+      if (!metadata.error.empty()) return refuse(metadata.error);
+      proposal.proposalReplay = metadata.value.proposalReplay;
+      proposal.proposalFactsSha256 = metadata.value.proposalFactsSha256;
+      proposal.proposalDMACapacity = metadata.value.proposalDMACapacity;
+    }
     std::optional<llvm::json::Value> requested;
     if (!orderFile.empty()) {
       auto file = llvm::MemoryBuffer::getFile(orderFile);
@@ -1197,7 +1209,7 @@ struct ScheduleAtlasVirtualPass
         if (!graphOutput.empty()) {
           auto costs = costsOf(*graph, *selected);
           if (failed(costs)) return signalPassFailure();
-          Machine estimate(*graph, *costs, selected->proposalDMACapacity);
+          Machine estimate(*graph, *costs, proposal.proposalDMACapacity);
           llvm::json::Array preds, names, order, costRecords;
           llvm::DenseMap<Operation *, unsigned> ids;
           for (unsigned node = 0; node < graph->nodes.size(); ++node) {
@@ -1220,9 +1232,9 @@ struct ScheduleAtlasVirtualPass
           graphs.push_back(llvm::json::Object{{"preds", std::move(preds)}, {"operations", std::move(names)},
               {"order", std::move(order)},
               {"proposal", llvm::json::Object{{"schema", "atlas.virtual_proposal.v2"},
-                  {"replay", llvm::json::Object(selected->proposalReplay->document)},
-                  {"facts_sha256", selected->proposalFactsSha256}, {"units", kUnits},
-                  {"dma_capacity", selected->proposalDMACapacity}, {"costs", std::move(costRecords)},
+                  {"replay", llvm::json::Object(proposal.proposalReplay->document)},
+                  {"facts_sha256", proposal.proposalFactsSha256}, {"units", kUnits},
+                  {"dma_capacity", proposal.proposalDMACapacity}, {"costs", std::move(costRecords)},
                   {"estimate", llvm::json::Object{{"makespan", estimate.makespan},
                                                  {"exposed_waiting", estimate.exposedWaiting}}}}}});
         }
@@ -1261,12 +1273,14 @@ void mlir::atlas::registerScheduleAtlasVirtualPass() {
 }
 
 std::unique_ptr<Pass> mlir::atlas::createScheduleAtlasVirtualPass(StringRef provider, unsigned lookahead, int randomSeed,
-                                                                   StringRef orderFile, StringRef graphOutput) {
+                                                                   StringRef orderFile, StringRef graphOutput,
+                                                                   unsigned packRelayoutRows) {
   auto pass = std::make_unique<ScheduleAtlasVirtualPass>();
   pass->provider = provider.str();
   pass->lookahead = lookahead;
   pass->randomSeed = randomSeed;
   pass->orderFile = orderFile.str();
   pass->graphOutput = graphOutput.str();
+  pass->packRelayoutRows = packRelayoutRows;
   return pass;
 }

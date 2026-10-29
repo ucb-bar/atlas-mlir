@@ -461,8 +461,6 @@ LogicalResult scheduleStream(ModuleOp module, bool insertDelays, StringRef reque
     return failure();
   if (waitPlacement != "default" && waitPlacement != "source" && waitPlacement != "preloaded")
     return module.emitError("wait-placement must be default, source or preloaded");
-  if (waitPlacement != "default" && provider->id != kModelTimingProviderId)
-    return module.emitError() << "wait-placement=" << waitPlacement << " requires the model timing provider";
   FailureOr<AtlasStream> stream = readAtlasStream(module);
   if (failed(stream) || failed(checkAtlasStream(*stream, *provider)))
     return failure();

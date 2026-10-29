@@ -82,6 +82,7 @@ struct TimingProvider {
   // Identity of model-owned proposal operands, separate from timing admissions.
   std::string proposalFactsSha256;
   ProposalGeometry proposalGeometry;
+  unsigned packRelayoutRows = 0; // Explicit compiler code-size policy override.
   FrontendSpacing frontendSpacing;
   std::shared_ptr<const ModelReplayProgram> proposalReplay;
   int proposalDMACapacity = 0; // builtin retains its existing policy bound.

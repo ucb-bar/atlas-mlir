@@ -80,13 +80,12 @@ DEFAULTS = POLICY["defaults"]
 def objective_receipt(provider: str, profile: str, standard_scorer: bool,
                       configuration_sha256: str | None = None) -> dict:
     """Identify selection policy separately from model-derived timing facts."""
-    model = provider == "model"
     payload = {
         "schema": "atlas.model_selection_objective.v1",
-        "policy": POLICY["algorithms"]["selection_objective"] if model else "builtin-default-v1",
-        "scoring": ("native-model" if standard_scorer else "injected-scorer") if model else "none",
-        "profile": profile if model else None,
-        "minimize": list(POLICY["objectives"][profile]) if model else ["index"],
+        "policy": POLICY["algorithms"]["selection_objective"],
+        "scoring": "native-model" if standard_scorer else "injected-scorer",
+        "profile": profile,
+        "minimize": list(POLICY["objectives"][profile]),
         "tie_rule": POLICY["algorithms"]["selection_tie"],
         "scoring_configuration_sha256": configuration_sha256,
     }
@@ -149,7 +148,8 @@ def evidence_option(model_facts: Path | None = None) -> list[str]:
 
 
 def candidate_options(candidate: Candidate, provider: str, spill: bool, *, graph_output: bool = False) -> list[str]:
-    options = [f"provider={provider}", f"spill={str(spill).lower()}", "allocation-report=allocation.json"]
+    options = [f"provider={provider}", f"spill={str(spill).lower()}", "allocation-report=allocation.json",
+               "pack-relayout-rows=2", "wait-reused-dma-slots=true"]
     for enabled, option in (
         (candidate.virtual_orders, "order-file=order.json"),
         (graph_output, "graph-output=graph.json"),
@@ -353,19 +353,14 @@ def select_program(source: Path, output_dir: Path, atlas_bin_dir: Path, *, provi
     if provider not in ("builtin", "model") or profile not in ("fifo43", "curve"):
         raise ValueError("unsupported provider or memory profile")
     if curve_candidates is None:
-        curve_candidates = provider == "model" and profile == "curve"
-    if type(curve_candidates) is not bool or (curve_candidates and (provider != "model" or profile != "curve")):
-        raise ValueError("curve-candidates requires the model curve profile")
+        curve_candidates = profile == "curve"
+    if type(curve_candidates) is not bool or (curve_candidates and profile != "curve"):
+        raise ValueError("curve-candidates requires the curve profile")
     if max_candidates < 1 or workers < 1 or boundary not in ("boundary", "none"):
         raise ValueError("candidate and worker counts must be positive and boundary must be boundary or none")
-    if provider != "model" and mreg_candidates != ():
-        raise ValueError("MREG candidates require the model provider")
     for name, value in (("search-group-evaluations", search_group_evaluations), ("search-patience", search_patience)):
-        if value < 0 or (value and provider != "model"):
-            raise ValueError(name + " must be nonnegative and requires the model provider")
-    for name, value in (("pack-reload-candidates", pack_reload_candidates), ("pack-preload-candidates", pack_preload_candidates)):
-        if value and provider != "model":
-            raise ValueError(name + " requires the model provider")
+        if value < 0:
+            raise ValueError(name + " must be nonnegative")
     if mreg_candidates is None:
         mreg_candidates = tuple(tuple(random.Random(seed).choices(POOLS["mreg_rank_choices"],
                                                                 k=POOLS["mreg_vector_length"]))
@@ -380,8 +375,7 @@ def select_program(source: Path, output_dir: Path, atlas_bin_dir: Path, *, provi
         search_patience=search_patience, pack_reload_candidates=pack_reload_candidates,
         pack_preload_candidates=pack_preload_candidates, curve_candidates=curve_candidates,
         objective=POLICY["objectives"][profile],
-        scoring_implementation=("none" if provider == "builtin" else
-                                "native_model" if scorer is None else "caller_callback")))
+        scoring_implementation=("native_model" if scorer is None else "caller_callback")))
     if search_policy is not None and search_policy != effective_policy:
         raise ValueError("search policy override does not match the versioned effective policy")
     if provider == "model":
@@ -410,7 +404,7 @@ def select_program(source: Path, output_dir: Path, atlas_bin_dir: Path, *, provi
                "candidates": []}
     standard_scorer = scorer is None
     capture = None
-    if standard_scorer and provider == "model":
+    if standard_scorer:
         if model is None:
             raise ValueError("model scoring requires --npu-model")
         capture = capture_selection_inputs(source, output, binaries, model, model_regions, effective_policy)
@@ -449,13 +443,13 @@ def select_program(source: Path, output_dir: Path, atlas_bin_dir: Path, *, provi
             stdout.write_text(result.stdout)
         return result.stdout
 
-    if provider == "model" and model_facts is None and model is not None:
+    if model_facts is None and model is not None:
         model_facts = output / "model-facts"
         command([sys.executable, "-B", str(Path(__file__).with_name("atlas_model_facts.py")),
                  "--npu-model", str(model), "--out", str(model_facts)], output)
     if capture is not None:
         receipt["provider_facts_sha256"] = bind_selection_facts(capture, model_facts)
-    options = evidence_option(model_facts) if provider == "model" else []
+    options = evidence_option(model_facts)
     options.append("--atlas-compile-prepare=" +
                    f"spill-mxu-state={str(spill_mxu).lower()} boundary={boundary}")
     if guarded_pack:
@@ -499,13 +493,13 @@ def select_program(source: Path, output_dir: Path, atlas_bin_dir: Path, *, provi
             stage = "emit"
             program = json.loads(command([str(binaries / "atlas-emit"), "final.mlir", "--program-json"],
                                          directory, directory / "program.json"))
-            if provider == "model" and (standard_scorer or "compiler_search_policy_sha256" in program):
+            if standard_scorer or "compiler_search_policy_sha256" in program:
                 stage = "policy"
                 if program.get("compiler_search_policy_sha256") != COMPILER_POLICY_SHA256:
                     raise ValueError("compiler search policy differs from driver; rebuild the selected compiler")
             words = tuple(instruction["word_u32"] for instruction in program["instructions"])
             (directory / "program.hex").write_text("".join(f"{word:08x}\n" for word in words))
-            if provider == "model":
+            if scorer is not None:
                 stage = "score"
                 cached, row["score_cache_hit"] = cached_score(program, profile)
                 row["cycles"] = cached.result() if isinstance(cached, Future) else cached
@@ -528,7 +522,7 @@ def select_program(source: Path, output_dir: Path, atlas_bin_dir: Path, *, provi
         nonlocal best
         pending, before = [], len(receipt["candidates"])
         for candidate, category in specifications:
-            if candidate in seen or len(receipt["candidates"]) >= (limit if provider == "model" else 1):
+            if candidate in seen or len(receipt["candidates"]) >= limit:
                 continue
             index = len(receipt["candidates"])
             directory = output / "candidates" / f"{index:03d}-{category}"
@@ -543,8 +537,6 @@ def select_program(source: Path, output_dir: Path, atlas_bin_dir: Path, *, provi
             for future in futures:
                 future.result()
         for row in receipt["candidates"][before:]:
-            if row["status"] == "FAIL" and provider != "model":
-                fail("default candidate failed: " + row["error"])
             # A verified program the model cannot score is an identity or soundness alarm.
             if row["status"] == "FAIL" and row["error_stage"] in ("score", "policy"):
                 fail(f"candidate {row['index']} failed model scoring: {row['error']}")
@@ -554,11 +546,11 @@ def select_program(source: Path, output_dir: Path, atlas_bin_dir: Path, *, provi
 
     # Model imports, configuration and execution are isolated from compiler threads.
     with ExitStack() as stack:
-        if standard_scorer and provider == "model":
+        if standard_scorer:
             score_executor = stack.enter_context(ProcessPoolExecutor(
                 max_workers=workers, mp_context=multiprocessing.get_context("spawn")))
         evaluate_batch([(Candidate(), "default")])
-        if provider == "model":
+        if provider in ("model", "builtin"):
             evaluate_batch([(Candidate(lookahead=lookahead), "lookahead") for lookahead in POOLS["initial_lookaheads"]] +
                            [(Candidate(random_seed=seed), "random-seed") for seed in random_seeds], limit=min(CANDIDATES["initial_knob_cap"], max_candidates))
             if best is None:
@@ -679,23 +671,23 @@ def add_model_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--max-candidates", type=int)
     parser.add_argument("--workers", type=int, default=min(DEFAULTS["workers"], os.cpu_count() or 1))
     parser.add_argument("--bank-candidates", action=argparse.BooleanOptionalAction, default=None,
-                        help="score eight legal MREG rank vectors (model only)")
+                        help="score eight legal MREG rank vectors")
     parser.add_argument("--search-group-evaluations", type=int,
-                        help="additional verified dependency-group attempts after knob selection (model only)")
+                        help="additional verified dependency-group attempts after knob selection")
     parser.add_argument("--search-patience", type=int,
                         help="stop a phase after this many nonimproving attempts, checked after each batch; zero disables")
     parser.add_argument("--curve-candidates", action=argparse.BooleanOptionalAction, default=None,
                         help="rank legal order proposals by derived costs and score default/source wait siblings (curve default)")
     parser.add_argument("--pack-reload-candidates", action=argparse.BooleanOptionalAction, default=None,
-                        help="score loading a pending weight before an adjacent PACK reload (model only)")
+                        help="score loading a pending weight before an adjacent PACK reload")
     parser.add_argument("--pack-preload-candidates", action=argparse.BooleanOptionalAction, default=None,
-                        help="score preloading disjoint weights before PACK with selective source waits (model only)")
+                        help="score preloading disjoint weights before PACK with selective source waits")
     parser.add_argument("--store-windows", action="append", default=[], metavar="RANKS",
                         help="additional candidate's comma-separated free ranks, one per DMA store")
 
 
 def model_arguments(args: argparse.Namespace) -> dict:
-    preset = SEARCH_BUDGETS[args.search_budget if args.provider == "model" else "selection"]
+    preset = SEARCH_BUDGETS[args.search_budget]
     budget = {name: getattr(args, name) if getattr(args, name) is not None else value for name, value in preset.items()}
     banks = budget.pop("bank_candidates")
     profile = args.profile or (DEFAULTS["model_profile"] if args.provider == "model" else DEFAULTS["builtin_profile"])

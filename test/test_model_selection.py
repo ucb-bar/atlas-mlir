@@ -155,7 +155,7 @@ class ModelSelectionTest(SelectionFixture, unittest.TestCase):
         self.assertFalse(values["pack_reload_candidates"] or values["pack_preload_candidates"])
         builtin = model_arguments(parser.parse_args([]))
         self.assertEqual((builtin["profile"], builtin["search_group_evaluations"],
-                          builtin["mreg_candidates"]), ("fifo43", 0, ()))
+                          builtin["mreg_candidates"]), ("fifo43", 204, None))
 
     def test_guarded_pack_reaches_preparation_and_entry_points(self):
         import atlas_model_selection
@@ -179,6 +179,7 @@ class ModelSelectionTest(SelectionFixture, unittest.TestCase):
         self.assertEqual(candidate_options(Candidate(store_windows=(7, 3, 0), mreg_ranks=(31, 0, 7),
                                                       wait_placement="source"), "model", True),
                          ["--atlas-compile-candidate=provider=model spill=true allocation-report=allocation.json "
+                          "pack-relayout-rows=2 wait-reused-dma-slots=true "
                           "store-windows='7,3,0' mreg-ranks='31,0,7' wait-placement=source"])
         self.assertNotIn("wait-placement", candidate_options(Candidate(), "model", True)[0])
         for invalid in ({"lookahead": 3}, {"lookahead": 1, "random_seed": 0},
@@ -201,8 +202,10 @@ class ModelSelectionTest(SelectionFixture, unittest.TestCase):
         self.assertEqual([row["options"] for row in receipts[0]],
                          [row["options"] for row in receipts[1][:len(receipts[0])]])
         self.assertFalse(any(row["class"] == "mreg-ranks" for row in self.select()["candidates"]))
-        with self.assertRaisesRegex(ValueError, "MREG candidates require"):
-            self.select(provider="builtin", mreg_candidates=None)
+        builtin = self.select(name="builtin-registers", provider="builtin", max_candidates=32,
+                              mreg_candidates=None, store_window_candidates=((0, 1), (0, 2), (0, 3)))
+        self.assertEqual([row["options"]["mreg_ranks"] for row in builtin["candidates"]
+                          if row["class"] == "mreg-ranks"], vectors)
 
     def test_register_search_preserves_the_knob_prefix_after_deduplication(self):
         common = dict(curve_candidates=False, scorer=lambda program, **_: program["cycles"], store_window_candidates=((0,), (0,), (1,)))
@@ -307,7 +310,6 @@ class ModelSelectionTest(SelectionFixture, unittest.TestCase):
     def test_invalid_search_controls_reject_before_tools(self):
         for options, diagnostic in (
             ({"search_patience": -1}, "search-patience"),
-            ({"provider": "builtin", "search_group_evaluations": 1}, "search-group-evaluations"),
             ({"search_group_evaluations": -1}, "search-group-evaluations"),
             ({"boundary": "inputs"}, "boundary must be boundary or none"),
         ):
@@ -315,13 +317,12 @@ class ModelSelectionTest(SelectionFixture, unittest.TestCase):
                 self.select(**options)
         self.assertEqual(self.invocations, [])
 
-    def test_builtin_does_not_score_or_generate_alternatives(self) -> None:
-        receipt = self.select(provider="builtin", scorer=lambda *_, **__: self.fail("builtin was scored"))
-        self.assertEqual(len(receipt["candidates"]), 1)
-        self.assertEqual(receipt["selected_index"], 0)
-        self.assertIsNone(receipt["selected_cycles"])
+    def test_builtin_scores_and_selects_alternatives(self) -> None:
+        receipt = self.select(provider="builtin", max_candidates=5)
+        self.assertEqual(len(receipt["candidates"]), 5)
+        self.assertEqual((receipt["selected_index"], receipt["selected_cycles"]), (2, 5))
         self.assertEqual(receipt["profile"], "fifo43")
-        self.assert_objective(receipt, scoring="none")
+        self.assert_objective(receipt, scoring="injected-scorer")
 
     def test_builtin_accepts_symlinked_source_and_binary_directory(self):
         linked_source = self.directory / "linked.mlir"
@@ -330,7 +331,7 @@ class ModelSelectionTest(SelectionFixture, unittest.TestCase):
         linked_binaries.symlink_to(self.directory, target_is_directory=True)
         with patch("atlas_model_selection.subprocess.run", side_effect=self.fake_run):
             receipt = select_program(linked_source, self.directory / "builtin-linked", linked_binaries,
-                                     provider="builtin", scorer=lambda *_: self.fail("builtin was scored"))
+                                     provider="builtin", max_candidates=1, scorer=lambda program, **_: program["cycles"])
         self.assertEqual(receipt["selected_index"], 0)
         with self.assertRaisesRegex(ValueError, "symlinks"):
             select_program(linked_source, self.directory / "model-linked", linked_binaries,
@@ -338,11 +339,10 @@ class ModelSelectionTest(SelectionFixture, unittest.TestCase):
 
     def assert_objective(self, receipt, *, scoring, configuration=None):
         objective = receipt["objective"]
-        model = receipt["provider"] == "model"
         expected = {"schema": "atlas.model_selection_objective.v1",
-                    "policy": "selected-profile-cycles-then-index-v1" if model else "builtin-default-v1",
-                    "scoring": scoring, "profile": receipt["profile"] if model else None,
-                    "minimize": ["cycles", "index"] if model else ["index"],
+                    "policy": "selected-profile-cycles-then-index-v1",
+                    "scoring": scoring, "profile": receipt["profile"],
+                    "minimize": ["cycles", "index"],
                     "tie_rule": "canonical-candidate-index-v1",
                     "scoring_configuration_sha256": configuration}
         self.assertEqual({key: value for key, value in objective.items() if key != "sha256"}, expected)
@@ -377,14 +377,16 @@ class ModelSelectionTest(SelectionFixture, unittest.TestCase):
         self.assert_objective(receipt, scoring="injected-scorer")
 
     def test_native_profile_receipts_bind_only_the_selected_profile(self):
-        for profile, cap, expected in (("curve", 3, {"curve"}), ("curve", 5, {"curve"}),
-                                       ("fifo43", 5, {"fifo43"})):
-            with self.subTest(profile=profile, cap=cap), \
+        for provider, profile, cap, expected in (("model", "curve", 3, {"curve"}), ("model", "curve", 5, {"curve"}),
+                                               ("model", "fifo43", 5, {"fifo43"}), ("builtin", "curve", 5, {"curve"}),
+                                               ("builtin", "fifo43", 5, {"fifo43"})):
+            with self.subTest(provider=provider, profile=profile, cap=cap), \
                     self.native_scoring(SyntheticNativeScorer(), runner=self.override_run("random-seed=0", 8, 5),
                         evidence=("--select-atlas-model-evidence=facts=synthetic-test",)) as capture_inputs:
-                output = self.directory / f"native-{profile}-{cap}"
+                output = self.directory / f"native-{provider}-{profile}-{cap}"
                 receipt = select_program(self.source, output, self.directory, model=self.directory,
-                                         profile=profile, model_facts=self.directory, curve_candidates=False, max_candidates=cap, workers=2)
+                                         provider=provider, profile=profile, model_facts=self.directory,
+                                         curve_candidates=False, max_candidates=cap, workers=2)
             self.assert_objective(receipt, scoring="native-model", configuration=profile + "-configuration-digest")
             self.assertEqual(set(receipt["scoring_configurations"]), expected)
             self.assertEqual(capture_inputs.call_args.args[-1], receipt["search_policy"])
@@ -467,10 +469,10 @@ class ModelSelectionTest(SelectionFixture, unittest.TestCase):
         receipt = json.loads((self.directory / "compiled/selection.json").read_text())
         self.assertEqual({row["status"] for row in receipt["candidates"]}, {"FAIL"})
 
-    def test_builtin_failure_still_stops_after_one_compile(self) -> None:
-        with self.assertRaisesRegex(ValueError, "default candidate failed"):
-            self.select(runner=self.refuse(lambda option: True), provider="builtin")
-        self.assertEqual(sum(bool(candidate_command(argv)) for argv in self.invocations), 1)
+    def test_builtin_refusals_count_toward_the_budget(self) -> None:
+        with self.assertRaisesRegex(ValueError, "no legal candidate"):
+            self.select(runner=self.refuse(lambda option: True), provider="builtin", max_candidates=5)
+        self.assertEqual(sum(bool(candidate_command(argv)) for argv in self.invocations), 5)
 
     def test_group_search_crosses_tied_orders(self) -> None:
         initial, winner = (0, 3, 1, 4, 2), (0, 1, 2, 3, 4)
@@ -505,13 +507,11 @@ class ModelSelectionTest(SelectionFixture, unittest.TestCase):
         self.assertEqual(receipt["group_search"]["accepted_indices"], [])
         self.assertEqual(receipt["candidates"][1]["status"], "FAIL")
 
-    def test_pack_reload_candidate_requires_provider_and_strict_model_improvement(self):
-        with self.assertRaisesRegex(ValueError, "pack-reload-candidates requires"):
-            self.select(provider="builtin", pack_reload_candidates=True)
+    def test_pack_reload_candidate_requires_strict_improvement(self):
         for cycles in (4, 5, 6):
             with self.subTest(cycles=cycles):
                 receipt = self.select(name=str(cycles), runner=self.override_run("pack-reload-after-weight=true", 99, cycles), max_candidates=3,
-                                      pack_reload_candidates=True)
+                                      provider="builtin", pack_reload_candidates=True)
             candidate = receipt["candidates"][-1]
             self.assertEqual(candidate["class"], "pack-reload-order")
             self.assertEqual(candidate["options"]["lookahead"], 2)
@@ -519,8 +519,6 @@ class ModelSelectionTest(SelectionFixture, unittest.TestCase):
             self.assertEqual(receipt["selected_index"], 3 if cycles < 5 else 2)
 
     def test_preload_candidates_replace_reload_and_compare_wait_placements(self):
-        with self.assertRaisesRegex(ValueError, "pack-preload-candidates requires"):
-            self.select(provider="builtin", pack_preload_candidates=True)
         for options in ({"pack_reload_after_weight": True, "pack_weight_before_pack": True},
                         {"wait_placement": "preloaded"}):
             with self.assertRaises(ValueError):
@@ -535,7 +533,7 @@ class ModelSelectionTest(SelectionFixture, unittest.TestCase):
                 if cycles is not None:
                     self.programs[kwargs["cwd"]] = {"instructions": [{"word_u32": 100 + cycles}], "cycles": cycles}
             return result
-        receipt = self.select(runner=compile_placement, max_candidates=3, pack_reload_candidates=True,
+        receipt = self.select(runner=compile_placement, provider="builtin", max_candidates=3, pack_reload_candidates=True,
                               pack_preload_candidates=True)
         self.assertEqual(receipt["selected_index"], 4)
         self.assertEqual(receipt["selected_cycles"], 2)
@@ -650,9 +648,9 @@ class ModelSelectionTest(SelectionFixture, unittest.TestCase):
                 return subprocess.CompletedProcess(argv, 1, "", "dependence refused")
 
         expected = None
-        for workers in (1, 4):
+        for provider, workers in (("model", 1), ("model", 4), ("builtin", 1), ("builtin", 4)):
             runner = self.graph_run(preds, initial, curve=True, configure=compile_order)
-            receipt = self.select(name=f"curve-{workers}", runner=runner, profile="curve",
+            receipt = self.select(name=f"curve-{provider}-{workers}", runner=runner, profile="curve", provider=provider,
                                   max_candidates=1, search_group_evaluations=13,
                                   workers=workers)
             self.assertTrue(receipt["curve_candidates"])
@@ -718,7 +716,7 @@ class ModelSelectionTest(SelectionFixture, unittest.TestCase):
         self.assertIsNone(model_arguments(parser.parse_args([]))["curve_candidates"])
         self.assertFalse(model_arguments(parser.parse_args(["--no-curve-candidates"]))["curve_candidates"])
         self.assertTrue(model_arguments(parser.parse_args(["--curve-candidates"]))["curve_candidates"])
-        for kwargs in ({"provider": "builtin", "profile": "curve"}, {"profile": "fifo43"}):
+        for kwargs in ({"provider": "builtin", "profile": "fifo43"}, {"profile": "fifo43"}):
             with self.assertRaisesRegex(ValueError, "curve-candidates requires"):
                 self.select(curve_candidates=True, **kwargs)
 
@@ -832,23 +830,42 @@ class GuardedModelPreparationTest(unittest.TestCase):
 
 
 class ModelSelectionKnobsTest(unittest.TestCase):
-    def test_candidate_controls_require_npu_model(self):
-        for option, diagnostic in (
-            ("--schedule-atlas-virtual=lookahead=1", "lookahead requires the model"),
-            ("--schedule-atlas-virtual=order-file=missing.json", "require the model"),
-            ("--schedule-atlas-virtual=graph-output=unused.json", "require the model"),
-            ("--lower-atlas-virtual-to-machine=store-windows=1", "store-windows requires the model"),
-            ("--lower-atlas-virtual-to-machine=mreg-ranks=1", "mreg-ranks requires the model"),
-            ("--lower-atlas-virtual-to-machine=pack-reload-after-weight=true", "pack-reload-after-weight requires the model"),
-            ("--lower-atlas-virtual-to-machine=pack-weight-before-pack=true", "pack-weight-before-pack requires the model"),
-            ("--schedule-atlas-stream=wait-placement=source", "wait-placement=source requires the model"),
-            ("--schedule-atlas-stream=wait-placement=preloaded", "wait-placement=preloaded requires the model"),
+    def test_candidate_controls_accept_builtin(self):
+        from test_delay_insertion import nop, program
+
+        for option in (
+            "--schedule-atlas-virtual=provider=builtin lookahead=1",
+            "--lower-atlas-virtual-to-machine=provider=builtin store-windows=1",
+            "--lower-atlas-virtual-to-machine=provider=builtin mreg-ranks=1",
+            "--lower-atlas-virtual-to-machine=provider=builtin pack-reload-after-weight=true",
+            "--lower-atlas-virtual-to-machine=provider=builtin pack-weight-before-pack=true",
+            "--schedule-atlas-stream=provider=builtin wait-placement=source",
+            "--schedule-atlas-stream=provider=builtin wait-placement=preloaded",
         ):
             with self.subTest(option=option):
-                source = "module {}" if "wait-placement" in option else EXAMPLE.read_text()
+                source = program([nop()]) if "wait-placement" in option else EXAMPLE.read_text()
+                if "wait-placement=preloaded" in option:
+                    source = source.replace("module {", "module attributes {atlas.model_preloaded_weights = array<i32>} {")
                 result = run("atlas-opt", source, option)
+                self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_builtin_graph_export_requires_selected_metadata(self):
+        result = run("atlas-opt", EXAMPLE.read_text(), "--schedule-atlas-virtual=provider=builtin graph-output=unused.json")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("requires selected atlas.model_evidence", result.stderr)
+
+    def test_missing_order_file_refuses(self):
+        result = run("atlas-opt", EXAMPLE.read_text(), "--schedule-atlas-virtual=provider=builtin order-file=missing.json")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("cannot read order-file", result.stderr)
+
+    def test_invalid_pack_rows_fail(self):
+        for option in ("--schedule-atlas-virtual=pack-relayout-rows=3",
+                       "--lower-atlas-virtual-to-machine=pack-relayout-rows=3"):
+            with self.subTest(option=option):
+                result = run("atlas-opt", EXAMPLE.read_text(), option)
                 self.assertNotEqual(result.returncode, 0)
-                self.assertIn(diagnostic, result.stderr)
+                self.assertIn("pack-relayout-rows must be", result.stderr)
 
     def test_invalid_candidate_controls_fail(self):
         for option, diagnostic in (
@@ -901,10 +918,25 @@ class ModelOrderReplayTest(unittest.TestCase):
         self.graph_path = self.directory / "graph.json"
         self.order_path = self.directory / "order.json"
 
-    def schedule(self, source=None, **options):
-        option = "--schedule-atlas-virtual=provider=model " + " ".join(
+    def schedule(self, source=None, provider="model", **options):
+        option = f"--schedule-atlas-virtual=provider={provider} " + " ".join(
             f"{key.replace('_', '-')}={value}" for key, value in options.items())
         return run("atlas-opt", source or self.source, self.evidence, option, "--verify-atlas-virtual-stream")
+
+    def test_builtin_graph_metadata_preserves_the_selected_schedule(self):
+        ordinary = self.schedule(provider="builtin")
+        exported = self.schedule(provider="builtin", graph_output=self.graph_path)
+        self.assertEqual(ordinary.returncode, 0, ordinary.stderr)
+        self.assertEqual(exported.returncode, 0, exported.stderr)
+        self.assertEqual(ordinary.stdout, exported.stdout)
+        graphs = json.loads(self.graph_path.read_text())
+        self.assertTrue(graphs)
+        self.assertGreater(graphs[0]["proposal"]["dma_capacity"], 0)
+        self.assertTrue(graphs[0]["proposal"]["facts_sha256"])
+        self.order_path.write_text(json.dumps([graph["order"] for graph in graphs]))
+        replay = self.schedule(provider="builtin", order_file=self.order_path)
+        self.assertEqual(replay.returncode, 0, replay.stderr)
+        self.assertEqual(ordinary.stdout, replay.stdout)
 
     def test_pack_reload_moves_only_the_trailing_same_block_reload(self):
         pack = f'%packed = "atlas.virtual_pack_fp8"(%tile) {{scale_code = 127 : i32}} : ({T}) -> {F}'

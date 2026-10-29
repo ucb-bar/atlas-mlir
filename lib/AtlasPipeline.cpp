@@ -36,7 +36,7 @@ void buildBoundaryStage(OpPassManager &pm, const AtlasCompileOptions &options) {
 
 void buildVirtualScheduleStage(OpPassManager &pm, const AtlasCompileOptions &options) {
   pm.addPass(createScheduleAtlasVirtualPass(options.provider, options.lookahead, options.randomSeed,
-                                           options.orderFile, options.graphOutput));
+                                           options.orderFile, options.graphOutput, options.packRelayoutRows));
   pm.addPass(createVerifyAtlasVirtualStreamPass());
 }
 
@@ -61,13 +61,13 @@ void buildSpillStage(OpPassManager &pm) {
 void buildLowerStage(OpPassManager &pm, const AtlasCompileOptions &options) {
   pm.addPass(createLowerAtlasVirtualToMachinePass(options.allocationReport, options.provider, options.storeWindows,
                                                      options.mregRanks, options.packReloadAfterWeight,
-                                                     options.packWeightBeforePack));
+                                                     options.packWeightBeforePack, options.packRelayoutRows));
 }
 
 // Each transfer's wait goes before what needs it done; the generated-schedule
 // check requires the waits.
 void insertDMAWaits(OpPassManager &pm, const AtlasCompileOptions &options) {
-  pm.addPass(createInsertAtlasDMAWaitsPass(options.provider));
+  pm.addPass(createInsertAtlasDMAWaitsPass(options.provider, options.waitReusedDMASlots));
   pm.addPass(createVerifyAtlasMachineStreamPass());
   pm.addPass(createVerifyAtlasGeneratedSchedulePass());
 }

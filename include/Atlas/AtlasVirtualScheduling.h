@@ -8,7 +8,8 @@ namespace mlir::atlas {
 // Register the pre-allocation virtual scheduling pass with atlas-opt.
 void registerScheduleAtlasVirtualPass();
 std::unique_ptr<Pass> createScheduleAtlasVirtualPass(llvm::StringRef provider = "", unsigned lookahead = 0, int randomSeed = -1,
-                                                            llvm::StringRef orderFile = "", llvm::StringRef graphOutput = "");
+                                                            llvm::StringRef orderFile = "", llvm::StringRef graphOutput = "",
+                                                            unsigned packRelayoutRows = 0);
 
 } // namespace mlir::atlas
 
