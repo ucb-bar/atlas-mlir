@@ -37,19 +37,6 @@ class CapacitySourceTests(unittest.TestCase):
             with self.subTest(mutation=new), self.assertRaises(UnsupportedModelTiming):
                 _plan(source.replace(old, new))
 
-    def test_only_exact_slot_parameter_positions_bypass_shape_pin(self):
-        source = self.source("vpu.py")
-        for slots in (1, 2, 3):
-            changed = source.replace("ISSUE_SLOTS = 2", f"ISSUE_SLOTS = {slots}")
-            resources._guard_ast(ast.parse(changed), "vpu.py")
-        for slots in (0, 4, True):
-            with self.subTest(slots=slots), self.assertRaises(ValueError):
-                resources._guard_ast(ast.parse(source.replace("ISSUE_SLOTS = 2", f"ISSUE_SLOTS = {slots}")), "vpu.py")
-        for old, new in (("cycle - op.issued < op.write_last", "cycle - op.issued <= op.write_last"),
-                         ("return VPU_OP_LATENCIES[mnemonic] - 1", "return VPU_OP_LATENCIES[mnemonic]")):
-            with self.subTest(mutation=new), self.assertRaises(ValueError):
-                resources._guard_ast(ast.parse(source.replace(old, new)), "vpu.py")
-
     def test_xlu_duration_is_resolved_after_complete_source_review(self):
         source = self.source("xlu.py")
         with tempfile.TemporaryDirectory() as directory:

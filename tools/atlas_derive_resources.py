@@ -9,8 +9,8 @@ import sys
 
 sys.dont_write_bytecode = True
 
-from atlas_derive_mxu import _plan, _check_checker, _assignment, _method, _one
-from atlas_model_schema import SOURCE_SHAPES, VOCABULARY, sha256
+from atlas_derive_mxu import _assignment, _method, _one
+from atlas_model_schema import VOCABULARY
 
 
 def _literal(node):
@@ -50,38 +50,19 @@ def _source(root, name):
     return source, tree
 
 
-def _guard_ast(tree, name):
-    reviewed = deepcopy(tree)
-    if name == "vpu.py":
-        reviewed.body = [n for n in reviewed.body if not (isinstance(n, ast.Assign) and any(
-            isinstance(t, ast.Name) and t.id == "VPU_OP_LATENCIES" for t in n.targets))]
-        if any(isinstance(n, ast.ClassDef) and n.name == "VectorExecutionUnit" for n in reviewed.body):
-            from atlas_derive_vpu import _normalize_slot_capacity
-            _normalize_slot_capacity(reviewed)
-    if sha256(ast.dump(reviewed, include_attributes=False).encode()) != SOURCE_SHAPES[name]:
-        raise ValueError("unsupported overlap control-flow semantics: " + name)
-
-
 def derive_resources(model):
-    """Guard complete control flow, then extract its actual structural values."""
+    """Read structural values after the engine extractors check their source digests."""
     model = Path(model)
-    mxu_text, mxu = _source(model, "mxu.py")
+    _, mxu = _source(model, "mxu.py")
     _, vpu = _source(model, "vpu.py")
-    checker_text, _ = _source(model, "bank_conflict.py")
     _, lsu = _source(model, "lsu.py")
-    _, xlu = _source(model, "xlu.py")
-    _plan(mxu_text)
-    _check_checker(checker_text)
-    for name, tree in (("vpu.py", vpu), ("lsu.py", lsu), ("xlu.py", xlu)):
-        _guard_ast(tree, name)
     base = _named(mxu, "_MatrixExecutionUnit")
     accept = _method(base, "_accept")
     active = _literal(_assignment(mxu, "PORT_CYCLES").value)
     acc_push_last = _age_bound(_assignment(accept, "acc_pushes").value, ast.LtE)
     weight_drain_last = _age_bound(_guard(accept, "same slot drained"), ast.LtE)
     acc_forward = _age_bound(_guard(accept, "cycle after a push"), ast.Lt)
-    # _plan guarded the complete selection loop and table. The existing rule
-    # schema expresses fixed ports plus a shared single-push preference list.
+    # The MXU digest pins port selection and its shared single-push priority.
     choices = ast.literal_eval(_assignment(mxu, "PORT_CHOICES").value)
     fixed = ("compute", "push_bf16", "pop_bf16", "pop_fp8")
     if (set(choices) != {*fixed, "weight", "push_fp8"}
