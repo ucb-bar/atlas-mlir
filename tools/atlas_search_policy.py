@@ -92,7 +92,7 @@ def load_policy() -> dict:
     pools, candidates = policy["pools"], policy["candidates"]
     keys(pools, "supported_lookaheads virtual_scheduler_lookaheads random_seeds "
          "neighbor_shuffle_seed group_max_nodes mreg_seeds mreg_rank_choices "
-         "mreg_vector_length uniform_store_ranks", "pools")
+         "mreg_vector_length", "pools")
     keys(candidates, "initial_knob_cap batch_width initial_wait_placement "
          "curve_group_wait_placements", "candidates")
     keys(policy["objectives"], "curve fifo43", "objectives")
@@ -106,7 +106,7 @@ def load_policy() -> dict:
             or not 1 <= dma["intercommand_serialization_cycles"] < 2**31):
         raise ValueError("invalid DMA proposal serialization policy")
     for name in ("supported_lookaheads", "virtual_scheduler_lookaheads",
-                 "random_seeds", "mreg_seeds", "mreg_rank_choices", "uniform_store_ranks"):
+                 "random_seeds", "mreg_seeds", "mreg_rank_choices"):
         if not integers(pools[name]) or len(set(pools[name])) != len(pools[name]):
             raise ValueError("invalid search pool: " + name)
     if not pools["virtual_scheduler_lookaheads"] or 0 not in pools["supported_lookaheads"]:

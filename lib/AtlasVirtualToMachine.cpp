@@ -45,10 +45,9 @@ namespace {
 class VirtualPlanner {
 public:
   VirtualPlanner(ModuleOp module, func::FuncOp function,
-                 ArrayRef<unsigned> storeWindowRanks = {},
                  ArrayRef<unsigned> mregRanks = {}, unsigned packRelayoutRows = 1)
       : module(module), function(function), attrs(module.getContext()),
-        emitter(module.getContext()), allocation(storeWindowRanks, mregRanks),
+        emitter(module.getContext()), allocation(mregRanks),
         packRelayoutRows(packRelayoutRows) {}
 
   LogicalResult plan() {
@@ -990,10 +989,6 @@ struct LowerAtlasVirtualToMachinePass
 
   Option<std::string> provider{
       *this, "provider", llvm::cl::desc("Timing provider for model selection candidates"), llvm::cl::init("")};
-  Option<std::string> storeWindows{
-      *this, "store-windows", llvm::cl::desc("Comma-separated free staging window ranks per DMA store"),
-      llvm::cl::init("")};
-
   Option<std::string> mregRanks{
       *this, "mreg-ranks", llvm::cl::desc("Cyclic free MREG color ranks"), llvm::cl::init("")};
   Option<unsigned> packRelayoutRows{*this, "pack-relayout-rows",
@@ -1013,22 +1008,18 @@ struct LowerAtlasVirtualToMachinePass
       return signalPassFailure();
     }
     auto refuse = [&](const Twine &why) { module.emitError(why); signalPassFailure(); };
-    auto parseRanks = [&](StringRef option, StringRef text, SmallVectorImpl<unsigned> &result) -> LogicalResult {
-      if (text.empty()) return success();
+    SmallVector<unsigned> registerRanks;
+    if (!mregRanks.empty()) {
       SmallVector<StringRef> ranks;
-      text.split(ranks, ',', -1, true);
+      StringRef(mregRanks.getValue()).split(ranks, ',', -1, true);
       for (StringRef rankText : ranks) {
         unsigned rank;
         if (rankText.empty() || rankText.getAsInteger(10, rank))
-          return module.emitError() << option << " must contain comma-separated unsigned integers";
-        result.push_back(rank);
+          return refuse("mreg-ranks must contain comma-separated "
+                        "unsigned integers");
+        registerRanks.push_back(rank);
       }
-      return success();
-    };
-    SmallVector<unsigned> storeWindowRanks, registerRanks;
-    if (failed(parseRanks("store-windows", storeWindows.getValue(), storeWindowRanks)) ||
-        failed(parseRanks("mreg-ranks", mregRanks.getValue(), registerRanks)))
-      return signalPassFailure();
+    }
     auto selected = selectAtlasTimingProvider(module, provider.getValue());
     if (failed(selected))
       return signalPassFailure();
@@ -1038,8 +1029,7 @@ struct LowerAtlasVirtualToMachinePass
       return refuse("pack-relayout-rows must be 0, 1, or 2");
     unsigned rows = packRelayoutRows ? packRelayoutRows.getValue() :
         atlasPackRelayoutRowsPerIteration(modelProvider);
-    VirtualPlanner planner(module, function, storeWindowRanks, registerRanks,
-                           rows);
+    VirtualPlanner planner(module, function, registerRanks, rows);
     if (allocationReport.empty()) {
       if (failed(planner.plan()) || failed(planner.materialize()))
         signalPassFailure();
@@ -1093,12 +1083,11 @@ void mlir::atlas::registerLowerAtlasVirtualToMachinePass() {
 
 std::unique_ptr<Pass>
 mlir::atlas::createLowerAtlasVirtualToMachinePass(
-    StringRef allocationReport, StringRef provider, StringRef storeWindows,
-    StringRef mregRanks, unsigned packRelayoutRows) {
+    StringRef allocationReport, StringRef provider, StringRef mregRanks,
+    unsigned packRelayoutRows) {
   auto pass = std::make_unique<LowerAtlasVirtualToMachinePass>();
   pass->allocationReport = allocationReport.str();
   pass->provider = provider.str();
-  pass->storeWindows = storeWindows.str();
   pass->mregRanks = mregRanks.str();
   pass->packRelayoutRows = packRelayoutRows;
   return pass;

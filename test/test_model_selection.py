@@ -152,14 +152,14 @@ class ModelSelectionTest(SelectionFixture, unittest.TestCase):
 
     def test_candidate_options_and_validation(self):
         self.assertIn("lookahead=4", candidate_options(Candidate(lookahead=4), "model", True)[0])
-        self.assertEqual(candidate_options(Candidate(store_windows=(7, 3, 0), mreg_ranks=(31, 0, 7),
+        self.assertEqual(candidate_options(Candidate(mreg_ranks=(31, 0, 7),
                                                       wait_placement="source"), "model", True),
                          ["--atlas-compile-candidate=provider=model spill=true allocation-report=allocation.json "
                           "pack-relayout-rows=2 wait-reused-dma-slots=true "
-                          "store-windows='7,3,0' mreg-ranks='31,0,7' wait-placement=source"])
+                          "mreg-ranks='31,0,7' wait-placement=source"])
         self.assertNotIn("wait-placement", candidate_options(Candidate(), "model", True)[0])
         for invalid in ({"lookahead": 3}, {"lookahead": 1, "random_seed": 0},
-                        {"lookahead": 1, "virtual_orders": ((0,),)}, {"store_windows": (-1,)},
+                        {"lookahead": 1, "virtual_orders": ((0,),)},
                         {"mreg_ranks": (-1,)}, {"wait_placement": "other"}):
             with self.subTest(invalid=invalid), self.assertRaises(ValueError):
                 Candidate(**invalid)
@@ -172,27 +172,24 @@ class ModelSelectionTest(SelectionFixture, unittest.TestCase):
         self.assertTrue(all(row["options"]["lookahead"] == 0 for row in rows))
         self.assertEqual(rows[3]["status"], "FAIL")
 
-    def test_seeded_register_pool_preserves_store_prefix_and_budget(self):
+    def test_seeded_register_pool_preserves_prefix_and_budget(self):
         vectors = [tuple(random.Random(seed).choices(range(32), k=64)) for seed in range(8)]
         receipts = []
-        for cap, evaluated in ((22, 2), (32, 8)):
-            receipt = self.select(name=str(cap), max_candidates=cap, mreg_candidates=None,
-                                  store_window_candidates=((0, 1), (0, 2), (0, 3)))
+        for cap, evaluated in ((12, 2), (18, 8)):
+            receipt = self.select(name=str(cap), max_candidates=cap, mreg_candidates=None)
             ranks = [row["options"]["mreg_ranks"] for row in receipt["candidates"] if row["class"] == "mreg-ranks"]
             self.assertEqual((receipt["mreg_pool_size"], ranks), (8, vectors[:evaluated]))
-            self.assertTrue({"explicit-store-windows", "uniform-store-windows"} <=
-                            {row["class"] for row in receipt["candidates"]})
             receipts.append(receipt["candidates"])
         self.assertEqual([row["options"] for row in receipts[0]],
                          [row["options"] for row in receipts[1][:len(receipts[0])]])
         self.assertFalse(any(row["class"] == "mreg-ranks" for row in self.select()["candidates"]))
         builtin = self.select(name="builtin-registers", provider="builtin", max_candidates=32,
-                              mreg_candidates=None, store_window_candidates=((0, 1), (0, 2), (0, 3)))
+                              mreg_candidates=None)
         self.assertEqual([row["options"]["mreg_ranks"] for row in builtin["candidates"]
                           if row["class"] == "mreg-ranks"], vectors)
 
     def test_register_search_preserves_the_knob_prefix_after_deduplication(self):
-        common = dict(scorer=lambda program, **_: program["cycles"], store_window_candidates=((0,), (0,), (1,)))
+        common = dict(scorer=lambda program, **_: program["cycles"])
         prefix = self.select(name="prefix", max_candidates=24, **common)
         extended = self.select(name="extended", max_candidates=32, mreg_candidates=None, **common)
         self.assertEqual([row["options"] for row in prefix["candidates"]],
@@ -570,7 +567,6 @@ class ModelSelectionKnobsTest(unittest.TestCase):
 
         for option in (
             "--schedule-atlas-virtual=provider=builtin lookahead=1",
-            "--lower-atlas-virtual-to-machine=provider=builtin store-windows=1",
             "--lower-atlas-virtual-to-machine=provider=builtin mreg-ranks=1",
             "--schedule-atlas-stream=provider=builtin wait-placement=source",
         ):

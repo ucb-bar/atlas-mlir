@@ -56,7 +56,6 @@ def objective_receipt(provider: str, profile: str, standard_scorer: bool,
 class Candidate:
     lookahead: int = 0
     random_seed: int | None = None
-    store_windows: tuple[int, ...] = ()
     wait_placement: str = "default"
     virtual_orders: tuple[tuple[int, ...], ...] = ()
     mreg_ranks: tuple[int, ...] = ()
@@ -66,8 +65,6 @@ class Candidate:
             raise ValueError("lookahead must be 0, 1, 2, 4, or 8")
         if self.random_seed is not None and (self.random_seed < 0 or self.lookahead):
             raise ValueError("random-seed must be nonnegative and excludes lookahead")
-        if any(rank < 0 or rank > 0xFFFFFFFF for rank in self.store_windows):
-            raise ValueError("store-window ranks must be unsigned 32-bit integers")
         if self.virtual_orders and (self.lookahead or self.random_seed is not None):
             raise ValueError("explicit virtual orders exclude lookahead and random-seed")
         if any(rank < 0 or rank > 0xFFFFFFFF for rank in self.mreg_ranks):
@@ -100,7 +97,6 @@ def candidate_options(candidate: Candidate, provider: str, spill: bool, *, graph
         (graph_output, "graph-output=graph.json"),
         (candidate.lookahead, f"lookahead={candidate.lookahead}"),
         (candidate.random_seed is not None, f"random-seed={candidate.random_seed}"),
-        (candidate.store_windows, "store-windows='" + ",".join(map(str, candidate.store_windows)) + "'"),
         (candidate.mreg_ranks, "mreg-ranks='" + ",".join(map(str, candidate.mreg_ranks)) + "'"),
         (candidate.wait_placement != "default", "wait-placement=" + candidate.wait_placement),
     ):
@@ -172,7 +168,6 @@ class SelectionConfig:
     max_candidates: int
     random_seeds: tuple[int, ...]
     workers: int
-    store_window_candidates: tuple[tuple[int, ...], ...]
     mreg_candidates: tuple[tuple[int, ...], ...] | None
     search_group_evaluations: int
     search_patience: int
@@ -201,7 +196,6 @@ class SelectionConfig:
             provider=self.provider, profile=self.profile, spill=self.spill, spill_mxu=self.spill_mxu,
             boundary=self.boundary, guarded_pack=self.guarded_pack, max_candidates=self.max_candidates,
             random_seeds=list(self.random_seeds), workers=self.workers,
-            store_window_candidates=[list(ranks) for ranks in self.store_window_candidates],
             mreg_candidates=[list(ranks) for ranks in self.mreg_candidates],
             search_group_evaluations=self.search_group_evaluations,
             search_patience=self.search_patience,
@@ -378,18 +372,8 @@ class Selection:
         if self.best is None:
             self.fail("no legal candidate: every initial candidate was refused")
 
-        program = json.loads((self.output / self.best["directory"] / "program.json").read_text())
-        store_count = sum(instruction.get("operation") == "atlas.dma" and
-                          instruction.get("fields", {}).get("direction") == "store"
-                          for instruction in program["instructions"])
-        # Allocation maps each free rank modulo the store's actual free set.
-        window_base = self.winner()
-        placements = [(replace(window_base, wait_placement=CANDIDATES["initial_wait_placement"]), "wait-placement")]
-        placements += [(replace(window_base, store_windows=tuple(ranks)), "explicit-store-windows")
-                       for ranks in self.config.store_window_candidates]
-        placements += [(replace(window_base, store_windows=(rank,) * store_count), "uniform-store-windows")
-                       for rank in POOLS["uniform_store_ranks"] if store_count]
-        self.evaluate_batch(placements, limit=min(CANDIDATES["initial_knob_cap"], self.config.max_candidates))
+        self.evaluate_batch([(replace(self.winner(), wait_placement=CANDIDATES["initial_wait_placement"]),
+                              "wait-placement")], limit=min(CANDIDATES["initial_knob_cap"], self.config.max_candidates))
         register_base = self.winner()
         self.receipt["mreg_pool_size"] = len(self.config.mreg_candidates)
         self.evaluate_batch([(replace(register_base, mreg_ranks=tuple(ranks)), "mreg-ranks")
@@ -483,7 +467,6 @@ def select_program(source: Path, output_dir: Path, atlas_bin_dir: Path, *,
                    model_facts: Path | None = None,
                    max_candidates: int = DEFAULTS["api_max_candidates"],
                    random_seeds: tuple[int, ...] = tuple(POOLS["random_seeds"]), workers: int = DEFAULTS["workers"],
-                   store_window_candidates: tuple[tuple[int, ...], ...] = (),
                    mreg_candidates: tuple[tuple[int, ...], ...] | None = (),
                    search_group_evaluations: int = DEFAULTS["api_search_group_evaluations"],
                    search_patience: int = DEFAULTS["api_search_patience"],
@@ -495,7 +478,6 @@ def select_program(source: Path, output_dir: Path, atlas_bin_dir: Path, *,
         spill=spill, spill_mxu=spill_mxu, boundary=boundary,
         guarded_pack=guarded_pack, model_facts=model_facts,
         max_candidates=max_candidates, random_seeds=random_seeds, workers=workers,
-        store_window_candidates=store_window_candidates,
         mreg_candidates=mreg_candidates, search_group_evaluations=search_group_evaluations,
         search_patience=search_patience).resolved()
     effective_policy = config.policy(scorer is None)
@@ -524,8 +506,6 @@ def add_model_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--search-patience", type=int,
                         help="stop a phase after this many nonimproving attempts, "
                              "checked after each batch; zero disables")
-    parser.add_argument("--store-windows", action="append", default=[], metavar="RANKS",
-                        help="additional candidate's comma-separated free ranks, one per DMA store")
 
 
 def model_arguments(args: argparse.Namespace) -> dict:
@@ -536,8 +516,7 @@ def model_arguments(args: argparse.Namespace) -> dict:
     return {"provider": args.provider, "profile": profile, "model": args.npu_model,
             "model_regions": tuple(args.model_region), "model_facts": args.model_facts,
             "workers": args.workers,
-            "mreg_candidates": None if banks else (), **budget,
-            "store_window_candidates": tuple(tuple(map(int, value.split(','))) for value in args.store_windows)}
+            "mreg_candidates": None if banks else (), **budget}
 
 
 def main() -> int:

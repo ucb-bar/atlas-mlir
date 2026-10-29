@@ -125,8 +125,8 @@ std::string mlir::atlas::locationText(Location loc) {
   return text;
 }
 
-VirtualAllocationPlan::VirtualAllocationPlan(llvm::ArrayRef<unsigned> storeWindowRanks, llvm::ArrayRef<unsigned> mregRanks)
-    : storeWindowRanks(storeWindowRanks.begin(), storeWindowRanks.end()), mregRanks(mregRanks.begin(), mregRanks.end()),
+VirtualAllocationPlan::VirtualAllocationPlan(llvm::ArrayRef<unsigned> mregRanks)
+    : mregRanks(mregRanks.begin(), mregRanks.end()),
       fixedResources(selectedResources()) {}
 
 LogicalResult VirtualAllocationPlan::allocate(func::FuncOp function) {
@@ -144,9 +144,9 @@ LogicalResult VirtualAllocationPlan::allocate(func::FuncOp function) {
   // crosses a block, so each block places its own. DMA comes first: its
   // staging windows decide where each loaded tile's register begins.
   bool fits = true;
-  unsigned nextTransfer = 0, nextStore = 0;
+  unsigned nextTransfer = 0;
   for (Block &block : function.getBody())
-    fits &= succeeded(placeDMA(block, nextTransfer, nextStore));
+    fits &= succeeded(placeDMA(block, nextTransfer));
   stageLoads();
   for (RegisterKind kind :
        {RegisterKind::BF16, RegisterKind::FP8, RegisterKind::Scalar})
@@ -255,7 +255,7 @@ LogicalResult VirtualAllocationPlan::placeMXU(Block &block) {
 // free, the oldest store's, else the oldest load's, whose staging VLOADs
 // lowering then emits before this launch instead of at the tile's first use.
 LogicalResult VirtualAllocationPlan::placeDMA(Block &block,
-                                              unsigned &nextTransfer, unsigned &nextStore) {
+                                              unsigned &nextTransfer) {
   struct InFlight {
     Operation *op;
     Value loaded;
@@ -318,15 +318,7 @@ LogicalResult VirtualAllocationPlan::placeDMA(Block &block,
       InFlight &oldest = store != inFlight.end() ? *store : *llvm::find_if(inFlight, [](const InFlight &t) { return t.holdsWindow; });
       window = oldest.window;
       oldest.holdsChannel = oldest.holdsWindow = false;
-    } else if (!load && nextStore < storeWindowRanks.size() && storeWindowRanks[nextStore]) {
-      SmallVector<unsigned, kAtlasDMAChannels> freeWindows;
-      for (unsigned candidate = 0; candidate < kAtlasDMAChannels; ++candidate)
-        if (!windowHeld(candidate))
-          freeWindows.push_back(candidate);
-      window = freeWindows[storeWindowRanks[nextStore] % freeWindows.size()];
     }
-    if (!load)
-      ++nextStore;
     release();
     unsigned halves =
         isa<VirtualDMALoadBF16Op, VirtualDMAStoreBF16Op>(op) ? 2 : 1;
