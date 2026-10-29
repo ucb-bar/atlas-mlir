@@ -35,10 +35,14 @@ void buildScheduleStage(OpPassManager &pm) {
 }
 
 // The schedule may exceed the registers; spilling recovers it.
-void buildSpillStage(OpPassManager &pm) {
+void buildSpillStage(OpPassManager &pm, bool scheduled) {
   pm.addPass(createSpillAtlasVirtualPass());
   pm.addPass(createVerifyAtlasVirtualStreamPass());
   pm.addPass(createLowerAtlasPackRelayoutPass());
+  // The first schedule costed each PACK as its scalar relayout loop; order
+  // the MXU round trips that replaced them by their own cost.
+  if (scheduled)
+    pm.addPass(createScheduleAtlasVirtualPass());
   // Keep the allocated helper values visible in the virtual stage artifact,
   // and recover any register pressure introduced by the quantized BF16 tile.
   pm.addPass(createSpillAtlasVirtualPass());
@@ -76,7 +80,7 @@ void mlir::atlas::buildAtlasCompilePipeline(OpPassManager &pm,
                                             const AtlasCompileOptions &options) {
   buildVerifyStage(pm, options);
   buildScheduleStage(pm);
-  buildSpillStage(pm);
+  buildSpillStage(pm, /*scheduled=*/true);
   buildLowerStage(pm, options);
   buildTimeStage(pm);
 }
@@ -88,7 +92,7 @@ void mlir::atlas::buildAtlasCompileUnscheduledPipeline(
     pm.addPass(createLowerAtlasGuardedPackPass());
   }
   // Spilling admits MXU pressure, so it runs before strict verification.
-  buildSpillStage(pm);
+  buildSpillStage(pm, /*scheduled=*/false);
   buildLowerStage(pm, options);
   insertDMAWaits(pm);
   pm.addPass(createInsertAtlasDelaysPass());
@@ -114,7 +118,7 @@ void mlir::atlas::registerAtlasCompilePipelines() {
       buildScheduleStage);
   PassPipelineRegistration<>("atlas-compile-spill",
                              "atlas-compile stage 3: spill register pressure",
-                             buildSpillStage);
+                             [](OpPassManager &pm) { buildSpillStage(pm, /*scheduled=*/true); });
   PassPipelineRegistration<AtlasCompileOptions>(
       "atlas-compile-lower",
       "atlas-compile stage 4: allocate and lower to machine IR",
