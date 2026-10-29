@@ -17,7 +17,7 @@ import atlas_derive_vpu as derive
 import atlas_derive_mxu as mxu
 import atlas_derive_memory as memory
 from atlas_model_schema import LOCK
-from atlas_model_diagnostics import ModelTimingValidationError
+from atlas_model_diagnostics import UnsupportedModelTiming
 from model_evidence import isolate_model_imports
 
 
@@ -28,7 +28,7 @@ class VPUShapeTest(unittest.TestCase):
                 source = Path(directory) / name
                 source.write_text("def changed_timing():\n    return 0\n")
                 with self.subTest(name=name), patch.object(derive.inspect, "getsourcefile", return_value=str(source)):
-                    with self.assertRaisesRegex(derive.UnsupportedVPU, "unsupported VPU timing semantics in " + name):
+                    with self.assertRaisesRegex(derive.UnsupportedModelTiming, "unsupported VPU timing semantics in " + name):
                         derive._check_source(SimpleNamespace(), latency_table=name == "vpu.py")
 
 
@@ -42,7 +42,7 @@ class DerivationGateTest(unittest.TestCase):
             report, _ = timing.validate_derived(object(), good, {}, Path(directory))
             self.assertTrue(report["passed"])
             wrong = {"vpu.add": dict(observed, first_free_age=68)}
-            with self.assertRaises(ModelTimingValidationError):
+            with self.assertRaises(UnsupportedModelTiming):
                 timing.validate_derived(object(), wrong, {}, Path(directory))
 
 
@@ -90,7 +90,7 @@ class ModelDerivationTest(NativeModelTest):
         for changed in (source.replace("0 <= age < 32", "0 <= age < 31"),
                         source.replace("age == 32 and", "age == 30 and")):
             self.assertTrue(source != changed, "negative mutation must change the source")
-            with self.assertRaises(mxu.UnsupportedMXU):
+            with self.assertRaises(mxu.UnsupportedModelTiming):
                 mxu._plan(changed)
 
 class DerivedVPUTest(NativeModelTest):
@@ -114,18 +114,18 @@ class DerivedVPUTest(NativeModelTest):
     def test_bad_latencies_fail_closed(self):
         for latency in (0, -1, True, 1.5, 4096, 32, 64, 65):
             with self.subTest(latency=latency), patch.dict(self.vpu.VPU_OP_LATENCIES, {"vadd.bf16": latency}):
-                with self.assertRaises(derive.UnsupportedVPU):
+                with self.assertRaises(derive.UnsupportedModelTiming):
                     derive.derive_vpu(self.cfg)[0]
 
     def test_unsupported_geometry_and_isa_fail_closed(self):
         cfg = type(self.cfg)()
         cfg.arch_state_config = replace(self.cfg.arch_state_config, mrf_depth=16)
-        with self.assertRaisesRegex(derive.UnsupportedVPU, "requires 64 MREGs"):
+        with self.assertRaisesRegex(derive.UnsupportedModelTiming, "requires 64 MREGs"):
             derive.derive_vpu(cfg)
         cfg.arch_state_config = self.cfg.arch_state_config
         cfg.isa = SimpleNamespace(operations={name: cls for name, cls in self.cfg.isa.operations.items()
                                               if name != "vadd.bf16"})
-        with self.assertRaisesRegex(derive.UnsupportedVPU, "operation coverage"):
+        with self.assertRaisesRegex(derive.UnsupportedModelTiming, "operation coverage"):
             derive.derive_vpu(cfg)
 
     @unittest.skipUnless(os.environ.get("ATLAS_DERIVE_OBSERVE"), "set ATLAS_DERIVE_OBSERVE for native validation")
@@ -136,7 +136,7 @@ class DerivedVPUTest(NativeModelTest):
         self.assertTrue(report["passed"])
         blocks["vpu.add"]["first_free_age"] += 1
         with tempfile.TemporaryDirectory() as directory:
-            with self.assertRaises(ModelTimingValidationError):
+            with self.assertRaises(UnsupportedModelTiming):
                 timing.validate_derived(self.cfg, blocks, releases, Path(directory))
 
 

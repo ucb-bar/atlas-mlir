@@ -23,9 +23,9 @@ class CurveContractTest(unittest.TestCase):
         curve._check_curve_configuration(cfg, params, data)
         for field, value in (("latency_mode", "knee"), ("min_latency", 0), ("min_latency", -1)):
             with self.subTest(field=field, value=value), self.assertRaisesRegex(
-                    curve.UnsupportedCurve, "unsupported capability: dma_memory_params\\." + field):
+                    curve.UnsupportedModelTiming, "unsupported capability: dma_memory_params\\." + field):
                 curve._check_curve_configuration(cfg, dict(params, **{field: value}), data)
-        with self.assertRaisesRegex(curve.UnsupportedCurve, "unsupported capability: curve\\.curves"):
+        with self.assertRaisesRegex(curve.UnsupportedModelTiming, "unsupported capability: curve\\.curves"):
             curve._check_curve_configuration(cfg, params, {"curves": {}})
 
 
@@ -83,7 +83,7 @@ class NativeCurveTest(NativeModelFixture, unittest.TestCase):
             cfg = copy(self.cfg)
             cfg.dma_memory_params = dict(self.cfg.dma_memory_params, **{field: value})
             with self.subTest(field=field), self.assertRaisesRegex(
-                    curve.UnsupportedCurve, "unsupported capability: dma_memory_params\\." + field):
+                    curve.UnsupportedModelTiming, "unsupported capability: dma_memory_params\\." + field):
                 curve.derive_curve(cfg)
 
     def test_unreviewed_source_mutation_rejected(self):
@@ -93,7 +93,7 @@ class NativeCurveTest(NativeModelFixture, unittest.TestCase):
         mutated = source.replace("self._last_ready = 0.0", "self._last_ready = 1.0")
         self.assertNotEqual(source, mutated)
         with patch.object(curve, "_read", return_value=mutated):
-            with self.assertRaisesRegex(curve.UnsupportedCurve, "source semantics or bytes"):
+            with self.assertRaisesRegex(curve.UnsupportedModelTiming, "source semantics or bytes"):
                 curve.derive_curve(self.cfg)
 
     def test_core_order_and_wait_predicate_mutations_refuse(self):
@@ -107,7 +107,7 @@ class NativeCurveTest(NativeModelFixture, unittest.TestCase):
                     return source.replace(before, after)
                 return source
             with self.subTest(before=before), patch.object(curve, "_read", side_effect=mutated):
-                with self.assertRaisesRegex(curve.UnsupportedCurve, "completion visibility"):
+                with self.assertRaisesRegex(curve.UnsupportedModelTiming, "completion visibility"):
                     curve.derive_curve(self.cfg)
 
     def test_source_bound_refuses_unknown_ready_expression_independently_of_pin(self):

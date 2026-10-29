@@ -8,13 +8,8 @@ from copy import deepcopy
 import inspect
 from atlas_derive_scratchpad import read_source
 
-from atlas_derive_mxu import UnsupportedMXU, _one, _method, _name
-from atlas_derive_vpu import UnsupportedVPU
+from atlas_derive_mxu import _one, _method, _name
 from atlas_model_schema import SOURCE_SHAPES, ast_digest, reservation as _reservation, timing_block
-
-
-class UnsupportedMemory(UnsupportedModelTiming):
-    """The selected memory engine has no reviewed structural timing interpretation."""
 
 
 def _integer(node, rows):
@@ -25,7 +20,7 @@ def _integer(node, rows):
     if isinstance(node, ast.BinOp) and isinstance(node.op, (ast.Add, ast.Sub)):
         left, right = _integer(node.left, rows), _integer(node.right, rows)
         return left + right if isinstance(node.op, ast.Add) else left - right
-    raise UnsupportedMemory("unsupported memory timing expression: " + ast.dump(node))
+    raise UnsupportedModelTiming("unsupported memory timing expression: " + ast.dump(node))
 
 
 def _ages(predicate, rows):
@@ -36,9 +31,9 @@ def _ages(predicate, rows):
         first = _integer(predicate.left, rows) + isinstance(predicate.ops[0], ast.Lt)
         last = _integer(predicate.comparators[1], rows) - isinstance(predicate.ops[1], ast.Lt)
     else:
-        raise UnsupportedMemory("unsupported memory timing predicate")
+        raise UnsupportedModelTiming("unsupported memory timing predicate")
     if not 0 <= first <= last < 4096:
-        raise UnsupportedMemory("memory timing predicate is outside the supported age range")
+        raise UnsupportedModelTiming("memory timing predicate is outside the supported age range")
     return dict(first_age=first, last_age=last, count=last - first + 1, step=1)
 
 
@@ -49,14 +44,14 @@ def _source(module):
     # indexing, completion and reservation call sites, must keep its reviewed AST.
     digest = ast_digest(tree)
     if digest != SOURCE_SHAPES[path.rsplit("/", 1)[-1]]:
-        raise UnsupportedMemory("unsupported LSU/XLU control-flow semantics")
+        raise UnsupportedModelTiming("unsupported LSU/XLU control-flow semantics")
     if path.rsplit("/", 1)[-1] == "xlu.py":
         # The full AST above guards the declaration and every use. Resolve the
         # reviewed public duration before interpreting the age expressions.
         from atlas_derive_mxu import _assignment
         duration = _assignment(tree, "TRANSPOSE_CYCLES").value
         if not isinstance(duration, ast.Constant) or type(duration.value) is not int:
-            raise UnsupportedMemory("unsupported XLU transpose duration")
+            raise UnsupportedModelTiming("unsupported XLU transpose duration")
         class ResolveDuration(ast.NodeTransformer):
             def visit_Name(self, node):
                 if isinstance(node.ctx, ast.Load) and node.id == "TRANSPOSE_CYCLES":
@@ -73,11 +68,11 @@ def _predicates(method):
 
 def _block(name, events, last):
     if last < max(event["last_age"] for event in events.values()):
-        raise UnsupportedMemory("engine completes before its final event")
+        raise UnsupportedModelTiming("engine completes before its final event")
     return timing_block(name, name.split(".")[0], events, last)
 
 
-def _derive_memory(cfg):
+def derive_memory(cfg):
     """Return six isolated blocks and separate reservation/port envelopes; no ticks."""
     from npu_model.hardware import lsu, xlu, bank_conflict
     from atlas_derive_vpu import _check_source
@@ -86,18 +81,18 @@ def _derive_memory(cfg):
     _check_source(bank_conflict)
     geometry = cfg.arch_state_config
     if (geometry.mrf_depth, geometry.mrf_width, geometry.num_m_registers, cfg.vmem_bank_bytes) != (32, 32, 64, 262144):
-        raise UnsupportedMemory("unsupported LSU/XLU bank geometry")
+        raise UnsupportedModelTiming("unsupported LSU/XLU bank geometry")
     if not {"LoadStoreUnit", "CrossLaneExecutionUnit"} <= set(cfg.execution_units.values()):
-        raise UnsupportedMemory("configuration does not provide LSU/XLU engines")
+        raise UnsupportedModelTiming("configuration does not provide LSU/XLU engines")
     for name in ("vload", "vstore", "lw", "seld", "sw", "vtrpose.xlu"):
         operation = cfg.isa.operations.get(name)
         if (operation is None or operation.mnemonic != name
                 or operation.exu != (EXU.XLU if name == "vtrpose.xlu" else EXU.LSU)):
-            raise UnsupportedMemory("unsupported memory ISA metadata")
+            raise UnsupportedModelTiming("unsupported memory ISA metadata")
         params = ({"vd", "vs1"} if name == "vtrpose.xlu" else {"vd", "rs1", "imm"} if name.startswith("v")
                   else {"rs1", "rs2", "imm"} if name == "sw" else {"rd", "rs1", "imm"})
         if set(inspect.signature(operation).parameters) != params:
-            raise UnsupportedMemory("unsupported memory ISA operands")
+            raise UnsupportedModelTiming("unsupported memory ISA operands")
     classes = {}
     for module, name in ((lsu, "LoadStoreUnit"), (xlu, "CrossLaneExecutionUnit")):
         classes[name] = _one((node for node in _source(module).body
@@ -106,7 +101,7 @@ def _derive_memory(cfg):
     vector = _predicates(_method(classes["LoadStoreUnit"], "_tick_vector"))
     transpose = _predicates(_method(classes["CrossLaneExecutionUnit"], "tick"))
     if (len(scalar), len(vector), len(transpose)) != (3, 3, 4):
-        raise UnsupportedMemory("unexpected memory timing predicates")
+        raise UnsupportedModelTiming("unexpected memory timing predicates")
     rows = geometry.mrf_depth
     # AST walk visits scalar store, load request, load response in source order.
     store, load, response = (_ages(node, rows) for node in scalar)
@@ -132,10 +127,3 @@ def _derive_memory(cfg):
                 releases[block["name"]][key] = _reservation(event["last_age"], first=event["first_age"], banks=[0])
     return {block["name"]: deepcopy(block) for block in blocks}, releases
 
-
-def derive_memory(cfg):
-    """Derive memory facts, reporting shared source-helper failures as memory errors."""
-    try:
-        return _derive_memory(cfg)
-    except (UnsupportedMXU, UnsupportedVPU) as error:
-        raise UnsupportedMemory(str(error)) from error

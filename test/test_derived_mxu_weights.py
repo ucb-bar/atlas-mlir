@@ -25,7 +25,7 @@ class NativeWeightTest(NativeModelFixture, unittest.TestCase):
         for old, new in mutations:
             self.assertIn(old, source)
             with self.subTest(mutation=old), patch.object(mxu, "_sources", return_value=(source.replace(old, new), checker)):
-                with self.assertRaises(mxu.UnsupportedMXU):
+                with self.assertRaises(mxu.UnsupportedModelTiming):
                     mxu.derive_weight_timing(self.cfg)
 
 if __name__ == "__main__":

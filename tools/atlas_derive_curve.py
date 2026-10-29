@@ -16,12 +16,8 @@ from atlas_derive_mxu import _one, _method
 from atlas_model_schema import (LOCK, SOURCE_SHAPES, DMA_SOURCE_SHAPES, ast_digest)
 
 
-class UnsupportedCurve(UnsupportedModelTiming):
-    """Source, curve or configuration has no reviewed DMA interpretation."""
-
-
 def _unsupported(field):
-    raise UnsupportedCurve("unsupported capability: " + field)
+    raise UnsupportedModelTiming("unsupported capability: " + field)
 
 
 def resolve_curve_path(cfg):
@@ -105,14 +101,14 @@ def _review(module):
     digest = hashlib.sha256(path.read_bytes()).hexdigest()
     if (shape != SOURCE_SHAPES.get(path.name) or
             digest != LOCK.get("dma_source_sha256", {}).get(path.name)):
-        raise UnsupportedCurve("unsupported DMA source semantics or bytes: " + path.name)
+        raise UnsupportedModelTiming("unsupported DMA source semantics or bytes: " + path.name)
     return tree
 
 
 def _literal(node):
     value = ast.literal_eval(node)
     if type(value) not in (int, float) or not math.isfinite(value) or value < 0:
-        raise UnsupportedCurve("unsupported DMA timing literal")
+        raise UnsupportedModelTiming("unsupported DMA timing literal")
     return value
 
 
@@ -122,14 +118,14 @@ def _engine_values(tree):
     increment = _one((n for n in ast.walk(tick) if isinstance(n, ast.AugAssign) and
                       isinstance(n.target, ast.Attribute) and n.target.attr == "cycle"), "DMA clock increment")
     if not isinstance(increment.op, ast.Add):
-        raise UnsupportedCurve("unsupported DMA clock progression")
+        raise UnsupportedModelTiming("unsupported DMA clock progression")
     edge = _literal(increment.value)
     entry = _one((n for n in ast.walk(tick) if isinstance(n, ast.Call) and
                   isinstance(n.func, ast.Name) and n.func.id == "_StoreBeat"), "store data queue entry")
     available = entry.args[-1]
     if not (isinstance(available, ast.BinOp) and isinstance(available.op, ast.Add) and
             isinstance(available.left, ast.Name) and available.left.id == "cycle"):
-        raise UnsupportedCurve("unsupported store data availability")
+        raise UnsupportedModelTiming("unsupported store data availability")
     delay = _literal(available.right)
     # tick snapshots the old slots and enqueues launches at the end; the reviewed
     # full AST pins this ordering. Stores first read at the next tick, then wait
@@ -150,20 +146,20 @@ def _core_phase_contract(core_source):
     mask.value.right = ast.Name(id="DERIVED_DELAY_MASK", ctx=ast.Load())
     if (shape(core_tick) != frontend_shapes[("core.py", "Core", "tick")] or
             shape(normalized) != frontend_shapes[("core.py", "Core", "_tick_s1")]):
-        raise UnsupportedCurve("unsupported DMA/Core completion visibility semantics")
+        raise UnsupportedModelTiming("unsupported DMA/Core completion visibility semantics")
     return core_tick, s1
 
 
 def review_dma_sources(sources):
     """Refuse changes to DMA issue, completion, and memory arbitration."""
     if set(sources) != set(DMA_SOURCE_SHAPES):
-        raise UnsupportedCurve("missing DMA source/phase contract source")
+        raise UnsupportedModelTiming("missing DMA source/phase contract source")
     trees = {}
     for name, expected in DMA_SOURCE_SHAPES.items():
         tree = ast.parse(sources[name])
         digest = ast_digest(tree)
         if digest != expected:
-            raise UnsupportedCurve("unsupported DMA/Core completion visibility or admission semantics: " + name)
+            raise UnsupportedModelTiming("unsupported DMA/Core completion visibility or admission semantics: " + name)
         trees[name] = tree
     startup, interval = _engine_values(trees["dma.py"])
     cls = _one((n for n in trees["core.py"].body if isinstance(n, ast.ClassDef) and n.name == "Core"), "Core class")
@@ -172,7 +168,7 @@ def review_dma_sources(sources):
                   and n.target.attr == "cycle_count" and isinstance(n.op, ast.Add)
                   and isinstance(n.value, ast.Constant) and type(n.value.value) is int]
     if increments != [1] or interval != 1:
-        raise UnsupportedCurve("unsupported DMA source/phase clock progression")
+        raise UnsupportedModelTiming("unsupported DMA source/phase clock progression")
     _core_phase_contract(sources["core.py"])
 
 
@@ -199,12 +195,12 @@ def _proposal_contract(core_source, dma_tree, backend_tree, rows, minimum, inter
 
     if not (call_line(core_tick, "self._tick_s1()") <
             call_line(core_tick, "exu.tick(self.issued_uop if exu is target else None)")):
-        raise UnsupportedCurve("unsupported Core S1/DMA tick order")
+        raise UnsupportedModelTiming("unsupported Core S1/DMA tick order")
     if not (call_line(tick, "self.backend.pop_response(cycle)") <
             call_line(tick, "self.backend.issue(BeatRequest(self._next_source, address, head.is_store, cycle))") <
             call_line(tick, "state.clear_flag(slot.channel)") <
             call_line(tick, "self._slots.append(slot)")):
-        raise UnsupportedCurve("unsupported DMA response/request/retirement/launch order")
+        raise UnsupportedModelTiming("unsupported DMA response/request/retirement/launch order")
     for tree, expected in (
             (issue, "request.cycle + max(float(self.min_latency), latency)"),
             (issue, "max(ready, self._last_ready + 1.0 / peak_bw)"),
@@ -219,15 +215,15 @@ def _proposal_contract(core_source, dma_tree, backend_tree, rows, minimum, inter
                   *(r["cycles_per_beat"] for r in rows))
     maximum_cycle = 2147483647
     if not math.isfinite(maximum) or maximum > maximum_cycle:
-        raise UnsupportedCurve("unsupported DMA proposal arithmetic domain")
+        raise UnsupportedModelTiming("unsupported DMA proposal arithmetic domain")
     # Do not subtract the backend rounding epsilon here: IEEE addition followed
     # by subtraction can round across an integer even on small cycle counts.
     # Rounding upward without that reduction preserves the service envelope.
     quantum = math.ceil(maximum) + interval
     if type(interval) is not int or interval != 1 or minimum < interval or quantum <= interval:
-        raise UnsupportedCurve("unsupported DMA bound service/positive response latency")
+        raise UnsupportedModelTiming("unsupported DMA bound service/positive response latency")
     if quantum > maximum_cycle:
-        raise UnsupportedCurve("unsupported DMA proposal arithmetic domain")
+        raise UnsupportedModelTiming("unsupported DMA proposal arithmetic domain")
     # Compiler policy: serialize DMA estimates by one cycle between commands.
     intercommand_serialization_cycles = 1
     return dict(retire_to_wait_issue_cycles=interval, per_beat_bound_cycles=quantum,
@@ -247,7 +243,7 @@ def derive_curve(cfg):
     try:
         data = json.loads(curve_bytes)
     except ValueError as error:
-        raise UnsupportedCurve("unsupported capability: dma_memory_params.curves") from error
+        raise UnsupportedModelTiming("unsupported capability: dma_memory_params.curves") from error
     if not isinstance(data, dict):
         _unsupported("dma_memory_params.curves")
     _check_curve_configuration(cfg, params, data)
@@ -257,24 +253,24 @@ def derive_curve(cfg):
     params.setdefault("queue_depth", cfg.dma_max_in_flight)
     backend = memory_backend.CurveMemoryBackend(**params)
     if backend.latency_mode != "unloaded" or backend.converge != 1.0 or not backend.enforce_peak:
-        raise UnsupportedCurve("DMA proposal facts support unloaded, converge=1, peak-paced curves only")
+        raise UnsupportedModelTiming("DMA proposal facts support unloaded, converge=1, peak-paced curves only")
     positive = (backend.beat_bytes, backend.channels, backend.frequency_ghz, backend.queue_depth,
                 backend.window_beats, backend.min_latency,
                 cfg.dma_max_in_flight, cfg.dma_num_channels, cfg.dma_max_transfer_bytes)
     if any(isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) or v <= 0 for v in positive):
-        raise UnsupportedCurve("unsupported DMA geometry or scaling")
+        raise UnsupportedModelTiming("unsupported DMA geometry or scaling")
     if backend.beat_bytes != cfg.dma_beat_bytes:
-        raise UnsupportedCurve("backend and engine beat sizes disagree")
+        raise UnsupportedModelTiming("backend and engine beat sizes disagree")
     if (any(type(value) is not int for value in (cfg.dma_beat_bytes, cfg.dma_max_in_flight,
                                                cfg.dma_num_channels, cfg.dma_max_transfer_bytes)) or
             cfg.dma_max_transfer_bytes % cfg.dma_beat_bytes):
-        raise UnsupportedCurve("unsupported integral DMA engine geometry")
+        raise UnsupportedModelTiming("unsupported integral DMA engine geometry")
     startup, issue_interval = _engine_values(dma_tree)
     rows = []
     for pct in backend._pcts:
         points = backend._curves[pct]
         if not 0 <= pct <= 100 or any(not math.isfinite(x) or x <= 0 for point in points for x in point):
-            raise UnsupportedCurve("unsupported DMA curve coordinates")
+            raise UnsupportedModelTiming("unsupported DMA curve coordinates")
         peak, _ = backend.curve_peak(pct)
         rows.append(dict(unloaded_latency_cycles=backend.latency_at(0.0, pct),
                          cycles_per_beat=1.0 / peak))

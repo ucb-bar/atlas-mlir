@@ -167,7 +167,7 @@ class ArchitectureDerivationTest(unittest.TestCase):
         for source, before, after, diagnostic in cases:
             with self.subTest(source=source, diagnostic=diagnostic):
                 self.assertIn(before, sources[source])
-                with self.assertRaisesRegex(derive.UnsupportedArchitecture, diagnostic):
+                with self.assertRaisesRegex(derive.UnsupportedModelTiming, diagnostic):
                     self.derive(**{source: sources[source].replace(before, after)})
 
     def test_config_capacity_mutations_propagate(self):
@@ -194,7 +194,7 @@ class ArchitectureDerivationTest(unittest.TestCase):
                 ("num_x_registers", 0, "num_x_registers must be a positive integer")):
             cfg = configuration()
             setattr(cfg.arch_state_config, name, value)
-            with self.subTest(name=name), self.assertRaisesRegex(derive.UnsupportedArchitecture, diagnostic):
+            with self.subTest(name=name), self.assertRaisesRegex(derive.UnsupportedModelTiming, diagnostic):
                 self.derive(cfg)
 
 
@@ -247,7 +247,7 @@ class NativeArchitectureTest(unittest.TestCase):
             return tree
 
         with patch.object(derive, "_source", side_effect=changed_storage):
-            with self.assertRaisesRegex(derive.UnsupportedArchitecture, "storage allocation for self.mrf"):
+            with self.assertRaisesRegex(derive.UnsupportedModelTiming, "storage allocation for self.mrf"):
                 derive.derive_arch(cfg)
 
 

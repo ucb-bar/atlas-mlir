@@ -9,10 +9,6 @@ from pathlib import Path
 from atlas_model_diagnostics import UnsupportedModelTiming
 
 
-class UnsupportedScratchpad(UnsupportedModelTiming):
-    """The source no longer has the supported sampling/staging boundary."""
-
-
 def read_source(path):
     return Path(path).read_text()
 
@@ -23,7 +19,7 @@ def method(source, cls, name):
     methods = [node for item in classes for node in item.body
                if isinstance(node, ast.FunctionDef) and node.name == name]
     if len(methods) != 1:
-        raise UnsupportedScratchpad(f"expected one source method {cls}.{name}")
+        raise UnsupportedModelTiming(f"expected one source method {cls}.{name}")
     return methods[0]
 
 

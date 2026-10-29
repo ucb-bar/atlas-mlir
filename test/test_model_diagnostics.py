@@ -6,21 +6,16 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 import atlas_model_timing as timing
-from atlas_model_diagnostics import (UPDATE_GUIDANCE, ModelTimingEvidenceError,
-                                     ModelTimingValidationError, UnsupportedModelTiming,
-                                     model_timing_cli, with_update_guidance)
+from atlas_model_diagnostics import UPDATE_GUIDANCE, UnsupportedModelTiming, model_timing_cli
 
 
 class DiagnosticBoundaryTest(unittest.TestCase):
-    def test_refusal_types_receive_exactly_one_final_guidance_line(self):
-        for cls in (UnsupportedModelTiming, ModelTimingEvidenceError, ModelTimingValidationError):
-            with self.subTest(cls=cls):
-                error = cls(with_update_guidance("refused"))
-                self.assertEqual(str(error), "refused\n" + UPDATE_GUIDANCE)
-                self.assertEqual(with_update_guidance(error), str(error))
-                with self.assertRaises(SystemExit) as raised:
-                    model_timing_cli(lambda: self.raise_error(error))()
-                self.assertEqual(str(raised.exception), str(error))
+    def test_cli_adds_guidance_to_refusals(self):
+        error = UnsupportedModelTiming("refused")
+        self.assertEqual(str(error), "refused")
+        with self.assertRaises(SystemExit) as raised:
+            model_timing_cli(lambda: self.raise_error(error))()
+        self.assertEqual(str(raised.exception), "refused\n" + UPDATE_GUIDANCE)
 
     @staticmethod
     def raise_error(error):

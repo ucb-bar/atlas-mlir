@@ -21,7 +21,7 @@ class VpuLifetimeTest(unittest.TestCase):
         self.assertEqual(final, {"vpu.rsum": 39})
         for changed in (dict(blocks["vpu.rsum"], first_free_age=41),
                         dict(blocks["vpu.rsum"], events=dict(write0=dict(last_age=40)))):
-            with patch("atlas_derive_vpu._plans", return_value=plans), self.assertRaises(derive.UnsupportedAdmission):
+            with patch("atlas_derive_vpu._plans", return_value=plans), self.assertRaises(derive.UnsupportedModelTiming):
                 derive._vpu_live_ages(None, {"vpu.rsum": changed})
 
 

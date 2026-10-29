@@ -2,7 +2,7 @@
 """Observe isolated operation timing from an explicitly selected model."""
 from __future__ import annotations
 
-from atlas_model_diagnostics import UnsupportedModelTiming, ModelTimingValidationError
+from atlas_model_diagnostics import UnsupportedModelTiming
 
 from collections import defaultdict
 from contextlib import closing
@@ -170,5 +170,5 @@ def validate_derived(cfg, candidates, releases, output_dir):
     output_dir.mkdir(parents=True, exist_ok=True)
     (output_dir / "validation-report.json").write_text(json.dumps(report, sort_keys=True, indent=2) + "\n")
     if not report["passed"]:
-        raise ModelTimingValidationError(f"derived facts validation failed; see {output_dir / 'validation-report.json'}")
+        raise UnsupportedModelTiming(f"derived facts validation failed; see {output_dir / 'validation-report.json'}")
     return report, observed
