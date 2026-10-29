@@ -817,12 +817,11 @@ public:
       llvm::erase_if(transfers, [&](int end) { return end <= cycle; });
       transfers.push_back(work + cost.busy);
     }
-    exposedWaiting += cycle - frontend;
     frontend = frontendAfter(node, cycle);
     makespan = std::max(makespan, finished[node]);
   }
 
-  int makespan = 0, exposedWaiting = 0;
+  int makespan = 0;
 
 private:
   unsigned unit(unsigned node) const {
