@@ -20,8 +20,7 @@ namespace {
 // Live MXU handles become saved tiles before the strict virtual verifier,
 // which bounds each unit's slots.
 void buildVerifyStage(OpPassManager &pm, const AtlasCompileOptions &options) {
-  if (options.spillMXUState)
-    pm.addPass(createSpillAtlasMXUStatePass());
+  pm.addPass(createSpillAtlasMXUStatePass());
   pm.addPass(createVerifyAtlasVirtualStreamPass());
   if (options.guardedPack)
     pm.addPass(createLowerAtlasGuardedPackPass());
