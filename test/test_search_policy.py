@@ -124,8 +124,7 @@ class SearchPolicyTest(SelectionFixture, unittest.TestCase):
         args = parser.parse_args(["--provider", "model", "--workers", "2", "--max-candidates", "5"])
         options = selection.model_arguments(args)
         options.update(random_seeds=(19,), search_group_evaluations=0,
-                       mreg_candidates=((7,) * 64,), store_window_candidates=((3,),),
-                       pack_preload_candidates=False)
+                       mreg_candidates=((7,) * 64,), store_window_candidates=((3,),))
         receipt = self.select(scorer=lambda *args, **kwargs: 11, **options)
         effective = receipt["search_policy"]["effective"]
         self.assertEqual(effective["random_seeds"], [19])

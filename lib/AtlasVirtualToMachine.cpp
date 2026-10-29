@@ -46,11 +46,9 @@ class VirtualPlanner {
 public:
   VirtualPlanner(ModuleOp module, func::FuncOp function,
                  ArrayRef<unsigned> storeWindowRanks = {},
-                 ArrayRef<unsigned> mregRanks = {},
-                 bool packWeightBeforePack = false, unsigned packRelayoutRows = 1)
+                 ArrayRef<unsigned> mregRanks = {}, unsigned packRelayoutRows = 1)
       : module(module), function(function), attrs(module.getContext()),
         emitter(module.getContext()), allocation(storeWindowRanks, mregRanks),
-        packWeightBeforePack(packWeightBeforePack),
         packRelayoutRows(packRelayoutRows) {}
 
   LogicalResult plan() {
@@ -103,7 +101,6 @@ public:
           flushReusedWindow(op);
           for (Value operand : op.getOperands())
             flushLoad(operand, op.getLoc());
-          preloadPackWeight(op);
         }
         size_t first = planned.size();
         if (failed(lowerOperation(op)))
@@ -189,8 +186,6 @@ public:
     (*emitted)->setAttr("atlas.input_dram_base", builder.getI64IntegerAttr(abi.inputBase));
     (*emitted)->setAttr("atlas.output_dram_base", builder.getI64IntegerAttr(abi.outputBase));
     (*emitted)->setAttr("atlas.scalar_arg_regs", builder.getDenseI32ArrayAttr(allocation.scalarArguments()));
-    if (packWeightBeforePack)
-      (*emitted)->setAttr("atlas.model_preloaded_weights", builder.getDenseI32ArrayAttr(preloadedWeights));
     if (controlBase)
       (*emitted)->setAttr("atlas.control_dram_base", builder.getI64IntegerAttr(*controlBase));
     if (function->hasAttr("atlas.memory_controls")) {
@@ -575,24 +570,6 @@ private:
       flushLoad(pendingOrder.front(), loc);
   }
 
-  void preloadPackWeight(Operation &op) {
-    auto pack = dyn_cast<VirtualPackFP8Op>(op);
-    if (!packWeightBeforePack || !pack)
-      return;
-    auto matmul = dyn_cast_or_null<VirtualMXUMatmulOp>(op.getNextNode());
-    if (!matmul || matmul.getActivation() != pack.getResult())
-      return;
-    auto load = pendingLoads.find(matmul.getWeight());
-    if (load == pendingLoads.end())
-      return;
-    unsigned weight = load->second.dst, source = tile(pack.getSrc());
-    // The original allocation did not keep the weight live across PACK.
-    if (weight == source || weight == source + 1 || weight == fp8(pack.getResult()))
-      return;
-    preloadedWeights.push_back(load->second.placement->id);
-    flushLoad(matmul.getWeight(), op.getLoc());
-  }
-
   LogicalResult lowerPack(VirtualPackFP8Op pack) {
     // Only the E8M0 scale codes observed on the selected RTL are admitted.
     if (pack.getScaleCode() < 122 || pack.getScaleCode() > 128)
@@ -969,9 +946,7 @@ private:
   std::vector<Operation *> planned;
   SmallVector<std::pair<size_t, unsigned>> redirects;
   VirtualAllocationPlan allocation;
-  bool packWeightBeforePack;
   unsigned packRelayoutRows;
-  SmallVector<int32_t> preloadedWeights;
   llvm::DenseMap<Value, std::optional<uint32_t>> constantAddresses;
   llvm::DenseMap<Block *, unsigned> blockLabels;
   llvm::DenseMap<unsigned, size_t> labelPC;
@@ -1021,10 +996,6 @@ struct LowerAtlasVirtualToMachinePass
 
   Option<std::string> mregRanks{
       *this, "mreg-ranks", llvm::cl::desc("Cyclic free MREG color ranks"), llvm::cl::init("")};
-  Option<bool> packWeightBeforePack{
-      *this, "pack-weight-before-pack", llvm::cl::desc("Preload a disjoint pending weight before adjacent PACK"),
-      llvm::cl::init(false)};
-
   Option<unsigned> packRelayoutRows{*this, "pack-relayout-rows",
       llvm::cl::desc("PACK rows per iteration (0 keeps provider policy)"), llvm::cl::init(0)};
 
@@ -1068,7 +1039,7 @@ struct LowerAtlasVirtualToMachinePass
     unsigned rows = packRelayoutRows ? packRelayoutRows.getValue() :
         atlasPackRelayoutRowsPerIteration(modelProvider);
     VirtualPlanner planner(module, function, storeWindowRanks, registerRanks,
-                           packWeightBeforePack, rows);
+                           rows);
     if (allocationReport.empty()) {
       if (failed(planner.plan()) || failed(planner.materialize()))
         signalPassFailure();
@@ -1123,13 +1094,12 @@ void mlir::atlas::registerLowerAtlasVirtualToMachinePass() {
 std::unique_ptr<Pass>
 mlir::atlas::createLowerAtlasVirtualToMachinePass(
     StringRef allocationReport, StringRef provider, StringRef storeWindows,
-    StringRef mregRanks, bool packWeightBeforePack, unsigned packRelayoutRows) {
+    StringRef mregRanks, unsigned packRelayoutRows) {
   auto pass = std::make_unique<LowerAtlasVirtualToMachinePass>();
   pass->allocationReport = allocationReport.str();
   pass->provider = provider.str();
   pass->storeWindows = storeWindows.str();
   pass->mregRanks = mregRanks.str();
-  pass->packWeightBeforePack = packWeightBeforePack;
   pass->packRelayoutRows = packRelayoutRows;
   return pass;
 }

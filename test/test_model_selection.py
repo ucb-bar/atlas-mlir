@@ -126,10 +126,8 @@ class ModelSelectionTest(SelectionFixture, unittest.TestCase):
             self.assertEqual(values["profile"], "curve")
             self.assertEqual(values["mreg_candidates"], None if budget == "full" else ())
         values = model_arguments(parser.parse_args(["--provider", "model", "--workers", "4",
-            "--search-group-evaluations", "72", "--profile", "fifo43", "--no-bank-candidates",
-            "--no-pack-preload-candidates"]))
+            "--search-group-evaluations", "72", "--profile", "fifo43", "--no-bank-candidates"]))
         self.assertEqual((values["search_group_evaluations"], values["profile"], values["mreg_candidates"]), (72, "fifo43", ()))
-        self.assertFalse(values["pack_preload_candidates"])
         builtin = model_arguments(parser.parse_args([]))
         self.assertEqual((builtin["profile"], builtin["search_group_evaluations"],
                           builtin["mreg_candidates"]), ("fifo43", 204, None))
@@ -239,16 +237,13 @@ class ModelSelectionTest(SelectionFixture, unittest.TestCase):
 
     def test_patience_stops_at_batch_boundary(self):
         receipt = self.select(runner=self.graph_run([[], [0], *[[] for _ in range(14)]]), max_candidates=1,
-                              search_group_evaluations=100, search_patience=12, workers=4,
-                              pack_preload_candidates=True)
+                              search_group_evaluations=100, search_patience=12, workers=4)
         self.assertEqual(receipt["group_search"]["evaluations"], 12)
         self.assertTrue(receipt["group_search"]["stopped_for_patience"])
         self.assertEqual(receipt["group_search"]["accepted_indices"], [])
-        self.assertEqual([row["class"] for row in receipt["candidates"]][-1:],
-                         ["pack-preload-waits"])
         self.assertEqual(receipt["selected_index"], 0)
         self.assertEqual(receipt["score_cache_entries"], 1)
-        self.assertEqual(receipt["score_cache_hits"], 13)
+        self.assertEqual(receipt["score_cache_hits"], 12)
 
     def test_invalid_search_controls_reject_before_tools(self):
         for options, diagnostic in (
@@ -449,41 +444,6 @@ class ModelSelectionTest(SelectionFixture, unittest.TestCase):
             self.assertEqual(receipt["selected_index"], 0)
             self.assertTrue(all(row["options"]["lookahead"] == 0 for row in receipt["candidates"]))
 
-    def test_curve_group_siblings_clear_weight_preloading(self):
-        from atlas_model_selection import Selection
-        orders = [((1, 0),)]
-        base = Candidate(virtual_orders=((0, 1),), wait_placement="preloaded", pack_weight_before_pack=True)
-        curve = list(Selection.group_candidates(base, orders, "curve"))
-        self.assertEqual([candidate.wait_placement for candidate in curve], ["default", "source"])
-        self.assertTrue(all(not candidate.pack_weight_before_pack for candidate in curve))
-        fifo = list(Selection.group_candidates(base, orders, "fifo43"))
-        self.assertEqual(len(fifo), 1)
-        self.assertEqual(fifo[0].wait_placement, "preloaded")
-        self.assertTrue(fifo[0].pack_weight_before_pack)
-
-    def test_preload_wait_placements(self):
-        for options in ({"wait_placement": "preloaded"},):
-            with self.assertRaises(ValueError):
-                Candidate(**options)
-        def compile_placement(argv, **kwargs):
-            result = self.fake_run(argv, **kwargs)
-            if candidate_command(argv):
-                flags = " ".join(argv)
-                cycles = (2 if "wait-placement=preloaded" in flags else
-                          3 if "pack-weight-before-pack=true" in flags else None)
-                if cycles is not None:
-                    self.programs[kwargs["cwd"]] = {"instructions": [{"word_u32": 100 + cycles}], "cycles": cycles}
-            return result
-        receipt = self.select(runner=compile_placement, provider="builtin", max_candidates=3,
-                              pack_preload_candidates=True)
-        self.assertEqual(receipt["selected_index"], 3)
-        self.assertEqual(receipt["selected_cycles"], 2)
-        self.assertEqual(receipt["candidates"][-1]["class"], "pack-preload-waits")
-        for row in receipt["candidates"][-1:]:
-            self.assertEqual(row["options"]["random_seed"], 1)
-            self.assertTrue(row["options"]["pack_weight_before_pack"])
-        self.assertEqual(receipt["candidates"][-1]["options"]["wait_placement"], "preloaded")
-
     def bundle(self):
         bundle = self.directory / "facts"
         bundle.mkdir(exist_ok=True)
@@ -612,14 +572,10 @@ class ModelSelectionKnobsTest(unittest.TestCase):
             "--schedule-atlas-virtual=provider=builtin lookahead=1",
             "--lower-atlas-virtual-to-machine=provider=builtin store-windows=1",
             "--lower-atlas-virtual-to-machine=provider=builtin mreg-ranks=1",
-            "--lower-atlas-virtual-to-machine=provider=builtin pack-weight-before-pack=true",
             "--schedule-atlas-stream=provider=builtin wait-placement=source",
-            "--schedule-atlas-stream=provider=builtin wait-placement=preloaded",
         ):
             with self.subTest(option=option):
                 source = program([nop()]) if "wait-placement" in option else EXAMPLE.read_text()
-                if "wait-placement=preloaded" in option:
-                    source = source.replace("module {", "module attributes {atlas.model_preloaded_weights = array<i32>} {")
                 result = run("atlas-opt", source, option)
                 self.assertEqual(result.returncode, 0, result.stderr)
 
@@ -661,7 +617,7 @@ class ModelSelectionKnobsTest(unittest.TestCase):
         for ordinary, explicit in (
             ("--schedule-atlas-virtual", "--schedule-atlas-virtual=provider=builtin lookahead=0"),
             ("--lower-atlas-virtual-to-machine", "--lower-atlas-virtual-to-machine=provider=builtin "
-             "pack-weight-before-pack=false"),
+             ""),
         ):
             with self.subTest(ordinary=ordinary):
                 before = run("atlas-opt", source, ordinary)
@@ -705,37 +661,6 @@ class ModelOrderReplayTest(unittest.TestCase):
         replay = self.schedule(provider="builtin", order_file=self.order_path)
         self.assertEqual(replay.returncode, 0, replay.stderr)
         self.assertEqual(ordinary.stdout, replay.stdout)
-
-    def test_preloaded_wait_ids_are_checked_and_empty_selection_preserves_default(self):
-        source = function("copy", [start(), inp("io0", "s1", "tile", 0),
-                                  outp("s1", "s2", "tile", 0), f"return %s2 : {S}"])
-        lowered = run("atlas-opt", source, self.evidence, "--lower-atlas-virtual-boundary-to-dma",
-                      "--lower-atlas-virtual-to-machine", "--insert-atlas-dma-waits")
-        self.assertEqual(lowered.returncode, 0, lowered.stderr)
-        transfer = re.findall(r'"atlas.dma_wait"[^\n]*atlas.virtual_dma_transfer = (\d+)', lowered.stdout)[0]
-        def annotated(value):
-            return lowered.stdout if value is None else lowered.stdout.replace(
-                "module attributes {", "module attributes {atlas.model_preloaded_weights = " + value + ", ", 1)
-        for value, diagnostic in ((None, "requires preloaded weight transfer IDs"),
-                                  ("42 : i32", "requires preloaded weight transfer IDs"),
-                                  ("array<i32: -1>", "unique and nonnegative"),
-                                  (f"array<i32: {transfer}, {transfer}>", "unique and nonnegative"),
-                                  ("array<i32: 999>", "has no DMA wait")):
-            with self.subTest(value=value):
-                rejected = run("atlas-opt", annotated(value),
-                               "--schedule-atlas-stream=provider=model wait-placement=preloaded")
-                self.assertNotEqual(rejected.returncode, 0)
-                self.assertIn(diagnostic, rejected.stderr)
-        empty = annotated("array<i32>")
-        default = run("atlas-opt", empty, "--schedule-atlas-stream=provider=model")
-        selected = run("atlas-opt", empty, "--schedule-atlas-stream=provider=model wait-placement=preloaded")
-        self.assertEqual(default.returncode, 0, default.stderr)
-        self.assertEqual(selected.returncode, 0, selected.stderr)
-        self.assertEqual(default.stdout, selected.stdout)
-        selected = run("atlas-opt", annotated(f"array<i32: {transfer}>"),
-                       "--schedule-atlas-stream=provider=model wait-placement=preloaded",
-                       "--verify-atlas-machine-stream", "--verify-atlas-timing", "--verify-atlas-generated-schedule")
-        self.assertEqual(selected.returncode, 0, selected.stderr)
 
     def graph(self):
         result = self.schedule(graph_output=self.graph_path)

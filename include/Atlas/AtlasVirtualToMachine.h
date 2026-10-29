@@ -9,7 +9,7 @@ std::unique_ptr<Pass>
 createLowerAtlasVirtualToMachinePass(
     llvm::StringRef allocationReport = "", llvm::StringRef provider = "",
     llvm::StringRef storeWindows = "", llvm::StringRef mregRanks = "",
-    bool packWeightBeforePack = false, unsigned packRelayoutRows = 0);
+    unsigned packRelayoutRows = 0);
 }
 
 #endif

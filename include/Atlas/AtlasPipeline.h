@@ -11,8 +11,6 @@ struct AtlasCompileOptions : PassPipelineOptions<AtlasCompileOptions> {
       llvm::cl::desc("PACK rows per iteration (0 keeps provider policy)"), llvm::cl::init(0)};
   Option<bool> waitReusedDMASlots{*this, "wait-reused-dma-slots",
       llvm::cl::desc("Wait before reusing DMA command slots"), llvm::cl::init(false)};
-  Option<bool> packWeightBeforePack{
-      *this, "pack-weight-before-pack", llvm::cl::desc("Preload disjoint weights before PACK"), llvm::cl::init(false)};
   Option<std::string> mregRanks{*this, "mreg-ranks", llvm::cl::desc("Free MREG ranks"), llvm::cl::init("")};
   Option<std::string> orderFile{*this, "order-file", llvm::cl::desc("Virtual order JSON"), llvm::cl::init("")};
   Option<std::string> graphOutput{*this, "graph-output", llvm::cl::desc("Virtual graph JSON"), llvm::cl::init("")};

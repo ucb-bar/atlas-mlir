@@ -90,8 +90,8 @@ The selection file records attempts, cycle counts, and the winning index.
 3. Run each candidate on npu_model through drained ECALL and check the
    supplied output regions.
 4. Keep the lowest cycle count, breaking ties by the lowest candidate index.
-5. Search dependency-group moves and PACK weight placement from the current
-   winner while the configured budget and patience allow it.
+5. Search dependency-group moves from the current winner while the configured
+   budget and patience allow it.
 
 Compiler refusals count toward the budget. Native execution faults and
 numerical mismatches stop selection. Scores for identical instruction words

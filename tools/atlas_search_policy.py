@@ -42,7 +42,7 @@ def load_policy() -> dict:
         "budget_accounting": "refusals-count-patience-after-batch-v1",
         "score_cache": "invocation-profile-exact-word-stream-v1",
         "virtual_scheduler": "start-plus-spill-frontend-negative-height-source-index-v1",
-        "lowering_alternatives": "compiler-verified-pack-wait-placement-v1",
+        "lowering_alternatives": "compiler-verified-source-wait-placement-v1",
     }
     if policy.get("algorithms") != algorithms:
         raise ValueError("unsupported search policy algorithm revision")
@@ -55,19 +55,19 @@ def load_policy() -> dict:
          "engineering dma_proposal validation execution_contract", "definition")
     keys(policy["presets"], "selection full", "presets")
     for name, preset in policy["presets"].items():
-        keys(preset, "max_candidates search_group_evaluations search_patience bank_candidates pack_preload_candidates", name)
+        keys(preset, "max_candidates search_group_evaluations search_patience bank_candidates", name)
         for key, value in preset.items():
             if key.endswith("candidates") and key != "max_candidates":
                 if type(value) is not bool:
                     raise ValueError("invalid preset boolean: " + key)
             elif type(value) is not int or value < (1 if key == "max_candidates" else 0):
                 raise ValueError("invalid preset budget: " + key)
-    keys(policy["defaults"], "lower_provider selection_provider model_profile builtin_profile search_budget workers guarded_pack spill spill_mxu boundary api_max_candidates api_search_group_evaluations api_search_patience api_pack_preload_candidates", "defaults")
+    keys(policy["defaults"], "lower_provider selection_provider model_profile builtin_profile search_budget workers guarded_pack spill spill_mxu boundary api_max_candidates api_search_group_evaluations api_search_patience", "defaults")
     defaults = policy["defaults"]
     for name in ("workers", "api_max_candidates", "api_search_group_evaluations", "api_search_patience"):
         if type(defaults[name]) is not int or defaults[name] < (1 if name in ("workers", "api_max_candidates") else 0):
             raise ValueError("invalid API default budget: " + name)
-    for name in ("guarded_pack", "spill", "spill_mxu", "api_pack_preload_candidates"):
+    for name in ("guarded_pack", "spill", "spill_mxu"):
         if type(defaults[name]) is not bool:
             raise ValueError("invalid API boolean: " + name)
     if (defaults["lower_provider"] not in ("builtin", "model") or defaults["selection_provider"] not in ("builtin", "model")
@@ -94,7 +94,7 @@ def load_policy() -> dict:
          "neighbor_shuffle_seed group_max_nodes mreg_seeds mreg_rank_choices "
          "mreg_vector_length uniform_store_ranks", "pools")
     keys(candidates, "initial_knob_cap batch_width initial_wait_placement "
-         "pack_preload_wait_placement curve_group_wait_placements", "candidates")
+         "curve_group_wait_placements", "candidates")
     keys(policy["objectives"], "curve fifo43", "objectives")
     keys(policy["engineering"], "compiler scorer", "engineering")
     keys(policy["engineering"]["compiler"], "timing_search_cycles generated_word_limit spill_rewrite_limit", "compiler bounds")
@@ -119,7 +119,7 @@ def load_policy() -> dict:
         raise ValueError("invalid neighborhood bound")
     if not integers([candidates["initial_knob_cap"], candidates["batch_width"]], 1):
         raise ValueError("invalid candidate batch bound")
-    if candidates["initial_wait_placement"] not in ("default", "source") or candidates["pack_preload_wait_placement"] != "preloaded":
+    if candidates["initial_wait_placement"] not in ("default", "source"):
         raise ValueError("unsupported placement policy")
     if candidates["curve_group_wait_placements"] != ["default", "source"]:
         raise ValueError("unsupported curve group wait placements")
