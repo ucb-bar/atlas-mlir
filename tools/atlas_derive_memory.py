@@ -6,7 +6,7 @@ from atlas_model_diagnostics import UnsupportedModelTiming
 import ast
 from copy import deepcopy
 import inspect
-from atlas_derive_scratchpad import read_source
+from atlas_derive_source import read_source
 
 from atlas_derive_mxu import _one, _method, _name
 from atlas_model_schema import SOURCE_SHAPES, ast_digest, reservation as _reservation, timing_block

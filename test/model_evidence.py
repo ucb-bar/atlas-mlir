@@ -43,7 +43,7 @@ class NativeModelFixture:
 class ModelSourceFixture(NativeModelFixture):
     def setUp(self):
         super().setUp()
-        from atlas_derive_scratchpad import read_source
+        from atlas_derive_source import read_source
         from npu_model.isa import EXU
         root = Path(os.environ["ATLAS_DERIVE_MODEL_ROOT"]) / "npu_model"
         self.sources = {name: read_source(root / "hardware" / name)
@@ -58,7 +58,7 @@ class ModelSourceFixture(NativeModelFixture):
 
 def semantic_sources(model):
     """Read only reviewed relative source entries, checking paths before access."""
-    from atlas_derive_scratchpad import read_source
+    from atlas_derive_source import read_source
     manifest = json.loads((Path(__file__).resolve().parents[1] / "tools/model-semantics.json").read_text())
     sources = {}
     for relative in manifest["files"]:

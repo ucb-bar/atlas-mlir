@@ -5,7 +5,7 @@ import ast
 import inspect
 from pathlib import Path
 
-from atlas_derive_scratchpad import method, read_source
+from atlas_derive_source import method, read_source
 from atlas_model_diagnostics import UnsupportedModelTiming
 
 

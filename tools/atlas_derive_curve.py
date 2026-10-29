@@ -1,7 +1,7 @@
 """Derive DMA service bounds from model source, configuration, and curves."""
 from __future__ import annotations
 
-from atlas_derive_scratchpad import read_source as _read
+from atlas_derive_source import read_source as _read
 from atlas_model_diagnostics import UnsupportedModelTiming
 
 import ast

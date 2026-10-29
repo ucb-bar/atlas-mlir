@@ -1,7 +1,7 @@
 """Derive isolated MXU row windows and logical MREG releases from model source."""
 from __future__ import annotations
 
-from atlas_derive_scratchpad import read_source, shape
+from atlas_derive_source import read_source, shape
 from atlas_model_diagnostics import UnsupportedModelTiming
 
 import ast
