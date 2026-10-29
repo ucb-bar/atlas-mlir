@@ -28,18 +28,10 @@ def reservation(last, *, first=0):
     return dict(first_age=first, release_age=last)
 
 
-def load_lock(path):
-    return json.loads(Path(path).read_text())
-
-
-def load_vocabulary(path):
-    return json.loads(Path(path).read_text())
-
-
 _DIRECTORY = Path(__file__).resolve().parent
-LOCK = load_lock(_DIRECTORY / "model-timing.lock.json")
-SOURCE_SHAPES = LOCK["source_shapes"]
-VOCABULARY = load_vocabulary(_DIRECTORY / "model-timing-vocabulary.json")
+GUARDS = json.loads((_DIRECTORY / "model-semantics.json").read_text())
+SOURCE_SHAPES = GUARDS["source_shapes"]
+VOCABULARY = json.loads((_DIRECTORY / "model-timing-vocabulary.json").read_text())
 VPU_BLOCKS = tuple(entry["mnemonic"] for entry in VOCABULARY["vpu_blocks"])
 MXU_BLOCKS = tuple(VOCABULARY["mxu_blocks"])
 BINARY = {entry["mnemonic"] for entry in VOCABULARY["vpu_blocks"] if entry["two_input"]}

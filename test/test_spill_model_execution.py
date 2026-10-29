@@ -25,13 +25,13 @@ from test_spill_resources import (
 from test_virtual_spilling import ROOT, compile_program, pressure
 
 sys.path.insert(0, str(ROOT / "tools"))
-from atlas_model_schema import LOCK
 from atlas_model_scorer import model_instruction
-from atlas_model_timing import source_digest
+from atlas_model_facts import regenerate
 from model_evidence import isolate_model_imports
 
 
-@unittest.skipUnless(os.environ.get('ATLAS_RUN_NPU_MODEL') == '1', 'set ATLAS_RUN_NPU_MODEL=1 and ATLAS_DERIVE_MODEL_ROOT for the locked model')
+@unittest.skipUnless(os.environ.get("ATLAS_RUN_NPU_MODEL") == "1",
+                     "set ATLAS_RUN_NPU_MODEL=1 and ATLAS_DERIVE_MODEL_ROOT")
 class SpillModelExecutionTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -45,10 +45,8 @@ class SpillModelExecutionTest(unittest.TestCase):
         imported = Path(npu_model.__file__).absolute().parent.parent
         if imported != root:
             raise ValueError("imported npu_model differs from ATLAS_DERIVE_MODEL_ROOT")
-        source, _ = source_digest(imported)
-        if source != LOCK["source_sha256"]:
-            raise ValueError("spill test model source differs from model-timing.lock.json "
-                             f"revision {LOCK['model_revision']}")
+        with tempfile.TemporaryDirectory() as directory:
+            regenerate(root, Path(directory) / "facts")
         torch.set_num_threads(1)
 
     def test_mxu_spills_restore_before_continuation_on_both_units(self):

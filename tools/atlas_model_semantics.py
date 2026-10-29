@@ -2,16 +2,14 @@
 from __future__ import annotations
 
 import ast
-import json
 import sys
 from pathlib import Path
 
 from atlas_derive_source import read_source
 from atlas_model_diagnostics import UnsupportedModelTiming
-from atlas_model_schema import ast_digest as _digest
+from atlas_model_schema import GUARDS, ast_digest as _digest
 
 
-CONTRACT = Path(__file__).with_name("model-semantics.json")
 # These reviewed classes do not inspect method-definition order. Other classes
 # (notably ISA metaclasses/dataclasses) retain their exact statement order.
 _ORDER_INDEPENDENT = frozenset({"Core", "ArchState", "InstructionMemory",
@@ -122,9 +120,8 @@ def check_model_semantics(model):
         raise UnsupportedModelTiming(
             "model timing requires Python 3.14 for reviewed AST fingerprints; "
             f"running {sys.version_info.major}.{sys.version_info.minor}")
-    contract = json.loads(read_source(CONTRACT))
     checked = {}
-    for filename, expected in contract["files"].items():
+    for filename, expected in GUARDS["files"].items():
         try:
             source = read_source(Path(model) / "npu_model" / filename)
             actual = module_contract(source)

@@ -8,37 +8,9 @@ from collections import defaultdict
 from contextlib import ExitStack, closing
 import inspect
 from dataclasses import asdict, replace
-import os
-from pathlib import Path
 from unittest.mock import Mock, patch
 
 from atlas_model_schema import BINARY, mreg_event, canonical as encoded, sha256
-
-
-def manifest(model_root: Path, subdir: str, suffixes=None, sort=False):
-    records = []
-    root = model_root / subdir
-    for directory, children, filenames in os.walk(root):
-        children[:] = sorted(name for name in children if
-                             not any(blocked in name.lower() for blocked in ("hammer", "vlsi"))
-                             and (not suffixes or name != "__pycache__"))
-        for name in sorted(filenames):
-            if any(blocked in name.lower() for blocked in ("hammer", "vlsi")):
-                continue
-            path = Path(directory) / name
-            if not suffixes or path.suffix in suffixes:
-                records.append({"path": str(path.relative_to(model_root)), "sha256": sha256(path.read_bytes())})
-    if sort:
-        records.sort(key=lambda record: record["path"])
-    return sha256(encoded(records)), records
-
-
-def source_digest(model_root: Path) -> tuple[str, list[dict]]:
-    return manifest(model_root, "npu_model", {".py", ".json", ".yaml"})
-
-
-def numerical_data(model_root: Path):
-    return manifest(model_root, "npu_model/configs/data", sort=True)
 
 
 def configuration():
