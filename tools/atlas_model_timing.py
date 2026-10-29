@@ -134,19 +134,15 @@ def observe_case(cfg, mnemonic):
     raise RuntimeError("native validation instruction did not drain")
 
 
-def validate_derived(cfg, candidates, releases, output_dir):
+def validate_derived(cfg, candidates):
     """Compare all extracted operation events and first-free ages with native ticks."""
-    observed = []
+    if not candidates:
+        raise UnsupportedModelTiming("native validation has no operations")
     for name, candidate in candidates.items():
         try:
             block = observe_case(cfg, name)
-            observed.append(block)
             if block != {key: candidate[key] for key in ("events", "first_free_age")}:
                 raise RuntimeError("native timing differs from facts")
         except (ValueError, RuntimeError) as error:
             raise UnsupportedModelTiming(f"{name}: {error}") from error
-    if not observed:
-        raise UnsupportedModelTiming("native validation has no operations")
-    report = dict(passed=True, observed_runs=len(observed),
-                  checks=[dict(name=name, passed=True) for name in candidates])
-    return report, observed
+    return len(candidates)

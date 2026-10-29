@@ -395,6 +395,38 @@ FailureOr<int64_t> scalarSlotCycles(bool store, int64_t word, Operation *at,
   return cycles;
 }
 
+FailureOr<Cost> packCost(Operation *op, const timing::TimingProvider &provider) {
+  // Pack, then relayout the FP8 tile through VMEM in the same grouped-row
+  // scalar loop as lowerPack. Each store hides behind the next word's load,
+  // so a row takes a load per load-path interval, then the last word's load
+  // and store, and the back-edge, whose delay slot takes the destination step.
+  auto pack = timing::machineTimingOf(provider, "vpack.bf16.fp8", op);
+  if (failed(pack))
+    return failure();
+  auto vstore = timing::machineTimingOf(provider, "vstore", op);
+  if (failed(vstore))
+    return failure();
+  auto lw = timing::machineTimingOf(provider, "lw", op);
+  if (failed(lw))
+    return failure();
+  auto sw = timing::machineTimingOf(provider, "sw", op);
+  if (failed(sw))
+    return failure();
+  auto vload = timing::machineTimingOf(provider, "vload", op);
+  if (failed(vload)) return failure();
+  const int groupedRows = provider.packRelayoutRows ? provider.packRelayoutRows :
+      atlasPackRelayoutRowsPerIteration(provider.model != nullptr);
+  const int rowWords = kAtlasMregRowBytes / 4 * groupedRows;
+  const int rows = kAtlasMregRows / groupedRows;
+  // Policy: this proposal omits general scalar setup and assumes the
+  // destination increment can fill the slot when filling is enabled.
+  // The physical scheduler separately proves an actual available filler.
+  const int rowControl = provider.frontendSpacing.successorGap() +
+      (timing::fillsDelaySlots(provider) ? 0 : provider.frontendSpacing.ordinaryGap);
+  int64_t row = int64_t(rowWords - 1) * lw->interval + lw->latency + sw->latency + rowControl;
+  return blocking(op, Unit::Lsu, int64_t(pack->latency) + vstore->latency + rows * row + vload->latency);
+}
+
 // An operation costs the machine operations it lowers to, as they issue in
 // order on the unit doing its work.
 FailureOr<Cost> costOf(Operation *op, const timing::TimingProvider &provider) {
@@ -407,8 +439,6 @@ FailureOr<Cost> costOf(Operation *op, const timing::TimingProvider &provider) {
       if (estimate.value < 1) return op->emitOpError("provider returned a nonpositive DMA proposal estimate");
       return estimate.value;
     }
-    if (provider.id == timing::kBuiltinTimingProviderId)
-      return timing::dmaTransferCycles(bytes, store);
     return op->emitOpError("timing provider has no DMA proposal estimator");
   };
   // Boundary tiles move one register at a time, each transfer waited for
@@ -456,7 +486,8 @@ FailureOr<Cost> costOf(Operation *op, const timing::TimingProvider &provider) {
   }
   if (isAtlasSpillStore(op) || isAtlasSpillLoad(op)) {
     Operation *writer = atlasSpillSaved(op).getDefiningOp();
-    FailureOr<int64_t> cycles = vmemCycles(atlasSpillWords(writer) / registerWords, isAtlasSpillStore(op), op, provider);
+    FailureOr<int64_t> cycles = vmemCycles(
+        atlasSpillWords(writer) / registerWords, isAtlasSpillStore(op), op, provider);
     if (failed(cycles)) return failure();
     return blocking(op, Unit::Dma, *cycles);
   }
@@ -530,37 +561,8 @@ FailureOr<Cost> costOf(Operation *op, const timing::TimingProvider &provider) {
   if (isa<VirtualXLUTransposeOp>(op)) {
     return onUnit("vtrpose.xlu", Unit::Xlu, op, provider);
   }
-  if (isa<VirtualPackFP8Op>(op)) {
-    // Pack, then relayout the FP8 tile through VMEM in the same grouped-row
-    // scalar loop as lowerPack. Each store hides behind the next word's load,
-    // so a row takes a load per load-path interval, then the last word's load
-    // and store, and the back-edge, whose delay slot takes the destination step.
-    auto pack = timing::machineTimingOf(provider, "vpack.bf16.fp8", op);
-    if (failed(pack))
-      return failure();
-    auto vstore = timing::machineTimingOf(provider, "vstore", op);
-    if (failed(vstore))
-      return failure();
-    auto lw = timing::machineTimingOf(provider, "lw", op);
-    if (failed(lw))
-      return failure();
-    auto sw = timing::machineTimingOf(provider, "sw", op);
-    if (failed(sw))
-      return failure();
-    auto vload = timing::machineTimingOf(provider, "vload", op);
-    if (failed(vload)) return failure();
-    const int groupedRows = provider.packRelayoutRows ? provider.packRelayoutRows :
-        atlasPackRelayoutRowsPerIteration(provider.model != nullptr);
-    const int rowWords = kAtlasMregRowBytes / 4 * groupedRows;
-    const int rows = kAtlasMregRows / groupedRows;
-    // Policy: this proposal omits general scalar setup and assumes the
-    // destination increment can fill the slot when filling is enabled.
-    // The physical scheduler separately proves an actual available filler.
-    const int rowControl = provider.frontendSpacing.successorGap() +
-        (timing::fillsDelaySlots(provider) ? 0 : provider.frontendSpacing.ordinaryGap);
-    int64_t row = int64_t(rowWords - 1) * lw->interval + lw->latency + sw->latency + rowControl;
-    return blocking(op, Unit::Lsu, int64_t(pack->latency) + vstore->latency + rows * row + vload->latency);
-  }
+  if (isa<VirtualPackFP8Op>(op))
+    return packCost(op, provider);
   // Scalar control, a DMA wait, or nothing at all.
   auto scalar = timing::machineTimingOf(provider, "addi", op);
   if (failed(scalar))

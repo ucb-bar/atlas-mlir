@@ -18,6 +18,24 @@ namespace {
 
 constexpr int kMaxIdle = 100000;
 
+void constrainSourceWaits(DepGraph &g) {
+  auto edge = [&](int from, int to) {
+    int index = static_cast<int>(g.edges.size());
+    g.edges.push_back({from, to, 1, EdgeKind::Order, "source DMA wait placement"});
+    g.out[from].push_back(index);
+    g.in[to].push_back(index);
+  };
+  int n = static_cast<int>(g.nodes.size());
+  for (int wait = 0; wait < n; ++wait) {
+    if (g.nodes[wait].op->opClass == OpClass::DmaWait) {
+      for (int i = 0; i < wait; ++i)
+        edge(i, wait);
+      for (int i = wait + 1; i < n; ++i)
+        edge(wait, i);
+    }
+  }
+}
+
 // scheduleBlock from atlas-compiler-experiments src/passes/schedule.cpp.
 // Fixed-latency engines drain between blocks; DMA uses waits.
 LogicalResult scheduleBlock(const AtlasStream &s, size_t block, bool generated,
@@ -58,22 +76,8 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block, bool generated,
   if (!built.error.empty())
     return op(0)->emitOpError(p.diagnostic(built.error));
   DepGraph g = std::move(built.value);
-  if (sourceWaitPlacement) {
-    auto edge = [&](int from, int to) {
-      int index = static_cast<int>(g.edges.size());
-      g.edges.push_back({from, to, 1, EdgeKind::Order, "source DMA wait placement"});
-      g.out[from].push_back(index);
-      g.in[to].push_back(index);
-    };
-    for (int wait = 0; wait < n; ++wait) {
-      if (nodes[wait].op->opClass == OpClass::DmaWait) {
-        for (int i = 0; i < wait; ++i)
-          edge(i, wait);
-        for (int i = wait + 1; i < n; ++i)
-          edge(wait, i);
-      }
-    }
-  }
+  if (sourceWaitPlacement)
+    constrainSourceWaits(g);
   if (generated) {
     // Preserve the generated DMA interval policy while allowing its permitted
     // compute to overlap. Transfers on several channels may be pending at
@@ -155,7 +159,8 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block, bool generated,
       int64_t distance = ed.distance;
       if (nodes[ed.to].op->opClass == OpClass::DmaWait && nodes[ed.to].op->channel == nodes[i].op->channel) {
         if (p.dmaProposal)
-          distance = std::max(distance, int64_t(rule(p.dmaProposal(g.footprints[i].dmaCycles, 0, std::nullopt)).waitIssue));
+          distance = std::max(distance, int64_t(rule(
+              p.dmaProposal(g.footprints[i].dmaCycles, 0, std::nullopt)).waitIssue));
         else if (g.footprints[i].dmaCycles > 0)
           note("timing provider lacks DMA proposal policy");
       }

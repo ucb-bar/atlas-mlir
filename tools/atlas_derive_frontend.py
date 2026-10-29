@@ -76,7 +76,8 @@ def derive_frontend_sources(sources, scalar_classes, *, fetch_width):
                               and isinstance(item.op, ast.Sub)), "DELAY countdown decrement")
             slots["decrement"] = _positive(decrement.value, "DELAY decrement")
             if slots["decrement"] != 1:
-                raise UnsupportedModelTiming("unsupported DELAY decrement: only unit countdown reaches zero for all immediates")
+                raise UnsupportedModelTiming(
+                    "unsupported DELAY decrement: only unit countdown reaches zero for all immediates")
         if (cls, name) == ("ScalarExecutionUnit", "tick"):
             delay = _one((item for item in ast.walk(node) if isinstance(item, ast.Assign)
                           and len(item.targets) == 1 and _attr(item.targets[0], "uop", "execute_delay")),

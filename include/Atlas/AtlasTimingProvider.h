@@ -19,8 +19,7 @@ struct DMACompletionConflict {
   EdgeKind kind = EdgeKind::Order;
 };
 
-// Proposal coordinates only; neither field establishes DMA completion.
-// queueEnd belongs to the provider's versioned serialization policy.
+// Estimated queue end and matching wait issue; completion requires a DMA wait.
 struct DMAProposal {
   int queueEnd = 0, waitIssue = 0;
 };

@@ -10,16 +10,16 @@ import inspect
 from pathlib import Path
 
 from atlas_model_schema import MXU_BLOCKS
-from atlas_model_schema import SOURCE_SHAPES, ast_digest, reservation, timing_block
+from atlas_model_schema import SOURCE_SHAPES, reservation, timing_block
 
 
 _CLASSES = ("_Operation", "_MatrixExecutionUnit", "MatrixExecutionUnitSystolic", "MatrixExecutionUnitInner")
 _UNITS = {"mxu0": "MatrixExecutionUnitSystolic", "mxu1": "MatrixExecutionUnitInner"}
 
 
-def _sources(cfg):
+def _source(cfg):
     root = Path(inspect.getfile(cfg.isa)).parent
-    return (read_source(root / "hardware" / "mxu.py"), read_source(root / "hardware" / "bank_conflict.py"))
+    return read_source(root / "hardware" / "mxu.py")
 
 
 def _one(values, label):
@@ -53,7 +53,8 @@ def _integer(expr, compute_first):
         return compute_first
     if isinstance(expr, ast.BinOp) and isinstance(expr.op, (ast.Add, ast.Sub, ast.Mult)):
         left, right = _integer(expr.left, compute_first), _integer(expr.right, compute_first)
-        return left + right if isinstance(expr.op, ast.Add) else left - right if isinstance(expr.op, ast.Sub) else left * right
+        return (left + right if isinstance(expr.op, ast.Add) else
+                left - right if isinstance(expr.op, ast.Sub) else left * right)
     raise UnsupportedModelTiming("unsupported MXU timing expression: " + ast.dump(expr, include_attributes=False))
 
 
@@ -161,7 +162,7 @@ def _validated(cfg):
             if set(inspect.signature(insn).parameters) != expected_params:
                 raise UnsupportedModelTiming(f"unsupported MXU ISA operands for {name}")
     # The VPU extractor checks the shared bank checker digest once.
-    source, _ = _sources(cfg)
+    source = _source(cfg)
     return _plan(source)
 
 
@@ -211,7 +212,7 @@ def derive_mxu(cfg):
 def derive_weight_timing(cfg):
     """Project native PE use windows onto whole output-column weight rows."""
     plans = _validated(cfg)
-    source, _ = _sources(cfg)
+    source = _source(cfg)
     tree = ast.parse(source)
     base = _one((n for n in tree.body if isinstance(n, ast.ClassDef)
                  and n.name == "_MatrixExecutionUnit"), "MXU base class")

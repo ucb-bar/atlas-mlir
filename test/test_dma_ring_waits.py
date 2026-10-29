@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import pathlib
@@ -11,13 +10,13 @@ import subprocess
 import tempfile
 import unittest
 
-from test_delay_insertion import BIN, OPT, run
+from test_delay_insertion import OPT, run
 from model_evidence import requires_model_evidence
 from test_virtual_scheduling import F, S, T, add, const, dma_load, dma_store, function, inp, outp, start
 
 
 def fixture_evidence(directory: pathlib.Path) -> str:
-    """Select the generated facts through the production bundle interface."""
+    """Select generated facts through the production loader."""
     facts = pathlib.Path(os.environ["ATLAS_TEST_MODEL_FACTS"])
     return f"--select-atlas-model-evidence=facts={facts}"
 
@@ -132,15 +131,17 @@ class DMARingWaitTest(unittest.TestCase):
         launch = next(index for index, line in enumerate(lines)
                       if '"atlas.dma"' in line and "atlas.virtual_dma_transfer = 1 " in line)
         state = lines[launch].split("=")[0].strip()
-        owner = f'atlas.virtual_cfg_block = 0 : i32, atlas.virtual_cfg_helper = "pack", atlas.virtual_cfg_source = {pack} : i32'
+        owner = ('atlas.virtual_cfg_block = 0 : i32, atlas.virtual_cfg_helper = "pack", '
+                 f'atlas.virtual_cfg_source = {pack} : i32')
         # A PACK-owned branch back to the launch, with its scalar delay slot.
         lines[launch + 1] = lines[launch + 1].replace(f"({state})", "(%slot)", 1)
         lines[launch + 1:launch + 1] = [
-            f'  %loop = "atlas.branch"({state}) <{{kind = "blt", lhs = 0 : i32, rhs = 0 : i32, offset_bytes = -2 : i32}}> '
+            f'  %loop = "atlas.branch"({state}) <{{kind = "blt", '
+            'lhs = 0 : i32, rhs = 0 : i32, offset_bytes = -2 : i32}> '
             f"{{{owner}}} : (!atlas.state) -> !atlas.state",
             f'  %slot = "atlas.alu_imm"(%loop) <{{dst = 0 : i32, immediate = 0 : i32, kind = "addi", src = 0 : i32}}> '
             f"{{{owner}}} : (!atlas.state) -> !atlas.state"]
-        # The stream reader's source memory contract refuses the repeated launch before the slot count runs.
+        # The source memory contract refuses the repeated launch before slot counting.
         rejected = run(OPT, "\n".join(lines) + "\n", "--insert-atlas-dma-waits=provider=model")
         self.assertNotEqual(rejected.returncode, 0)
         self.assertIn("launched twice", rejected.stderr)

@@ -61,8 +61,7 @@ class CostProbes(NativeModelFixture, unittest.TestCase):
         blocks = {}
         for derive in (derive_vpu, derive_mxu, derive_memory):
             blocks.update(derive(self.cfg)[0])
-        report, _ = validate_derived(self.cfg, blocks, {}, None)
-        self.assertEqual(report["observed_runs"], 49)
+        self.assertEqual(validate_derived(self.cfg, blocks), 49)
         for name, block in blocks.items():
             for field in ("events", "first_free_age"):
                 changed = deepcopy(block)
@@ -72,7 +71,7 @@ class CostProbes(NativeModelFixture, unittest.TestCase):
                     changed[field] += 1
                 with self.subTest(name=name, field=field), self.assertRaisesRegex(
                         UnsupportedModelTiming, "native timing differs"):
-                    validate_derived(self.cfg, {name: changed}, {}, None)
+                    validate_derived(self.cfg, {name: changed})
 
     def test_operands_and_capacity(self):
         architecture = derive_arch(self.cfg)

@@ -87,15 +87,15 @@ class ModelSelectionTest(SelectionFixture, unittest.TestCase):
 
     def test_seed_pool_and_budget_prefix(self):
         vectors = [tuple(random.Random(seed).choices(range(32), k=64)) for seed in range(8)]
-        receipts = []
+        results = []
         for cap, evaluated in ((12, 2), (18, 8)):
-            receipt = self.select(name=str(cap), max_candidates=cap, mreg_candidates=None)
-            ranks = [row["options"]["mreg_ranks"] for row in receipt["candidates"] if row["class"] == "mreg-ranks"]
+            result = self.select(name=str(cap), max_candidates=cap, mreg_candidates=None)
+            ranks = [row["options"]["mreg_ranks"] for row in result["candidates"] if row["class"] == "mreg-ranks"]
             self.assertEqual(ranks, vectors[:evaluated])
-            receipts.append(receipt["candidates"])
-        self.assertEqual([row["options"] for row in receipts[0]],
-                         [row["options"] for row in receipts[1][:len(receipts[0])]])
-        self.assertEqual([row["options"]["random_seed"] for row in receipts[0][1:9]], list(range(8)))
+            results.append(result["candidates"])
+        self.assertEqual([row["options"] for row in results[0]],
+                         [row["options"] for row in results[1][:len(results[0])]])
+        self.assertEqual([row["options"]["random_seed"] for row in results[0][1:9]], list(range(8)))
 
     def test_neighbors_preserve_dependencies_and_blocks(self) -> None:
         preds = [[], [], [0], [1, 2], []]
@@ -134,10 +134,10 @@ class ModelSelectionTest(SelectionFixture, unittest.TestCase):
         self.assertEqual(self.invocations, [])
 
     def test_builtin_scores_and_selects_alternatives(self) -> None:
-        receipt = self.select(provider="builtin", max_candidates=5)
-        self.assertEqual(len(receipt["candidates"]), 5)
-        self.assertEqual((receipt["selected_index"], receipt["selected_cycles"]), (2, 5))
-        self.assertEqual(receipt["profile"], "fifo43")
+        result = self.select(provider="builtin", max_candidates=5)
+        self.assertEqual(len(result["candidates"]), 5)
+        self.assertEqual((result["selected_index"], result["selected_cycles"]), (2, 5))
+        self.assertEqual(result["profile"], "fifo43")
 
     def test_parallel_tie_uses_candidate_index(self) -> None:
         later_finished = threading.Event()
@@ -150,8 +150,8 @@ class ModelSelectionTest(SelectionFixture, unittest.TestCase):
                 later_finished.set()
             return result
 
-        receipt = self.select(runner=reordered, max_candidates=5, workers=4)
-        self.assertEqual(receipt["selected_index"], 2)
+        result = self.select(runner=reordered, max_candidates=5, workers=4)
+        self.assertEqual(result["selected_index"], 2)
 
     def refuse(self, refused):
         def run(argv, **kwargs):
@@ -163,11 +163,11 @@ class ModelSelectionTest(SelectionFixture, unittest.TestCase):
 
     def test_default_refusal_continues(self) -> None:
         default = candidate_options(Candidate(), "model", True)[0]
-        receipt = self.select(runner=self.refuse(lambda option: option == default), max_candidates=5)
-        failed = receipt["candidates"][0]
+        result = self.select(runner=self.refuse(lambda option: option == default), max_candidates=5)
+        failed = result["candidates"][0]
         self.assertEqual((failed["status"], failed["error_stage"]), ("FAIL", "compile"))
-        self.assertIsNone(receipt["default_cycles"])
-        self.assertEqual((receipt["selected_index"], receipt["selected_cycles"]), (2, 5))
+        self.assertIsNone(result["default_cycles"])
+        self.assertEqual((result["selected_index"], result["selected_cycles"]), (2, 5))
         self.assertTrue((self.directory / "compiled/program.json").exists())
 
     def test_all_refusals_fail_and_count_toward_budget(self):
@@ -193,14 +193,14 @@ class ModelSelectionTest(SelectionFixture, unittest.TestCase):
                 ("fifo43", ["default", "default"], ["FAIL", "PASS"])):
             with self.subTest(profile=profile), patch(
                     "atlas_model_selection.group_order_neighbors", return_value=iter(orders)):
-                receipt = self.select(name=profile, profile=profile, max_candidates=1,
+                result = self.select(name=profile, profile=profile, max_candidates=1,
                                       search_group_evaluations=3, scorer=lambda *args, **kwargs: 10,
                                       runner=self.graph_run([[], [], []], configure=compile_order))
-            rows = receipt["candidates"][1:]
+            rows = result["candidates"][1:]
             self.assertEqual([row["options"]["wait_placement"] for row in rows], placements)
             self.assertEqual([row["status"] for row in rows], statuses)
-            self.assertEqual(receipt["group_search"]["evaluations"], len(rows))
-            self.assertEqual(receipt["selected_index"], 0)
+            self.assertEqual(result["group_search"]["evaluations"], len(rows))
+            self.assertEqual(result["selected_index"], 0)
 
 
 class CandidateControlsTest(unittest.TestCase):
@@ -247,11 +247,11 @@ class TiledSelectionTest(unittest.TestCase):
     def test_one_candidate_real_emit(self):
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "selected"
-            receipt = select_program(ROOT / "test/examples/virtual_fp8_mlp_16_tiles.mlir", output, BIN,
+            result = select_program(ROOT / "test/examples/virtual_fp8_mlp_16_tiles.mlir", output, BIN,
                                      SelectionConfig(max_candidates=1,
                                          model_facts=Path(os.environ["ATLAS_TEST_MODEL_FACTS"])),
                                      scorer=lambda program, **_: len(program["instructions"]))
-            self.assertEqual((receipt["candidates"][0]["status"], receipt["selected_index"]), ("PASS", 0))
+            self.assertEqual((result["candidates"][0]["status"], result["selected_index"]), ("PASS", 0))
 
 
 @requires_model_evidence

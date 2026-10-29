@@ -395,9 +395,11 @@ void testSchedulerReservations(MLIRContext &context) {
         "provider capacity changes physical placement", diagnostics);
   const char *waiting = R"mlir(module {
     %s0 = "atlas.start"() : () -> !atlas.state
-    %s1 = "atlas.dma"(%s0) {direction = "load", channel = 0 : i32, reg = 0 : i32, dram = 0 : i32, size = 0 : i32} : (!atlas.state) -> !atlas.state
+    %s1 = "atlas.dma"(%s0) {direction = "load", channel = 0 : i32, reg = 0 : i32, dram = 0 : i32, size = 0 : i32}
+      : (!atlas.state) -> !atlas.state
     %s2 = "atlas.dma_wait"(%s1) {channel = 0 : i32} : (!atlas.state) -> !atlas.state
-    %s3 = "atlas.alu_imm"(%s2) {kind = "addi", dst = 1 : i32, src = 0 : i32, immediate = 0 : i32} : (!atlas.state) -> !atlas.state
+    %s3 = "atlas.alu_imm"(%s2) {kind = "addi", dst = 1 : i32, src = 0 : i32, immediate = 0 : i32}
+      : (!atlas.state) -> !atlas.state
     %s4 = "atlas.trap"(%s3) {kind = "ecall"} : (!atlas.state) -> !atlas.state
   })mlir";
   auto afterWait = [](bool extend) {
@@ -480,12 +482,15 @@ void registerPolicy(TimingProvider provider) {
 void testVirtualCosts(MLIRContext &context) {
   const char *source = R"mlir(module { func.func @cost() -> !atlas.virtual_state {
     %s0 = "atlas.virtual_start"() : () -> !atlas.virtual_state
-    %s1, %x = "atlas.virtual_input_bf16"(%s0) {index = 0 : i32} : (!atlas.virtual_state) -> (!atlas.virtual_state, !atlas.virtual_bf16)
+    %s1, %x = "atlas.virtual_input_bf16"(%s0) {index = 0 : i32}
+      : (!atlas.virtual_state) -> (!atlas.virtual_state, !atlas.virtual_bf16)
     %a = "atlas.virtual_vpu_unary"(%x) {kind = "mov"} : (!atlas.virtual_bf16) -> !atlas.virtual_bf16
     %b = "atlas.virtual_vpu_unary"(%x) {kind = "relu"} : (!atlas.virtual_bf16) -> !atlas.virtual_bf16
     %c = "atlas.virtual_vpu_unary"(%b) {kind = "relu"} : (!atlas.virtual_bf16) -> !atlas.virtual_bf16
-    %sum = "atlas.virtual_vpu_binary"(%a, %c) {kind = "add"} : (!atlas.virtual_bf16, !atlas.virtual_bf16) -> !atlas.virtual_bf16
-    %s2 = "atlas.virtual_output_bf16"(%s1, %sum) {index = 0 : i32} : (!atlas.virtual_state, !atlas.virtual_bf16) -> !atlas.virtual_state
+    %sum = "atlas.virtual_vpu_binary"(%a, %c) {kind = "add"}
+      : (!atlas.virtual_bf16, !atlas.virtual_bf16) -> !atlas.virtual_bf16
+    %s2 = "atlas.virtual_output_bf16"(%s1, %sum) {index = 0 : i32}
+      : (!atlas.virtual_state, !atlas.virtual_bf16) -> !atlas.virtual_state
     return %s2 : !atlas.virtual_state
   } })mlir";
   auto module = parseSourceString<ModuleOp>(source, &context);
@@ -548,7 +553,8 @@ void testVirtualCosts(MLIRContext &context) {
   };
   check(builtin && selected && firstUnary(*builtin) == "relu" && firstUnary(*selected) == "mov",
         "selected virtual costs change the chosen order", diagnostics);
-  std::string retained = replace(source, "module {", "module attributes {atlas.timing_provider = \"synthetic-virtual-costs\"} {");
+  std::string retained = replace(source, "module {",
+      "module attributes {atlas.timing_provider = \"synthetic-virtual-costs\"} {");
   auto implicit = runPipeline(context, retained, "schedule-atlas-virtual");
   check(implicit && firstUnary(*implicit) == "mov", "virtual costs honor the retained provider", diagnostics);
   diagnostics.clear();
@@ -561,7 +567,8 @@ void testVirtualCosts(MLIRContext &context) {
   registerPolicy(missingDMA);
   diagnostics.clear();
   check(!runPipeline(context, source, "schedule-atlas-virtual{provider=synthetic-missing-dma-cost}") &&
-            diagnosed("no DMA proposal estimator"), "virtual DMA costs have no implicit provider fallback", diagnostics);
+            diagnosed("no DMA proposal estimator"),
+        "virtual DMA costs have no implicit provider fallback", diagnostics);
   p.id = "synthetic-missing-virtual-cost";
   p.footprint = [=](const Instr &in, const RegValues &regs) {
     Footprint f = footprint(in, regs);
@@ -597,7 +604,8 @@ void testVirtualCosts(MLIRContext &context) {
   const char *withoutTileLoads = R"mlir(module { func.func @no_tile_load() -> !atlas.virtual_state {
     %s0 = "atlas.virtual_start"() : () -> !atlas.virtual_state
     %tile = "atlas.virtual_vpu_splat"() {bits = 0 : i32} : () -> !atlas.virtual_bf16
-    %s1 = "atlas.virtual_output_bf16"(%s0, %tile) {index = 0 : i32} : (!atlas.virtual_state, !atlas.virtual_bf16) -> !atlas.virtual_state
+    %s1 = "atlas.virtual_output_bf16"(%s0, %tile) {index = 0 : i32}
+      : (!atlas.virtual_state, !atlas.virtual_bf16) -> !atlas.virtual_state
     return %s1 : !atlas.virtual_state
   } })mlir";
   diagnostics.clear();

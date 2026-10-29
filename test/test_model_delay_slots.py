@@ -96,7 +96,7 @@ class ModelDelaySlotTest(unittest.TestCase):
         self.assertEqual(sum(op == "scalar_load" for op, _, _ in body), words)
         self.assertEqual(sum(op == "scalar_store" for op, _, _ in body), words)
         # All copy loads, including the cross-row pair, sustain the derived
-        # scalar result age. A lost replay proof serializes them more slowly.
+        # scalar result age, keeping the relayout loop pipelined.
         load_timing = next(row for row in timing["op_timing"] if row["name"] == "lw")
         load_age = load_timing["events"]["load_write"]["last_age"]
         issues = issue_cycles(body)

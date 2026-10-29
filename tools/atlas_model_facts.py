@@ -64,9 +64,9 @@ def regenerate(model, out):
     if any(list(cfg.execution_units.values()).count(name) != 1 for name in required):
         raise UnsupportedModelTiming("engine admission requires unique independent native units")
     out.mkdir(parents=True)
-    validate_derived(cfg, blocks, releases, out)
+    native_blocks = validate_derived(cfg, blocks)
     write(out, "model-timing.json", payload)
-    print(json.dumps(dict(operations=len(blocks), native_blocks=len(blocks), passed=True)), flush=True)
+    print(json.dumps(dict(operations=len(blocks), native_blocks=native_blocks, passed=True)), flush=True)
     return payload
 
 
