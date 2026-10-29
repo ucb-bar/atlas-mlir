@@ -1098,17 +1098,71 @@ static bool contains(const std::vector<int> &v, int x) {
   return std::find(v.begin(), v.end(), x) != v.end();
 }
 
-static void considerDependence(Dependence &best, int distance, EdgeKind kind,
-                               const std::string &why) {
-  if (distance > best.distance)
-    best = {distance, kind, why};
-}
-
-static void mxuDependence(const Instr &a, const Footprint &fa,
-                          const Instr &b, const TimingTables *tables,
-                          Dependence &best) {
+Dependence mlir::atlas::timing::dependence(const Instr &a, const Footprint &fa,
+                                         const Instr &b, const Footprint &fb,
+                                         const TimingTables *tables) {
+  Dependence best;
+  auto consider = [&](int d, EdgeKind kind, const std::string &why) {
+    if (d > best.distance)
+      best = {d, kind, why};
+  };
+  int issueGap = tables ? tables->ordinaryIssueGap : 1;
   const OpInfo &A = *a.op;
   const OpInfo &B = *b.op;
+
+  if (isBarrier(a))
+    consider(issueGap, EdgeKind::Order, A.name + " is a barrier");
+  if (isBarrier(b))
+    consider(issueGap, EdgeKind::Order, B.name + " is a barrier");
+  if (b.release)
+    consider(fa.doneAge + 1, EdgeKind::Order,
+             "atlas.complete waits for prior fixed-latency work to complete");
+
+  if (A.engine == Engine::Dma && B.engine == Engine::Dma) {
+    bool aWait = A.opClass == OpClass::DmaWait,
+         bWait = B.opClass == OpClass::DmaWait;
+    if (!aWait && !bWait)
+      consider(issueGap, EdgeKind::Order, "DMA queue order");
+    else if (A.channel == B.channel)
+      consider(issueGap, EdgeKind::Order, "DMA channel " + std::to_string(A.channel));
+  }
+
+  for (const Access &x : fa.accesses) {
+    if (x.atCompletion)
+      continue;
+    for (const Access &y : fb.accesses) {
+      if (x.res != y.res || (!x.write && !y.write))
+        continue;
+      int element = 0;
+      int d = dataDistance(x, y, element);
+      if (d == INT_MIN)
+        continue;
+      EdgeKind kind = x.write && y.write ? EdgeKind::WAW
+                      : x.write          ? EdgeKind::RAW
+                                         : EdgeKind::WAR;
+      consider(std::max(d, issueGap), kind,
+               std::string(edgeKindName(kind)) + " on " +
+                   elementName(x.res, element));
+    }
+  }
+
+  for (int r : fa.mregWrites) {
+    if (contains(fb.mregReads, r))
+      consider(fa.writeRelease + 1, EdgeKind::RAW,
+               "m" + std::to_string(r) + " reserved for writing until age " +
+                   std::to_string(fa.writeRelease));
+    if (contains(fb.mregWrites, r))
+      consider(fa.writeRelease + 1, EdgeKind::WAW,
+               "m" + std::to_string(r) + " reserved for writing until age " +
+                   std::to_string(fa.writeRelease));
+  }
+  if (!fb.writeDuringRead)
+    for (int r : fa.mregReads)
+      if (contains(fb.mregWrites, r))
+        consider(fa.readRelease + 1, EdgeKind::WAR,
+                 "m" + std::to_string(r) + " reserved for reading until age " +
+                     std::to_string(fa.readRelease));
+
   // npu_model mxu.py sequencer rules.
   if (A.mxu >= 0 && A.mxu == B.mxu) {
     int m = A.mxu;
@@ -1140,116 +1194,47 @@ static void mxuDependence(const Instr &a, const Footprint &fa,
     if (tables && isAccPush(A) && accOf(a) == accOf(b) &&
         (B.opClass == OpClass::PopFp8 || B.opClass == OpClass::PopBf16 ||
          B.opClass == OpClass::MatMulAcc))
-      considerDependence(best, tables->mxu[m].accumulatorForwardGap, EdgeKind::Rule,
-                               mx + "accumulator push forwarding");
+      consider(tables->mxu[m].accumulatorForwardGap, EdgeKind::Rule,
+               mx + "accumulator push forwarding");
     if (isCompute(A) && !bWeight && accOf(a) == accOf(b))
-      considerDependence(best, tables ? [&] {
-                                 for (const Access &access : fa.accesses)
-                                   if (access.res == Res::Acc && access.write)
-                                     return access.age + 1;
-                                 return 0;
-                               }() : mt.defUseLatency.accumulatorRow0, EdgeKind::Rule,
-                               mx + "wait until row 0 of the matmul on acc" +
-                                   std::to_string(accOf(a)) + " is written");
+      consider(tables ? [&] {
+                 for (const Access &access : fa.accesses)
+                   if (access.res == Res::Acc && access.write)
+                     return access.age + 1;
+                 return 0;
+               }() : mt.defUseLatency.accumulatorRow0, EdgeKind::Rule,
+               mx + "wait until row 0 of the matmul on acc" +
+                   std::to_string(accOf(a)) + " is written");
     if (m == 0 && isCompute(A) && bWeight && slotOf(a) == slotOf(b))
-      considerDependence(best, tables ? tables->mxu[m].weightOverwriteAfterCompute
-                                      : mt.weightOverwriteAfterCompute, EdgeKind::Rule,
-                               mx + "weight slot still feeding the systolic array");
+      consider(tables ? tables->mxu[m].weightOverwriteAfterCompute
+                      : mt.weightOverwriteAfterCompute, EdgeKind::Rule,
+               mx + "weight slot still feeding the systolic array");
     if (m == 1) {
       bool aWeight = A.opClass == OpClass::WeightPush;
       if (aWeight && (bWeight || isCompute(B)) && slotOf(a) == slotOf(b))
-        considerDependence(best, tables ? tables->mxu[m].weightUseAfterPush
-                                        : kMxu1WeightUseAfterPush, EdgeKind::Rule,
-                                 mx + "weight push still active on w" +
-                                     std::to_string(slotOf(a)));
+        consider(tables ? tables->mxu[m].weightUseAfterPush
+                        : kMxu1WeightUseAfterPush, EdgeKind::Rule,
+                 mx + "weight push still active on w" +
+                     std::to_string(slotOf(a)));
       if (isCompute(A) && bWeight && slotOf(a) == slotOf(b))
-        considerDependence(best, tables ? tables->mxu[m].weightOverwriteAfterCompute
-                                      : mt.weightOverwriteAfterCompute, EdgeKind::Rule,
-                                 mx + "matmul still reading w" + std::to_string(slotOf(a)));
+        consider(tables ? tables->mxu[m].weightOverwriteAfterCompute
+                      : mt.weightOverwriteAfterCompute, EdgeKind::Rule,
+                 mx + "matmul still reading w" + std::to_string(slotOf(a)));
       if (isAccPush(A) && (isCompute(B) || B.opClass == OpClass::AccPushFp8) &&
           accOf(a) == accOf(b))
-        considerDependence(best, tables ? tables->mxu[m].accumulatorUseAfterPush
-                                        : kMxu1AccumulatorUseAfterPush, EdgeKind::Rule,
-                                 mx + "accumulator push still active on acc" +
-                                     std::to_string(accOf(a)));
+        consider(tables ? tables->mxu[m].accumulatorUseAfterPush
+                        : kMxu1AccumulatorUseAfterPush, EdgeKind::Rule,
+                 mx + "accumulator push still active on acc" +
+                     std::to_string(accOf(a)));
     }
   }
-}
-
-static Dependence makeDependence(const Instr &a, const Footprint &fa,
-                                 const Instr &b, const Footprint &fb,
-                                 const TimingTables *tables) {
-  Dependence best;
-  int issueGap = tables ? tables->ordinaryIssueGap : 1;
-  const OpInfo &A = *a.op;
-  const OpInfo &B = *b.op;
-
-  if (isBarrier(a))
-    considerDependence(best, issueGap, EdgeKind::Order, A.name + " is a barrier");
-  if (isBarrier(b))
-    considerDependence(best, issueGap, EdgeKind::Order, B.name + " is a barrier");
-  if (b.release)
-    considerDependence(best, fa.doneAge + 1, EdgeKind::Order,
-                             "atlas.complete waits for prior fixed-latency work to complete");
-
-  if (A.engine == Engine::Dma && B.engine == Engine::Dma) {
-    bool aWait = A.opClass == OpClass::DmaWait,
-         bWait = B.opClass == OpClass::DmaWait;
-    if (!aWait && !bWait)
-      considerDependence(best, issueGap, EdgeKind::Order, "DMA queue order");
-    else if (A.channel == B.channel)
-      considerDependence(best, issueGap, EdgeKind::Order, "DMA channel " + std::to_string(A.channel));
-  }
-
-  for (const Access &x : fa.accesses) {
-    if (x.atCompletion)
-      continue;
-    for (const Access &y : fb.accesses) {
-      if (x.res != y.res || (!x.write && !y.write))
-        continue;
-      int element = 0;
-      int d = dataDistance(x, y, element);
-      if (d == INT_MIN)
-        continue;
-      EdgeKind kind = x.write && y.write ? EdgeKind::WAW
-                      : x.write          ? EdgeKind::RAW
-                                         : EdgeKind::WAR;
-      considerDependence(best, std::max(d, issueGap), kind,
-                               std::string(edgeKindName(kind)) + " on " +
-                                   elementName(x.res, element));
-    }
-  }
-
-  for (int r : fa.mregWrites) {
-    if (contains(fb.mregReads, r))
-      considerDependence(best, fa.writeRelease + 1, EdgeKind::RAW,
-                               "m" + std::to_string(r) + " reserved for writing until age " +
-                                   std::to_string(fa.writeRelease));
-    if (contains(fb.mregWrites, r))
-      considerDependence(best, fa.writeRelease + 1, EdgeKind::WAW,
-                               "m" + std::to_string(r) + " reserved for writing until age " +
-                                   std::to_string(fa.writeRelease));
-  }
-  if (!fb.writeDuringRead)
-    for (int r : fa.mregReads)
-      if (contains(fb.mregWrites, r))
-        considerDependence(best, fa.readRelease + 1, EdgeKind::WAR,
-                                 "m" + std::to_string(r) + " reserved for reading until age " +
-                                     std::to_string(fa.readRelease));
-
-  mxuDependence(a, fa, b, tables, best);
   return best;
-}
-
-Dependence mlir::atlas::timing::dependence(const Instr &a, const Footprint &fa,
-                                         const Instr &b, const Footprint &fb) {
-  return makeDependence(a, fa, b, fb, nullptr);
 }
 
 Dependence mlir::atlas::timing::dependence(const Instr &a, const Footprint &fa,
                                          const Instr &b, const Footprint &fb,
                                          const TimingTables &tables) {
-  return makeDependence(a, fa, b, fb, &tables);
+  return dependence(a, fa, b, fb, &tables);
 }
 
 static bool overlaps(const Access &x, const Access &y) {

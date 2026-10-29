@@ -189,7 +189,7 @@ struct Dependence {
 
 // Cycles b must issue after a, which precedes it; DMA completion is excluded.
 Dependence dependence(const Instr &a, const Footprint &fa, const Instr &b,
-                      const Footprint &fb);
+                      const Footprint &fb, const TimingTables *tables = nullptr);
 Dependence dependence(const Instr &a, const Footprint &fa, const Instr &b,
                       const Footprint &fb, const TimingTables &tables);
 bool conflictsAtCompletion(const Footprint &dma, const Footprint &other,
