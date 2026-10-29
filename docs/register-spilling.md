@@ -244,7 +244,7 @@ virtual evaluator consumes pre-spill IR; it is not a production fallback.
 
 The optional test uses Python 3.14, Torch and an explicit `npu_model` checkout
 matching `tools/model-timing.lock.json` (currently
-`47b8599d8ffbe5ddd96059ffe2b5be2427a410f5`). With model dependencies available,
+`74982e7c68bd28ba6505b4df37290f198102ccce`). With model dependencies available,
 select it directly:
 
 ```sh

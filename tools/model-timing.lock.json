@@ -1,6 +1,6 @@
 {
   "schema": "atlas.model_timing.lock.v1",
-  "model_revision": "47b8599d8ffbe5ddd96059ffe2b5be2427a410f5",
+  "model_revision": "74982e7c68bd28ba6505b4df37290f198102ccce",
   "source_sha256": "29960d71c11e8fee75fbed481f15f24f509080b42d27678907371c6980539562",
   "reference_configuration_sha256": "bdb127152c1ab4b174b2f628687f3b166dad48ea6f00be124ed8351443885e94",
   "configuration_sha256": "c41ab668a2a6bf6a9351cb0df4e544703e14818f050f248d83a8e250d260e33a",
