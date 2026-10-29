@@ -72,7 +72,7 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block, bool generated,
     return std::move(result.value);
   };
 
-  auto built = buildTimingGraph(nodes, s.entry[block], p);
+  auto built = buildGraph(nodes, s.entry[block], p);
   if (!built.error.empty())
     return op(0)->emitOpError(p.diagnostic(built.error));
   DepGraph g = std::move(built.value);

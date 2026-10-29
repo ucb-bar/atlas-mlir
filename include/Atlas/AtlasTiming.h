@@ -214,6 +214,11 @@ struct DepGraph {
 // Pending transfers per channel at block entry; null keeps broad barriers.
 using IncomingDma = std::array<std::vector<Footprint>, kAtlasDMAChannels>;
 
+struct TimingProvider;
+TimingRuleResult<DepGraph> buildGraph(
+    const std::vector<Instr> &instrs, const RegValues &entry,
+    const TimingProvider &provider, const IncomingDma *incomingDma = nullptr);
+
 bool isBarrier(const Instr &in);
 bool vpuCanOverlap(const OpInfo &a, const OpInfo &b);
 bool vpuUsesBothSlots(const OpInfo &op);

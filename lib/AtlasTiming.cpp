@@ -1,9 +1,11 @@
 #include "Atlas/AtlasTiming.h"
+#include "Atlas/AtlasTimingProvider.h"
 #include "llvm/ADT/StringSwitch.h"
 #include <algorithm>
 #include <cctype>
 #include <climits>
 #include <cstdio>
+#include <limits>
 
 using namespace mlir::atlas;
 using namespace mlir::atlas::timing;
@@ -695,7 +697,7 @@ ScalarAccess mlir::atlas::timing::scalarAccess(const Instr &in, const RegValues 
 Footprint mlir::atlas::timing::footprintOf(const Instr &in,
                                            const RegValues &regs,
                                            const TimingTables *tables) {
-  Builder b(in, tables);
+  ::Builder b(in, tables);
   const OpInfo &op = *in.op;
   if (in.release && op.opClass != OpClass::Csr) {
     b.f.error = "atlas.complete is only valid on a CSR instruction";
@@ -1266,6 +1268,131 @@ bool mlir::atlas::timing::conflictsAtCompletion(const Footprint &dma,
     }
   }
   return false;
+}
+
+namespace {
+// Adds an edge, or raises the distance of an existing edge between the nodes.
+struct EdgeSet {
+  DepGraph &g;
+  std::map<std::pair<int, int>, int> index;
+
+  void add(int from, int to, int distance, EdgeKind kind,
+           const std::string &reason) {
+    auto it = index.find({from, to});
+    if (it == index.end()) {
+      index[{from, to}] = static_cast<int>(g.edges.size());
+      g.edges.push_back({from, to, distance, kind, reason});
+    } else if (distance > g.edges[it->second].distance) {
+      g.edges[it->second] = {from, to, distance, kind, reason};
+    }
+  }
+};
+} // namespace
+
+TimingRuleResult<DepGraph> mlir::atlas::timing::buildGraph(const std::vector<Instr> &instrs,
+                                         const RegValues &entry,
+                                         const TimingProvider &p,
+                                         const IncomingDma *incomingDma) {
+  std::string missing = validateTimingProvider(p);
+  if (!missing.empty()) return {{}, missing};
+  int issueGap = p.frontendSpacing.ordinaryGap;
+  DepGraph g;
+  g.nodes = instrs;
+  int n = static_cast<int>(instrs.size());
+  RegValues regs = entry;
+  for (const Instr &in : instrs) {
+    Footprint f = p.footprint(in, regs);
+    if (!f.error.empty()) return {{}, f.error};
+    if (f.doneAge < 0 || f.doneAge == std::numeric_limits<int>::max())
+      return {{}, "timing provider completion age exceeds positive cycle domain"};
+    g.footprints.push_back(std::move(f));
+    applyScalar(in, regs);
+  }
+
+  EdgeSet edges{g, {}};
+  for (int b = 0; b < n; b++)
+    for (int a = 0; a < b; a++) {
+      auto d = p.dependence(g.nodes[a], g.footprints[a], g.nodes[b], g.footprints[b]);
+      if (!d.error.empty()) return {{}, d.error};
+      if (d.value.distance < 0)
+        return {{}, "timing provider returned a negative dependence distance"};
+      if (d.value.distance > 0)
+        edges.add(a, b, d.value.distance, d.value.kind, d.value.reason);
+    }
+
+  // A DMA's completion is known only once its dma.wait issues, so later
+  // conflicting accesses wait for that dma.wait.
+  for (int d = 0; d < n; d++) {
+    const OpInfo &op = *g.nodes[d].op;
+    if (op.opClass != OpClass::DmaLoad && op.opClass != OpClass::DmaStore)
+      continue;
+    int wait = -1;
+    for (int k = d + 1; k < n && wait < 0; k++)
+      if (g.nodes[k].op->opClass == OpClass::DmaWait &&
+          g.nodes[k].op->channel == op.channel)
+        wait = k;
+    for (int k = d + 1; k < n; k++) {
+      if (k == wait)
+        continue;
+      auto conflict = p.dmaConflict(g.footprints[d], g.footprints[k]);
+      if (!conflict.error.empty()) return {{}, conflict.error};
+      if (!conflict.value.conflict)
+        continue;
+      EdgeKind kind = conflict.value.kind;
+      if (wait >= 0 && wait < k)
+        edges.add(wait, k, issueGap, kind,
+                  std::string(edgeKindName(kind)) + " with " + op.name +
+                      " (done once the wait issues)");
+      else
+        edges.add(d, k, issueGap, EdgeKind::Order,
+                  op.name + " may still be in flight (no dma.wait in between)");
+    }
+  }
+
+  // A wait for a transfer from an earlier block guards conflicting accesses
+  // and channel reuse.
+  for (int w = 0; w < n; w++) {
+    const OpInfo &op = *g.nodes[w].op;
+    if (op.opClass != OpClass::DmaWait)
+      continue;
+    bool local = false;
+    for (int d = 0; d < w; d++)
+      if ((g.nodes[d].op->opClass == OpClass::DmaLoad ||
+           g.nodes[d].op->opClass == OpClass::DmaStore) &&
+          g.nodes[d].op->channel == op.channel)
+        local = true;
+    if (local)
+      continue;
+    for (int k = w + 1; k < n; k++) {
+      bool guarded = g.nodes[k].op->opClass == OpClass::DmaLoad ||
+                     g.nodes[k].op->opClass == OpClass::DmaStore;
+      if (incomingDma) {
+        guarded = guarded && g.nodes[k].op->channel == op.channel;
+        for (const Footprint &dma : (*incomingDma)[op.channel]) {
+          auto conflict = p.dmaConflict(dma, g.footprints[k]);
+          if (!conflict.error.empty()) return {{}, conflict.error};
+          guarded |= conflict.value.conflict;
+        }
+      } else {
+        // The transfer latched its registers at launch, so only the VMEM it
+        // moves at completion may conflict.
+        for (const Access &a : g.footprints[k].accesses)
+          if (a.res == Res::Vmem)
+            guarded = true;
+      }
+      if (guarded)
+        edges.add(w, k, issueGap, EdgeKind::Order,
+                  op.name + " guards a transfer started in an earlier block");
+    }
+  }
+
+  g.in.assign(n, {});
+  g.out.assign(n, {});
+  for (int e = 0; e < static_cast<int>(g.edges.size()); e++) {
+    g.out[g.edges[e].from].push_back(e);
+    g.in[g.edges[e].to].push_back(e);
+  }
+  return {std::move(g), {}};
 }
 
 static int unitKey(Unit u, int index) {

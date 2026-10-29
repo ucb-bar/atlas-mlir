@@ -346,8 +346,8 @@ void testProviderGraph(MLIRContext &context) {
   Footprint transfer;
   transfer.accesses.push_back({Res::Vmem, true, 0, 32, 0, 1, false, true});
   incoming[0].push_back(transfer);
-  auto precise = buildTimingGraph(nodes, unknownRegs(), p, &incoming);
-  auto broad = buildTimingGraph(nodes, unknownRegs(), p);
+  auto precise = buildGraph(nodes, unknownRegs(), p, &incoming);
+  auto broad = buildGraph(nodes, unknownRegs(), p);
   auto has = [](const TimingRuleResult<DepGraph> &g, int to) {
     return llvm::any_of(g.value.edges, [&](const Edge &e) { return e.from == 0 && e.to == to; });
   };
@@ -358,13 +358,13 @@ void testProviderGraph(MLIRContext &context) {
   p.dmaConflict = [](const Footprint &, const Footprint &) {
     return TimingRuleResult<DMACompletionConflict>{{}, "missing incoming DMA rule"};
   };
-  check(buildTimingGraph(nodes, unknownRegs(), p, &incoming).error == "missing incoming DMA rule",
+  check(buildGraph(nodes, unknownRegs(), p, &incoming).error == "missing incoming DMA rule",
         "incoming DMA coverage errors do not become no-conflict rules");
   p = toy();
   p.dependence = [](const Instr &, const Footprint &, const Instr &, const Footprint &) {
     return TimingRuleResult<Dependence>{{}, "missing graph dependence"};
   };
-  check(buildTimingGraph(nodes, unknownRegs(), p).error == "missing graph dependence",
+  check(buildGraph(nodes, unknownRegs(), p).error == "missing graph dependence",
         "graph propagates missing dependence coverage");
 }
 
