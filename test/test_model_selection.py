@@ -1001,6 +1001,42 @@ class ModelOrderReplayTest(unittest.TestCase):
         self.assertEqual(replay.stdout, scheduled)
         self.assertEqual(graphs, json.loads(replay_path.read_text()))
 
+    def test_roundtrip_cost_uses_selected_conversion_and_scale_facts(self):
+        from atlas_derived_contract import seal_derived
+        from atlas_model_schema import VPU_BLOCKS
+        from test_pack_roundtrip import source
+
+        self.source = source(explicit=True)
+        facts_path = Path(os.environ["ATLAS_TEST_MODEL_FACTS"]) / "model-timing.json"
+        facts = json.loads(facts_path.read_text())
+        blocks = {block["name"]: block for block in facts["op_timing"]}
+        conversions = sum(blocks["vpu." + VPU_BLOCKS[name]]["first_free_age"]
+                          for name in ("vpack.bf16.fp8", "vunpack.fp8.bf16"))
+
+        def cost():
+            graphs, _ = self.graph()
+            graph = graphs[0]
+            node = graph["operations"].index("atlas.virtual_pack_roundtrip_bf16")
+            return graph["proposal"]["costs"][node]
+
+        expected = conversions + 2 * (facts["frontend_timing"]["scalar"]["write_age"] + 1)
+        before = cost()
+        for field in ("busy", "latency", "frontend"):
+            self.assertEqual(before[field], expected)
+        self.assertFalse(before["drains"])
+        self.assertFalse(before["queued_dma"])
+
+        # Each conversion consumes the scale register written by its SELI.
+        facts["frontend_timing"]["scalar"]["write_age"] += 3
+        seal_derived(facts)
+        changed = self.directory / "roundtrip-facts.json"
+        changed.write_text(json.dumps(facts))
+        self.evidence = (f"--select-atlas-model-evidence=test-op-timing={changed} "
+                         f"test-op-timing-sha256={hashlib.sha256(changed.read_bytes()).hexdigest()}")
+        after = cost()
+        for field in ("busy", "latency", "frontend"):
+            self.assertEqual(after[field], expected + 6)
+
     def test_replay_matches_scheduler_and_repairs_state_after_independent_load_swap(self):
         self.source = function("loads", [start(), const("address", -2147481600), const("size", 2048),
             dma_load("io0", "s1", "a", "address", "size", "bf16"),

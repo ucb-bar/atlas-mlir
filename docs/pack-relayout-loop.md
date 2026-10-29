@@ -1,30 +1,94 @@
-# A faster PACK relayout loop
+# PACK layout repair
+
+VPU PACK converts all 32 physical BF16 rows of the left-half register, then all
+32 rows of the right-half register. Its FP8 result contains two 512-byte halves.
+An MXU operand instead needs each row's left and right 16-byte halves together.
+The compiler repairs this layout in registers when a free accumulator is
+available, retaining the scalar VMEM interleave as a fallback.
 
 ## Grouped model-provider loop
 
-The model provider copies two adjacent logical rows per iteration, selected by the compiler's explicit two-row unroll policy. The builtin loop keeps the RTL-qualified one-row shape; its provider exposes no per-row load interval to exploit. This is a compiler code-size choice, not a model-derived timing value or an experimentally fitted constant. Both forms copy the same 256 words through the same two temporary registers, and every offset and row stride comes from the selected geometry.
+The model provider copies two adjacent logical rows per iteration, selected by
+the compiler's explicit two-row unroll policy. The builtin loop keeps the RTL-
+qualified one-row shape; its provider exposes no per-row load interval to
+exploit. This is a compiler code-size choice, not a model-derived timing value
+or an experimentally fitted constant. Both forms copy the same 256 words through
+the same two temporary registers, and every offset and row stride comes from the
+selected geometry.
 
-Grouping pipelines the final store of one row behind the first load of the next and halves the counter, pointer and back-edge overhead. The virtual proposal uses the same grouped body with model-derived scalar load intervals and completion ages. Its algorithm identifier is versioned separately from native timing facts.
+Grouping pipelines the final store of one row behind the first load of the next
+and halves the counter, pointer and back-edge overhead. The virtual proposal
+uses the same grouped body with model-derived scalar load intervals and
+completion ages. Its algorithm identifier is versioned separately from native
+timing facts.
 
-The scalar timing proof counts decoded copy instructions and replays the actual loop to a decided exit. A group must contain equal load/store counts covering whole rows; its group size must divide the tile height and the replay must cover exactly that height. The immutable 32-address context repeats the actual finite cases at shared ordinals for shorter replays. The generated buffer verifier still checks each copied word against the complete PACK interleave; generic loops gain no scalar-overlap permission.
+The scalar timing proof counts decoded copy instructions and replays the actual
+loop to a decided exit. A group must contain equal load/store counts covering
+whole rows; its group size must divide the tile height and the replay must cover
+exactly that height. The immutable 32-address context repeats the actual finite
+cases at shared ordinals for shorter replays. The generated buffer verifier
+still checks each copied word against the complete PACK interleave; generic
+loops gain no scalar-overlap permission.
 
-The rest of this page records the earlier single-row software pipeline and its original measurements. The historical numbers below are not measurements of grouping.
+The rest of this page records the earlier single-row software pipeline and its
+original measurements. The historical numbers below are not measurements of
+grouping.
 
-## Goal
+## Register-only repair
 
-A PACK converts a BF16 tile to FP8 with `vpu_pack` (about 65 cycles), then
-repairs the row layout through VMEM: a VSTORE of the raw result, a 32-row
-scalar copy loop, and a VLOAD of the relayout. The loop is nearly all of a
-PACK's 1,490 cycles. With DMA now overlapping PACK, PACK running with the DMA
-engine idle is the largest remaining share of the combined attention + MLP
-tile (npu_model main):
+The scheduled compile pipeline runs `--lower-atlas-pack-relayout` in the spill
+stage, after virtual scheduling and the first pressure recovery; the unscheduled
+pipeline runs the same spill stage in source order. Both rerun spilling
+afterward to allocate the new BF16 value. The pass preserves the existing order,
+finds the current state token and a free accumulator on either MXU, and replaces
+an admitted `virtual_pack_fp8` with:
 
-| Program | Cycles | DMA busy | PACK with DMA idle |
-|---|---|---|---|
-| 4 independent tiles | 27,182 | 76.5% | 21% of cycles |
-| 4 tiles, shared weights | 23,690 | 49.8% | 45% of cycles |
+1. `virtual_pack_roundtrip_bf16`, which applies the original VPU PACK quantization, then unit-scale UNPACK into a BF16 tile.
+2. A BF16 accumulator push followed by a unit-scale FP8 readout, which produces the canonical FP8 layout.
 
-## Why the loop is slow
+The roundtrip operation lowers to PACK using reserved scratch register m62, then
+UNPACK using an allocated BF16 destination pair. The source and destination
+pairs exclude m62. UNPACK reverses PACK's physical-row arrangement; the
+accumulator push reads the restored logical BF16 tile, and the FP8 pop writes
+ordinary row-major bytes. The conversion needs no VMEM scratch or DRAM transfer.
+Scale registers are rematerialized for each conversion, and the CFG contract
+checks the source, temporary, result pair and both scales.
+
+The original PACK handles every exceptional BF16 input before UNPACK executes.
+Its output has exactly 239 possible codes: `0x00`, `0x08..0x7e`, and
+`0x88..0xfe`. It emits no negative zero, subnormal or `0x7f`/`0xff` code. Unit-
+scale UNPACK maps these codes to exact finite BF16 values; the MXU unit-scale
+converter maps them back byte-identically. In particular, the largest magnitude
+is 448, so the MXU converter's different treatment of rounded 480 cannot occur.
+Unlike direct guarded MXU conversion, this route needs no source-finiteness
+proof or clamping.
+
+Read-only analysis exhaustively checked all 65,536 BF16 encodings at each
+admitted source scale `122..128`, with zero converter mismatches. Direct
+functional ISA checks also covered both MXUs and all these encodings in
+asymmetric tiles: 896 chains and 917,504 compared output bytes, all identical.
+These checks establish the selected model's conversion and layout behavior; they
+do not exercise encoded decode or timed execution.
+
+If both MXUs' accumulator slots are occupied, the current block has no state
+token, or the scale is outside `122..128`, the pass leaves PACK unchanged.
+Direct virtual-to-machine lowering also retains the scalar fallback. After the
+repair, the scheduled pipeline runs virtual scheduling again with the selected
+timing provider, lookahead, and seed. An explicit search order is preserved
+through its expansion, and graph output retains the prepared node IDs used by
+group search. Spilling and allocation own the new BF16 value and accumulator
+lifetime.
+
+## Scalar fallback
+
+The fallback applies `vpu_pack`, a raw-result VSTORE, the scalar interleave
+below, and a VLOAD. The default provider copies one row per iteration: eight
+words, 32 iterations, 16-byte source-half steps and a 32-byte destination step.
+The model provider groups two rows as described above. The mandatory scalar
+stream branches back 27 instruction words, with a B immediate of -54. [Explicit
+DMA may remain in flight across the loop](pack-dma-overlap.md).
+
+## Original serial loop
 
 Each row copies eight words, two halves of four (`lowerPack`):
 
@@ -43,9 +107,9 @@ each word waits for its load: eight RAW delays per row, about 43 cycles a row.
 The floor for a word-at-a-time copy is the load path: 256 loads at three
 cycles each, 768 cycles per PACK.
 
-## Change
+## Pipelined one-row copy
 
-Software-pipeline the body by one copy, inside the iteration:
+The original improvement software-pipelined one row by one copy:
 
 ```
 lw(0)
@@ -82,7 +146,7 @@ its delay slot holding the destination step), which gives the measured 28
 cycles.
 `kPackRelayoutRowWords` (`AtlasVirtualAllocation.h`) is the row size both use.
 
-## What does not change
+## Scalar fallback: what does not change
 
 - The buffer contract runs the loop from its entry registers and checks every
   relayout word against the row interleave, so it proves the reordered copy
@@ -91,7 +155,7 @@ cycles.
   scalar loads, stores and ALU work, so DMA still overlaps the loop.
 - The register-allocation checker's PACK effects name the same registers.
 
-## Tests
+## Scalar fallback: tests
 
 - `test_buffer_contract_verification.py::test_relayout_stores_follow_the_next_copy_load`:
   the lowered copy order is `lw, (lw, sw) x 7, sw`, and after either timing
@@ -102,7 +166,7 @@ cycles.
   every store back up to its own load, the old serial order, and still proves
   the interleave.
 
-## Results
+## Earlier one-row results
 
 Full ctest passes (104 skips, as on main). Each program was lowered through
 `tools/lower_atlas_program.py` (every verifier, `--timing
@@ -133,21 +197,6 @@ without a PACK are unchanged. One exception: `mlp_independent_4`, already 99%
 DMA busy, is 35 cycles (0.2%) slower on both models. Its virtual schedule
 differs only in the order of the last MXU readouts and stores, a tie the
 cheaper PACK cost tips the other way.
-
-## Next
-
-- Shared-weight programs are still PACK-bound (61% DMA busy at 4 tiles), and
-  29 cycles a row is within five of the word-at-a-time floor of 24 (eight
-  loads at three cycles). Going further needs fewer, wider moves, or no
-  relayout at all.
-
-## Not in this change
-
-- Fewer loop registers (one source pointer with offsets, the destination as
-  the counter). It saves ALU work that already hides in the load path's free
-  cycles.
-- Removing the relayout altogether, which needs a PACK or XLU layout the MXU
-  accepts: a hardware question.
 
 ## Guarded MXU conversion
 

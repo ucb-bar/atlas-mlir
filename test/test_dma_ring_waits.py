@@ -66,7 +66,7 @@ class DMARingWaitTest(unittest.TestCase):
         self.directory = pathlib.Path(temporary.name)
         self.evidence = fixture_evidence(self.directory)
 
-    def lower(self, source: str, *, order: bool = True) -> str:
+    def lower(self, source: str, *, order: bool = True, scalar_pack: bool = False) -> str:
         """Prepare, replay the source order and lower for model, leaving the waits pending."""
         prepared = run(OPT, source, self.evidence, "--atlas-compile-prepare=boundary=none")
         self.assertEqual(prepared.returncode, 0, prepared.stderr)
@@ -74,8 +74,11 @@ class DMARingWaitTest(unittest.TestCase):
         written = run(OPT, prepared.stdout, f"--schedule-atlas-virtual=provider=model graph-output={graph}")
         self.assertEqual(written.returncode, 0, written.stderr)
         replay.write_text(json.dumps([list(range(len(block["preds"]))) for block in json.loads(graph.read_text())]))
+        spill = (("--spill-atlas-virtual", "--verify-atlas-virtual-stream")
+                 if scalar_pack else ("--atlas-compile-spill",))
         lowered = run(OPT, prepared.stdout, "--atlas-compile-schedule=provider=model boundary=none" +
-                      (f" order-file={replay}" if order else ""), "--atlas-compile-spill",
+                      (f" order-file={replay}" if order else ""),
+                      *spill,
                       "--atlas-compile-lower=provider=model")
         self.assertEqual(lowered.returncode, 0, lowered.stderr)
         return lowered.stdout
@@ -127,7 +130,8 @@ class DMARingWaitTest(unittest.TestCase):
             f'%y = "atlas.virtual_mxu_matmul"(%p, %p) {{unit = 0 : i32}} : ({F}, {F}) -> {T}',
             dma_load("s1", "s2", "z", "a1", "size", "bf16"), add("w", "y", "z"),
             dma_store("s2", "s3", "w", "a2"), f"return %s3 : {S}"])
-        lines = self.lower(source, order=False).splitlines()
+        # Direct lowering keeps the scalar fallback loop this mutation needs.
+        lines = self.lower(source, order=False, scalar_pack=True).splitlines()
         pack = next(re.search(r"atlas\.virtual_cfg_source = (\d+)", line).group(1)
                     for line in lines if "atlas.virtual_cfg_helper" in line and "atlas.virtual_cfg_source" in line)
         launch = next(index for index, line in enumerate(lines)

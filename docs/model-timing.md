@@ -75,6 +75,15 @@ python -B tools/lower_atlas_program.py input.mlir \
 
 The loader checks fixed filenames/locked digests; omit `--model-facts` to regenerate. `--select-atlas-model-evidence="facts=DIR"` selects compiler evidence. Repeated `--model-region FILE` supplies disjoint DRAM regions with `address`, `initial_hex`, optional `expected_hex`; output directories must be empty. Model paths reject traversal, symlink ancestry and prohibited names before traversal.
 
+The PACK relayout pass replaces eligible scalar copies with VPU PACK and
+UNPACK followed by an MXU push and readout. The roundtrip cost uses the same
+extracted SELI and VPACK timing rules as other virtual costs. The second
+virtual schedule keeps the selected provider, lookahead, and random seed.
+Explicit search orders stay applied after PACK expansion, and graph output
+keeps the prepared graph used by group search. The schedule stage records its
+options in the intermediate IR, and the spill stage restores them for this
+second pass, including when the stages run as separate commands.
+
 Facts guide scheduling, allocation, delay slots, waits and lowering. Python/C++ projected-Core replay uses checked edge facts and a fixed compiler recurrence, schema `atlas.projected_core_replay.v2`, with checked source clock step 1; older bundles require regeneration. Dependency waits, serial virtual engines, anonymous DMA channels and drained-transfer serialization are proposal policy. Core does not automatically stall for dependencies/conflicts. Virtual graphs omit emitted setup, branches, allocation, ports, exact waits and memory history; replay is no full Core simulation. Prediction errors against native scores change neither facts nor completion obligations.
 
 Every production candidate passes compiler verification and native scoring through drained ECALL; winning words are the scored words. Identity mismatches, native faults, incomplete drain and supplied output mismatches fail selection. Expected bytes cover only supplied regions; injected scorers are test hooks. DMA requires matching waits. The model lacks the RTL eight-slot `kAtlasDMACommandSlots` rule: the compiler waits before launch n reuses n−8's slot and rejects overwrite. Builtin behavior is unchanged.
