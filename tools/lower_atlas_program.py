@@ -17,6 +17,9 @@ The output directory receives:
   commands.txt      every command, in order
   log.txt           each command's diagnostics and exit status
 
+Model selection writes selection.json, program.hex, program.json, allocation.json,
+and final.mlir alongside commands.txt, log.txt, and each attempted candidate.
+
 The driver stops at the first failing command; its diagnostic ends log.txt.
 If allocation fails, 3-allocation.json still names each resource that does
 not fit.
@@ -69,8 +72,7 @@ def main() -> int:
     if args.provider == "model" or args.npu_model is not None:
         try:
             select_program(args.source, args.output_dir, args.atlas_bin_dir,
-                           spill=True, spill_mxu=True, guarded_pack=args.guarded_pack,
-                           **model_arguments(args))
+                           model_arguments(args))
         except (OSError, ValueError) as error:
             print(error, file=sys.stderr)
             return 1

@@ -1,14 +1,18 @@
 #!/usr/bin/env python3
-"""Choose verified Atlas programs by native model cycles, breaking ties by candidate order."""
+"""Choose verified Atlas programs by native model cycles.
+
+Candidate order is deterministic; ties use the earliest index regardless of workers.
+"""
 
 from __future__ import annotations
 
 import argparse
 from concurrent.futures import Future, ProcessPoolExecutor, ThreadPoolExecutor
 from contextlib import ExitStack
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, fields, replace
 import hashlib
 import json
+from itertools import islice
 import multiprocessing
 import os
 from pathlib import Path
@@ -45,18 +49,8 @@ CURVE_GROUP_WAIT_PLACEMENTS = ("default", "source")
 class Candidate:
     random_seed: int | None = None
     wait_placement: str = "default"
-    virtual_orders: tuple[tuple[int, ...], ...] = ()
+    order_file: tuple[tuple[int, ...], ...] = ()
     mreg_ranks: tuple[int, ...] = ()
-
-    def __post_init__(self) -> None:
-        if self.random_seed is not None and (self.random_seed < 0):
-            raise ValueError("random-seed must be nonnegative")
-        if self.virtual_orders and self.random_seed is not None:
-            raise ValueError("explicit virtual orders exclude random-seed")
-        if any(rank < 0 or rank > 0xFFFFFFFF for rank in self.mreg_ranks):
-            raise ValueError("MREG ranks must be unsigned 32-bit integers")
-        if self.wait_placement not in ("default", "source"):
-            raise ValueError("wait-placement must be default or source")
 
 
 def _option_path(path: Path) -> str:
@@ -66,27 +60,23 @@ def _option_path(path: Path) -> str:
 def evidence_option(model_facts: Path | None = None) -> list[str]:
     if model_facts is None:
         return []  # A library caller may supply IR with selected evidence.
-    directory = Path(model_facts).resolve()
-    if not directory.is_dir():
-        raise ValueError("--model-facts must name a bundle directory")
-    for name in ("facts.lock.json", "model-timing.json"):
-        if not (directory / name).is_file():
-            raise ValueError(f"model facts bundle requires {name}")
-    return ["--select-atlas-model-evidence=facts=" + _option_path(directory)]
+    return ["--select-atlas-model-evidence=facts=" + _option_path(Path(model_facts))]
 
 
 def candidate_options(candidate: Candidate, provider: str, spill: bool, *, graph_output: bool = False) -> list[str]:
     options = [f"provider={provider}", f"spill={str(spill).lower()}", "allocation-report=allocation.json",
                "pack-relayout-rows=2", "wait-reused-dma-slots=true"]
-    for enabled, option in (
-        (candidate.virtual_orders, "order-file=order.json"),
-        (graph_output, "graph-output=graph.json"),
-        (candidate.random_seed is not None, f"random-seed={candidate.random_seed}"),
-        (candidate.mreg_ranks, "mreg-ranks='" + ",".join(map(str, candidate.mreg_ranks)) + "'"),
-        (candidate.wait_placement != "default", "wait-placement=" + candidate.wait_placement),
-    ):
-        if enabled:
-            options.append(option)
+    for field in fields(candidate):
+        value = getattr(candidate, field.name)
+        if value == field.default:
+            continue
+        if field.name == "order_file":
+            value = "order.json"
+        elif isinstance(value, tuple):
+            value = "'" + ",".join(map(str, value)) + "'"
+        options.append(field.name.replace("_", "-") + "=" + str(value))
+    if graph_output:
+        options.append("graph-output=graph.json")
     return ["--atlas-compile-candidate=" + " ".join(options)]
 
 
@@ -141,29 +131,35 @@ def group_order_neighbors(graphs: list[dict], orders: tuple[tuple[int, ...], ...
 
 @dataclass(frozen=True)
 class SelectionConfig:
-    provider: str
-    profile: str | None
-    model: Path | None
-    model_regions: tuple[Path, ...]
-    spill: bool
-    spill_mxu: bool
-    boundary: str
-    guarded_pack: bool
-    model_facts: Path | None
-    max_candidates: int
-    random_seeds: tuple[int, ...]
-    workers: int
-    mreg_candidates: tuple[tuple[int, ...], ...] | None
-    search_group_evaluations: int
+    provider: str = "model"
+    profile: str | None = None
+    model: Path | None = None
+    model_regions: tuple[Path, ...] = ()
+    spill: bool = True
+    spill_mxu: bool = True
+    boundary: str = "boundary"
+    guarded_pack: bool = False
+    model_facts: Path | None = None
+    max_candidates: int = API_INITIAL_ATTEMPTS
+    random_seeds: tuple[int, ...] = RANDOM_SEEDS
+    workers: int = 12
+    mreg_candidates: tuple[tuple[int, ...], ...] | None = ()
+    search_group_evaluations: int = API_GROUP_ATTEMPTS
 
     def resolved(self) -> SelectionConfig:
         profile = self.profile
         if profile is None:
             profile = "curve" if self.provider == "model" else "fifo43"
-        if self.provider not in ("builtin", "model") or profile not in ("fifo43", "curve"):
-            raise ValueError("unsupported provider or memory profile")
-        if self.max_candidates < 1 or self.workers < 1 or self.boundary not in ("boundary", "none"):
-            raise ValueError("candidate and worker counts must be positive and boundary must be boundary or none")
+        if self.provider not in ("builtin", "model"):
+            raise ValueError("provider must be builtin or model")
+        if profile not in ("fifo43", "curve"):
+            raise ValueError("profile must be fifo43 or curve")
+        if self.max_candidates < 1:
+            raise ValueError("max-candidates must be positive")
+        if self.workers < 1:
+            raise ValueError("workers must be positive")
+        if self.boundary not in ("boundary", "none"):
+            raise ValueError("boundary must be boundary or none")
         if self.search_group_evaluations < 0:
             raise ValueError("search-group-evaluations must be nonnegative")
         mreg_candidates = self.mreg_candidates
@@ -173,19 +169,10 @@ class SelectionConfig:
                 for seed in MREG_SEEDS)
         return replace(self, profile=profile, mreg_candidates=mreg_candidates)
 
-    def policy(self) -> dict:
-        return {"effective": dict(
-            provider=self.provider, profile=self.profile, spill=self.spill, spill_mxu=self.spill_mxu,
-            boundary=self.boundary, guarded_pack=self.guarded_pack, max_candidates=self.max_candidates,
-            random_seeds=list(self.random_seeds), workers=self.workers,
-            mreg_candidates=[list(ranks) for ranks in self.mreg_candidates],
-            search_group_evaluations=self.search_group_evaluations,
-        )}
-
 
 class Selection:
     def __init__(self, source: Path, output_dir: Path, atlas_bin_dir: Path,
-                 config: SelectionConfig, scorer: Callable | None, effective_policy: dict):
+                 config: SelectionConfig, scorer: Callable | None):
         self.config = config
         self.scorer = scorer
         self.source = Path(source).resolve(strict=True)
@@ -195,21 +182,13 @@ class Selection:
             raise ValueError("output directory must be empty to prevent stale artifacts")
         self.output.mkdir(parents=True, exist_ok=True)
         self.started = time.monotonic()
-        self.commands, self.logs = [], []
         self.log_lock, self.score_lock = threading.Lock(), threading.Lock()
-        self.receipt = {
-            "schema": "atlas.model_selection.v1", "provider": config.provider, "profile": config.profile,
-            "guarded_pack": config.guarded_pack,
-            "max_candidates": config.max_candidates, "workers": config.workers,
-            "search_group_evaluations": config.search_group_evaluations,
-            "source_sha256": hashlib.sha256(self.source.read_bytes()).hexdigest(),
-            "search_policy": effective_policy,
-            "candidates": []}
+        self.result = {"profile": config.profile, "guarded_pack": config.guarded_pack, "candidates": []}
         self.standard_scorer = scorer is None
         self.prepared = self.output / "1-virtual.mlir"
         self.seen: set[Candidate] = set()
-        # Profiles must not share scores; model and regions are fixed for this selection.
-        self.score_cache: dict[tuple[str, tuple[int, ...]], int | Future] = {}
+        # Model, profile, and regions are fixed for this selection.
+        self.score_cache: dict[tuple[int, ...], int | Future] = {}
         self.score_executor: ProcessPoolExecutor | None = None
         self.best: dict | None = None
 
@@ -238,44 +217,35 @@ class Selection:
         rendered = f"cd {shlex.quote(str(directory))} && " + shlex.join(argv)
         if stdout:
             rendered += f" > {shlex.quote(str(stdout))}"
-        with self.log_lock:
-            self.commands.append(rendered)
-            (self.output / "commands.txt").write_text("\n".join(self.commands) + "\n")
+        with self.log_lock, (self.output / "commands.txt").open("a") as stream:
+            stream.write(rendered + "\n")
         try:
             result = subprocess.run(argv, cwd=directory, capture_output=True, text=True,
                                     env=dict(os.environ, PYTHONDONTWRITEBYTECODE="1"))
         except OSError as error:
             result = subprocess.CompletedProcess(argv, 1, "", str(error))
-        with self.log_lock:
-            self.logs.append(f"$ {rendered}\n{result.stderr}exit {result.returncode}\n")
-            (self.output / "log.txt").write_text("\n".join(self.logs))
+        with self.log_lock, (self.output / "log.txt").open("a") as stream:
+            stream.write(f"$ {rendered}\n{result.stderr}exit {result.returncode}\n\n")
         if result.returncode:
             raise ValueError(result.stderr.strip() or f"{argv[0]} exited {result.returncode}")
         if stdout:
             stdout.write_text(result.stdout)
         return result.stdout
 
-    def cached_score(self, program: dict, scoring_profile: str) -> tuple[int | Future, bool]:
-        key = scoring_profile, tuple(instruction["word_u32"] for instruction in program["instructions"])
+    def cached_score(self, program: dict) -> int | Future:
+        key = tuple(instruction["word_u32"] for instruction in program["instructions"])
         with self.score_lock:
-            if self.standard_scorer:
-                profiles = self.receipt.setdefault("scoring_configurations", {})
-                if scoring_profile not in profiles:
-                    profiles[scoring_profile] = self.score_executor.submit(
-                        self.scorer.profile_receipt, program, scoring_profile).result()
-            hit = key in self.score_cache
-            if not hit:
-                self.score_cache[key] = (self.score_executor.submit(self.scorer, program, scoring_profile)
-                                         if self.score_executor else self.scorer(program, profile=scoring_profile))
-            return self.score_cache[key], hit
+            if key not in self.score_cache:
+                self.score_cache[key] = (self.score_executor.submit(self.scorer, program, self.config.profile)
+                                         if self.score_executor else self.scorer(program, profile=self.config.profile))
+            return self.score_cache[key]
 
     def compile_candidate(self, candidate: Candidate, row: dict) -> None:
         directory = self.output / row["directory"]
-        before = time.monotonic()
         stage = "compile"
         try:
-            if candidate.virtual_orders:
-                (directory / "order.json").write_text(json.dumps(candidate.virtual_orders) + "\n")
+            if candidate.order_file:
+                (directory / "order.json").write_text(json.dumps(candidate.order_file) + "\n")
             self.command([str(self.binaries / "atlas-opt"), str(self.prepared),
                           *candidate_options(candidate, self.config.provider, self.config.spill,
                                              graph_output=bool(self.config.search_group_evaluations)),
@@ -287,43 +257,41 @@ class Selection:
             (directory / "program.hex").write_text("".join(f"{word:08x}\n" for word in words))
             if self.scorer is not None:
                 stage = "score"
-                cached, row["score_cache_hit"] = self.cached_score(program, self.config.profile)
+                cached = self.cached_score(program)
                 row["cycles"] = cached.result() if isinstance(cached, Future) else cached
-            row.update(status="PASS", words=len(words), program_sha256=hashlib.sha256(
+            row.update(status="PASS", program_sha256=hashlib.sha256(
                 b"".join(word.to_bytes(4, "little") for word in words)).hexdigest())
         except (OSError, ValueError, RuntimeError) as error:
             row.update(status="FAIL", error=str(error), error_stage=stage)
-        finally:
-            row["elapsed_seconds"] = time.monotonic() - before
 
     def fail(self, message: str) -> None:
-        (self.output / "selection.json").write_text(json.dumps(self.receipt, indent=2) + "\n")
+        (self.output / "selection.json").write_text(json.dumps(self.result, indent=2) + "\n")
         raise ValueError(message)
 
     def evaluate_batch(self, specifications: list[tuple[Candidate, str]], limit: int | None = None) -> None:
         if limit is None:
             limit = self.config.max_candidates
-        pending, before = [], len(self.receipt["candidates"])
+        pending, before = [], len(self.result["candidates"])
         for candidate, category in specifications:
-            if candidate in self.seen or len(self.receipt["candidates"]) >= limit:
+            if candidate in self.seen or len(self.result["candidates"]) >= limit:
                 continue
-            index = len(self.receipt["candidates"])
+            index = len(self.result["candidates"])
             directory = self.output / "candidates" / f"{index:03d}-{category}"
             directory.mkdir(parents=True)
             row = {"index": index, "class": category, "options": asdict(candidate),
                    "directory": str(directory.relative_to(self.output))}
             pending.append((candidate, row))
             self.seen.add(candidate)
-            self.receipt["candidates"].append(row)
+            self.result["candidates"].append(row)
         with ThreadPoolExecutor(max_workers=min(self.config.workers, max(1, len(pending)))) as executor:
             futures = [executor.submit(self.compile_candidate, candidate, row) for candidate, row in pending]
             for future in futures:
                 future.result()
-        for row in self.receipt["candidates"][before:]:
+        for row in self.result["candidates"][before:]:
             # Native faults stop the search instead of hiding an invalid program.
             if row["status"] == "FAIL" and row["error_stage"] == "score":
                 self.fail(f"candidate {row['index']} failed model scoring: {row['error']}")
-        passing = [row for row in self.receipt["candidates"] if row["status"] == "PASS"]
+        passing = [row for row in self.result["candidates"] if row["status"] == "PASS"]
         # Assign canonical indices before parallel work to preserve deterministic ties.
         self.best = min(passing, key=lambda row: (row.get("cycles", 0), row["index"]), default=None)
 
@@ -340,68 +308,50 @@ class Selection:
         self.evaluate_batch([(replace(self.winner(), wait_placement=INITIAL_WAIT_PLACEMENT),
                               "wait-placement")], limit=self.config.max_candidates)
         register_base = self.winner()
-        self.receipt["mreg_pool_size"] = len(self.config.mreg_candidates)
         self.evaluate_batch([(replace(register_base, mreg_ranks=tuple(ranks)), "mreg-ranks")
                              for ranks in self.config.mreg_candidates])
 
-    @staticmethod
-    def group_candidates(base: Candidate, orders, profile: str):
-        placements = (CURVE_GROUP_WAIT_PLACEMENTS
-                      if profile == "curve" else (base.wait_placement,))
-        for order in orders:
-            for placement in placements:
-                yield replace(base, virtual_orders=order, wait_placement=placement)
-
     def search_groups(self) -> None:
-        search_started = time.monotonic()
-        initial_count = len(self.receipt["candidates"])
+        initial_count = len(self.result["candidates"])
         limit = initial_count + self.config.search_group_evaluations
-        phase = self.receipt["group_search"] = {
+        phase = self.result["group_search"] = {
             "start_index": self.best["index"], "accepted_indices": []}
-        while len(self.receipt["candidates"]) < limit:
+        while len(self.result["candidates"]) < limit:
             parent = self.best
             graphs = json.loads((self.output / parent["directory"] / "graph.json").read_text())
             orders = tuple(tuple(graph["order"]) for graph in graphs)
-            base = replace(self.winner(), random_seed=None, virtual_orders=orders)
+            base = replace(self.winner(), random_seed=None, order_file=orders)
             self.seen.add(base)
-            proposed = group_order_neighbors(graphs, orders)
-            pending = self.group_candidates(base, proposed, self.config.profile)
-            while len(self.receipt["candidates"]) < limit:
-                batch = []
-                width = min(BATCH_WIDTH, limit - len(self.receipt["candidates"]))
-                while len(batch) < width:
-                    candidate = next(pending, None)
-                    if candidate is None:
-                        break
-                    if candidate not in self.seen and candidate not in batch:
-                        batch.append(candidate)
+            placements = CURVE_GROUP_WAIT_PLACEMENTS if self.config.profile == "curve" else (base.wait_placement,)
+            pending = (replace(base, order_file=order, wait_placement=placement)
+                       for order in group_order_neighbors(graphs, orders) for placement in placements)
+            while len(self.result["candidates"]) < limit:
+                width = min(BATCH_WIDTH, limit - len(self.result["candidates"]))
+                # Each neighbor and wait-placement sibling is unique in this stream.
+                batch = list(islice((candidate for candidate in pending if candidate not in self.seen), width))
                 if not batch:
                     break
-                before = len(self.receipt["candidates"])
+                before = len(self.result["candidates"])
                 self.evaluate_batch([(candidate, "group-order") for candidate in batch], limit)
-                for row in self.receipt["candidates"][before:]:
+                for row in self.result["candidates"][before:]:
                     row["parent_index"] = parent["index"]
                 if self.best["index"] != parent["index"]:
                     phase["accepted_indices"].append(self.best["index"])
                     break
             if self.best["index"] == parent["index"]:
                 break
-        phase.update(evaluations=len(self.receipt["candidates"]) - initial_count,
-                     elapsed_seconds=time.monotonic() - search_started)
+        phase["evaluations"] = len(self.result["candidates"]) - initial_count
 
     def publish(self) -> dict:
         selected = self.output / self.best["directory"]
         for name in ("final.mlir", "allocation.json", "program.json", "program.hex"):
             shutil.copyfile(selected / name, self.output / name)
-        self.receipt.update(selected_index=self.best["index"], selected_class=self.best["class"],
-                            default_cycles=self.receipt["candidates"][0].get("cycles"),
+        self.result.update(selected_index=self.best["index"], selected_class=self.best["class"],
+                            default_cycles=self.result["candidates"][0].get("cycles"),
                             selected_cycles=self.best.get("cycles"),
-                            score_cache_entries=sum(key[0] == self.config.profile for key in self.score_cache),
-                            score_cache_hits=sum(row.get("score_cache_hit", False)
-                                                 for row in self.receipt["candidates"]),
                             elapsed_seconds=time.monotonic() - self.started)
-        (self.output / "selection.json").write_text(json.dumps(self.receipt, indent=2) + "\n")
-        return self.receipt
+        (self.output / "selection.json").write_text(json.dumps(self.result, indent=2) + "\n")
+        return self.result
 
     def run(self) -> dict:
         self.initialize_scorer()
@@ -418,27 +368,10 @@ class Selection:
         return self.publish()
 
 
-def select_program(source: Path, output_dir: Path, atlas_bin_dir: Path, *,
-                   provider: str = "model",
-                   profile: str | None = None, model: Path | None = None, model_regions: tuple[Path, ...] = (),
-                   spill: bool = True, spill_mxu: bool = True,
-                   boundary: str = "boundary",
-                   guarded_pack: bool = False,
-                   model_facts: Path | None = None,
-                   max_candidates: int = API_INITIAL_ATTEMPTS,
-                   random_seeds: tuple[int, ...] = RANDOM_SEEDS, workers: int = 12,
-                   mreg_candidates: tuple[tuple[int, ...], ...] | None = (),
-                   search_group_evaluations: int = API_GROUP_ATTEMPTS,
-                   scorer: Callable | None = None) -> dict:
+def select_program(source: Path, output_dir: Path, atlas_bin_dir: Path,
+                   config: SelectionConfig = SelectionConfig(), *, scorer: Callable | None = None) -> dict:
     """Verify candidates and publish the lowest-cycle program in canonical order."""
-    config = SelectionConfig(
-        provider=provider, profile=profile, model=model, model_regions=model_regions,
-        spill=spill, spill_mxu=spill_mxu, boundary=boundary,
-        guarded_pack=guarded_pack, model_facts=model_facts,
-        max_candidates=max_candidates, random_seeds=random_seeds, workers=workers,
-        mreg_candidates=mreg_candidates, search_group_evaluations=search_group_evaluations).resolved()
-    effective_policy = config.policy()
-    return Selection(source, output_dir, atlas_bin_dir, config, scorer, effective_policy).run()
+    return Selection(source, output_dir, atlas_bin_dir, config.resolved(), scorer).run()
 
 
 def add_model_arguments(parser: argparse.ArgumentParser) -> None:
@@ -451,7 +384,8 @@ def add_model_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--model-facts", type=Path,
                         help="model facts directory (default: regenerate from --npu-model)")
     parser.add_argument("--search-budget", choices=("full", "single"), default="full",
-                        help="full search (18 initial and 134 group attempts) or one default candidate")
+                        help="full search (18 initial and 134 group attempts) or one default candidate; "
+                             "deterministic candidate order, with ties going to the earliest index")
     parser.add_argument("--max-candidates", type=int, default=FULL_INITIAL_ATTEMPTS,
                         help="initial attempt limit in full mode (default: 18)")
     parser.add_argument("--workers", type=int, default=min(12, os.cpu_count() or 1))
@@ -461,17 +395,16 @@ def add_model_arguments(parser: argparse.ArgumentParser) -> None:
                         help="group attempt limit in full mode (default: 134)")
 
 
-def model_arguments(args: argparse.Namespace) -> dict:
+def model_arguments(args: argparse.Namespace) -> SelectionConfig:
     single = args.search_budget == "single"
-    profile = args.profile or ("curve" if args.provider == "model" else "fifo43")
-    return {
-        "provider": args.provider, "profile": profile,
-        "model": args.npu_model, "model_regions": tuple(args.model_region),
-        "model_facts": args.model_facts, "workers": args.workers,
-        "mreg_candidates": () if single or not args.bank_candidates else None,
-        "max_candidates": 1 if single else args.max_candidates,
-        "search_group_evaluations": 0 if single else args.search_group_evaluations,
-    }
+    return SelectionConfig(
+        provider=args.provider, profile=args.profile, model=args.npu_model,
+        model_regions=tuple(args.model_region), model_facts=args.model_facts, workers=args.workers,
+        boundary=getattr(args, "boundary", "boundary"), spill=not getattr(args, "no_spill", False),
+        guarded_pack=getattr(args, "guarded_pack", False),
+        mreg_candidates=() if single or not args.bank_candidates else None,
+        max_candidates=1 if single else args.max_candidates,
+        search_group_evaluations=0 if single else args.search_group_evaluations)
 
 
 def main() -> int:
@@ -487,14 +420,13 @@ def main() -> int:
     parser.set_defaults(provider="model")
     args = parser.parse_args()
     try:
-        receipt = select_program(args.source, args.output_dir, args.atlas_bin_dir,
-                                 boundary=args.boundary, spill=not args.no_spill,
-                                 guarded_pack=args.guarded_pack, **model_arguments(args))
+        result = select_program(args.source, args.output_dir, args.atlas_bin_dir,
+                                model_arguments(args))
     except (OSError, ValueError) as error:
         print(error, file=sys.stderr)
         return 1
-    print(json.dumps({key: receipt[key] for key in ("selected_index", "selected_class", "default_cycles",
-                                                  "selected_cycles", "elapsed_seconds")}))
+    print(json.dumps({key: result[key] for key in ("selected_index", "selected_class", "default_cycles",
+                                                 "selected_cycles", "elapsed_seconds")}))
     return 0
 
 

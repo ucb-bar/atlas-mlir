@@ -1,6 +1,5 @@
 """Execute verified words on the evidence-selected model; no timing surrogate."""
 from dataclasses import dataclass
-from functools import lru_cache
 import inspect
 import json
 from pathlib import Path
@@ -8,11 +7,7 @@ import sys
 from types import SimpleNamespace
 
 from atlas_derive_curve import resolve_curve_path
-from atlas_model_profiles import bind_synthetic_configuration, scoring_configuration_receipt, synthetic_targets
-from atlas_model_schema import LOCK
-from atlas_model_semantics import check_model_semantics
-from atlas_model_capabilities import check_configuration
-from atlas_model_timing import configuration, encoded, numerical_data, sha256, source_digest
+from atlas_model_timing import configuration, sha256
 from check_program_decode import decode_binary
 
 
@@ -21,36 +16,23 @@ MAX_CYCLES = 200000
 TORCH_THREADS = 1
 
 
-@lru_cache(maxsize=1)
-def _model_content(root):
-    root = Path(root).absolute()
-    check_model_semantics(root)
-    sys.path.insert(0, str(root))
-    import npu_model
-    import torch
-    if Path(npu_model.__file__).parent.parent.absolute() != root:
-        raise ValueError("imported npu_model differs from --npu-model")
-    torch.set_num_threads(TORCH_THREADS)
-    source, _ = source_digest(root)
-    numerical, _ = numerical_data(root)
-    return root, source, numerical
+def fifo43_accept(cycle):
+    """Synthetic FIFO43 target: four accepted cycles per eleven-cycle period."""
+    return cycle % 11 < 4
 
 
-def selected_model(root, *, include_configuration=False):
-    root, source, numerical = _model_content(root)
-    cfg, values = configuration()
-    check_configuration(cfg)
-    identity = root, source, numerical, sha256(encoded(values))
-    return (*identity, cfg) if include_configuration else identity
+def bind_fifo43_configuration(cfg):
+    # Synthetic target matching the standalone memory responder.
+    cfg.dma_memory_backend = "fixed"
+    cfg.dma_memory_params = dict(latency=43, cycles_per_beat=1,
+                                 accept_fn=fifo43_accept)
 
 
 def bind_curve_configuration(cfg, evidence):
     """Run exactly the configured curve bytes whose digest the provider retained."""
     path = resolve_curve_path(cfg)
     curve_bytes = path.read_bytes()
-    # Providers without a separate curve digest admitted only the locked curve.
-    expected = evidence.get("dma_curve_sha256", LOCK["curve_sha256"])
-    if sha256(curve_bytes) != expected:
+    if sha256(curve_bytes) != evidence.get("dma_curve_sha256"):
         raise ValueError("scoring DMA curve differs from provider evidence")
     # Bind checked bytes to prevent a second path resolution/read during Core init.
     cfg.dma_memory_params = dict(cfg.dma_memory_params, curves=json.loads(curve_bytes))
@@ -98,31 +80,22 @@ class ModelScorer:
         object.__setattr__(self, "model", Path(self.model).absolute())
         object.__setattr__(self, "regions", tuple(
             json.loads(Path(path).absolute().read_text()) for path in self.regions))
-        # Snapshot named targets once, including when this scorer is pickled for workers.
-        object.__setattr__(self, "_targets", synthetic_targets())
-
-    def configured_profile(self, document, profile):
-        """Bind and identify the exact configuration used for native scoring."""
-        root, source, numerical, config_hash, cfg = selected_model(self.model, include_configuration=True)
-        evidence = document.get("model_evidence", {})
-        target = self._targets.get(profile)
-        if target is not None:
-            bind_synthetic_configuration(cfg, target)
-        elif profile == "curve":
-            bind_curve_configuration(cfg, evidence)
-        else:
-            raise ValueError("unsupported memory profile")
-        identity = dict(source_sha256=source, numerical_data_sha256=numerical, configuration_sha256=config_hash)
-        receipt = scoring_configuration_receipt(cfg, profile, identity, synthetic_target=target)
-        return cfg, receipt
-
-    def profile_receipt(self, document, profile):
-        return self.configured_profile(document, profile)[1]
 
     def __call__(self, document, profile="curve"):
         if sys.flags.optimize:
             raise ValueError("model scoring requires Python assertions; disable -O/PYTHONOPTIMIZE")
-        cfg, _ = self.configured_profile(document, profile)
+        if str(self.model) not in sys.path:
+            sys.path.insert(0, str(self.model))
+        import npu_model
+        if Path(npu_model.__file__).parent.parent.absolute() != self.model:
+            raise ValueError("imported npu_model differs from --npu-model")
+        cfg, _ = configuration()
+        if profile == "fifo43":
+            bind_fifo43_configuration(cfg)
+        elif profile == "curve":
+            bind_curve_configuration(cfg, document.get("model_evidence", {}))
+        else:
+            raise ValueError("unsupported memory profile")
         import torch
         torch.set_num_threads(TORCH_THREADS)
         from npu_model.configs import isa_definition as isa
@@ -133,8 +106,10 @@ class ModelScorer:
         words = [row["word_u32"] for row in document["instructions"]]
         inventory = json.loads((Path(__file__).parents[1] / "docs/selected-variant-inventory.json").read_text())
         decoded = decode_binary(inventory, b"".join(word.to_bytes(4, "little") for word in words))
-        program = InstantiableProgram([model_instruction(row, inventory, isa) for row in decoded["instructions"]])
-        logger = SimpleNamespace(**{name: lambda *args, **kwargs: None for name in dir(Logger) if name.startswith("log_")})
+        program = InstantiableProgram([model_instruction(row, inventory, isa)
+                                       for row in decoded["instructions"]])
+        logger = SimpleNamespace(**{name: lambda *args, **kwargs: None
+                                  for name in dir(Logger) if name.startswith("log_")})
         core = Core(cfg, logger)
         try:
             if core.ignore_runtime_errors is not False:
@@ -142,7 +117,8 @@ class ModelScorer:
             core.load_program(program)
             state = core.arch_state
             for region in self.regions:
-                state.write_dram(region["address"], torch.tensor(list(bytes.fromhex(region["initial_hex"])), dtype=torch.uint8))
+                initial = torch.tensor(list(bytes.fromhex(region["initial_hex"])), dtype=torch.uint8)
+                state.write_dram(region["address"], initial)
             first = None
             while not state.halted and core.cycle_count < MAX_CYCLES:
                 if core.is_finished():
