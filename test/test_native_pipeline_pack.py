@@ -1,4 +1,4 @@
-"""Optional native pipeline and emitted PACK-copy regressions."""
+"""Optional native pipeline and exact on-chip PACK relayout regressions."""
 
 from __future__ import annotations
 
@@ -81,55 +81,60 @@ class NativePipelinePackTest(unittest.TestCase):
             input_text=machine,
         )
 
-    def test_pack_copy_preserves_all_32_rows(self) -> None:
+    def test_relu_before_pack_keeps_exact_on_chip_roundtrip(self) -> None:
+        source = PACK_VIRTUAL.replace('    %y = "atlas.virtual_pack_fp8"(%x)',
+            '    %relu = "atlas.virtual_vpu_unary"(%x) {kind = "relu"} '
+            ': (!atlas.virtual_bf16) -> !atlas.virtual_bf16\n' '    %y = "atlas.virtual_pack_fp8"(%relu)')
+        machine = self.binding._run([str(Path(ATLAS_BIN) / "atlas-opt"), *self.binding.NATIVE_PIPELINES["mandatory"],
+            "-"], input_text=source,)
+        program = json.loads(self.binding._run([str(Path(ATLAS_BIN) / "atlas-emit"), "--program-json", "-"],
+            input_text=machine,))
+        self.binding.check_pack_stream(program, input_address=0x90001800, output_address=0x90011800, source_pair=32,
+            relu_pair=(34, 32),)
+        self.assertEqual(program["word_count"], 39)
+
+    def test_pack_uses_exact_on_chip_roundtrip(self) -> None:
         self.check_pack(self.program)
         rows = self.program["instructions"]
-        branch = next(i for i, row in enumerate(rows) if row["operation"] == "atlas.branch")
-        start = branch + rows[branch]["fields"]["offset_bytes"] // 2
-        registers = {0: 0, 10: 131072, 11: 131584, 12: 132096, 13: 0, 14: 32}
-        memory = {131072 + i: tuple(range(i, i + 4)) for i in range(0, 1024, 4)}
-        stores = {}
-        for _ in range(32):
-            for row in rows[start:branch]:
-                op, fields = row["operation"], row["fields"]
-                if op == "atlas.scalar_load":
-                    registers[fields["dst"]] = memory[registers[fields["base"]] + fields["offset"]]
-                elif op == "atlas.scalar_store":
-                    address = registers[fields["base"]] + fields["offset"]
-                    self.assertNotIn(address, stores)
-                    stores[address] = registers[fields["src"]]
-                elif op == "atlas.alu_imm":
-                    registers[fields["dst"]] = registers[fields["src"]] + fields["immediate"]
-                else:
-                    self.assertEqual(op, "atlas.delay")
-        self.assertEqual(registers[13], registers[14])
-        self.assertEqual(len(stores), 256)
-        for row in range(32):
-            for half in range(2):
-                for word in range(4):
-                    source = half * 512 + row * 16 + word * 4
-                    self.assertEqual(stores[132096 + row * 32 + half * 16 + word * 4],
-                                     tuple(range(source, source + 4)))
+        conversions = [row["fields"] for row in rows if row["operation"] == "atlas.vpu_pack"]
+        self.assertEqual([fields["direction"] for fields in conversions], ["bf16_to_fp8", "fp8_to_bf16"])
+        self.assertEqual((conversions[0]["dst"], conversions[1]["src"]), (62, 62))
+        self.assertEqual(sum(row["operation"] == "atlas.mxu_push" for row in rows), 1)
+        self.assertEqual(sum(row["operation"] == "atlas.mxu_pop" for row in rows), 1)
+        self.assertFalse(any(row["operation"] in {"atlas.branch", "atlas.scalar_store"} for row in rows))
 
-    def test_pack_rejects_corrupt_address_temporary_and_branch(self) -> None:
-        for case in ("address", "last-word-address", "temporary", "branch"):
-            with self.subTest(case=case):
+    def test_pack_rejects_changed_conversion_fields_scales_and_words(self) -> None:
+        rows = self.program["instructions"]
+        selected = { "pack": next(i for i, row in enumerate(rows) if row["operation"] == "atlas.vpu_pack"), "unpack":
+            next(i for i, row in enumerate(rows) if row["operation"] == "atlas.vpu_pack" and row["fields"]["direction"]
+            == "fp8_to_bf16"), "push": next(i for i, row in enumerate(rows) if row["operation"] == "atlas.mxu_push"),
+            "pop": next(i for i, row in enumerate(rows) if row["operation"] == "atlas.mxu_pop"), }
+        mutations = [(index, "offset", 126) for index, row in enumerate(rows)
+                     if row["operation"] == "atlas.scalar_load" and row["fields"].get("kind") == "seli"]
+        mutations.extend((selected[name], field, value) for name, field, value in (("pack", "src", 0), ("pack", "dst",
+            60), ("pack", "scale_reg", 2), ("unpack", "src", 60), ("unpack", "dst", 36), ("unpack", "direction",
+            "bf16_to_fp8"), ("push", "src", 36), ("push", "kind", "acc_fp8"), ("pop", "scale_reg", 2), ("pop", "unit",
+            1),))
+        for index, field, value in mutations:
+            with self.subTest(index=index, field=field):
                 program = copy.deepcopy(self.program)
-                if case == "address":
-                    row = next(row for row in program["instructions"]
-                               if row["operation"] == "atlas.scalar_load" and row["fields"].get("kind") == "lw")
-                    row["fields"]["offset"] += 4
-                elif case == "last-word-address":
-                    row = next(row for row in program["instructions"]
-                               if row["operation"] == "atlas.scalar_load" and row["fields"].get("kind") == "lw"
-                               and row["fields"]["offset"] == 12)
-                    row["fields"]["offset"] += 4
-                elif case == "temporary":
-                    row = next(row for row in program["instructions"] if row["operation"] == "atlas.scalar_store")
-                    row["fields"]["src"] = 17 if row["fields"]["src"] == 16 else 16
-                else:
-                    row = next(row for row in program["instructions"] if row["operation"] == "atlas.branch")
-                    row["fields"]["offset_bytes"] += 2
+                program["instructions"][index]["fields"][field] = value
+                with self.assertRaises(self.binding.NativeCompilationError):
+                    self.check_pack(program)
+        for index in (*selected.values(), *(i for i, row in enumerate(rows)
+                        if row["operation"] == "atlas.scalar_load")):
+            with self.subTest(encoded_word=index):
+                program = copy.deepcopy(self.program)
+                program["instructions"][index]["word_u32"] ^= 1 << 7
+                with self.assertRaises(self.binding.NativeCompilationError):
+                    self.check_pack(program)
+
+    def test_pack_rejects_shortened_conversion_delays(self) -> None:
+        delays = [index for index, row in enumerate(self.program["instructions"]) if row["operation"] == "atlas.delay"]
+        for index in delays:
+            with self.subTest(delay=index):
+                program = copy.deepcopy(self.program)
+                program["instructions"][index]["fields"]["cycles"] = 0
                 with self.assertRaises(self.binding.NativeCompilationError):
                     self.check_pack(program)
 
