@@ -151,59 +151,36 @@ TimingRuleResult<DepGraph> mlir::atlas::timing::buildTimingGraph(
 }
 
 namespace {
-std::pair<Instr, Instr> representativeProbes(const OpInfo *op, bool model) {
-  Instr first{op, 0, 2, 4}, second{op, 6, 8, 10};
-  switch (op->opClass) {
-  case OpClass::WeightPush:
-  case OpClass::AccPushFp8:
-  case OpClass::AccPushBf16:
-  case OpClass::MatMul:
-  case OpClass::MatMulAcc:
-  case OpClass::PopFp8:
-  case OpClass::PopBf16:
-    first = {op, 0, 0, 0};
-    second = {op, 1, 2, 1};
-    break;
-  default:
-    break;
+std::pair<Instr, Instr> representativeProbes(const OpInfo *op,
+                                           const ProposalGeometry *geometry) {
+  const bool mxu = op->engine == Engine::Mxu0 || op->engine == Engine::Mxu1;
+  if (!geometry) {
+    if (mxu)
+      return {{op, 0, 0, 0}, {op, 1, 2, 1}};
+    return {{op, 0, 2, 4}, {op, 6, 8, 10}};
   }
-  if (model) {
-    if (op->engine == Engine::Scalar) {
-      if (!hasOperand(*op, "x1")) first.rs1 = second.rs1 = 0;
-      if (!hasOperand(*op, "x2")) first.rs2 = second.rs2 = 0;
+  const int stride = geometry->bf16Registers;
+  Instr first{op}, second{op};
+  if (op->engine == Engine::Scalar)
+    second.rd = 3 * stride;
+  // Field positions retain the compiler's disjoint probe placement. The span
+  // comes from the model's register geometry; ISA metadata selects live fields.
+  auto place = [&](int Instr::*field, int index,
+                   std::initializer_list<const char *> tokens) {
+    for (const char *token : tokens) {
+      if (!hasOperand(*op, token)) continue;
+      if (mxu) {
+        second.*field = token[0] == 'm' ? stride : token[0] == 'e' ? 0 : 1;
+      } else {
+        first.*field = index * stride;
+        second.*field = (index + 3) * stride;
+      }
+      return;
     }
-    switch (op->opClass) {
-    case OpClass::WeightPush:
-    case OpClass::AccPushFp8:
-    case OpClass::AccPushBf16:
-      second = {op, 1, 2, 0};
-      break;
-    case OpClass::PopFp8:
-    case OpClass::PopBf16:
-      second = {op, 2, 0, 1};
-      break;
-    case OpClass::VLoad:
-    case OpClass::VStore:
-    case OpClass::ScalarLoad:
-    case OpClass::ScaleLoad:
-    case OpClass::Transpose:
-    case OpClass::VpuRowReduce:
-    case OpClass::VpuColReduce:
-      first.rs2 = second.rs2 = 0;
-      break;
-    case OpClass::ScalarStore:
-      first.rd = second.rd = 0;
-      break;
-    case OpClass::VpuElementwise:
-      if (!op->twoInput) first.rs2 = second.rs2 = 0;
-      break;
-    case OpClass::VpuLoadImmPair:
-    case OpClass::VpuLoadImmSingle:
-      first.rs1 = first.rs2 = second.rs1 = second.rs2 = 0;
-      break;
-    default: break;
-    }
-  }
+  };
+  place(&Instr::rd, 0, {"md", "wd", "ad", "ed", "xd"});
+  place(&Instr::rs1, 1, {"m1", "e1", "x1", "@"});
+  place(&Instr::rs2, 2, {"m2", "w2", "a2", "x2"});
   return {first, second};
 }
 } // namespace
@@ -219,7 +196,7 @@ mlir::FailureOr<MachineOpTiming> mlir::atlas::timing::machineTimingOf(
   if (!missing.empty()) return error(missing);
   const OpInfo *op = findOp(name);
   if (!op) return error("unknown machine operation");
-  auto [first, second] = representativeProbes(op, bool(p.model));
+  auto [first, second] = representativeProbes(op, p.model ? &p.proposalGeometry : nullptr);
   auto [firstContext, secondContext] = contexts ? contexts(first, second) : std::pair<TimingContext, TimingContext>{};
   Footprint a = p.footprint(first, unknownRegs());
   Footprint b = p.footprint(second, unknownRegs());

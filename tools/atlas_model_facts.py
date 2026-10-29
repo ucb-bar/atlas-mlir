@@ -46,6 +46,7 @@ def regenerate(model, out):
     from atlas_derive_frontend import derive_frontend
     from atlas_derive_arch import derive_arch
     from atlas_derive_resources import derive_resources
+    from atlas_derive_costs import derive_costs
 
     torch.set_num_threads(1)
     cfg, config = configuration()
@@ -56,6 +57,7 @@ def regenerate(model, out):
         timing, reservations = extract(cfg)
         blocks.update(timing)
         releases.update(reservations)
+    derive_costs(cfg, architecture)
     names = [name for name, _, _ in isa_cases(cfg)]
     if set(blocks) != set(names) or set(releases) != set(blocks):
         raise UnsupportedModelTiming("source derivation does not cover the selected ISA")
