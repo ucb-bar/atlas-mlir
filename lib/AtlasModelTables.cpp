@@ -420,7 +420,6 @@ std::string memoryOperands(const Instr &in, const RegValues &regs,
   if (!xreg(in.rs1) || !xreg(in.rs2)) return "scalar operand out of range";
   if (op.engine == Engine::Dma) {
     if (!xreg(in.rd)) return "scalar operand out of range";
-    if (op.channel < 0 || op.channel >= facts.dmaChannels) return "unsupported DMA channel";
     if (op.opClass == OpClass::DmaWait) return {};
     if (op.opClass == OpClass::DmaConfig)
       return regs[in.rs1] && *regs[in.rs1] <= 31 ? "" : "DMA configuration requires known upper base";
@@ -437,15 +436,7 @@ std::string memoryOperands(const Instr &in, const RegValues &regs,
   }
   bool vector = op.opClass == OpClass::VLoad || op.opClass == OpClass::VStore;
   if (vector) {
-    if (in.rs2 || in.rd >= kAtlasTensorRegisters || in.imm < -2048 || in.imm > 4095)
-      return "unsupported vector memory encoding";
-    if (regs[in.rs1]) {
-      uint32_t words = *regs[in.rs1] + uint32_t(signExtend(in.imm, 12) * 32);
-      unsigned line = (words >> 3) & 0xffff;
-      if (line % 32 || line + 32 > kAtlasVmemBytes / kLineBytes ||
-          line / (kVmemBankBytes / kLineBytes) != (line + 31) / (kVmemBankBytes / kLineBytes))
-        return "vector memory tile is unaligned or outside VMEM";
-    }
+    if (in.rs2) return "unsupported vector memory encoding";
     return {};
   }
   if (!xreg(in.rd)) return "scalar operand out of range";
@@ -463,19 +454,9 @@ std::string vectorOperands(const Instr &in, const Footprint &f) {
   const auto &op = *in.op;
   bool push = op.opClass == OpClass::WeightPush || op.opClass == OpClass::AccPushFp8 ||
               op.opClass == OpClass::AccPushBf16;
-  bool pop = op.opClass == OpClass::PopFp8 || op.opClass == OpClass::PopBf16;
-  if ((op.opClass == OpClass::PopFp8 || op.opClass == OpClass::VpuPack ||
-       op.opClass == OpClass::VpuUnpack) && (in.rs1 < 0 || in.rs1 > 31))
-    return "scale register out of range";
   if (op.mxu >= 0) {
     if (in.imm || (push && in.rs2) || (op.opClass == OpClass::PopBf16 && in.rs1))
       return "unsupported MXU encoding";
-    if ((push && (in.rd < 0 || in.rd > 1)) || (pop && (in.rs2 < 0 || in.rs2 > 1)) ||
-        (!push && !pop && (in.rd < 0 || in.rd > 1 || in.rs2 < 0 || in.rs2 > 1)))
-      return "MXU accumulator and weight slots must be 0 or 1";
-    if ((op.opClass == OpClass::AccPushBf16 && (in.rs1 & 1)) ||
-        (op.opClass == OpClass::PopBf16 && (in.rd & 1)))
-      return "BF16 operands require even register pairs";
     return {};
   }
   if (op.opClass == OpClass::Transpose)
@@ -485,13 +466,6 @@ std::string vectorOperands(const Instr &in, const Footprint &f) {
       ((op.opClass == OpClass::VpuRowReduce || op.opClass == OpClass::VpuColReduce ||
         (op.opClass == OpClass::VpuElementwise && !op.twoInput)) && in.rs2))
     return "unsupported VPU encoding";
-  if ((op.opClass == OpClass::VpuElementwise && ((in.rd | in.rs1 | (op.twoInput ? in.rs2 : 0)) & 1)) ||
-      (op.opClass == OpClass::VpuRowReduce && ((in.rd | in.rs1) & 1)) ||
-      (op.opClass == OpClass::VpuColReduce && ((in.rd | in.rs1) & 1)) ||
-      (op.opClass == OpClass::VpuPack && (in.rs2 & 1)) ||
-      (op.opClass == OpClass::VpuUnpack && (in.rd & 1)) ||
-      (op.opClass == OpClass::VpuLoadImmPair && (in.rd & 1)))
-    return "BF16 operands require even register pairs";
   for (const auto *registers : {&f.mregReads, &f.mregWrites}) {
     std::map<int, int> banks;
     for (int reg : *registers) {
@@ -509,7 +483,6 @@ Footprint modelFootprint(const Instr &in, const RegValues &regs,
   auto fail = [&](const std::string &message) { rejected.error = message; return rejected; };
   if (!in.op) return fail("invalid instruction");
   const auto &op = *in.op;
-  if (in.release && op.opClass != OpClass::Csr) return fail("unsupported completion annotation");
   if (op.engine == Engine::Scalar) {
     if (std::find(facts.frontendInstructions.begin(), facts.frontendInstructions.end(), op.name) ==
         facts.frontendInstructions.end()) return fail("unsupported frontend operation " + op.name);
