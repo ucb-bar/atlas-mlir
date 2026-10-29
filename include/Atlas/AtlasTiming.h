@@ -171,7 +171,8 @@ struct Footprint {
   std::string error;
 };
 
-Footprint footprintOf(const Instr &in, const RegValues &regs);
+Footprint footprintOf(const Instr &in, const RegValues &regs,
+                      const TimingTables *tables = nullptr);
 Footprint footprintOf(const Instr &in, const RegValues &regs,
                       const TimingTables &tables);
 // Rules supplied by the selected timing provider.

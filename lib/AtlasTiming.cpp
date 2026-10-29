@@ -692,10 +692,20 @@ ScalarAccess mlir::atlas::timing::scalarAccess(const Instr &in, const RegValues 
   return {first, bytes, store};
 }
 
-static void scalarFootprint(Builder &b, const Instr &in, const RegValues &regs) {
+Footprint mlir::atlas::timing::footprintOf(const Instr &in,
+                                           const RegValues &regs,
+                                           const TimingTables *tables) {
+  Builder b(in, tables);
   const OpInfo &op = *in.op;
-  const TimingTables *tables = b.tables;
-  switch (in.op->opClass) {
+  if (in.release && op.opClass != OpClass::Csr) {
+    b.f.error = "atlas.complete is only valid on a CSR instruction";
+    return b.f;
+  }
+  int mxu = op.mxu;
+  const MxuTiming &mt = kMxuTiming[mxu == 0 ? 0 : 1];
+  const auto &occ = mt.resourceOccupancy;
+
+  switch (op.opClass) {
   case OpClass::Alu:
   case OpClass::Csr:
   case OpClass::Branch:
@@ -739,48 +749,38 @@ static void scalarFootprint(Builder &b, const Instr &in, const RegValues &regs) 
     b.bankHold(access.first, t.bank);
     break;
   }
-  default:
+  case OpClass::VLoad:
+  case OpClass::VStore: {
+    bool load = op.opClass == OpClass::VLoad;
+    auto addr = vectorAddress(in, regs);
+    if (addr && (*addr % kAtlasRegisterBytes != 0 ||
+                 *addr / kVmemBankBytes != (*addr + kAtlasRegisterBytes - 1) / kVmemBankBytes))
+      b.f.error =
+          "vload/vstore address must be 1 KiB aligned inside one VMEM bank";
+    b.x(in.rs1, false, b.readAge());
+    if (load) {
+      const VloadTiming &t = kVloadTiming;
+      b.vmem(addr, kAtlasRegisterBytes, false, t.memoryAccessAge, 1, false,
+             "vmem_read");
+      b.mrows(in.rd, true, t.resultWriteAge, 1, "mreg_write");
+      b.f.mregWrites = {in.rd};
+      b.f.writeRelease = t.defUseLatency - 1;
+      b.f.writeDuringRead = true;
+      b.hold(Unit::VloadPath, 0, t.path);
+      b.bankHold(addr, t.bank);
+    } else {
+      const VstoreTiming &t = kVstoreTiming;
+      b.mrows(in.rd, false, t.sourceReadAge, 1, "mreg_read");
+      b.vmem(addr, kAtlasRegisterBytes, true, t.memoryAccessAge, 1, false,
+             "vmem_write");
+      b.f.mregReads = {in.rd};
+      b.f.readRelease = b.f.writeRelease = t.sourceReadRelease;
+      b.hold(Unit::VstorePath, 0, t.path);
+      b.bankHold(addr, t.bank);
+    }
     break;
   }
-}
 
-static void vectorMemoryFootprint(Builder &b, const Instr &in, const RegValues &regs) {
-  const OpInfo &op = *in.op;
-  bool load = op.opClass == OpClass::VLoad;
-  auto addr = vectorAddress(in, regs);
-  if (addr && (*addr % kAtlasRegisterBytes != 0 ||
-               *addr / kVmemBankBytes != (*addr + kAtlasRegisterBytes - 1) / kVmemBankBytes))
-    b.f.error =
-        "vload/vstore address must be 1 KiB aligned inside one VMEM bank";
-  b.x(in.rs1, false, b.readAge());
-  if (load) {
-    const VloadTiming &t = kVloadTiming;
-    b.vmem(addr, kAtlasRegisterBytes, false, t.memoryAccessAge, 1, false,
-           "vmem_read");
-    b.mrows(in.rd, true, t.resultWriteAge, 1, "mreg_write");
-    b.f.mregWrites = {in.rd};
-    b.f.writeRelease = t.defUseLatency - 1;
-    b.f.writeDuringRead = true;
-    b.hold(Unit::VloadPath, 0, t.path);
-    b.bankHold(addr, t.bank);
-  } else {
-    const VstoreTiming &t = kVstoreTiming;
-    b.mrows(in.rd, false, t.sourceReadAge, 1, "mreg_read");
-    b.vmem(addr, kAtlasRegisterBytes, true, t.memoryAccessAge, 1, false,
-           "vmem_write");
-    b.f.mregReads = {in.rd};
-    b.f.readRelease = b.f.writeRelease = t.sourceReadRelease;
-    b.hold(Unit::VstorePath, 0, t.path);
-    b.bankHold(addr, t.bank);
-  }
-}
-
-static void mxuPushFootprint(Builder &b, const Instr &in) {
-  const OpInfo &op = *in.op;
-  int mxu = op.mxu;
-  const MxuTiming &mt = kMxuTiming[mxu == 0 ? 0 : 1];
-  const auto &occ = mt.resourceOccupancy;
-  switch (in.op->opClass) {
   case OpClass::WeightPush:
     b.mrows(in.rs1, false, kMxuSourceReadAge, 1, "mreg_read1");
     b.mxuRows(Res::Weight, mxu, in.rd, true, kMxuPushResultAge,
@@ -810,84 +810,72 @@ static void mxuPushFootprint(Builder &b, const Instr &in) {
     b.hold(Unit::MxuAccWrite, mxu * 2 + in.rd, occ.pushStream);
     break;
   }
-  default:
+  case OpClass::PopFp8:
+  case OpClass::PopBf16: {
+    bool pair = op.opClass == OpClass::PopBf16;
+    b.mxuRows(Res::Acc, mxu, in.rs2, false, kMxuSourceReadAge, "acc_store");
+    if (!pair)
+      b.e(in.rs1, false, b.readAge());
+    b.mrows(in.rd, true, kMxuPopResultAge, 1, "mreg_write0");
+    if (pair)
+      b.mrows(in.rd + 1, true, kMxuPopResultAge, 1, "mreg_write1");
+    b.f.mregWrites = pair ? std::vector<int>{in.rd, in.rd + 1}
+                          : std::vector<int>{in.rd};
+    b.f.readRelease = mt.sourceReadRelease;
+    b.f.writeRelease = mt.defUseLatency.poppedMreg - 1;
+    b.mxuPorts(pair ? std::vector<int>{2, 3} : std::vector<int>{2});
+    b.hold(Unit::MxuAccRead, mxu * 2 + in.rs2, occ.accumulatorRead);
     break;
   }
-}
 
-static void mxuPopFootprint(Builder &b, const Instr &in) {
-  const OpInfo &op = *in.op;
-  int mxu = op.mxu;
-  const MxuTiming &mt = kMxuTiming[mxu == 0 ? 0 : 1];
-  const auto &occ = mt.resourceOccupancy;
-  bool pair = op.opClass == OpClass::PopBf16;
-  b.mxuRows(Res::Acc, mxu, in.rs2, false, kMxuSourceReadAge, "acc_store");
-  if (!pair)
-    b.e(in.rs1, false, b.readAge());
-  b.mrows(in.rd, true, kMxuPopResultAge, 1, "mreg_write0");
-  if (pair)
-    b.mrows(in.rd + 1, true, kMxuPopResultAge, 1, "mreg_write1");
-  b.f.mregWrites = pair ? std::vector<int>{in.rd, in.rd + 1}
-                        : std::vector<int>{in.rd};
-  b.f.readRelease = mt.sourceReadRelease;
-  b.f.writeRelease = mt.defUseLatency.poppedMreg - 1;
-  b.mxuPorts(pair ? std::vector<int>{2, 3} : std::vector<int>{2});
-  b.hold(Unit::MxuAccRead, mxu * 2 + in.rs2, occ.accumulatorRead);
-}
-
-static void mxuComputeFootprint(Builder &b, const Instr &in) {
-  const OpInfo &op = *in.op;
-  const TimingTables *tables = b.tables;
-  int mxu = op.mxu;
-  const MxuTiming &mt = kMxuTiming[mxu == 0 ? 0 : 1];
-  const auto &occ = mt.resourceOccupancy;
-  CycleWindow accumulatorWrite = {mt.defUseLatency.accumulatorRow0 - 1, mt.defUseLatency.accumulatorRow0 + 30};
-  b.mrows(in.rs1, false, kMxuSourceReadAge, 1, "mreg_read0");
-  if (tables) {
-    const auto &rules = tables->mxu[mxu];
-    for (const TimingEvent &event : {rules.weightFirst, rules.weightLast})
-      b.f.accesses.push_back({Res::Weight, false, (mxu * 2 + in.rs2) * 32,
-                              32, event.firstAge, event.step});
-  } else
-    b.mxuRows(Res::Weight, mxu, in.rs2, false, mt.weightReadAge, "");
-  if (op.opClass == OpClass::MatMulAcc)
-    b.mxuRows(Res::Acc, mxu, in.rd, false, kMxuSourceReadAge, "acc_read");
-  b.mxuRows(Res::Acc, mxu, in.rd, true, accumulatorWrite.from, "acc_write");
-  b.f.mregReads = {in.rs1};
-  b.f.readRelease = b.f.writeRelease = mt.sourceReadRelease;
-  b.mxuPorts({0});
-  b.hold(Unit::MxuCompute, mxu, 0, accumulatorWrite.to);
-  if (op.opClass == OpClass::MatMulAcc)
-    b.hold(Unit::MxuAccRead, mxu * 2 + in.rd, occ.accumulatorRead);
-  b.hold(Unit::MxuAccWrite, mxu * 2 + in.rd, accumulatorWrite);
-}
-
-static void vpuElementwiseFootprint(Builder &b, const Instr &in) {
-  const OpInfo &op = *in.op;
-  const VpuTiming &t = kVpuElementwiseTiming;
-  std::vector<int> sources = {in.rs1};
-  if (op.twoInput)
-    sources.push_back(in.rs2);
-  for (size_t source = 0; source < sources.size(); ++source) {
-    int s = sources[source];
-    const char *key = source == 0 ? "read0" : "read1";
-    b.needEven(s, "BF16 source");
-    b.mrows(s, false, t.sourceReads.firstAge, 1, key);
-    b.mrows(s + 1, false, t.sourceReads.secondAge, 1, key, 32);
-    b.f.mregReads.push_back(s);
-    b.f.mregReads.push_back(s + 1);
+  case OpClass::MatMul:
+  case OpClass::MatMulAcc: {
+    CycleWindow accumulatorWrite = {mt.defUseLatency.accumulatorRow0 - 1, mt.defUseLatency.accumulatorRow0 + 30};
+    b.mrows(in.rs1, false, kMxuSourceReadAge, 1, "mreg_read0");
+    if (tables) {
+      const auto &rules = tables->mxu[mxu];
+      for (const TimingEvent &event : {rules.weightFirst, rules.weightLast})
+        b.f.accesses.push_back({Res::Weight, false, (mxu * 2 + in.rs2) * 32,
+                                32, event.firstAge, event.step});
+    } else
+      b.mxuRows(Res::Weight, mxu, in.rs2, false, mt.weightReadAge, "");
+    if (op.opClass == OpClass::MatMulAcc)
+      b.mxuRows(Res::Acc, mxu, in.rd, false, kMxuSourceReadAge, "acc_read");
+    b.mxuRows(Res::Acc, mxu, in.rd, true, accumulatorWrite.from, "acc_write");
+    b.f.mregReads = {in.rs1};
+    b.f.readRelease = b.f.writeRelease = mt.sourceReadRelease;
+    b.mxuPorts({0});
+    b.hold(Unit::MxuCompute, mxu, 0, accumulatorWrite.to);
+    if (op.opClass == OpClass::MatMulAcc)
+      b.hold(Unit::MxuAccRead, mxu * 2 + in.rd, occ.accumulatorRead);
+    b.hold(Unit::MxuAccWrite, mxu * 2 + in.rd, accumulatorWrite);
+    break;
   }
-  b.needEven(in.rd, "BF16 destination");
-  b.mrows(in.rd, true, t.resultWrites.firstAge, t.resultWrites.step,
-          "write0");
-  b.mrows(in.rd + 1, true, t.resultWrites.secondAge, 1, "write0", 32);
-  b.f.mregWrites = {in.rd, in.rd + 1};
-  b.f.readRelease = t.sourceReadRelease;
-  b.f.writeRelease = t.defUseLatency - 1;
-}
 
-static void vpuConversionFootprint(Builder &b, const Instr &in) {
-  switch (in.op->opClass) {
+  case OpClass::VpuElementwise: {
+    const VpuTiming &t = kVpuElementwiseTiming;
+    std::vector<int> sources = {in.rs1};
+    if (op.twoInput)
+      sources.push_back(in.rs2);
+    for (size_t source = 0; source < sources.size(); ++source) {
+      int s = sources[source];
+      const char *key = source == 0 ? "read0" : "read1";
+      b.needEven(s, "BF16 source");
+      b.mrows(s, false, t.sourceReads.firstAge, 1, key);
+      b.mrows(s + 1, false, t.sourceReads.secondAge, 1, key, 32);
+      b.f.mregReads.push_back(s);
+      b.f.mregReads.push_back(s + 1);
+    }
+    b.needEven(in.rd, "BF16 destination");
+    b.mrows(in.rd, true, t.resultWrites.firstAge, t.resultWrites.step,
+            "write0");
+    b.mrows(in.rd + 1, true, t.resultWrites.secondAge, 1, "write0", 32);
+    b.f.mregWrites = {in.rd, in.rd + 1};
+    b.f.readRelease = t.sourceReadRelease;
+    b.f.writeRelease = t.defUseLatency - 1;
+    break;
+  }
+
   case OpClass::VpuPack: {
     const VpuTiming &t = kVpuPackTiming;
     b.needEven(in.rs2, "BF16 source");
@@ -916,14 +904,6 @@ static void vpuConversionFootprint(Builder &b, const Instr &in) {
     b.f.writeRelease = t.defUseLatency - 1;
     break;
   }
-  default:
-    break;
-  }
-}
-
-static void vpuReductionFootprint(Builder &b, const Instr &in) {
-  const OpInfo &op = *in.op;
-  switch (in.op->opClass) {
   case OpClass::VpuRowReduce: {
     const VpuTiming &t = op.name == "vredsum.row.bf16" ? kVpuRowSumTiming : kVpuRowMinMaxTiming;
     b.needEven(in.rs1, "BF16 source");
@@ -960,13 +940,6 @@ static void vpuReductionFootprint(Builder &b, const Instr &in) {
     b.f.writeRelease = t.defUseLatency - 1;
     break;
   }
-  default:
-    break;
-  }
-}
-
-static void vpuImmediateFootprint(Builder &b, const Instr &in) {
-  switch (in.op->opClass) {
   case OpClass::VpuLoadImmPair: {
     const VpuTiming &t = kVpuLoadImmPairTiming;
     b.needEven(in.rd, "BF16 destination");
@@ -985,25 +958,15 @@ static void vpuImmediateFootprint(Builder &b, const Instr &in) {
     b.f.writeRelease = t.defUseLatency - 1;
     break;
   }
-  default:
+  case OpClass::Transpose:
+    b.mrows(in.rs1, false, kXluTiming.sourceReadAge, 1, "read");
+    b.mrows(in.rd, true, kXluTiming.resultWriteAge, 1, "write");
+    b.f.mregReads = {in.rs1};
+    b.f.mregWrites = {in.rd};
+    b.f.readRelease = kXluTiming.sourceReadRelease;
+    b.f.writeRelease = kXluTiming.defUseLatency - 1;
+    b.hold(Unit::Xlu, 0, kXluTiming.resourceOccupancy);
     break;
-  }
-}
-
-static void transposeFootprint(Builder &b, const Instr &in) {
-  b.mrows(in.rs1, false, kXluTiming.sourceReadAge, 1, "read");
-  b.mrows(in.rd, true, kXluTiming.resultWriteAge, 1, "write");
-  b.f.mregReads = {in.rs1};
-  b.f.mregWrites = {in.rd};
-  b.f.readRelease = kXluTiming.sourceReadRelease;
-  b.f.writeRelease = kXluTiming.defUseLatency - 1;
-  b.hold(Unit::Xlu, 0, kXluTiming.resourceOccupancy);
-}
-
-static void dmaFootprint(Builder &b, const Instr &in, const RegValues &regs) {
-  const OpInfo &op = *in.op;
-  const TimingTables *tables = b.tables;
-  switch (in.op->opClass) {
   case OpClass::DmaLoad:
   case OpClass::DmaStore: {
     // ScalarCore captures XRF operands and the shared upper address at launch;
@@ -1048,12 +1011,8 @@ static void dmaFootprint(Builder &b, const Instr &in, const RegValues &regs) {
     b.f.accesses.push_back(base);
     break;
   }
-  default:
-    break;
   }
-}
 
-static Footprint completeFootprint(Builder &b, const OpInfo &op) {
   Footprint &f = b.f;
   if (b.timing) {
     f.readRelease = f.writeRelease = 0;
@@ -1084,82 +1043,10 @@ static Footprint completeFootprint(Builder &b, const OpInfo &op) {
   return f;
 }
 
-static Footprint makeFootprint(const Instr &in, const RegValues &regs,
-                               const TimingTables *tables) {
-  Builder b(in, tables);
-  const OpInfo &op = *in.op;
-  if (in.release && op.opClass != OpClass::Csr) {
-    b.f.error = "atlas.complete is only valid on a CSR instruction";
-    return b.f;
-  }
-  switch (op.opClass) {
-  case OpClass::Alu:
-  case OpClass::Csr:
-  case OpClass::Branch:
-  case OpClass::Jump:
-  case OpClass::Delay:
-  case OpClass::Halt:
-  case OpClass::Fence:
-  case OpClass::DmaWait:
-  case OpClass::ScaleImm:
-  case OpClass::ScalarLoad:
-  case OpClass::ScaleLoad:
-  case OpClass::ScalarStore:
-    scalarFootprint(b, in, regs);
-    break;
-  case OpClass::VLoad:
-  case OpClass::VStore:
-    vectorMemoryFootprint(b, in, regs);
-    break;
-  case OpClass::WeightPush:
-  case OpClass::AccPushFp8:
-  case OpClass::AccPushBf16:
-    mxuPushFootprint(b, in);
-    break;
-  case OpClass::PopFp8:
-  case OpClass::PopBf16:
-    mxuPopFootprint(b, in);
-    break;
-  case OpClass::MatMul:
-  case OpClass::MatMulAcc:
-    mxuComputeFootprint(b, in);
-    break;
-  case OpClass::VpuElementwise:
-    vpuElementwiseFootprint(b, in);
-    break;
-  case OpClass::VpuPack:
-  case OpClass::VpuUnpack:
-    vpuConversionFootprint(b, in);
-    break;
-  case OpClass::VpuRowReduce:
-  case OpClass::VpuColReduce:
-    vpuReductionFootprint(b, in);
-    break;
-  case OpClass::VpuLoadImmPair:
-  case OpClass::VpuLoadImmSingle:
-    vpuImmediateFootprint(b, in);
-    break;
-  case OpClass::Transpose:
-    transposeFootprint(b, in);
-    break;
-  case OpClass::DmaLoad:
-  case OpClass::DmaStore:
-  case OpClass::DmaConfig:
-    dmaFootprint(b, in, regs);
-    break;
-  }
-  return completeFootprint(b, op);
-}
-
-Footprint mlir::atlas::timing::footprintOf(const Instr &in,
-                                        const RegValues &regs) {
-  return makeFootprint(in, regs, nullptr);
-}
-
 Footprint mlir::atlas::timing::footprintOf(const Instr &in,
                                         const RegValues &regs,
                                         const TimingTables &tables) {
-  return makeFootprint(in, regs, &tables);
+  return footprintOf(in, regs, &tables);
 }
 
 static std::string elementName(Res res, int element) {
