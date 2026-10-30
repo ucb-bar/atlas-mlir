@@ -194,6 +194,7 @@ void readDMA(Reader &r, const Object &root, ModelDMATiming &dma) {
       else maximum = std::max(maximum, *number);
     }
   }
+  // Compiler policy: bound every beat by the slowest curve plus issue spacing.
   int interval = r.integer(timing, "issue_interval_cycles", 1);
   if (maximum > INT_MAX - interval) r.fail("DMA per-beat bound exceeds cycle domain");
   else dma.perBeatBound = int(std::ceil(maximum)) + interval;
@@ -302,6 +303,7 @@ std::string mlir::atlas::timing::modelSha256(llvm::StringRef bytes) {
 }
 
 TimingRuleResult<int> ModelDMATiming::estimate(int64_t bytes, bool store) const {
+  // Compiler policy for ordering; dma.wait establishes actual completion.
   if (beatBytes <= 0 || bytes < beatBytes || bytes > maxBytes || bytes % beatBytes)
     return {0, "model DMA transfer is outside aligned geometry"};
   int64_t cycles = int64_t(store ? storeStartup : loadStartup) + bytes / beatBytes * perBeatBound;

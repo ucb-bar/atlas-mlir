@@ -233,8 +233,8 @@ struct InsertAtlasDelaysPass
   StringRef getArgument() const final { return "insert-atlas-delays"; }
   StringRef getDescription() const final {
     return "Insert the minimum in-order delays of the selected timing "
-           "provider (default: the npu_model rtl-match model, ported from "
-           "atlas-compiler-experiments) into a stream without atlas.delay";
+           "provider (default: atlas.timing_provider, else builtin) into a "
+           "stream without atlas.delay";
   }
 
   void runOnOperation() override {

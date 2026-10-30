@@ -206,6 +206,9 @@ numerical policy, or availability across the stream.
 | Name | Kind | What it does |
 | --- | --- | --- |
 | `--atlas-compile` | pipeline | Virtual function to timed machine IR: MXU and tensor spilling, boundary DMA, virtual scheduling, late PACK repair, virtual scheduling again, spilling again, lowering, DMA waits and stream scheduling, with every verifier between them. `--dump-pass-pipeline` lists the passes; `allocation-report=<file>` writes the allocation plan. |
+| `--atlas-compile-prepare` | pipeline | Verify and spill MXU state, apply guarded PACK if selected, and expose boundary DMA once for a shared candidate graph. See [selection](model-timing.md#how-selection-works). |
+| `--atlas-compile-candidate` | pipeline | Schedule a prepared candidate, spill, repair PACK, lower, add waits, schedule the machine stream, and verify. See [selection](model-timing.md#how-selection-works). |
+| `--select-atlas-model-evidence` | pass | Select regenerated facts with `facts=DIR` before timing; record their path and hash for later reloads. See [selection](model-timing.md#how-selection-works). |
 | `--atlas-compile-verify`, `-schedule`, `-spill`, `-lower`, `-time` | pipeline | The five stages of `--atlas-compile`, in order, for tools that keep each stage's IR. |
 | `--atlas-compile-unscheduled` | pipeline | The native binding's qualification lowering: spilling, late PACK repair, spilling again, lowering, DMA waits and in-order delays, with the same verifiers, but no boundary DMA or scheduling. |
 | `--verify-atlas-virtual-stream` | pass | Check virtual types, state edges, output indices, and that no machine op is mixed in. |
@@ -219,7 +222,7 @@ numerical policy, or availability across the stream.
 | `--verify-atlas-generated-schedule` | pass | Run the [generated-artifact checks](#generated-artifact-checks), wait matching, and scalar ALU delay slots; on timed streams also recheck issue spacing. |
 | `--verify-atlas-machine-stream` | pass | Check field verifiers, the flat state chain, encoding, delay slots, and in-block targets. |
 | `--insert-atlas-delays` | pass | Time each block in order and add the minimum delays, each with an `atlas.reason`. Each pending delay slot gets a NOP. Rejects input that already has delays, and rejects AUIPC, JALR, and linking JAL. A hazard only a DMA wait can fix is an error. |
-| `--schedule-atlas-stream` | pass | List-schedule each block with shared dependence rules and the selected timing tables' issue gaps, reservations, and DMA conflicts, then add delays. The selected provider verifies the schedule. Ops move only within a block. A pending delay slot takes the block's last-issued single-cycle scalar ALU op that nothing after it depends on, else a NOP. |
+| `--schedule-atlas-stream` | pass | List-schedule each block with shared dependence rules and the selected timing tables' issue gaps, reservations, and DMA conflicts, then add delays. The `model` provider also verifies the completed schedule. Ops move only within a block. A pending delay slot takes the block's last-issued single-cycle scalar ALU op that nothing after it depends on, else a NOP. |
 | `--verify-atlas-timing` | pass | Recheck issue cycles, dependencies, DMA waits, halt, and drained block boundaries for `provider=<id>`. |
 | `--convert-atlas-to-llvm-calls` | pass | One `llvm.call @atlas_emit_*` marker per instruction with fields, word, and index. Must be finalized before translation. |
 | `--finalize-atlas-llvm-calls` | pass | Rebuild and recheck the Atlas stream from the markers, then emit one ordered inline-assembly word block. |
@@ -230,11 +233,28 @@ numerical policy, or availability across the stream.
 | `tools/lower_atlas_program.py` | script | Run the stages of `--atlas-compile` and emission, keeping every stage's artifact. |
 
 By default, scheduling and timing passes use the `builtin` rules, ported from
-npu-model's earlier `rtl-match` mode at atlas-compiler-experiments `3ae2b5d`, with DMA VMEM addresses counted in
-words; they are a model, not RTL timing. The LLVM handoff uses one
+`npu_model`'s earlier `rtl-match` mode at atlas-compiler-experiments `3ae2b5d`,
+with DMA VMEM addresses counted in words; they are a model, not RTL timing. The LLVM handoff uses one
 inline-assembly block so stock LLVM, which has no Atlas instructions, cannot
 put code between a branch and its delay slot. There is no instruction
 selector, whole-program allocator, Linalg-to-Atlas pass, or callable ABI here.
+
+The compile pipelines share `provider=<id>`, `spill=true|false` (default:
+`true`), `boundary=boundary|none` (default: `boundary`), and `guarded-pack`
+(default: `false`). `random-seed=N` selects a random virtual order; its default
+`-1` uses the list scheduler. `wait-placement=default|source` controls machine
+DMA wait placement, and `wait-reused-dma-slots` defaults to `false`.
+`mreg-ranks` supplies comma-separated free-register ranks, `order-file` reads
+per-block topological orders from JSON, `graph-output` writes the virtual
+graph as JSON, and `allocation-report` writes the allocation plan.
+Each pipeline stage applies the options relevant to that stage.
+
+The individual passes expose the same controls: `--schedule-atlas-virtual`
+accepts `order-file` and `graph-output` (an explicit order excludes
+`random-seed`); `--lower-atlas-virtual-to-machine` accepts `mreg-ranks`;
+`--schedule-atlas-stream` accepts `wait-placement=default|source` (default:
+`default`). See [selection](model-timing.md#how-selection-works) for their use
+across prepare and candidate pipelines.
 
 ## Adding a pass
 

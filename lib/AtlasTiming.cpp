@@ -1261,7 +1261,8 @@ bool mlir::atlas::timing::conflictsAtCompletion(const Footprint &dma,
     if (!x.atCompletion)
       continue;
     for (const Access &y : f.accesses) {
-      // Queued transfers and model VLS paths retain their VMEM ownership.
+      // Compiler policy: keep overlapping queued/VLS reads ordered until
+      // completion, conservatively retaining their VMEM ownership.
       bool queuedVmem = tables ? y.atCompletion || vectorMemory
                                : x.res == Res::Vmem && y.atCompletion;
       if (!overlaps(x, y) || (!x.write && !y.write && !queuedVmem))

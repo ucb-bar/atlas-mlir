@@ -1,9 +1,9 @@
 #ifndef ATLAS_TIMING_H
 #define ATLAS_TIMING_H
 
-// npu_model rtl-match timing rules, ported from atlas-compiler-experiments
-// 3ae2b5d (src/core) with its names. DMA VMEM addresses count words, as in
-// Atlas RTL. An age counts cycles after an instruction issues.
+// Handwritten rules ported from npu_model rtl-match mode in
+// atlas-compiler-experiments 3ae2b5d (src/core). DMA VMEM addresses count
+// words, as in Atlas RTL. An age counts cycles after an instruction issues.
 
 #include "Atlas/AtlasTarget.h"
 #include <array>

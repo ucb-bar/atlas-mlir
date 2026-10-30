@@ -15,7 +15,7 @@ constexpr int kAtlasVmemBytes = 1536 * 1024;
 constexpr unsigned kAtlasDMAChannels = 8;
 
 // RTL CONTRACT ONLY: shared DMA command ring (DmaParams.scala), across
-// channels and directions. The NPU Model does not represent this rule; it
+// channels and directions. npu_model does not represent this rule; it
 // must not be presented as a model-derived architecture fact.
 constexpr unsigned kAtlasDMACommandSlots = 8;
 

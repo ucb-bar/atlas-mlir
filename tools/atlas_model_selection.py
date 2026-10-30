@@ -305,6 +305,8 @@ class Selection:
         while len(self.result["candidates"]) < limit:
             parent = self.best
             graphs = json.loads((self.output / parent["directory"] / "graph.json").read_text())
+            # PACK repair can reorder the later schedule, so this graph order
+            # seeds moves rather than reproducing the parent image.
             orders = tuple(tuple(graph["order"]) for graph in graphs)
             base = replace(self.winner(), random_seed=None, order_file=orders)
             self.seen.add(base)

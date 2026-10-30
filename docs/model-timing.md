@@ -2,52 +2,47 @@
 
 A timing provider supplies the rules used by scheduling, waits, delay slots,
 and lowering. The default `builtin` provider uses handwritten rules ported
-from [`npu_model`](https://github.com/ucb-ee194-tapeout/npu_model). The `model` provider reads facts extracted from a selected
-`npu_model` checkout. A candidate is one compiled program; selection runs
-candidates on `npu_model` and keeps the one with the fewest cycles. A profile
-chooses the memory behavior used to score those programs.
+from [`npu_model`](https://github.com/ucb-ee194-tapeout/npu_model). The `model`
+provider reads facts extracted from a selected `npu_model` checkout. A candidate
+is one compiled program; selection keeps the candidate with the fewest measured
+cycles. A profile chooses the memory behavior used for scoring.
 
 ## How the pieces fit
 
-```
-npu_model checkout ──► tools/atlas_model_facts.py ──► model-timing.json
-  (source + config)      reads each unit's timing         │
-                         code, checks it natively         ▼
-                                              lib/AtlasModelTables.cpp
-                                              (load, check, TimingTables)
-                                                          │
-                                                          ▼
-source.mlir ──► compiler passes ◄── `model` timing provider
-                  │  (virtual scheduling, stream scheduling,
-                  │   DMA waits, delays, timing verification)
-                  ▼
-           candidate programs ──► tools/atlas_model_scorer.py ──► cycles
-                  ▲                (runs each on npu_model,           │
-                  │                 checks expected bytes)            │
-                  └────────── tools/atlas_model_selection.py ◄────────┘
-                               (keeps the fastest; program.hex)
+```text
+model-pins.json + npu_model source/config
+                 |
+                 v
+       atlas_model_facts.py ---> model-timing.json
+                                       |
+                      --select-atlas-model-evidence=facts=DIR
+                                       |
+                                       v
+source.mlir ---> compile-prepare ---> compile-candidate ---> program
+                                       ^                    |
+                  builtin rules -------|                    v
+                  model tables --------|              native scoring
+                                                       on npu_model
+                                                            |
+                                    selection keeps fastest exact candidate
 ```
 
-1. Extraction. `tools/atlas_model_facts.py` reads a `npu_model` checkout.
-   The `tools/atlas_derive_*.py` modules interpret the ISA, architecture,
-   frontend, VPU, MXU, LSU and XLU, DMA, and curve memory code.
-   `tools/model-pins.json` records the source digests that interpretation was
-   reviewed against, so an unreviewed change refuses instead of producing
-   stale facts. Each of the 49 timing blocks is then run alone in
-   `npu_model` and compared with the extracted events before
-   `model-timing.json` is written.
-2. Loading. `lib/AtlasModelTables.cpp` reads the facts, checks them against
-   the compiler's target geometry and operand metadata, and builds
-   `TimingTables`.
-3. Compilation. With `provider=model`, the existing scheduling, DMA wait,
-   delay, and timing-verification passes do the work; the shared rules in
-   `lib/AtlasTiming.cpp` (footprints, dependences, reservations) read the
-   tables where the `builtin` provider uses its handwritten values.
-4. Selection. `tools/atlas_model_selection.py` compiles a fixed set of
-   candidate schedules, `tools/atlas_model_scorer.py` runs each one on
-   `npu_model` with the supplied expected regions, and the fastest exact
-   candidate is written out. `tools/lower_atlas_program.py --provider model`
-   is the entry point.
+Extraction checks the source pins and reads timing through the
+`tools/atlas_derive_*.py` modules. It runs each of the 49 timing blocks alone in
+`npu_model` and compares its events with the extracted events before writing
+`model-timing.json`. No generated facts file is committed.
+
+`--select-atlas-model-evidence="facts=DIR"` records the facts path and SHA-256
+in `atlas.model_evidence`. Later passes reload the file and check its hash.
+`lib/AtlasModelTables.cpp` checks geometry and operand metadata and builds
+`TimingTables`; the shared rules in `lib/AtlasTiming.cpp` consume them.
+The `builtin` path uses handwritten rules and needs no checkout or facts.
+
+`tools/lower_atlas_program.py --provider model` starts selection. It prepares
+the source once with `--atlas-compile-prepare`, then compiles each schedule
+with `--atlas-compile-candidate`. The scorer runs candidates on `npu_model`,
+checks the supplied expected bytes, and selection writes the fastest exact
+program. See [How selection works](#how-selection-works).
 
 ## Regenerating the facts
 
@@ -63,12 +58,12 @@ Regenerate it when changing the model checkout or supported configuration.
 The tested checkout is `npu_model` revision
 `74982e7c68bd28ba6505b4df37290f198102ccce`.
 
-One guard table, `tools/model-pins.json`, records digests for 17 modules and
-seven engine shapes. Central contracts ignore comments and leading
-docstrings. Local renames and method reordering require source acceptance.
-VPU slot and latency-table normalization and MXU timing and tracker
-normalization remain supported. Extraction and loading check configuration;
-geometry must equal the compiler target geometry.
+`tools/model-pins.json` records AST digests for 17 modules, ignoring comments
+and leading docstrings. Seven engine files also have full-AST digests, with
+normalization for supported VPU slot/latency changes and MXU timing/tracker
+changes. Local renames and method reordering require source acceptance.
+Extraction and loading check configuration; geometry must equal the compiler
+target geometry.
 
 After inspecting a source change and updating its interpretation where needed,
 re-pin with the single command
@@ -188,9 +183,9 @@ keeps the prepared graph used by group search. The schedule stage records its
 options in the intermediate IR, and the spill stage restores them for this
 second pass, including when the stages run as separate commands.
 
-The default profile is `curve`; `--profile curve|fifo43` changes scoring memory
-behavior. `--guarded-pack` converts proven-finite PACK inputs through MXU0 for
-exact results. `--workers` controls parallel work. `--no-bank-candidates`
+The default scoring profile is `curve` for `model` and `fifo43` for `builtin`;
+`--profile curve|fifo43` changes the scoring memory behavior. `--guarded-pack`
+converts proven-finite PACK inputs through MXU0 for exact results. `--workers` controls parallel work. `--no-bank-candidates`
 skips the eight MREG rank vectors in full mode.
 
 The output contains `selection.json`, `program.hex`, `program.json`,
@@ -200,9 +195,9 @@ Choose a fresh output directory to prevent stale program artifacts.
 
 ## How selection works
 
-1. Prepare the source once, then try the default candidate and fixed random
-   seeds. Try source-wait placement from the current winner, then MREG rank
-   vectors. Candidate numbers are assigned before parallel compilation.
+1. Run `--atlas-compile-prepare` once, then use `--atlas-compile-candidate`
+   for the default candidate and fixed random seeds. Try source-wait placement
+   from the current winner, then MREG rank vectors. Candidate numbers are assigned before parallel compilation.
 2. Compile and verify every candidate. Execute legal words natively through
    ECALL, require drained engines and DMA, and check supplied DRAM regions.
 3. Keep the lowest cycle count, breaking ties by the earliest candidate
