@@ -45,9 +45,14 @@ def write(directory, name, value):
 
 
 def accept_source(model):
+    try:
+        revision = subprocess.check_output(
+            ["git", "-C", str(model), "rev-parse", "HEAD"], text=True,
+            stderr=subprocess.PIPE).strip()
+    except subprocess.CalledProcessError as error:
+        raise UnsupportedModelTiming("--accept-source requires a git checkout with a readable HEAD") from error
     pins = source_pins(model)
-    pins["model_revision"] = subprocess.check_output(
-        ["git", "-C", str(model), "rev-parse", "HEAD"], text=True).strip()
+    pins["model_revision"] = revision
     for group in ("files", "source_shapes"):
         for name, digest in pins[group].items():
             if digest != GUARDS[group].get(name):

@@ -24,6 +24,18 @@ from model_evidence import NativeModelFixture, model_evidence_available
 
 
 class FactsErrors(unittest.TestCase):
+    def test_accept_source_requires_git_checkout(self):
+        pins = (TOOLS / "model-pins.json").read_bytes()
+        with tempfile.TemporaryDirectory() as directory:
+            result = subprocess.run([sys.executable, "-B", str(TOOLS / "atlas_model_facts.py"),
+                                     "--npu-model", directory, "--accept-source"],
+                                    text=True, capture_output=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("--accept-source requires a git checkout with a readable HEAD", result.stderr)
+        self.assertIn(UPDATE_GUIDANCE, result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertEqual((TOOLS / "model-pins.json").read_bytes(), pins)
+
     def test_instruction_memory_words(self):
         for words in (32768, 65536):
             tree = ast.parse(f"class InstructionMemory:\n    WORDS = {words}\n")
