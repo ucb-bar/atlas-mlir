@@ -1,10 +1,15 @@
 """--atlas-compile: the one virtual-to-machine pipeline every tool runs."""
 
 import re
+import json
+import os
+from pathlib import Path
+import tempfile
 import unittest
 from itertools import pairwise
 
 from test_virtual_ssa import ROOT, run
+from model_evidence import requires_model_evidence
 
 # Spilling, boundary DMA, virtual scheduling, lowering, DMA waits, stream
 # scheduling, and every verifier, in order.
@@ -12,6 +17,8 @@ PASSES = [
     "spill-atlas-mxu-state", "verify-atlas-virtual-stream",
     "lower-atlas-virtual-boundary-to-dma", "schedule-atlas-virtual", "verify-atlas-virtual-stream",
     "spill-atlas-virtual", "verify-atlas-virtual-stream",
+    "lower-atlas-pack-relayout", "schedule-atlas-virtual", "spill-atlas-virtual",
+    "verify-atlas-virtual-stream",
     "lower-atlas-virtual-to-machine", "insert-atlas-dma-waits",
     "verify-atlas-machine-stream", "verify-atlas-generated-schedule",
     "schedule-atlas-stream",
@@ -26,6 +33,59 @@ PROGRAMS = [
 
 
 class AtlasCompileTest(unittest.TestCase):
+    @requires_model_evidence
+    def test_relayout_schedule_keeps_candidate_options(self) -> None:
+        facts = Path(os.environ["ATLAS_TEST_MODEL_FACTS"])
+        evidence = f"--select-atlas-model-evidence=facts={facts}"
+        for control in ("pack-relayout-rows=1", "random-seed=7"):
+            result = run("atlas-opt", PROGRAMS[1].read_text(), evidence,
+                         f"--atlas-compile=provider=model {control}",
+                         "--dump-pass-pipeline")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            schedules = [line for line in result.stderr.splitlines()
+                         if line.lstrip().startswith("schedule-atlas-virtual{")]
+            self.assertEqual(len(schedules), 2, result.stderr)
+            for schedule in schedules:
+                self.assertIn("provider=model", schedule)
+                self.assertIn(control, schedule)
+            staged = run("atlas-opt", PROGRAMS[1].read_text(), evidence,
+                         "--atlas-compile-verify",
+                         f"--atlas-compile-schedule=provider=model {control}",
+                         "--atlas-compile-spill",
+                         "--atlas-compile-lower=provider=model",
+                         "--atlas-compile-time=provider=model")
+            self.assertEqual(staged.returncode, 0, staged.stderr)
+            self.assertEqual(staged.stdout, result.stdout)
+            self.assertNotIn("atlas.virtual_schedule_options", staged.stdout)
+
+    @requires_model_evidence
+    def test_expanded_order_matches_staged_candidate(self) -> None:
+        facts = Path(os.environ["ATLAS_TEST_MODEL_FACTS"])
+        evidence = f"--select-atlas-model-evidence=facts={facts}"
+        with tempfile.TemporaryDirectory() as directory:
+            graph = Path(directory) / "graph.json"
+            order = Path(directory) / "order.json"
+            prepared = run("atlas-opt", PROGRAMS[1].read_text(), evidence,
+                           "--atlas-compile-prepare")
+            self.assertEqual(prepared.returncode, 0, prepared.stderr)
+            scheduled = run("atlas-opt", prepared.stdout,
+                            f"--schedule-atlas-virtual=provider=model graph-output={graph}")
+            self.assertEqual(scheduled.returncode, 0, scheduled.stderr)
+            graphs = json.loads(graph.read_text())
+            order.write_text(json.dumps([block["order"] for block in graphs]))
+            options = f"provider=model order-file={order} graph-output={graph}"
+            candidate = run("atlas-opt", prepared.stdout,
+                            f"--atlas-compile-candidate={options}")
+            self.assertEqual(candidate.returncode, 0, candidate.stderr)
+            self.assertEqual(json.loads(graph.read_text()), graphs)
+            staged = run("atlas-opt", prepared.stdout,
+                         f"--atlas-compile-schedule=boundary=none {options}",
+                         "--atlas-compile-spill",
+                         "--atlas-compile-lower=provider=model",
+                         "--atlas-compile-time=provider=model")
+            self.assertEqual(staged.returncode, 0, staged.stderr)
+            self.assertEqual(staged.stdout, candidate.stdout)
+
     def test_pipeline_runs_every_stage_and_verifier_in_order(self) -> None:
         result = run("atlas-opt", PROGRAMS[0].read_text(), "--atlas-compile", "--dump-pass-pipeline")
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -51,9 +111,10 @@ class AtlasCompileTest(unittest.TestCase):
                 self.assertEqual(candidate.stdout, compiled.stdout)
 
     def test_lowering_leaves_delay_slots_for_the_stream_scheduler(self) -> None:
-        # The attention tile's PACK relayout loop closes with a back-edge.
-        stages = ("--atlas-compile-verify", "--atlas-compile-schedule", "--atlas-compile-spill")
-        lowered = run("atlas-opt", PROGRAMS[1].read_text(), *stages, "--atlas-compile-lower")
+        # Direct lowering retains the scalar fallback's PACK back-edge.
+        stages = ("--atlas-compile-verify", "--atlas-compile-schedule",
+                  "--spill-atlas-virtual", "--verify-atlas-virtual-stream")
+        lowered = run("atlas-opt", PROGRAMS[1].read_text(), *stages, "--lower-atlas-virtual-to-machine")
         self.assertEqual(lowered.returncode, 0, lowered.stderr)
         timed = run("atlas-opt", lowered.stdout, "--atlas-compile-time")
         self.assertEqual(timed.returncode, 0, timed.stderr)

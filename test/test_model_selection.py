@@ -22,7 +22,7 @@ from model_evidence import requires_model_evidence
 from atlas_model_selection import (Candidate, SelectionConfig, candidate_options, evidence_option,
                                    group_order_neighbors, select_program)
 from test_virtual_ssa import BIN, run
-from test_virtual_scheduling import S, function, start, const, dma_load, outp
+from test_virtual_scheduling import S, T, add, function, start, const, dma_load, inp, outp
 
 
 def candidate_command(argv):
@@ -291,6 +291,41 @@ class ModelOrderReplayTest(unittest.TestCase):
     def replay(self, orders):
         self.order_path.write_text(json.dumps(orders))
         return self.schedule(order_file=self.order_path)
+
+    def test_roundtrip_schedule_uses_provider_timing(self):
+        self.source = function("roundtrip", [
+            start(), inp("io0", "s1", "x", 0),
+            f'%p = "atlas.virtual_pack_roundtrip_bf16"(%x) {{scale_code = 127 : i32}} : ({T}) -> {T}',
+            inp("s1", "s2", "y", 1),
+            f'%s3, %a = "atlas.virtual_mxu_load_acc_bf16"(%s2, %y) {{unit = 0 : i32}} '
+            f': ({S}, {T}) -> ({S}, !atlas.virtual_mxu_acc<0>)',
+            f'%s4, %m = "atlas.virtual_mxu_readout_bf16"(%s3, %a) '
+            f': ({S}, !atlas.virtual_mxu_acc<0>) -> ({S}, {T})',
+            add("result", "p", "m"), outp("s4", "s5", "result", 0), f"return %s5 : {S}"])
+
+        def positions():
+            graphs, _ = self.graph()
+            graph = graphs[0]
+            names = [graph["operations"][node] for node in graph["order"]]
+            return (names.index("atlas.virtual_pack_roundtrip_bf16"),
+                    names.index("atlas.virtual_mxu_load_acc_bf16"))
+
+        before = positions()
+        self.assertLess(*before)
+        original = (Path(os.environ["ATLAS_TEST_MODEL_FACTS"]) / "model-timing.json").read_text()
+        for operation in ("seli", "vpack.bf16.fp8", "vunpack.fp8.bf16"):
+            with self.subTest(operation=operation):
+                facts = json.loads(original)
+                # A slower conversion or scale write makes pushing the other
+                # tile before the blocking roundtrip profitable.
+                if operation == "seli":
+                    facts["frontend_timing"]["scalar"]["write_age"] = 2048
+                else:
+                    block = next(block for block in facts["op_timing"] if block["name"] == operation)
+                    block["first_free_age"] = 3500
+                (self.directory / "model-timing.json").write_text(json.dumps(facts))
+                self.evidence = evidence_option(self.directory)[0]
+                self.assertGreater(*positions())
 
     def test_replay_matches_scheduler_and_repairs_state(self):
         self.source = function("loads", [start(), const("address", -2147481600), const("size", 2048),

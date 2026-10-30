@@ -1389,124 +1389,69 @@ def check_bf16_tile_stream(program: dict, *, graph: CandidateGraph,
         raise NativeCompilationError("unqualified_target", "BF16 scratch store has no DMA completion")
 
 
-# lowerPack copies one row an iteration: eight load/store pairs, four counter
-# and pointer advances, and seven load-path delays.
-_PACK_RELAYOUT_BRANCH_DISTANCE = 27
-_PACK_RELAYOUT_BRANCH_OFFSET = -2 * _PACK_RELAYOUT_BRANCH_DISTANCE
-_PACK_RELAYOUT_ADVANCES = [
-    ("addi", 13, 13, 1), ("addi", 10, 10, 16),
-    ("addi", 11, 11, 16), ("addi", 12, 12, 32),
-]
+def _pack_roundtrip_effects(source: int, pair: int, destination: int, scale_code: int) -> list[tuple]:
+    """Retain PACK's exact conversion, then canonicalize its strip layout."""
+    if (type(scale_code) is not int or scale_code not in range(122, 129) or type(pair) is not int or pair % 2
+        or not 32 <= pair <= 60 or type(destination) is not int or not 0 <= destination < 32):
+        raise NativeCompilationError("unqualified_target", "pack roundtrip placement or scale changed")
+    return [("seli", 3, scale_code), ("pack", "bf16_to_fp8", source, 62, 3), ("seli", 3, 127), ("pack", "fp8_to_bf16",
+        62, pair, 3), ("mxu_push", 0, 0, "acc_bf16", pair), ("seli", 3, 127), ("mxu_pop", 0, 0, "fp8", 3, destination),]
 
 
-def _pack_relayout_effects() -> list[tuple]:
-    """Current selected scalar copy: two live temporaries overlap load/store."""
-    def load(copy: int) -> tuple:
-        return ("lw", 16 + copy % 2, 131072 + (copy % 2) * 512 + (copy // 2) * 4)
-
-    def store(copy: int) -> tuple:
-        return ("sw", 16 + copy % 2, 132096 + (copy % 2) * 16 + (copy // 2) * 4)
-
-    effects = [load(0)]
-    for copy in range(1, 8):
-        effects.extend((load(copy), store(copy - 1)))
-    effects.extend((store(7), ("blt", 13, 14, 1, 32, _PACK_RELAYOUT_BRANCH_OFFSET)))
-    return effects
+def _check_pack_roundtrip_words(program: dict) -> None:
+    """Bind conversion fields, scale loads and MXU copy/pop to actual words."""
+    for row in program["instructions"]:
+        op, fields = row["operation"], row["fields"]
+        if op == "atlas.vpu_pack":
+            direction = fields.get("direction")
+            if direction not in {"bf16_to_fp8", "fp8_to_bf16"}:
+                raise NativeCompilationError("unqualified_target", "pack conversion direction changed")
+            word = ((0x44 if direction == "bf16_to_fp8" else 0x45) << 25 | fields["src"] << 19
+                | fields["scale_reg"] << 13 | fields["dst"] << 7 | 0x57)
+        elif op == "atlas.scalar_load" and fields.get("kind") == "seli":
+            word = (fields["offset"] << 20 | fields["base"] << 15 | 7 << 12 | fields["dst"] << 7 | 3)
+        elif op == "atlas.mxu_push" and fields.get("kind") == "acc_bf16":
+            word = ((4 + fields["unit"]) << 25 | fields["src"] << 13 | fields["slot"] << 7 | 0x77)
+        elif op == "atlas.mxu_pop" and fields.get("format") == "fp8":
+            word = ((6 + fields["unit"]) << 25 | fields["slot"] << 19
+                    | fields["scale_reg"] << 13 | fields["dst"] << 7 | 0x77)
+        else:
+            continue
+        if row.get("word_u32") != word:
+            raise NativeCompilationError("unqualified_target", "pack roundtrip word differs from its fields")
 
 
 def check_pack_stream(program: dict, *, input_address: int, output_address: int,
                       source_pair: int = 32, relu_pair: tuple[int, int] | None = None,
                       scale_code: int = 127) -> None:
-    """Replay the selected pack scale, row relayout, and output transfer.
-
-    Scalar addresses use bytes; VLOAD/VSTORE bases use VMEM words. The loop
-    structure is checked here because a linear list of memory effects cannot
-    establish that every one of the 32 rows is copied.
-    """
+    """Replay exact PACK/UNPACK, unit-scale MXU conversion and output DMA."""
     expected: list[tuple] = [
         ("config",),
         ("dma", "load", input_address, 0, 1024, 0),
-        ("wait", 0), ("vload", 32, 0),
+        ("wait", 0), ("vload", relu_pair[0] if relu_pair else source_pair, 0),
         ("dma", "load", input_address + 1024, 256, 1024, 0),
-        ("wait", 0), ("vload", 33, 256),
+        ("wait", 0), ("vload", (relu_pair[0] if relu_pair else source_pair) + 1, 256),
     ]
+    pairs = (source_pair,) if relu_pair is None else relu_pair
+    if (any(type(pair) is not int or pair % 2 or not 32 <= pair <= 60 for pair in pairs) or (relu_pair is not None
+        and (relu_pair[0] == relu_pair[1] or source_pair != relu_pair[1]))):
+        raise NativeCompilationError("unqualified_target", "pack BF16 input placement changed")
     if relu_pair is not None:
         expected.append(("relu", *relu_pair))
-    if type(scale_code) is not int or not 0 <= scale_code <= 255:
-        raise NativeCompilationError("unqualified_target", "pack scale code is outside the physical encoding")
-    expected.extend((("seli", 3, scale_code), ("pack", "bf16_to_fp8", source_pair, 0, 3),
-                     ("vstore", 0, 32768)))
-    expected.extend(_pack_relayout_effects())
+    effects = _tile_effects(program)
+    unpacks = [effect for effect in effects if effect[:2] == ("pack", "fp8_to_bf16")]
+    if len(unpacks) != 1:
+        raise NativeCompilationError("unqualified_target", "pack requires exactly one strip unpack")
+    expected.extend(_pack_roundtrip_effects(source_pair, unpacks[0][3], 0, scale_code))
     expected.extend((
-        ("vload", 0, 33024),
         ("vstore", 0, 131072),
         ("dma", "store", output_address, 131072, 1024, 1),
         ("wait", 1), ("complete",), ("trap",),
     ))
-    if _tile_effects(program) != expected:
+    if effects != expected:
         raise NativeCompilationError("unqualified_target", "pack stream differs in layout, addresses, or transfer")
-    rows = program["instructions"]
-    pack_word = next(row["word_u32"] for row in rows if row["operation"] == "atlas.vpu_pack")
-    if ((pack_word >> 25) & 0x7f, (pack_word >> 19) & 0x3f,
-        (pack_word >> 13) & 0x3f, (pack_word >> 7) & 0x3f,
-        pack_word & 0x7f) != (0x44, source_pair, 3, 0, 0x57):
-        raise NativeCompilationError("unqualified_target", "pack word does not encode the selected six-bit source")
-    branch = next(index for index, row in enumerate(rows) if row["operation"] == "atlas.branch")
-    first_load = next(index for index, row in enumerate(rows) if row["operation"] == "atlas.scalar_load"
-                      and row["fields"].get("kind") == "lw")
-    # ScalarCore's PC is word-indexed. The RISC-V B immediate encodes halfword
-    # units, so the selected emitter uses two, not four, per instruction word.
-    if (branch - first_load != _PACK_RELAYOUT_BRANCH_DISTANCE
-            or rows[branch]["fields"]["offset_bytes"] != 2 * (first_load - branch)
-            or branch + 1 >= len(rows) or rows[branch + 1]["operation"] != "atlas.alu_imm"
-            or any(rows[branch + 1]["fields"].get(key) != value for key, value in
-                   {"dst": 0, "immediate": 0, "kind": "addi", "src": 0}.items())):
-        raise NativeCompilationError("unqualified_target", "pack loop target or delay slot changed")
-    branch_word = rows[branch]["word_u32"]
-    immediate = (((branch_word >> 31) & 1) << 12) | (((branch_word >> 7) & 1) << 11) | (
-        ((branch_word >> 25) & 0x3f) << 5) | (((branch_word >> 8) & 0xf) << 1)
-    immediate = immediate - 8192 if immediate & 4096 else immediate
-    if (branch_word & 0x7f, (branch_word >> 12) & 7,
-        (branch_word >> 15) & 31, (branch_word >> 20) & 31,
-        immediate) != (0x63, 4, 13, 14, _PACK_RELAYOUT_BRANCH_OFFSET):
-        raise NativeCompilationError("unqualified_target", "pack loop word has a wrong branch target")
-    # Require 32 iterations, 16-byte advancement in each source half and
-    # 32-byte advancement in the destination. The one-iteration effects above
-    # then cover 32*32 bytes without touching the source or adjacent slots.
-    before = rows[first_load - 1]["fields"]
-    if before.get("cycles", 0) < 0:
-        raise NativeCompilationError("unqualified_target", "pack loop has invalid delay")
-    advances = [row["fields"] for row in rows[first_load:branch]
-                if row["operation"] == "atlas.alu_imm"]
-    if [(row.get("kind"), row.get("dst"), row.get("src"), row.get("immediate"))
-        for row in advances] != _PACK_RELAYOUT_ADVANCES:
-        raise NativeCompilationError("unqualified_target", "pack loop does not advance every row")
-    cycle = 0
-    issued: dict[str, list[int]] = {}
-    for row in rows:
-        op, fields = row["operation"], row["fields"]
-        if op == "atlas.delay":
-            count = fields.get("cycles")
-            if type(count) is not int or not 0 <= count <= 65535:
-                raise NativeCompilationError("unqualified_target", "pack delay is invalid")
-            cycle += count
-        else:
-            issued.setdefault(op, []).append(cycle)
-        cycle += 1
-    gaps = [
-        ("atlas.vpu_pack", 0, "atlas.vstore", 0, 65),
-        ("atlas.vstore", 0, "atlas.scalar_load", 1, 34),
-        ("atlas.vload", 2, "atlas.vstore", 1, 34),
-        ("atlas.vstore", 1, "atlas.dma", 2, 34),
-    ]
-    if relu_pair is None:
-        gaps.append(("atlas.vload", 1, "atlas.vpu_pack", 0, 34))
-    else:
-        gaps.extend((("atlas.vload", 1, "atlas.vpu_unary", 0, 34),
-                     ("atlas.vpu_unary", 0, "atlas.vpu_pack", 0, 65)))
-    if any(issued[end][end_index] - issued[start][start_index] < minimum
-           for start, start_index, end, end_index, minimum in gaps):
-        raise NativeCompilationError("unqualified_target", "pack stream uses data before the diagnostic delay floor")
+    _check_pack_roundtrip_words(program)
+    _check_mxu_dag_timing(program)
 
 
 def check_transpose_stream(program: dict, *, input_address: int,
@@ -2235,15 +2180,15 @@ def check_mxu_bf16_dag_stream(
                        transpose_inputs=transpose_inputs)
     effects = _tile_effects(program)
     loads = [effect for effect in effects if effect[0] == "vload"]
-    pops = [effect for effect in effects if effect[0] == "mxu_pop"]
+    pops = [effect for effect in effects if effect[0] == "mxu_pop" and effect[3] == "bf16"]
+    converted = [effect for effect in effects if effect[0] == "mxu_pop" and effect[3] == "fp8"]
     packs = [effect for effect in effects if effect[0] == "pack"]
     transposes = [effect for effect in effects if effect[0] == "transpose"]
     unaries = [effect for effect in effects if effect[0] in {"relu", *BF16_UNARY_MODES.values()}]
     reductions = [effect for effect in effects if effect[0] in BF16_ROW_REDUCTION_MODES.values()]
     binaries = [effect for effect in effects if effect[0] in BF16_BINARY_MODES.values()]
-    expected_loads = sum(1 if names[value_id] in {
-        "atlas.load_fp8_tile", *PACK_RULE_NAMES,
-    } else 2 if names[value_id] == "atlas.load_bf16_tile" else 0
+    expected_loads = sum(1 if names[value_id] == "atlas.load_fp8_tile"
+                         else 2 if names[value_id] == "atlas.load_bf16_tile" else 0
                          for value_id in order)
     expected_packs = sum(names[value_id] in PACK_RULE_NAMES
                          for value_id in order)
@@ -2256,10 +2201,13 @@ def check_mxu_bf16_dag_stream(
     expected_binaries = sum(names[value_id] in BF16_BINARY_MODES for value_id in order)
     if (len(loads), len(pops), len(packs), len(transposes), len(unaries),
             len(reductions), len(binaries)) != (
-        expected_loads, len(mxu_inputs), expected_packs, expected_transposes, expected_unaries,
+        expected_loads, len(mxu_inputs), 2 * expected_packs, expected_transposes, expected_unaries,
         expected_reductions, expected_binaries,
     ):
         raise NativeCompilationError("unqualified_target", "MXU/VPU physical instruction counts changed")
+    if len(converted) != expected_packs:
+        raise NativeCompilationError("unqualified_target", "interlayer pack copy/pop count changed")
+    roundtrip_pairs: dict[int, int] = {}
     realized = dict(assignment)
     load_index = pop_index = pack_index = transpose_index = unary_index = reduction_index = binary_index = 0
     for value_id in order:
@@ -2279,13 +2227,14 @@ def check_mxu_bf16_dag_stream(
             pop_index += 1
         elif name in PACK_RULE_NAMES:
             pack_code(value_id)
-            effect = packs[pack_index]
+            effect, unpack = packs[2 * pack_index:2 * pack_index + 2]
+            result = converted[pack_index]
             pack_index += 1
-            if (effect[1] != "bf16_to_fp8" or effect[2] != realized[value.children[0]]
-                    or effect[4] != 3 or loads[load_index] != ("vload", effect[3], 33024)):
-                raise NativeCompilationError("unqualified_target", "interlayer pack source or reload changed")
-            realized[value_id] = effect[3]
-            load_index += 1
+            if (effect != ("pack", "bf16_to_fp8", realized[value.children[0]], 62, 3) or unpack[:3] != ("pack",
+                "fp8_to_bf16", 62) or unpack[4] != 3 or result[:5] != ("mxu_pop", 0, 0, "fp8", 3)):
+                raise NativeCompilationError("unqualified_target", "interlayer pack source or conversion changed")
+            roundtrip_pairs[value_id] = unpack[3]
+            realized[value_id] = result[5]
         elif name in TRANSPOSE_RULE_NAMES:
             effect = transposes[transpose_index]
             transpose_index += 1
@@ -2353,13 +2302,8 @@ def check_mxu_bf16_dag_stream(
             expected.append((kind, realized[value.children[0]],
                              realized[value.children[1]], realized[value_id]))
         elif name in PACK_RULE_NAMES:
-            expected.extend((
-                ("seli", 3, pack_code(value_id)),
-                ("pack", "bf16_to_fp8", realized[value.children[0]], realized[value_id], 3),
-                ("vstore", realized[value_id], 32768),
-            ))
-            expected.extend(_pack_relayout_effects())
-            expected.append(("vload", realized[value_id], 33024))
+            expected.extend(_pack_roundtrip_effects(realized[value.children[0]], roundtrip_pairs[value_id],
+                realized[value_id], pack_code(value_id)))
         elif name in TRANSPOSE_RULE_NAMES:
             expected.append(("transpose", realized[value.children[0]], realized[value_id]))
         elif name in {"atlas.store_bf16_tile", "atlas.store_bf16_mxu0_tile"}:
@@ -2384,79 +2328,52 @@ def check_mxu_bf16_dag_stream(
             "unqualified_target",
             f"MXU/VPU DAG effect {mismatch} differs: selected {wanted}, emitted {actual}",
         )
-    _check_interlayer_pack_words(program, tuple(
-        (realized[graph.value(value_id).children[0]], realized[value_id]) for value_id in order
-        if names[value_id] in PACK_RULE_NAMES
-    ))
+    _check_pack_roundtrip_words(program)
     _check_mxu_dag_timing(program)
     return realized
 
-
-def _check_interlayer_pack_words(program: dict, pack_registers: tuple[tuple[int, int], ...]) -> None:
-    rows = program["instructions"]
-    packs = [row for row in rows if row["operation"] == "atlas.vpu_pack"]
-    branches = [index for index, row in enumerate(rows) if row["operation"] == "atlas.branch"]
-    if len(packs) != len(pack_registers) or len(branches) != len(pack_registers):
-        raise NativeCompilationError("unqualified_target", "interlayer pack encoding count changed")
-    for row, (source_pair, destination) in zip(packs, pack_registers):
-        if not 0 <= destination < 32:
-            raise NativeCompilationError("unqualified_target", "interlayer pack destination is outside FP8 storage")
-        word = row["word_u32"]
-        if ((word >> 25) & 0x7f, (word >> 19) & 0x3f,
-            (word >> 13) & 0x3f, (word >> 7) & 0x3f,
-            word & 0x7f) != (0x44, source_pair, 3, destination, 0x57):
-            raise NativeCompilationError("unqualified_target", "interlayer pack word changed")
-    for branch in branches:
-        first_load = branch - _PACK_RELAYOUT_BRANCH_DISTANCE
-        if (first_load < 0 or rows[first_load]["operation"] != "atlas.scalar_load"
-                or rows[first_load]["fields"].get("kind") != "lw"
-                or branch + 1 >= len(rows)
-                or rows[branch + 1]["operation"] != "atlas.alu_imm"
-                or any(rows[branch + 1]["fields"].get(key) != value for key, value in
-                       {"dst": 0, "immediate": 0, "kind": "addi", "src": 0}.items())
-                or rows[branch]["fields"].get("offset_bytes") != _PACK_RELAYOUT_BRANCH_OFFSET):
-            raise NativeCompilationError("unqualified_target", "interlayer pack loop changed")
-        word = rows[branch]["word_u32"]
-        immediate = (((word >> 31) & 1) << 12) | (((word >> 7) & 1) << 11) | (
-            ((word >> 25) & 0x3f) << 5) | (((word >> 8) & 0xf) << 1)
-        immediate = immediate - 8192 if immediate & 4096 else immediate
-        if (word & 0x7f, (word >> 12) & 7, (word >> 15) & 31,
-            (word >> 20) & 31, immediate) != (0x63, 4, 13, 14, _PACK_RELAYOUT_BRANCH_OFFSET):
-            raise NativeCompilationError("unqualified_target", "interlayer pack branch word changed")
-        advances = [row["fields"] for row in rows[first_load:branch]
-                    if row["operation"] == "atlas.alu_imm"]
-        if [(row.get("kind"), row.get("dst"), row.get("src"), row.get("immediate"))
-            for row in advances] != _PACK_RELAYOUT_ADVANCES:
-            raise NativeCompilationError("unqualified_target", "interlayer pack row increments changed")
 
 
 def _check_mxu_dag_timing(program: dict) -> None:
     """Check conservative data availability against the emitted issue stream."""
     cycle = 0
     ready_at: dict[int, int] = {}
-    weight_ready: int | None = None
-    matmul_ready: int | None = None
+    weight_ready: dict[tuple[int, int], int] = {}
+    accumulator_ready: dict[tuple[int, int], int] = {}
     pending_stores: list[int] = []
-    pack_store_due = False
-    pack_scratch_ready: int | None = None
+    load_path_ready = 0
     for row in program["instructions"]:
         op, fields = row["operation"], row["fields"]
         if op == "atlas.vload":
+            if cycle < load_path_ready:
+                raise NativeCompilationError("unqualified_target", "VLOAD path is still active")
+            # npu_model/hardware/lsu.py: 32 MRF rows + 3 issue cycles;
+            # _accept runs before the final-row tick, so +34 is still busy.
+            load_path_ready = cycle + (32 + 3)
             ready_at[fields["dst"]] = cycle + 34
         elif op == "atlas.mxu_push":
-            if ready_at.get(fields["src"], 1 << 60) > cycle:
-                raise NativeCompilationError("unqualified_target", "MXU weight is not available")
-            weight_ready = cycle + 1
+            halves = (0, 1) if fields["kind"] == "acc_bf16" else (0,)
+            if any(ready_at.get(fields["src"] + half, 1 << 60) > cycle for half in halves):
+                raise NativeCompilationError("unqualified_target", "MXU push source is not available")
+            key = (fields["unit"], fields["slot"])
+            if fields["kind"] == "weight_fp8":
+                weight_ready[key] = cycle + 1
+            else:
+                # A push writes row0 one cycle after issue; a POP may read it
+                # the following cycle while later rows continue streaming.
+                accumulator_ready[key] = cycle + 2
         elif op == "atlas.mxu_matmul":
+            key = (fields["unit"], fields["weight_slot"])
             if (ready_at.get(fields["src"], 1 << 60) > cycle
-                    or weight_ready is None or weight_ready > cycle):
+                    or weight_ready.get(key, 1 << 60) > cycle):
                 raise NativeCompilationError("unqualified_target", "MXU operand is not available")
-            matmul_ready = cycle + 64
+            accumulator_ready[(fields["unit"], fields["acc_slot"])] = cycle + 64
         elif op == "atlas.mxu_pop":
-            if matmul_ready is None or matmul_ready > cycle:
+            if accumulator_ready.get((fields["unit"], fields["slot"]), 1 << 60) > cycle:
                 raise NativeCompilationError("unqualified_target", "MXU readout is premature")
             ready_at[fields["dst"]] = cycle + 32
-            ready_at[fields["dst"] + 1] = cycle + 32
+            if fields["format"] == "bf16":
+                ready_at[fields["dst"] + 1] = cycle + 32
         elif op == "atlas.vpu_unary":
             pair = fields["src"]
             if any(ready_at.get(pair + half, 1 << 60) > cycle for half in (0, 1)):
@@ -2477,11 +2394,13 @@ def _check_mxu_dag_timing(program: dict) -> None:
             ready_at[fields["dst"]] = cycle + 66
             ready_at[fields["dst"] + 1] = cycle + 66
         elif op == "atlas.vpu_pack":
-            pair = fields["src"]
-            if any(ready_at.get(pair + half, 1 << 60) > cycle for half in (0, 1)):
-                raise NativeCompilationError("unqualified_target", "pack reads an unavailable BF16 pair")
-            ready_at[fields["dst"]] = cycle + 65
-            pack_store_due = True
+            unpack = fields["direction"] == "fp8_to_bf16"
+            halves = (0,) if unpack else (0, 1)
+            if any(ready_at.get(fields["src"] + half, 1 << 60) > cycle for half in halves):
+                raise NativeCompilationError("unqualified_target", "pack conversion reads unavailable data")
+            ready_at[fields["dst"]] = cycle + (66 if unpack else 65)
+            if unpack:
+                ready_at[fields["dst"] + 1] = cycle + 66
         elif op == "atlas.xlu_transpose":
             if ready_at.get(fields["src"], 1 << 60) > cycle:
                 raise NativeCompilationError("unqualified_target", "XLU reads an unavailable FP8 register")
@@ -2489,14 +2408,7 @@ def _check_mxu_dag_timing(program: dict) -> None:
         elif op == "atlas.vstore":
             if ready_at.get(fields["src"], 1 << 60) > cycle:
                 raise NativeCompilationError("unqualified_target", "VPU store reads an unavailable register")
-            if pack_store_due:
-                pack_scratch_ready = cycle + 34
-                pack_store_due = False
-            else:
-                pending_stores.append(cycle)
-        elif op == "atlas.scalar_load" and fields.get("kind") == "lw":
-            if pack_scratch_ready is None or pack_scratch_ready > cycle:
-                raise NativeCompilationError("unqualified_target", "pack row read precedes VSTORE completion")
+            pending_stores.append(cycle)
         elif op == "atlas.dma" and fields["direction"] == "store":
             if not pending_stores or cycle - pending_stores.pop(0) < 34:
                 raise NativeCompilationError("unqualified_target", "DMA reads scratch before VSTORE completes")
@@ -2506,7 +2418,7 @@ def _check_mxu_dag_timing(program: dict) -> None:
                 raise NativeCompilationError("unqualified_target", "MXU/VPU DAG delay is invalid")
             cycle += count
         cycle += 1
-    if pending_stores or pack_store_due:
+    if pending_stores:
         raise NativeCompilationError("unqualified_target", "VPU scratch store has no DMA completion")
 
 
@@ -3315,13 +3227,17 @@ class AtlasNativeBinding:
                     or tuple(value.kind for value in values) != (
                         "input", "instruction", "instruction", "instruction", "instruction"
                     )
-                    or names[1:] != [
-                        "atlas.load_bf16_tile_mixed", "atlas.vpu_relu_bf16_tile",
-                        "atlas.vpu_pack_unit_fp8_tile", "atlas.store_fp8_unit_tile",
-                    ]
+                    or names[1] not in {"atlas.load_bf16_tile", "atlas.load_bf16_tile_mixed"}
+                    or names[2:] != ["atlas.vpu_relu_bf16_tile",
+                                      "atlas.vpu_pack_unit_fp8_tile", "atlas.store_fp8_unit_tile"]
+                    or values[1].storage != "tensor_bf16" or values[2].storage != "tensor_bf16"
+                    or values[3].storage != "tensor_fp8"
                     or tuple(value.children for value in values[1:]) != ((0,), (1,), (2,), (3,))
                     or (assignment[0], assignment[4]) != (input_slot, output_slot)
-                    or assignment[1] != 32 or assignment[2] != 34 or assignment[3] != 0
+                    or any(assignment[index] % 2 or not 0 <= assignment[index] <= 60
+                           for index in (1, 2))
+                    or not 32 <= assignment[2] <= 60
+                    or assignment[1] == assignment[2] or assignment[3] != 0
                 ):
                     raise NativeCompilationError("unqualified_target", "selected ReLU/pack graph or bindings changed")
                 selected_registers = [32, 33, 34, 35, 0]
@@ -3514,11 +3430,21 @@ class AtlasNativeBinding:
                     issue_times=selected.allocation.issue_times,
                 )
             elif pack:
+                effects = _tile_effects(program)
+                loads = [effect for effect in effects if effect[0] == "vload"]
+                relus = [effect for effect in effects if effect[0] == "relu"]
+                if len(loads) != 2 or len(relus) != int(relu_pack):
+                    raise NativeCompilationError("unqualified_target", "pack input or ReLU count changed")
+                source_pair = relus[0][2] if relu_pack else loads[0][1]
+                actual_relu = (relus[0][1], relus[0][2]) if relu_pack else None
                 check_pack_stream(program, input_address=input_address,
-                                  output_address=output_address,
-                                  source_pair=34 if relu_pack else 32,
-                                  relu_pair=(32, 34) if relu_pack else None,
-                                  scale_code=pack_scale_code)
+                                  output_address=output_address, source_pair=source_pair,
+                                  relu_pair=actual_relu, scale_code=pack_scale_code)
+                input_pair = loads[0][1]
+                selected_registers = [input_pair, input_pair + 1]
+                if relu_pack:
+                    selected_registers.extend((source_pair, source_pair + 1))
+                selected_registers.append(0)
             elif copy_transpose:
                 check_copy_transpose_stream(
                     program, input_address=input_address,

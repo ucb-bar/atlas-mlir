@@ -802,6 +802,15 @@ private:
     }
     if (auto pack = dyn_cast<VirtualPackFP8Op>(op))
       return lowerPack(pack);
+    if (auto roundtrip = dyn_cast<VirtualPackRoundTripBF16Op>(op)) {
+      // PACK establishes the exact quantized alphabet before UNPACK restores
+      // the original physical BF16 half rows at unit scale.
+      emit<ScalarLoadOp>(loc, "seli", fixed().scaleReg, 0, roundtrip.getScaleCode());
+      emit<VPUPackOp>(loc, "bf16_to_fp8", fixed().tensorTemporary, tile(roundtrip.getSrc()), fixed().scaleReg);
+      emit<ScalarLoadOp>(loc, "seli", fixed().scaleReg, 0, 127);
+      emit<VPUPackOp>(loc, "fp8_to_bf16", tile(roundtrip.getResult()), fixed().tensorTemporary, fixed().scaleReg);
+      return success();
+    }
     if (auto output = dyn_cast<VirtualOutputBF16Op>(op)) {
       uint64_t index = output.getIndexAttr().getValue().getZExtValue();
       for (unsigned half = 0; half < 2; ++half)

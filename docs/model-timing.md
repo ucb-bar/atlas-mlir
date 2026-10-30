@@ -114,6 +114,16 @@ facts. The `curve` profile also refuses different curve bytes and binds the
 checked bytes to the backend. The compiler checks the facts file again on
 reload.
 
+The PACK relayout pass replaces eligible scalar copies with VPU PACK and
+UNPACK followed by an MXU push and readout. The roundtrip cost uses the shared
+SELI, PACK, and UNPACK timing rules from the provider's precomputed machine
+operation timings. The second virtual schedule keeps the selected provider
+and random seed, and uses the same automatic lookahead selection as the first.
+Explicit search orders stay applied after PACK expansion, and graph output
+keeps the prepared graph used by group search. The schedule stage records its
+options in the intermediate IR, and the spill stage restores them for this
+second pass, including when the stages run as separate commands.
+
 The default profile is `curve`; `--profile curve|fifo43` changes scoring memory
 behavior. `--guarded-pack` converts proven-finite PACK inputs through MXU0 for
 exact results. `--workers` controls parallel work. `--no-bank-candidates`

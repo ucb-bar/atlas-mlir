@@ -84,7 +84,7 @@ bool isImplicitMemory(Operation *op) {
 Effects effectsOf(Operation *op) {
   Effects e;
   e.reads = bit(kBarrier);
-  if (isa<VirtualPackFP8Op>(op))
+  if (isa<VirtualPackFP8Op, VirtualPackRoundTripBF16Op>(op))
     e.writes = bit(kPack);
   else if (auto load = dyn_cast<VirtualMXULoadWeightOp>(op))
     e.reads |= bit(kUnit0 + unitOf(load.getWeight().getType()));
@@ -487,6 +487,13 @@ Cost costOf(Operation *op, const timing::TimingProvider &provider, int transfer)
     return onVpu("vli.all");
   if (isa<VirtualXLUTransposeOp>(op)) {
     return onUnit("vtrpose.xlu", Unit::Xlu);
+  }
+  if (isa<VirtualPackRoundTripBF16Op>(op)) {
+    const auto &pack = provider.machineTiming.at("vpack.bf16.fp8");
+    const auto &unpack = provider.machineTiming.at("vunpack.fp8.bf16");
+    const auto &scale = provider.machineTiming.at("seli");
+    return blocking(Unit::Vpu,
+                    int64_t(pack.latency) + unpack.latency + 2 * scale.latency);
   }
   if (isa<VirtualPackFP8Op>(op))
     return packCost(provider);
@@ -983,7 +990,44 @@ struct ScheduleAtlasVirtualPass
 
   ScheduleAtlasVirtualPass() = default;
   ScheduleAtlasVirtualPass(const ScheduleAtlasVirtualPass &other)
-      : PassWrapper(other) {}
+      : PassWrapper(other), orderApplied(other.orderApplied),
+        rememberOptions(other.rememberOptions) {}
+
+  // Spilling and PACK repair expand an explicit order without changing it.
+  // Its node IDs and graph output still refer to the prepared search graph.
+  bool orderApplied = false;
+  bool rememberOptions = false;
+
+  static constexpr StringLiteral scheduleOptions = "atlas.virtual_schedule_options";
+
+  LogicalResult restoreOptions(ModuleOp module) {
+    auto options = module->getAttrOfType<DictionaryAttr>(scheduleOptions);
+    if (!options)
+      return success();
+    auto savedProvider = options.getAs<StringAttr>("provider");
+    auto savedRows = options.getAs<IntegerAttr>("pack_relayout_rows");
+    auto savedSeed = options.getAs<IntegerAttr>("random_seed");
+    auto savedOrder = options.getAs<StringAttr>("order_file");
+    auto savedGraph = options.getAs<StringAttr>("graph_output");
+    if (!savedProvider || !savedRows || !savedSeed || !savedOrder || !savedGraph)
+      return module.emitError("virtual schedule options are incomplete");
+    provider = savedProvider.str();
+    packRelayoutRows = savedRows.getInt();
+    randomSeed = savedSeed.getInt();
+    orderFile = savedOrder.str();
+    graphOutput = savedGraph.str();
+    return success();
+  }
+
+  void saveOptions(ModuleOp module, StringRef selectedProvider) {
+    Builder builder(module.getContext());
+    module->setAttr(scheduleOptions, builder.getDictionaryAttr({
+        builder.getNamedAttr("provider", builder.getStringAttr(selectedProvider)),
+        builder.getNamedAttr("pack_relayout_rows", builder.getI64IntegerAttr(packRelayoutRows)),
+        builder.getNamedAttr("random_seed", builder.getI64IntegerAttr(randomSeed)),
+        builder.getNamedAttr("order_file", builder.getStringAttr(orderFile)),
+        builder.getNamedAttr("graph_output", builder.getStringAttr(graphOutput))}));
+  }
 
   StringRef getArgument() const final { return "schedule-atlas-virtual"; }
   StringRef getDescription() const final {
@@ -1015,6 +1059,8 @@ struct ScheduleAtlasVirtualPass
 
   void runOnOperation() override {
     ModuleOp module = getOperation();
+    if (orderApplied && failed(restoreOptions(module)))
+      return signalPassFailure();
     if (failed(verifyAtlasVirtualModule(module)))
       return signalPassFailure();
     auto refuse = [&](const Twine &why) { module.emitError(why); signalPassFailure(); };
@@ -1027,7 +1073,7 @@ struct ScheduleAtlasVirtualPass
       return refuse("pack-relayout-rows must be 0, 1, or 2");
     selected->packRelayoutRows = packRelayoutRows;
     std::optional<llvm::json::Value> requested;
-    if (!orderFile.empty()) {
+    if (!orderFile.empty() && !orderApplied) {
       auto file = llvm::MemoryBuffer::getFile(orderFile);
       if (!file)
         return refuse(Twine("cannot read order-file: ") + file.getError().message());
@@ -1039,6 +1085,7 @@ struct ScheduleAtlasVirtualPass
         return refuse("order-file must contain an array of block permutations");
     }
     llvm::json::Array graphs;
+    const bool exportGraph = !graphOutput.empty() && !orderApplied;
     unsigned blockIndex = 0;
     std::optional<unsigned> seed;
     if (randomSeed >= 0)
@@ -1053,7 +1100,7 @@ struct ScheduleAtlasVirtualPass
       unsigned index = 0;
       for (Block &block : function.getBody()) {
         std::optional<BlockGraph> graph;
-        if (requested || !graphOutput.empty()) {
+        if (requested || exportGraph) {
           auto built = buildGraph(block);
           if (failed(built))
             return signalPassFailure();
@@ -1077,11 +1124,12 @@ struct ScheduleAtlasVirtualPass
             ops.push_back(graph->nodes[*node]);
           }
           reorder(block, ops);
-        } else if (failed(scheduleBlock(block, index, liveness,
+        } else if (!(orderApplied && !orderFile.empty()) &&
+                   failed(scheduleBlock(block, index, liveness,
                                         capacity, seed, *selected))) {
           return signalPassFailure();
         }
-        if (!graphOutput.empty()) {
+        if (exportGraph) {
           llvm::json::Array preds, names, order;
           llvm::DenseMap<Operation *, unsigned> ids;
           for (unsigned node = 0; node < graph->nodes.size(); ++node) {
@@ -1114,7 +1162,7 @@ struct ScheduleAtlasVirtualPass
                        "not verify");
       return signalPassFailure();
     }
-    if (!graphOutput.empty()) {
+    if (exportGraph) {
       std::error_code error;
       llvm::raw_fd_ostream output(graphOutput, error);
       if (error)
@@ -1124,6 +1172,10 @@ struct ScheduleAtlasVirtualPass
       if (output.has_error())
         return refuse("cannot write graph-output");
     }
+    if (rememberOptions)
+      saveOptions(module, selected->id);
+    if (orderApplied)
+      module->removeAttr(scheduleOptions);
   }
 };
 
@@ -1135,12 +1187,15 @@ void mlir::atlas::registerScheduleAtlasVirtualPass() {
 
 std::unique_ptr<Pass> mlir::atlas::createScheduleAtlasVirtualPass(
     StringRef provider, int randomSeed, StringRef orderFile,
-    StringRef graphOutput, unsigned packRelayoutRows) {
+    StringRef graphOutput, unsigned packRelayoutRows, bool orderApplied,
+    bool rememberOptions) {
   auto pass = std::make_unique<ScheduleAtlasVirtualPass>();
   pass->provider = provider.str();
   pass->randomSeed = randomSeed;
   pass->orderFile = orderFile.str();
   pass->graphOutput = graphOutput.str();
   pass->packRelayoutRows = packRelayoutRows;
+  pass->orderApplied = orderApplied;
+  pass->rememberOptions = rememberOptions;
   return pass;
 }

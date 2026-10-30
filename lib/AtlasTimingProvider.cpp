@@ -122,7 +122,8 @@ std::string mlir::atlas::timing::fillMachineTiming(TimingProvider &p) {
   };
   for (const OpInfo &op : machineOperations()) {
     if (op.engine == Engine::Dma ||
-        (op.engine == Engine::Scalar && op.name != "addi" && op.name != "lui") ||
+        (op.engine == Engine::Scalar && op.name != "addi" &&
+         op.name != "lui" && op.name != "seli") ||
         (op.opClass == OpClass::ScalarLoad && op.name != "lw") ||
         (op.opClass == OpClass::ScalarStore && op.name != "sw"))
       continue;

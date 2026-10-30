@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import json
 import os
 import pathlib
 import re
 import subprocess
+import tempfile
 import unittest
 
 from test_delay_insertion import OPT, run
@@ -56,11 +58,25 @@ def dma_sequence(text: str) -> list[tuple[str, int | None]]:
 
 @requires_model_evidence
 class DMARingWaitTest(unittest.TestCase):
-    def lower(self, source: str) -> str:
-        """Lower source order directly, leaving waits pending for the insertion pass."""
-        lowered = run(OPT, source, fixture_evidence(pathlib.Path(".")),
-                      "--atlas-compile-prepare=boundary=none", "--atlas-compile-spill",
-                      "--atlas-compile-lower=provider=model")
+    def setUp(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.directory = pathlib.Path(temporary.name)
+        self.evidence = fixture_evidence(self.directory)
+
+    def lower(self, source: str, *, scalar_pack: bool = False) -> str:
+        """Lower source order, leaving waits pending for the insertion pass."""
+        prepared = run(OPT, source, self.evidence, "--atlas-compile-prepare=boundary=none")
+        self.assertEqual(prepared.returncode, 0, prepared.stderr)
+        graph, replay = self.directory / "graph.json", self.directory / "order.json"
+        written = run(OPT, prepared.stdout, f"--schedule-atlas-virtual=provider=model graph-output={graph}")
+        self.assertEqual(written.returncode, 0, written.stderr)
+        replay.write_text(json.dumps([list(range(len(block["preds"]))) for block in json.loads(graph.read_text())]))
+        spill = (("--spill-atlas-virtual", "--verify-atlas-virtual-stream")
+                 if scalar_pack else ("--atlas-compile-spill",))
+        lowered = run(OPT, prepared.stdout,
+                      f"--atlas-compile-schedule=provider=model boundary=none order-file={replay}",
+                      *spill, "--atlas-compile-lower=provider=model")
         self.assertEqual(lowered.returncode, 0, lowered.stderr)
         return lowered.stdout
 
@@ -104,7 +120,8 @@ class DMARingWaitTest(unittest.TestCase):
             f'%y = "atlas.virtual_mxu_matmul"(%p, %p) {{unit = 0 : i32}} : ({F}, {F}) -> {T}',
             dma_load("s1", "s2", "z", "a1", "size", "bf16"), add("w", "y", "z"),
             dma_store("s2", "s3", "w", "a2"), f"return %s3 : {S}"])
-        lines = self.lower(source).splitlines()
+        # Direct lowering keeps the scalar fallback loop this mutation needs.
+        lines = self.lower(source, scalar_pack=True).splitlines()
         pack = next(re.search(r"atlas\.virtual_cfg_source = (\d+)", line).group(1)
                     for line in lines if "atlas.virtual_cfg_helper" in line and "atlas.virtual_cfg_source" in line)
         launch = next(index for index, line in enumerate(lines)

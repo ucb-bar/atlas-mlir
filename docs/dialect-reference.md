@@ -45,7 +45,8 @@ even-based pair in `0..62`; an FP8 tile uses one register in `0..63`. Each MXU
 | `vpu_splat` | `bits` `0..65535` → BF16 | Same raw bits everywhere; lowers to `atlas.vli` mode `all` |
 | `xlu_transpose` | FP8 → FP8 | Element `(j, i)` is source `(i, j)` |
 | `mxu_matmul` | FP8, FP8, `unit` → BF16 | One reset contraction; the unit affects the result |
-| `pack_fp8` | BF16, `scale_code` → FP8 | Row-major FP8 tile; lowering accepts codes `122..128` and adds the relayout |
+| `pack_fp8` | BF16, `scale_code` → FP8 | Row-major FP8 tile; codes `122..128`; the late relayout pass uses a free MXU accumulator, otherwise lowering interleaves through VMEM |
+| `pack_roundtrip_bf16` | BF16, `scale_code` → BF16 | Pure VPU PACK quantization followed by unit-scale UNPACK; codes `122..128`; restores logical positions for canonical MXU conversion |
 | `dma_load_fp8/bf16` | state, addr, len → state, tile | Atomic DRAM load |
 | `dma_store_fp8/bf16` | state, tile, addr, len → state | Atomic DRAM store |
 | `mxu_load_weight` | state, FP8, `unit` → state, weight | Replace the unit's current weight |
@@ -204,12 +205,13 @@ numerical policy, or availability across the stream.
 
 | Name | Kind | What it does |
 | --- | --- | --- |
-| `--atlas-compile` | pipeline | Virtual function to timed machine IR: MXU and tensor spilling, boundary DMA, virtual scheduling, lowering, DMA waits and stream scheduling, with every verifier between them. `--dump-pass-pipeline` lists the passes; `allocation-report=<file>` writes the allocation plan. |
+| `--atlas-compile` | pipeline | Virtual function to timed machine IR: MXU and tensor spilling, boundary DMA, virtual scheduling, late PACK repair, virtual scheduling again, spilling again, lowering, DMA waits and stream scheduling, with every verifier between them. `--dump-pass-pipeline` lists the passes; `allocation-report=<file>` writes the allocation plan. |
 | `--atlas-compile-verify`, `-schedule`, `-spill`, `-lower`, `-time` | pipeline | The five stages of `--atlas-compile`, in order, for tools that keep each stage's IR. |
-| `--atlas-compile-unscheduled` | pipeline | The native binding's qualification lowering: spilling, lowering, DMA waits and in-order delays, with the same verifiers, but no boundary DMA or scheduling. |
+| `--atlas-compile-unscheduled` | pipeline | The native binding's qualification lowering: spilling, late PACK repair, spilling again, lowering, DMA waits and in-order delays, with the same verifiers, but no boundary DMA or scheduling. |
 | `--verify-atlas-virtual-stream` | pass | Check virtual types, state edges, output indices, and that no machine op is mixed in. |
 | `--lower-atlas-virtual-boundary-to-dma` | pass | Convert boundary FP8/BF16 inputs and BF16 outputs to explicit DMA loads and stores using the input and output DRAM bases and 2-KiB slot stride; run before virtual scheduling to expose prefetching and overlap. |
 | `--schedule-atlas-virtual` | pass | Reorder each virtual block before spilling and allocation by a latency-aware list schedule that charges estimated spill cycles for values beyond the registers, keeping SSA, handle, and memory order. Run `--spill-atlas-virtual` after it. `random-seed=N` picks a random legal order. `provider=<id>` selects machine-operation timing for costs, spill costs included; lowering recipes and DMA serialization remain compiler policy. Missing cost coverage fails. |
+| `--lower-atlas-pack-relayout` | pass | After virtual scheduling, replace PACK with a BF16 quantization roundtrip and unit-scale MXU push/readout when an accumulator is free. Run before spilling and allocation; otherwise retain the scalar relayout fallback. See [PACK layout repair](pack-relayout-loop.md). |
 | `--spill-atlas-mxu-state` | pass | Save and reload completed MXU accumulator/weight state when local slots are exhausted, before virtual scheduling. |
 | `--spill-atlas-virtual` | pass | Recover MXU/tensor/scalar pressure, lower memory edge copies, place spills and scratch, and retry the existing allocator. See [register spilling](register-spilling.md) for the storage operations, control ABI and limits. |
 | `--lower-atlas-virtual-to-machine` | pass | Allocate and emit untimed machine IR with resource contracts: tiles, controls, MXU, pack, block-argument copies, branches, DMA launches with VLOADs moved to first use. Leaves waits to the next pass, and delay slots to the timing passes (`atlas.delay_slots_pending`). `allocation-report=<file>` writes the plan as JSON, even on failure. |

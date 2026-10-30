@@ -303,7 +303,7 @@ LogicalResult verifyVirtualBlock(Block &block, bool entry, bool cfg,
     }
     if (isa<VirtualVPUUnaryOp, VirtualVPUBinaryOp, VirtualVPUReduceOp,
             VirtualVPUSplatOp, VirtualXLUTransposeOp, VirtualPackFP8Op,
-            VirtualScaleConstantOp>(operation))
+            VirtualPackRoundTripBF16Op, VirtualScaleConstantOp>(operation))
       continue;
     if (auto constant = dyn_cast<arith::ConstantOp>(operation)) {
       Type type = constant.getResult().getType();
