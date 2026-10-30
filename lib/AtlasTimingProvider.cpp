@@ -232,18 +232,25 @@ std::string mlir::atlas::timing::registerAtlasTimingProvider(
   };
   Registry &r = registry();
   std::lock_guard<std::mutex> lock(r.mutex);
-  if (!r.factories.try_emplace(id, std::move(complete)).second)
+  if (!r.factories.try_emplace(canonicalTimingProviderId(id), std::move(complete)).second)
     return "timing provider is already registered: " + id;
   return {};
 }
 
+llvm::StringRef mlir::atlas::timing::canonicalTimingProviderId(llvm::StringRef id) {
+  if (id == "npu-model-rtl-match-v1")
+    return kBuiltinTimingProviderId;
+  return id;
+}
+
 TimingRuleResult<TimingProvider> mlir::atlas::timing::lookupTimingProvider(
     const std::string &id, mlir::ModuleOp module) {
+  const std::string canonical = canonicalTimingProviderId(id).str();
   TimingProviderFactory factory;
   {
     Registry &r = registry();
     std::lock_guard<std::mutex> lock(r.mutex);
-    auto found = r.factories.find(id);
+    auto found = r.factories.find(canonical);
     if (found != r.factories.end())
       factory = found->second;
   }
@@ -255,7 +262,7 @@ TimingRuleResult<TimingProvider> mlir::atlas::timing::lookupTimingProvider(
   auto result = factory(module);
   if (!result.error.empty())
     return {{}, result.error};
-  if (result.value.id != id)
+  if (result.value.id != canonical)
     return {{}, "timing provider factory for " + id + " returned policy " + result.value.id};
   std::string missing = validateTimingProvider(result.value);
   if (!missing.empty())

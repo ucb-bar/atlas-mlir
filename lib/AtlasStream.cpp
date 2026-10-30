@@ -781,7 +781,7 @@ LogicalResult mlir::atlas::verifyAtlasTiming(
   if (failed(verifyAtlasTimingState(module)))
     return failure();
   if (auto selected = module->getAttrOfType<StringAttr>(kAtlasTimingProvider);
-      selected && selected.getValue() != provider.id)
+      selected && canonicalTimingProviderId(selected.getValue()) != provider.id)
     return module.emitOpError("supplied timing policy disagrees with retained provider identity");
   assert(ctx.stream && "a timed stream is decoded");
   return verifyAtlasTimedStream(*ctx.stream, provider);
@@ -797,7 +797,8 @@ FailureOr<TimingProvider> mlir::atlas::selectAtlasTimingProvider(
     ModuleOp module, StringRef requested) {
   auto retained = module->getAttrOfType<StringAttr>(kAtlasTimingProvider);
   if (!requested.empty() && retained &&
-      retained.getValue() != requested)
+      canonicalTimingProviderId(retained.getValue()) !=
+          canonicalTimingProviderId(requested))
     return module.emitOpError("supplied timing policy disagrees with retained provider identity");
   std::string id =
       !requested.empty() ? requested.str() : retained ? retained.getValue().str() : kBuiltinTimingProviderId.str();

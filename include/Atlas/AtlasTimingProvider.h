@@ -106,6 +106,8 @@ using TimingProviderFactory =
 // provider. Returns an error for an empty, duplicate or null registration.
 std::string registerAtlasTimingProvider(const std::string &id,
                                         TimingProviderFactory factory);
+// Normalize the provider identity retained by timed IR from main.
+llvm::StringRef canonicalTimingProviderId(llvm::StringRef id);
 // Only complete registered policies are returned; unknown and footprint-only
 // CIRCT evidence ids fail rather than borrow model rules.
 TimingRuleResult<TimingProvider> lookupTimingProvider(const std::string &id,

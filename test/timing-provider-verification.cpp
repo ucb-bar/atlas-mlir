@@ -274,6 +274,11 @@ void testRegistry(MLIRContext &context) {
   check(builtin.error.empty() && builtin.value.id == "builtin",
         "default provider resolves to its registered identity");
   check(!registerAtlasTimingProvider("builtin", complete).empty(), "duplicate registration fails");
+  check(!registerAtlasTimingProvider("npu-model-rtl-match-v1", complete).empty(),
+        "main provider alias cannot replace builtin registration");
+  auto alias = lookupTimingProvider("npu-model-rtl-match-v1");
+  check(alias.error.empty() && alias.value.id == "builtin",
+        "main provider alias resolves to builtin after duplicate refusal");
   check(!registerAtlasTimingProvider("", complete).empty(), "empty registration id fails");
   check(!registerAtlasTimingProvider("synthetic-null-factory", {}).empty(), "null factory fails");
   check(registerAtlasTimingProvider("synthetic-renamed-policy", complete).empty() &&

@@ -234,3 +234,7 @@ regions before using new facts. See
 Isolated native event checks do not test arbitrary concurrent programs.
 Curve estimates ignore address effects, and close rankings can reverse on
 the SoC. Exactness depends on the chosen numerical policy and input regions.
+
+Timed IR from main may retain `atlas.timing_provider = "npu-model-rtl-match-v1"`.
+The compiler normalizes that identity to `builtin` when reading it. Explicit
+`provider=builtin` also accepts it; newly timed artifacts use `builtin`.
