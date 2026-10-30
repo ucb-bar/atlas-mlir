@@ -110,6 +110,11 @@ class PrecisionModesTest(unittest.TestCase):
         self.assert_bits(actual, [oracle.bf16_round(Fraction(float(x))) for x in source])
         self.assertFalse(torch.equal(actual, source.float().bfloat16().float()))
         self.assertEqual(bits(arithmetic.direct_bf16(torch.tensor([-0.0]))), 0)
+        # Chains of 1, 2^-8 (second K chunk), and 2^-40 (low term) sum above a BF16 midpoint that float32 rounds onto.
+        a, b, low = torch.zeros((1, 64)), torch.zeros((64, 1)), torch.zeros((64, 1))
+        a[0, 0], a[0, 32], b[0], b[32], low[0] = 1, 0.25, 1, 2**-6, 1
+        zero, low = torch.tensor(0), (low, torch.tensor(-40))
+        self.assert_bits(arithmetic.contraction(a, b, zero, zero, 32, low), [0x3f81])
 
     def test_site_selection(self):
         args = SimpleNamespace(finer_scales=None, k_split=0, two_term=False, sites=["*"])
