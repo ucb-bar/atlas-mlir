@@ -23,6 +23,7 @@ struct ModelTimingTables {
   std::shared_ptr<const TimingTables> timing;
   ModelDMATiming dma;
   FrontendSpacing frontend;
+  int instructionMemoryWords = 0;
   std::vector<std::string> frontendInstructions;
 };
 

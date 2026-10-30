@@ -154,7 +154,8 @@ void readFrontend(Reader &r, const Object &root, TimingTables &tables,
   }
 }
 
-void readGeometry(Reader &r, const Object &root, TimingTables &tables) {
+void readGeometry(Reader &r, const Object &root, TimingTables &tables,
+                  ModelTimingTables &facts) {
   const Object *arch = r.object(&root, "architecture");
   for (auto [key, expected] : std::initializer_list<std::pair<const char *, int>>{
       {"mreg_count", kAtlasTensorRegisters}, {"mreg_rows", kAtlasMregRows},
@@ -171,6 +172,9 @@ void readGeometry(Reader &r, const Object &root, TimingTables &tables) {
   if (r.integer(arch, "mreg_bytes", 1) != kAtlasRegisterBytes)
     r.fail("unsupported architecture mreg_bytes");
   tables.bf16RegistersPerTile = r.integer(arch, "bf16_registers_per_tile", 1);
+  facts.instructionMemoryWords = r.integer(arch, "instruction_memory_words", 1, INT_MAX);
+  if (facts.instructionMemoryWords != 32768)
+    r.fail("unsupported architecture instruction_memory_words");
 }
 
 void readDMA(Reader &r, const Object &root, ModelDMATiming &dma) {
@@ -330,7 +334,7 @@ llvm::Expected<ModelTimingTables> mlir::atlas::timing::parseModelTimingTables(ll
   ModelTimingTables result;
   auto tables = std::make_shared<TimingTables>();
   readOperations(r, *root, *tables);
-  readGeometry(r, *root, *tables);
+  readGeometry(r, *root, *tables, result);
   readFrontend(r, *root, *tables, result);
   readDMA(r, *root, result.dma);
   const Object *resources = r.object(root, "resources");
@@ -453,8 +457,9 @@ Footprint modelFootprint(const Instr &in, const RegValues &regs,
   return f;
 }
 
-std::string modelScope(const AtlasStream &stream) {
-  if (stream.ops.size() > 32768) return "model program exceeds instruction memory";
+std::string modelScope(const AtlasStream &stream, int instructionMemoryWords) {
+  if (stream.ops.size() > size_t(instructionMemoryWords))
+    return "model program exceeds instruction memory";
   struct Transfer { uint64_t first, end; bool write, waited; };
   std::vector<Transfer> transfers;
   std::array<int, kAtlasDMAChannels> pending;
@@ -506,8 +511,8 @@ TimingProvider mlir::atlas::timing::modelTimingProvider(std::shared_ptr<const Mo
   p.frontendSpacing = facts->frontend;
   p.fillPendingDelaySlots = true;
   p.waitReusedDMASlots = true;
-  p.validateScope = [](const AtlasStream &stream) {
-    auto error = modelScope(stream);
+  p.validateScope = [facts](const AtlasStream &stream) {
+    auto error = modelScope(stream, facts->instructionMemoryWords);
     return error.empty() ? error : modelTimingDiagnostic(error);
   };
   p.footprint = [facts](const Instr &in, const RegValues &regs) {

@@ -5,12 +5,18 @@ import ast
 import inspect
 from pathlib import Path
 
-from atlas_model_source import (UnsupportedModelTiming, one as _one, positive_int, read_source,
+from atlas_model_source import (GUARDS, UnsupportedModelTiming, one as _one, positive_int, read_source,
                                 source_method)
+from atlas_model_semantics import module_contract
 
 
 _METHODS = (("core.py", "Core", "tick"), ("core.py", "Core", "_tick_s1"),
             ("exu.py", "ScalarExecutionUnit", "tick"), ("ifu.py", "InstructionFetch", "tick"))
+
+# These issue-edge assumptions are checked by the Core, scalar, and fetch digests.
+# They describe the guarded pipeline ordering, rather than counts of AST nodes.
+PINNED_ASSUMPTIONS = dict(scalar_read_age=0, scalar_write_age=0,
+                         control_operand_read_age=0, control_delay_slots=1)
 
 
 def _attr(node, base, attr):
@@ -44,6 +50,10 @@ def _accesses(node):
 
 def derive_frontend_sources(sources, scalar_classes, *, fetch_width):
     """Pure AST interface, also used by mutation tests; no model tick/exec calls."""
+    for filename in ("core.py", "exu.py", "ifu.py"):
+        if module_contract(sources[filename]) != GUARDS["files"]["hardware/" + filename]:
+            raise UnsupportedModelTiming(
+                f"unsupported frontend pinned assumptions: {filename}: module contract changed")
     if fetch_width != 1 or type(fetch_width) is not int:
         raise UnsupportedModelTiming("unsupported frontend fetch width: source has one S1 issue slot")
     slots = {}
@@ -78,9 +88,6 @@ def derive_frontend_sources(sources, scalar_classes, *, fetch_width):
                       and _attr(item.target, "self", "cycle_count") and isinstance(item.op, ast.Add)),
                      "Core clock increment")
     gap = positive_int(increment.value, "frontend Core clock increment", maximum=65536)
-    ifu = methods[("ifu.py", "InstructionFetch", "tick")]
-    delay_slots = len([item for item in ast.walk(ifu) if isinstance(item, ast.Call)
-                       and isinstance(item.func, ast.Name) and item.func.id == "Uop"])
     classes = {item.name: item for item in ast.parse(sources["isa_definition.py"]).body
                if isinstance(item, ast.ClassDef)}
     instructions = {}
@@ -91,11 +98,12 @@ def derive_frontend_sources(sources, scalar_classes, *, fetch_width):
         execute = _one((item for item in cls.body if isinstance(item, ast.FunctionDef) and item.name == "exec"),
                        f"{class_name}.exec")
         instructions[mnemonic] = _accesses(execute)
-    # The central Core/scalar method guards pin reads and writes to the issue edge.
     return dict(ordinary_issue_gap=gap,
                 delay=dict(base_gap=gap, immediate_mask=slots["delay_mask"], decrement_per_tick=slots["decrement"]),
-                scalar=dict(read_age=0, write_age=0),
-                control=dict(delay_slots=delay_slots, operand_read_age=0),
+                scalar=dict(read_age=PINNED_ASSUMPTIONS["scalar_read_age"],
+                            write_age=PINNED_ASSUMPTIONS["scalar_write_age"]),
+                control=dict(delay_slots=PINNED_ASSUMPTIONS["control_delay_slots"],
+                             operand_read_age=PINNED_ASSUMPTIONS["control_operand_read_age"]),
                 instructions=instructions)
 
 

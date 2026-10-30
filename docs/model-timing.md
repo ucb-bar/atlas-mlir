@@ -73,8 +73,8 @@ mode is separate from `--out`; regeneration never calls it or changes pins.
 
 | Guarded `npu_model` input | Facts the compiler consumes |
 | --- | --- |
-| ISA, Core, scalar unit, and fetch unit | Operand roles, issue ages, delays |
-| Architecture and bank mapping | Register spans, sizes, and VMEM layout |
+| ISA, Core, scalar unit, and fetch unit | Operand roles, clock gap, DELAY encoding; pinned issue-edge assumptions below |
+| Architecture, instruction memory, and bank mapping | Register spans, sizes, instruction capacity, and VMEM layout |
 | VPU planners and issue logic | Event ages, releases, groups, and capacity |
 | MXU planners and weight helpers | Events, ports, capacities, row windows |
 | LSU and XLU paths | Memory events, releases, and load response spacing |
@@ -111,7 +111,8 @@ environment variables.
 
 ## What comes from `npu_model` and what the compiler chooses
 
-Scalar reads and writes at age zero follow the guarded issue-edge methods.
+Frontend issue-edge ages and delay slots are pinned assumptions checked by
+the Core, scalar-unit, and fetch-unit source digests, as listed below.
 The loader checks scalar operand roles against compiler metadata. VPU operand
 roles and two-input classification are compiler mappings. Physical scheduling
 reads `TimingTables` directly and uses shared dependence and reservation rules;
@@ -121,13 +122,20 @@ operations by name.
 
 The compiler chooses these policies and structural mappings:
 
+- Pinned assumptions: scalar read/write and control operand-read ages are
+  zero, and control instructions have one delay slot. Core, scalar-unit, and
+  fetch-unit digests check the pipeline ordering supporting these values.
+  DMA retire-to-wait spacing is one cycle, checked by the Core digest because
+  S1 tests completion before DMA ticks. These are reviewed source assumptions,
+  rather than values extracted from the number of fetch nodes or DMA ticks.
 - Native execution uses `rtl` numerics and disables randomized initialization.
 - Search budgets, seeds, candidate pools, group size, and batch width.
 - Unit capacity one outside MXU compute; VPU issue slots have their own
   extracted admission check. MXU compute capacities come from the facts.
 - MXU source/result port windows span zero through the sequencer age minus
-  one. MXU1 weight overwrite and both engines' weight use after push use
-  the extracted sequencer duration.
+  one. MXU1 weight overwrite and weight use after push use the extracted
+  sequencer duration. MXU0 push-to-compute spacing uses the weight-row access
+  streams.
 - Probe fields use the loaded BF16 register span: non-MXU destination and
   sources occupy spans zero, one, two, then three, four, five. MXU probes
   start at zero; the second uses one span for matrix operands, zero for
@@ -136,19 +144,22 @@ The compiler chooses these policies and structural mappings:
 - DMA estimates use startup plus the beat count times the sum of the rounded
   up maximum curve latency/per-beat cost and issue interval. The maximum
   includes the configured minimum latency. Estimates serialize with a
-  one-cycle gap; the extracted retire-to-wait age places the proposed wait.
+  one-cycle gap; the pinned retire-to-wait assumption places the proposed wait.
 - PACK relayout copies one row per iteration for every provider. Selection
   waits before reuse of an eight-slot DMA command-ring entry for every
   provider; this wait is an RTL rule. PACK cost omits general scalar setup and
   assumes the destination increment fills a delay slot when filling is enabled;
   physical scheduling proves that an actual filler is available.
 - Native scoring stops at 200,000 cycles. Same-unit interval search stops
-  at 100,000 cycles, and model program scope is at most 32,768 instructions.
+  at 100,000 cycles. Program scope uses the extracted `InstructionMemory.WORDS`
+  capacity, which the loader checks against the target's 32,768 instructions.
 - The synthetic `fifo43` target uses latency 43, one cycle per beat, and four
   accepted cycles in each eleven-cycle period.
 
 DMA costs conservatively bound the selected curve for ordering. Matching
 `dma.wait` operations establish completion; an estimate cannot replace them.
+Overlapping queued DMA and VLS reads retain ownership until completion,
+conservatively including read/read conflicts.
 
 ## Compiling with the model provider
 

@@ -8,8 +8,13 @@ import json
 import math
 from pathlib import Path
 
-from atlas_model_source import (UnsupportedModelTiming, literal, method as _method, module_tree,
-                                one as _one)
+from atlas_model_source import (GUARDS, UnsupportedModelTiming, literal, method as _method, module_tree,
+                                one as _one, read_source)
+from atlas_model_semantics import module_contract
+
+# Core.tick checks S1 before ticking the DMA unit, so a retirement is visible to
+# dma.wait at the next issue edge. check_model_semantics pins that Core ordering.
+PINNED_RETIRE_TO_WAIT_ISSUE_CYCLES = 1
 
 
 def _unsupported(field):
@@ -58,6 +63,10 @@ def _engine_values(tree):
 
 def derive_curve(cfg):
     from npu_model.hardware import dma, memory_backend
+    core_source = read_source(Path(inspect.getsourcefile(dma)).with_name("core.py"))
+    if module_contract(core_source) != GUARDS["files"]["hardware/core.py"]:
+        raise UnsupportedModelTiming(
+            "unsupported DMA retire-to-wait pinned assumption: core.py: module contract changed")
     module_tree(memory_backend, reviewed=True, label="DMA source")
     dma_tree = module_tree(dma, reviewed=True, label="DMA source")
     if cfg.dma_memory_backend != "curve":
@@ -110,4 +119,4 @@ def derive_curve(cfg):
     return dict(curve_sha256=curve_sha, beat_bytes=backend.beat_bytes,
                 max_transfer_bytes=cfg.dma_max_transfer_bytes, min_latency=backend.min_latency,
                 startup_cycles=startup, issue_interval_cycles=issue_interval, curves=rows,
-                retire_to_wait_issue_cycles=issue_interval)
+                retire_to_wait_issue_cycles=PINNED_RETIRE_TO_WAIT_ISSUE_CYCLES)

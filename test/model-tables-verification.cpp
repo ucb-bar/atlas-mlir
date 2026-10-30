@@ -1,4 +1,5 @@
 #include "Atlas/AtlasModelTables.h"
+#include "Atlas/AtlasStream.h"
 #include "VerificationTestSupport.h"
 #include "llvm/Support/JSON.h"
 #include "llvm/Support/MemoryBuffer.h"
@@ -207,6 +208,19 @@ void dmaValues(const ModelTimingTables &facts) {
   }
 }
 
+void instructionMemory(const ModelTimingTables &facts) {
+  auto values = std::make_shared<ModelTimingTables>(facts);
+  auto provider = modelTimingProvider(values);
+  mlir::atlas::AtlasStream stream;
+  stream.ops.resize(facts.instructionMemoryWords);
+  check(provider.validateScope(stream).empty(), "instruction memory accepts its capacity");
+  stream.ops.push_back(nullptr);
+  check(provider.validateScope(stream).find("exceeds instruction memory") != std::string::npos,
+        "instruction memory refuses an oversized program");
+  values->instructionMemoryWords += 1;
+  check(provider.validateScope(stream).empty(), "program limit uses the loaded instruction memory capacity");
+}
+
 void probeGeometry(const ModelTimingTables &facts, MLIRContext &) {
   auto provider = modelTimingProvider(std::make_shared<ModelTimingTables>(facts));
   auto footprint = provider.footprint;
@@ -244,6 +258,8 @@ void loaderRefusal(llvm::StringRef bytes) {
       {{"architecture", "mreg_count"}, 63, "unsupported geometry refuses"},
       {{"architecture", "bf16_registers_per_tile"}, 3,
        "unsupported BF16 span refuses"},
+      {{"architecture", "instruction_memory_words"}, 65536,
+       "unsupported instruction memory capacity refuses"},
       {{"frontend_timing", "instructions", "addi", "reads"}, llvm::json::Array{},
        "changed scalar operand roles refuse"},
   };
@@ -287,6 +303,7 @@ void atlas_test::runModelTables(MLIRContext &context) {
   frontendValues(*facts->timing);
   reservationValues(*facts->timing);
   dmaValues(*facts);
+  instructionMemory(*facts);
   probeGeometry(*facts, context);
   loaderRefusal((*file)->getBuffer());
   auto wrongHash = loadModelTimingTables(path, std::string(64, '0'));

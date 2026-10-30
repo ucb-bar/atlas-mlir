@@ -55,9 +55,15 @@ def _scalar_bytes(tree):
     return bits // 8
 
 
+def instruction_memory_words(tree):
+    imem = named(tree, "InstructionMemory")
+    return positive_int(assignment(imem, "WORDS", single_write=True).value,
+                        "InstructionMemory.WORDS", maximum=2147483648)
+
+
 def derive_arch(cfg):
     """Return source-derived architecture facts for the actual selected config."""
-    from npu_model.hardware import arch_state, bank_conflict
+    from npu_model.hardware import arch_state, bank_conflict, ifu
     import torch
 
     bank_tree, arch_tree = module_tree(bank_conflict), module_tree(arch_state)
@@ -65,6 +71,7 @@ def derive_arch(cfg):
     banks, row_stride, logical_limit = _mreg_mapping(bank_tree)
     pair_count, pair_stride = _bf16_mapping(bank_tree, arch_tree)
     fp8_count = _fp8_mapping(arch_tree)
+    instruction_words = instruction_memory_words(module_tree(ifu))
     arch = cfg.arch_state_config
     fields = {
         "mreg_count": (arch, "num_m_registers"), "mreg_rows": (arch, "mrf_depth"),
@@ -95,6 +102,7 @@ def derive_arch(cfg):
         raise UnsupportedModelTiming("MREG row bytes do not contain whole FP8 elements")
     register_bytes = facts["mreg_rows"] * facts["mreg_row_bytes"]
     facts.update(dram_base=base, mreg_bytes=register_bytes, mreg_physical_bank_count=banks,
+                 instruction_memory_words=instruction_words,
                  bf16_registers_per_tile=pair_count, bf16_element_bytes=element_bytes,
                  fp8_element_bytes=fp8_element_bytes, fp8_registers_per_tile=fp8_count,
                  vmem_bank_count=facts["vmem_bytes"] // facts["vmem_bank_bytes"],

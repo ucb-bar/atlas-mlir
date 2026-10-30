@@ -16,7 +16,7 @@ from unittest.mock import patch
 
 TOOLS = Path(__file__).resolve().parents[1] / "tools"
 sys.path.insert(0, str(TOOLS))
-from atlas_derive_arch import derive_arch
+from atlas_derive_arch import derive_arch, instruction_memory_words
 from atlas_derive_costs import check_timing_conditions, derive_costs
 from atlas_model_source import UPDATE_GUIDANCE, UnsupportedModelTiming, model_timing_cli
 from atlas_model_timing import compress, sha256, validate_derived
@@ -24,6 +24,15 @@ from model_evidence import NativeModelFixture, model_evidence_available
 
 
 class FactsErrors(unittest.TestCase):
+    def test_instruction_memory_words(self):
+        for words in (32768, 65536):
+            tree = ast.parse(f"class InstructionMemory:\n    WORDS = {words}\n")
+            self.assertEqual(instruction_memory_words(tree), words)
+        for words in ("0", "True", "32768.0", "1 << 15"):
+            tree = ast.parse(f"class InstructionMemory:\n    WORDS = {words}\n")
+            with self.subTest(words=words), self.assertRaises(UnsupportedModelTiming):
+                instruction_memory_words(tree)
+
     def test_event_sweep(self):
         self.assertEqual(compress([3, 1, 2]), dict(count=3, first_age=1, last_age=3, step=1))
         for ages in ([], [1, 1], [1, 2, 4]):
@@ -81,6 +90,23 @@ class CostProbes(NativeModelFixture, unittest.TestCase):
                                (dict(architecture, bf16_registers_per_tile=0), "register span must be positive")):
             with self.subTest(reason=reason), self.assertRaisesRegex(UnsupportedModelTiming, reason):
                 derive_costs(self.cfg, values)
+
+    def test_frontend_assumptions_refuse_source_changes(self):
+        from atlas_derive_frontend import derive_frontend_sources
+        root = Path(os.environ["ATLAS_DERIVE_MODEL_ROOT"]) / "npu_model/hardware"
+        sources = {name: (root / name).read_text() for name in ("core.py", "exu.py", "ifu.py")}
+        for name in sources:
+            changed = dict(sources, **{name: sources[name] + "\nASSUMPTION_TEST_CHANGE = 1\n"})
+            with self.subTest(file=name), self.assertRaisesRegex(
+                    UnsupportedModelTiming, "frontend pinned assumptions: " + name):
+                derive_frontend_sources(changed, {}, fetch_width=1)
+
+    def test_retire_to_wait_assumption_refuses_source_changes(self):
+        import atlas_derive_curve as curve
+        source = Path(os.environ["ATLAS_DERIVE_MODEL_ROOT"]) / "npu_model/hardware/core.py"
+        with (patch.object(curve, "read_source", return_value=source.read_text() + "\nPIN_TEST_CHANGE = 1\n"),
+              self.assertRaisesRegex(UnsupportedModelTiming, "retire-to-wait pinned assumption: core.py")):
+            curve.derive_curve(self.cfg)
 
     def test_configuration_limits(self):
         from atlas_model_facts import check_configuration
@@ -242,7 +268,11 @@ class Regeneration(unittest.TestCase):
         self.assertEqual(dma["retire_to_wait_issue_cycles"], 1)
         self.assertEqual((facts["resources"]["capacity"]["vpu_slots"],
                           facts["resources"]["scalar_lsu"]["load_response_gap"]), (2, 3))
-        self.assertEqual(len(facts["architecture"]), 16)
+        self.assertEqual(len(facts["architecture"]), 17)
+        self.assertEqual(facts["architecture"]["instruction_memory_words"], 32768)
+        frontend = facts["frontend_timing"]
+        self.assertEqual(frontend["scalar"], dict(read_age=0, write_age=0))
+        self.assertEqual(frontend["control"], dict(delay_slots=1, operand_read_age=0))
         self.assertEqual([facts["architecture"][key] for key in
                           ("mreg_count", "mreg_bytes", "vmem_bank_count", "scalar_word_bytes")], [64, 1024, 6, 4])
         self.assertEqual(facts["reservation_releases"]["vadd.bf16"]["mreg_write"],
