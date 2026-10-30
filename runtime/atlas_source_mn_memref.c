@@ -72,7 +72,7 @@ static atlas_ordered_k_status run(
   uint8_t *rhs_codes = malloc(rhs_one);
   uint8_t *logical = malloc(out_one * 2u);
   uint8_t *staging = malloc(out_one * 2u);
-  uint8_t *physical = malloc(2048u);
+  uint8_t *physical = malloc(ATLAS_BF16_TILE_BYTES);
   uint8_t *lhs_tile = malloc(binding->k * 32u);
   uint8_t *rhs_tile = malloc(binding->k * 32u);
   atlas_ordered_k_status status = ATLAS_ORDERED_K_MEMORY_ERROR;
@@ -112,7 +112,7 @@ static atlas_ordered_k_status run(
         binding->encode_rhs, binding->rhs_policy,
         output, out_count * sizeof(float), staged_result, out_count * sizeof(float),
         lhs_codes, lhs_one, rhs_codes, rhs_one, logical, out_one * 2u,
-        staging, out_one * 2u, physical, 2048u,
+        staging, out_one * 2u, physical, ATLAS_BF16_TILE_BYTES,
         lhs_tile, binding->k * 32u, rhs_tile, binding->k * 32u,
         device_result);
   else
@@ -123,7 +123,7 @@ static atlas_ordered_k_status run(
         binding->encode_rhs, binding->rhs_policy,
         output, out_count * sizeof(float),
         lhs_codes, lhs_one, rhs_codes, rhs_one, logical, out_one * 2u,
-        staging, out_one * 2u, physical, 2048u,
+        staging, out_one * 2u, physical, ATLAS_BF16_TILE_BYTES,
         lhs_tile, binding->k * 32u, rhs_tile, binding->k * 32u,
         device_result);
   if (status == ATLAS_ORDERED_K_OK) {

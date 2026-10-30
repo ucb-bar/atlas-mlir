@@ -2,7 +2,7 @@ add_library(atlas-host STATIC atlas_host.c)
 target_include_directories(atlas-host PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 set_target_properties(atlas-host PROPERTIES C_STANDARD 11)
 install(TARGETS atlas-host ARCHIVE DESTINATION lib)
-install(FILES atlas_host.h DESTINATION include)
+install(FILES atlas_host.h atlas_host_layout.h atlas_host_check.h DESTINATION include)
 
 add_library(atlas-model-tile STATIC atlas_model_tile.c)
 target_include_directories(atlas-model-tile PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
@@ -31,3 +31,21 @@ target_link_libraries(atlas-source-mn PUBLIC atlas-ordered-mn)
 set_target_properties(atlas-source-mn PROPERTIES C_STANDARD 11)
 install(TARGETS atlas-source-mn ARCHIVE DESTINATION lib)
 install(FILES atlas_source_mn.h DESTINATION include)
+
+# Full graph geometry is generated after checking inputs. The callback backend
+# and math library also support native conformance checks.
+add_library(atlas-resnet-graph STATIC atlas_resnet_graph_math.c atlas_resnet_graph_device.c)
+target_include_directories(atlas-resnet-graph PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(atlas-resnet-graph PUBLIC atlas-host)
+set_target_properties(atlas-resnet-graph PROPERTIES C_STANDARD 11)
+target_compile_options(atlas-resnet-graph PRIVATE -ffp-contract=off -fno-fast-math)
+install(TARGETS atlas-resnet-graph ARCHIVE DESTINATION lib)
+install(FILES atlas_numeric.h atlas_resnet_graph_device.h atlas_resnet_graph_math.h DESTINATION include)
+
+# Workload adapters compile independently; embedding callers supply packing APIs.
+add_library(atlas-block-adapters STATIC tiny_projection.c smol_block_raw_adapter.c)
+target_include_directories(atlas-block-adapters PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(atlas-block-adapters PUBLIC atlas-host)
+set_target_properties(atlas-block-adapters PROPERTIES C_STANDARD 11)
+install(TARGETS atlas-block-adapters ARCHIVE DESTINATION lib)
+install(FILES tiny_projection.h smol_block_raw_adapter.h DESTINATION include)
