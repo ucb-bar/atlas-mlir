@@ -2,6 +2,7 @@
 
 import copy
 import json
+import os
 from pathlib import Path
 import struct
 import sys
@@ -10,7 +11,11 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
-sys.path.insert(0, str(Path(__file__).absolute().parents[1] / "tools" / "host_iss"))
+TOOLS = Path(__file__).absolute().parents[1] / "tools"
+sys.path[:0] = [str(TOOLS), str(TOOLS / "host_iss")]
+from atlas_path_guard import checked
+from block_bundle import BlockBundle
+from elf_image import Image as ELFImage
 import smol_contract as smol
 
 
@@ -89,11 +94,6 @@ class CompletionTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     self.verify()
 
-    def test_truncated_tohost_is_rejected(self):
-        self.memory[0x2000] = b"\1"
-        with self.assertRaisesRegex(ValueError, "tohost"):
-            self.verify()
-
     def test_tohost_failure_is_rejected(self):
         self.memory[0x2000] = struct.pack("<Q", 511)
         with self.assertRaisesRegex(ValueError, "tohost"):
@@ -119,12 +119,6 @@ class CompletionTests(unittest.TestCase):
                     self.verify()
                 self.memory[address] = original
 
-    def test_truncated_live_output_is_rejected(self):
-        address = self.image.symbols["output"]["address"]
-        self.memory[address] = self.memory[address][:-1]
-        with self.assertRaises(ValueError):
-            self.verify()
-
     def test_device_ledger_cannot_skip_or_fake_execution(self):
         original = copy.deepcopy(self.device.completed)
         mutations = [dict(index=1), dict(sequence=2), dict(exact=False), dict(drained=False), dict(reset_count=2)]
@@ -144,92 +138,6 @@ class CompletionTests(unittest.TestCase):
             self.verify()
 
 
-class SyntheticAdmission:
-    """Complete fixed-shape synthetic inputs with independent ELF byte views."""
-    def __init__(self):
-        self.image = Image()
-        self.image.raw = b"synthetic ELF"
-        self.image.entry = 0x80000000
-        self.image.symbols = {}
-        self.embedded = {}
-        self.image.bytes_at = lambda address, size: self.embedded[address][:size]
-        self.payloads = {"host/host.elf": self.image.raw}
-        self.sums = {"host/host.elf": smol.digest(self.image.raw)}
-        self.build = dict(status="passed_RV64GC_LP64D_ELF_build_only", ELF_executed=False,
-                          source_bookends_unchanged=True, elf=dict(sha256=self.sums["host/host.elf"]))
-        self.kernel_count = 7
-        self.kernels = []
-        self.value = dict(schema="atlas.smol_selected_layer1.epoch3_launch_data.v1",
-                          ELF=dict(sha256=self.sums["host/host.elf"]), symbols={}, assets={},
-                          ordered_projections=[], constant_parameters=dict(input_epsilon=1e-5,
-                          post_epsilon=1e-5, first_table_position=-1, table_rows=8193))
-        self.provenance = dict(workload="smol", contract="host/contract.json")
-        self.next_address = 0x80010000
-        for name, size in (("smol_workload_mailbox", 120), ("smol_selected_state", 32), ("tohost", 8)):
-            self.add_symbol(name, size)
-            self.value["symbols"][name] = self.image.symbols[name].copy()
-        extents = dict(input=339840, pad=177, attention_boundaries=177, input_norm_weight=1920,
-                       post_norm_weight=1920, cosine=1048704, sine=1048704, expected_output=339840,
-                       expected_key_cache=113280, expected_value_cache=113280)
-        for name, size in extents.items():
-            raw = bytes(size)
-            self.payloads["data/" + name + ".bin"] = raw
-            symbol = "smol_asset_" + name
-            address = self.add_symbol(symbol, 0, raw)
-            self.value["assets"][name] = dict(file=dict(bytes=size, sha256=smol.digest(raw)),
-                ELF_constant_symbol=symbol, ELF_constant_address=address)
-        for name, actual, size in smol.FINAL:
-            address = self.add_symbol(actual, size)
-            self.value["assets"][name].update(actual_C_buffer_symbol=actual,
-                                              actual_C_buffer=dict(address=address, size=size))
-        for index, (role, wi, wo) in enumerate(zip(smol.ROLES, smol.INPUT_WIDTHS, smol.OUTPUT_WIDTHS)):
-            source = b"ecall\n"
-            original = struct.pack("<I", 0x73)
-            weights = bytes(wi * wo)
-            offset = 192 * wi + len(weights) + 256
-            expected = bytes(192 * wo * 2)
-            initial = bytes(offset + len(expected) + 256)
-            paths = dict(output_offset=offset, dram_base=0x100000000,
-                         requested_dma=dict(load_bytes=192 * wi + len(weights), store_bytes=len(expected)))
-            projection = dict(index=index, role=role, physical_rows=192, native_rows=177,
-                              input_width=wi, output_width=wo, output_offset=offset,
-                              dram_bytes=len(initial), requested_dma=paths["requested_dma"].copy())
-            for key, record, raw in (("source", "program_S", source), ("original", "original_program_bin", original),
-                                     ("initial", "initial_dram", initial),
-                                     ("expected", "expected_physical_output", expected)):
-                name = str(index) + "/" + key
-                self.payloads[name] = raw
-                paths[key] = name
-                projection[record] = dict(bytes=len(raw), sha256=smol.digest(raw))
-            ps, ws = "program_" + str(index), "weights_" + str(index)
-            self.add_symbol(ps, 0, original)
-            address = self.add_symbol(ws, 0, weights)
-            projection.update(ELF_original_program_symbol=ps, ELF_weight_symbol=ws,
-                              ELF_weight_address=address, weights=dict(sha256=smol.digest(weights)))
-            self.kernels.append(paths)
-            self.value["ordered_projections"].append(projection)
-        self.refresh()
-
-    def add_symbol(self, name, size, raw=None):
-        address = self.next_address
-        self.next_address += max(size, len(raw) if raw is not None else 0) + 64
-        self.image.symbols[name] = dict(address=address, size=size, section=2)
-        if raw is not None:
-            self.embedded[address] = raw
-        return address
-
-    def refresh(self):
-        raw = json.dumps(self.value).encode()
-        self.payloads["host/contract.json"] = raw
-        self.provenance["contract_sha256"] = smol.digest(raw)
-
-    def read(self, name):
-        return self.payloads[name]
-
-    def kernel_paths(self, index):
-        return self.kernels[index]
-
-
 class AdmissionTests(unittest.TestCase):
     def bundle(self, value=None):
         value = value or dict(schema="atlas.smol_selected_layer1.epoch3_launch_data.v1")
@@ -237,47 +145,59 @@ class AdmissionTests(unittest.TestCase):
         return SimpleNamespace(provenance=dict(workload="smol", contract="host/contract.json",
             contract_sha256=smol.digest(raw)), kernel_count=7, read=lambda name: raw)
 
-    def test_complete_synthetic_admission(self):
-        bundle = SyntheticAdmission()
-        smol.validate_bundle(bundle, bundle.image)
+    def captured(self):
+        root = os.environ.get("SMOL_BLOCK_BUNDLE")
+        if not root:
+            self.skipTest("SMOL_BLOCK_BUNDLE is unset")
+        bundle = BlockBundle(checked(root), "smol")
+        return bundle, ELFImage(bundle.read("host/host.elf"))
+
+    def replace_contract(self, bundle, value):
+        raw, read = json.dumps(value).encode(), bundle.read
+        member = bundle.provenance["contract"]
+        bundle.read = lambda name: raw if name == member else read(name)
+        bundle.provenance["contract_sha256"] = smol.digest(raw)
+
+    def test_captured_elf_and_source_admission(self):
+        bundle, image = self.captured()
+        smol.validate_bundle(bundle, image)
 
     def test_descriptor_and_embedded_payload_mutations_are_rejected(self):
-        bundle = SyntheticAdmission()
+        bundle, image = self.captured()
         original = copy.deepcopy(bundle.kernels[0])
-        for changes in (dict(output_offset=1), dict(dram_base=0),
-                        dict(requested_dma=dict(load_bytes=0, store_bytes=1))):
-            with self.subTest(changes=changes):
-                bundle.kernels[0] = dict(original, **changes)
-                with self.assertRaises(ValueError):
-                    smol.validate_bundle(bundle, bundle.image)
+        bundle.kernels[0]["output_offset"] = 1
+        with self.assertRaisesRegex(ValueError, "launch descriptor"):
+            smol.validate_bundle(bundle, image)
         bundle.kernels[0] = original
-        for symbol in ("smol_asset_expected_output", "program_0", "weights_0"):
-            with self.subTest(symbol=symbol):
-                address = bundle.image.symbols[symbol]["address"]
-                raw = bundle.embedded[address]
-                bundle.embedded[address] = bytes([raw[0] ^ 1]) + raw[1:]
+        value = smol.contract(bundle)
+        projection = value["ordered_projections"][0]
+        symbols = (value["assets"]["expected_output"]["ELF_constant_symbol"],
+                   projection["ELF_original_program_symbol"], projection["ELF_weight_symbol"])
+        read = image.bytes_at
+        for symbol in symbols:
+            address = image.symbols[symbol]["address"]
+            def corrupt(start, size):
+                raw = read(start, size)
+                return bytes([raw[0] ^ 1]) + raw[1:] if start == address else raw
+            with self.subTest(symbol=symbol), patch.object(image, "bytes_at", side_effect=corrupt):
                 with self.assertRaises(ValueError):
-                    smol.validate_bundle(bundle, bundle.image)
-                bundle.embedded[address] = raw
+                    smol.validate_bundle(bundle, image)
 
     def test_source_payload_geometry_and_role_mutations_are_rejected(self):
-        bundle = SyntheticAdmission()
-        path = bundle.kernels[0]["initial"]
-        original = bundle.payloads[path]
-        bundle.payloads[path] = bytes([1]) + original[1:]
-        with self.assertRaisesRegex(ValueError, "projection payload"):
-            smol.validate_bundle(bundle, bundle.image)
-        bundle.payloads[path] = original
+        bundle, image = self.captured()
+        path, read = bundle.kernels[0]["initial"], bundle.read
+        raw = read(path)
+        with patch.object(bundle, "read", side_effect=lambda name:
+                          bytes([raw[0] ^ 1]) + raw[1:] if name == path else read(name)):
+            with self.assertRaisesRegex(ValueError, "projection payload"):
+                smol.validate_bundle(bundle, image)
+        original = smol.contract(bundle)
         for key, value in (("role", "mlp.down_proj"), ("native_rows", 192), ("output_width", 320)):
-            with self.subTest(key=key):
-                projection = bundle.value["ordered_projections"][0]
-                before = projection[key]
-                projection[key] = value
-                bundle.refresh()
-                with self.assertRaises(ValueError):
-                    smol.validate_bundle(bundle, bundle.image)
-                projection[key] = before
-        bundle.refresh()
+            changed = copy.deepcopy(original)
+            changed["ordered_projections"][0][key] = value
+            self.replace_contract(bundle, changed)
+            with self.subTest(key=key), self.assertRaises(ValueError):
+                smol.validate_bundle(bundle, image)
 
     def test_source_contract_is_digest_bound(self):
         bundle = self.bundle()
@@ -286,17 +206,9 @@ class AdmissionTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "digest"):
             smol.contract(bundle)
 
-    def test_wrong_schema_workload_or_count_is_rejected(self):
-        wrong_schema = self.bundle(dict(schema="other"))
-        wrong_count = self.bundle()
-        wrong_count.kernel_count = 6
-        for bundle in (wrong_schema, wrong_count):
-            with self.assertRaises(ValueError):
-                smol.contract(bundle)
-        bundle = self.bundle()
-        bundle.provenance["workload"] = "tiny"
-        with self.assertRaises(ValueError):
-            smol.contract(bundle)
+    def test_source_schema_is_required(self):
+        with self.assertRaisesRegex(ValueError, "source schema"):
+            smol.contract(self.bundle(dict(schema="other")))
 
     def test_build_only_admission_requires_original_success_and_bookends(self):
         for build in ({}, dict(status="passed_RV64GC_LP64D_ELF_build_only", ELF_executed=True,

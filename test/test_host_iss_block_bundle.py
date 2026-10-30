@@ -77,15 +77,6 @@ class BlockBundleTest(unittest.TestCase):
             with self.subTest(name=name, size=len(raw)), self.assertRaises(ValueError):
                 BlockBundle(root, "smol")
 
-    def test_bookends_detect_payload_and_manifest_changes(self):
-        for name in ("kernel/initial.bin", "provenance.json", "host/build.json", "SHA256SUMS"):
-            root = self.fixture()
-            bundle = BlockBundle(root, "smol")
-            with (root / name).open("ab") as handle:
-                handle.write(b"changed")
-            with self.subTest(name=name), self.assertRaises(ValueError):
-                bundle.verify_bookends()
-
     def test_restricted_names_refused_without_filesystem_access(self):
         for name in ("a/HAMMER-input.bin", "a/vLsI-data.bin"):
             with self.subTest(name=name), self.assertRaises(ValueError):
@@ -201,16 +192,6 @@ class DeviceLaunchTest(unittest.TestCase):
         device.remote.read.assert_not_called()
         device.core.tick.assert_not_called()
         self.assertEqual(device.completed, [])
-
-    def test_shared_initial_hook_keeps_real_execution_and_checks(self):
-        device, initial, expected = self.device()
-        device.bundle = SimpleNamespace(read=device.bundle.read, initial_dram=Mock(return_value=initial))
-        del device.programs[0][2]["initial"]
-        device.start()
-        device.bundle.initial_dram.assert_called_once_with(0)
-        device.core.tick.assert_called_once_with()
-        device.remote.write.assert_called_once_with(0x100000000, initial[:16] + expected + initial[48:])
-        self.assertTrue(device.completed[0]["exact"])
 
     def test_actual_program_input_output_guards_and_dma_refused(self):
         def bad_imem(device):

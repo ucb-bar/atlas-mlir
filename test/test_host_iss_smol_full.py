@@ -6,7 +6,6 @@ import struct
 import sys
 from types import SimpleNamespace
 import unittest
-from unittest.mock import Mock
 
 TOOLS = Path(__file__).absolute().parents[1] / "tools"
 sys.path[:0] = [str(TOOLS), str(TOOLS / "host_iss")]
@@ -66,8 +65,8 @@ class FullSmolTest(unittest.TestCase):
             contract.selected_kernels(bundle, data, captured, lambda _: program)
 
     def test_immutable_pointers_must_be_readonly_and_fully_file_backed(self):
-        image = Mock()
-        image.segments = [dict(address=0x80000000, file_bytes=64, memory_bytes=128, flags=4)]
+        image = SimpleNamespace(segments=[dict(address=0x80000000, file_bytes=64,
+                                               memory_bytes=128, flags=4)])
         contract.readonly_span(image, 0x80000020, 32)
         with self.assertRaisesRegex(ValueError, "read-only"):
             contract.readonly_span(image, 0x80000020, 33)
