@@ -1,11 +1,10 @@
-"""Offline TinyLlama recipe emulator with local checkpoint comparisons.
+"""TinyLlama with every projection on the emulated MXU and the Atlas host arithmetic for everything else.
 
-The capture supplies column shards, rotary tables, and the default prompt.
-``--inputs`` accepts {"prompts": [{"id": "name", "token_ids": [...]}]}.
-Token IDs are used verbatim; tokenization and downloads are never performed.
+The PR #26 arithmetic capture supplies the weight panels, rotary tables, and default prompt. --inputs takes
+{"prompts": [{"id": ..., "token_ids": [...]}]}; nothing is tokenized or downloaded. Native FP32 Transformers
+logits give the free-greedy and forced-history comparisons.
 """
 
-import gc
 import hashlib
 import json
 
@@ -13,230 +12,200 @@ import torch
 from safetensors import safe_open
 
 from . import arithmetic
-from . import tiny_host as host
 
-SITES = ("self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj",
-         "self_attn.o_proj", "mlp.gate_proj", "mlp.up_proj", "mlp.down_proj")
-
-
-def digest(tensor):
-    return hashlib.sha256(
-        tensor.contiguous().float().numpy().tobytes()).hexdigest()
+SITES = ("self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj", "self_attn.o_proj", "mlp.gate_proj",
+         "mlp.up_proj", "mlp.down_proj")
 
 
-def metric(actual, expected):
-    delta = actual.double() - expected.double()
-    return {"rmse": float(delta.square().mean().sqrt()),
-            "max_abs": float(delta.abs().max()),
-            "relative_l2": float(
-                delta.norm() / expected.double().norm().clamp_min(1e-30))}
+def bf(x):
+    return x.to(torch.bfloat16).float()
 
 
-def summarize(logits):
-    top = torch.argsort(logits, descending=True, stable=True)[:5]
-    return {"token": int(logits.argmax()), "logits_sha256": digest(logits),
-            "top5_ids": top.tolist(), "top5_logits": logits[top].tolist()}
+def fma(a, b, c):
+    return (a.double() * b.double() + c.double()).float()
+
+
+def norm(x, weight):
+    """RMSNorm with the host's blocked FP32 sum of squares over 2048 lanes."""
+    squares = (x * x).reshape(x.shape[0], 64, 4, 8)
+    partial = torch.zeros((x.shape[0], 4, 8))
+    for block in range(4):
+        local = torch.zeros_like(partial)
+        for i in range(16):
+            local = local + squares[:, block * 16 + i]
+        partial = partial + local
+    lanes = partial[:, 0]
+    for group in range(1, 4):
+        lanes = lanes + partial[:, group]
+    total = torch.zeros(x.shape[0])
+    for lane in range(8):
+        total = total + lanes[:, lane]
+    return bf(bf(x * (1.0 / torch.sqrt(total / 2048.0 + 1e-5))[:, None]) * weight)
+
+
+def rotary(x, cosine, sine):
+    half = x.shape[-1] // 2
+    return bf(bf(x * cosine) + bf(torch.cat((-x[..., half:], x[..., :half]), dim=-1) * sine))
+
+
+def exp_nonpositive(x):
+    """Host exp for x <= 0: two-constant ln 2 reduction, an FP32 FMA polynomial, and two ldexp steps."""
+    safe = torch.clamp(x, min=-104.0)
+    q = torch.round(safe * torch.tensor(1.4426950408889634, dtype=torch.float32))
+    s = fma(q, torch.tensor(-0.693145751953125), safe)
+    s = fma(q, torch.tensor(-1.428606765330187045e-06), s)
+    u = torch.full_like(s, 0.000198527617612853646278381)
+    for constant in (0.00139304355252534151077271, 0.00833336077630519866943359, 0.0416664853692054748535156,
+                     0.166666671633720397949219, 0.5):
+        u = fma(u, s, torch.tensor(constant, dtype=torch.float32))
+    u = 1.0 + fma(s * s, u, s)
+    qi = q.to(torch.int32)
+    half = torch.div(qi, 2, rounding_mode="floor")
+    return torch.where(x < -104.0, 0.0, torch.ldexp(torch.ldexp(u, half), qi - half))
+
+
+def softmax(x):
+    ex = exp_nonpositive(x - x.amax(dim=-1, keepdim=True))
+    lanes = torch.zeros((*x.shape[:-1], 16))
+    for i in range(0, x.shape[-1], 16):
+        size = min(16, x.shape[-1] - i)
+        lanes[..., :size] = lanes[..., :size] + ex[..., i:i + size]
+    for delta in (8, 4, 2, 1):
+        lanes[..., :delta] = lanes[..., :delta] + lanes[..., delta:2 * delta]
+    return bf(ex * (1.0 / lanes[..., :1]))
+
+
+def pair_bmm(a, b, transposed, decode):
+    """Host attention matmul in its FP32 FMA order; BF16 inputs are exact in FP32."""
+    heads, rows, reduction = a.shape
+    right = b.transpose(-1, -2) if transposed else b
+    columns = right.shape[-1]
+    if decode and transposed and reduction == 64:
+        lanes = torch.zeros((heads, columns, 16))
+        for start in range(0, 64, 16):
+            lanes = fma(a[:, 0, start:start + 16, None].transpose(-1, -2), b[:, :, start:start + 16], lanes)
+        for distance in (8, 4, 2, 1):
+            lanes = lanes + lanes[..., torch.arange(16) ^ distance]
+        return bf(lanes[..., 0].unsqueeze(1))
+    total = torch.zeros((heads, rows, columns))
+    if decode and not transposed and columns == 64:
+        start = 0
+        for block in (8, 4, 2, 1):
+            while reduction - start >= block:
+                partial = torch.zeros_like(total)
+                for pair in range(start, start + block, 2):
+                    if pair + 1 < start + block:
+                        partial = fma(a[:, :, pair + 1, None], right[:, None, pair + 1, :], partial)
+                    partial = fma(a[:, :, pair, None], right[:, None, pair, :], partial)
+                total = total + partial
+                start += block
+    else:
+        for pair in range(0, reduction, 2):
+            if pair + 1 < reduction:
+                total = fma(a[:, :, pair + 1, None], right[:, None, pair + 1, :], total)
+            total = fma(a[:, :, pair, None], right[:, None, pair, :], total)
+    return bf(total)
+
+
+def attention(q, k, v, cosine, sine, past):
+    """Grouped-query attention, 32 query and 4 KV heads of 64, with a KV cache."""
+    rows = q.shape[0]
+    offset = 0 if past is None else past[0].shape[1]
+    cosine, sine = cosine[offset:offset + rows], sine[offset:offset + rows]
+    q = rotary(q.reshape(rows, 32, 64).transpose(0, 1), cosine, sine)
+    k = rotary(k.reshape(rows, 4, 64).transpose(0, 1), cosine, sine)
+    v = v.reshape(rows, 4, 64).transpose(0, 1)
+    if past is not None:
+        k, v = torch.cat((past[0], k), dim=1), torch.cat((past[1], v), dim=1)
+    scores = bf(pair_bmm(q, k.repeat_interleave(8, dim=0), True, rows == 1) * 0.125)
+    causal = torch.arange(k.shape[1])[None, :] > torch.arange(offset, offset + rows)[:, None]
+    scores = bf(scores + torch.where(causal, torch.tensor(-3.3895313892515355e38), torch.tensor(0.0)))
+    attended = pair_bmm(softmax(scores), v.repeat_interleave(8, dim=0), False, rows == 1)
+    return attended.transpose(0, 1).contiguous().reshape(rows, 2048), (k, v)
+
+
+def silu_mul(gate, up):
+    # exp and division run in FP32, and SiLU rounds before the MLP multiply.
+    return bf(bf(gate / (1.0 + torch.exp(-gate))) * up)
+
+
+def sha(logits):
+    return hashlib.sha256(logits.contiguous().numpy().tobytes()).hexdigest()
 
 
 class Engine:
     def __init__(self, args):
-        self.args = args
-        self.capture = args.capture
-        self.receipt = json.loads((self.capture / "receipt.json").read_text())
-        self.calls = {(c["step"], c["site"]): c for c in self.receipt["calls"]}
-        self.cos = self.load(self.receipt["host_parameters"]["rotary_cosine"])
-        self.sin = self.load(self.receipt["host_parameters"]["rotary_sine"])
-        self.weights = safe_open(str(args.checkpoint / "model.safetensors"),
-                                 framework="pt", device="cpu")
-        config = json.loads((args.checkpoint / "config.json").read_text())
-        self.layers = config["num_hidden_layers"]
-        if (config["hidden_size"], config["num_attention_heads"],
-                config["num_key_value_heads"]) != (2048, 32, 4):
-            raise ValueError("Tiny host recipe requires hidden size 2048, "
-                             "32 query heads, and 4 KV heads")
+        self.receipt = json.loads((args.capture / "receipt.json").read_text())
+        self.panels = {call["site"]: call["panels"] for call in self.receipt["calls"] if call["step"] == 0}
+        tables = [self.receipt["host_parameters"][key] for key in ("rotary_cosine", "rotary_sine")]
+        self.cos, self.sin = (torch.frombuffer(bytearray((args.capture / table["file"]).read_bytes()), dtype=torch.int16)
+                              .reshape(table["shape"]).view(torch.bfloat16).float() for table in tables)
+        self.weights = safe_open(str(args.checkpoint / "model.safetensors"), framework="pt", device="cpu")
+        self.layers = json.loads((args.checkpoint / "config.json").read_text())["num_hidden_layers"]
         self.embedding = self.weights.get_tensor("model.embed_tokens.weight")
         self.linear = arithmetic.Linear(args)
-        self.norms = {}
-        self.panel_calls = 0
-
-    def load(self, item):
-        raw = (self.capture / item["file"]).read_bytes()
-        if hashlib.sha256(raw).hexdigest() != item["sha256"]:
-            raise ValueError("Capture payload digest mismatch: " + item["file"])
-        return torch.frombuffer(bytearray(raw), dtype=torch.uint16).reshape(
-            item["shape"]).view(torch.bfloat16).float()
 
     def weight(self, site):
         return self.weights.get_tensor(site + ".weight").float()
 
-    def project(self, x, site, step):
-        # Each weight panel of the prefill launch has its own tensor scale.
-        outputs = []
-        for index, panel in enumerate(self.calls[0, site]["panels"]):
-            lo, hi = panel["columns"]
-            outputs.append(self.linear(site, x, lambda: self.weight(site)[lo:hi].T, key=(site, index)))
-            self.panel_calls += 1
-        return torch.cat(outputs, dim=1)
+    def project(self, x, site):
+        """One contraction per prefill weight panel, each with its own tensor scale."""
+        return torch.cat([self.linear(site, x, lambda: self.weight(site)[lo:hi].T, key=(site, lo))
+                          for lo, hi in (panel["columns"] for panel in self.panels[site])], dim=1)
 
-    def norm(self, x, site):
-        if site not in self.norms:
-            self.norms[site] = self.weight(site)
-        return host.norm(x, self.norms[site])
-
-    def forward(self, ids, cache, step):
-        offset = 0 if cache[0] is None else cache[0][0].shape[1]
-        if offset + len(ids) > self.cos.shape[0]:
-            raise ValueError("Sequence exceeds the capture rotary table")
-        x = self.embedding[torch.tensor(ids, dtype=torch.int64)].float()
+    def forward(self, ids, cache):
+        x = self.embedding[torch.tensor(ids)].float()
         for layer in range(self.layers):
             prefix = f"model.layers.{layer}."
-            entry = x
-            n = self.norm(x, prefix + "input_layernorm")
-            q, k, v = [self.project(n, prefix + s, step) for s in SITES[:3]]
-            attended, cache[layer] = host.attention(q, k, v, self.cos, self.sin,
-                                                   cache[layer])
-            residual = host.bf(entry + self.project(
-                attended, prefix + SITES[3], step))
-            n = self.norm(residual, prefix + "post_attention_layernorm")
-            gate, up = [self.project(n, prefix + s, step) for s in SITES[4:6]]
-            x = host.bf(residual + self.project(host.silu_mul(gate, up),
-                                                prefix + SITES[6], step))
-        return self.project(self.norm(x, "model.norm"), "lm_head", step)[
-            -1].contiguous(), cache
+            n = norm(x, self.weight(prefix + "input_layernorm"))
+            q, k, v = (self.project(n, prefix + site) for site in SITES[:3])
+            attended, cache[layer] = attention(q, k, v, self.cos, self.sin, cache[layer])
+            residual = bf(x + self.project(attended, prefix + SITES[3]))
+            n = norm(residual, self.weight(prefix + "post_attention_layernorm"))
+            gate, up = (self.project(n, prefix + site) for site in SITES[4:6])
+            x = bf(residual + self.project(silu_mul(gate, up), prefix + SITES[6]))
+        return self.project(norm(x, self.weight("model.norm")), "lm_head")[-1], cache
 
 
-def native_model(checkpoint, precision):
-    from transformers.models.llama import modeling_llama
-
-    config = modeling_llama.LlamaConfig.from_pretrained(str(checkpoint),
-                                                       local_files_only=True)
-    config._attn_implementation = "eager"
-    with torch.device("meta"):
-        model = modeling_llama.LlamaForCausalLM(config)
-    model.model.rotary_emb = modeling_llama.LlamaRotaryEmbedding(config=config,
-                                                               device="cpu")
-    parameters = dict(model.named_parameters())
-    with safe_open(str(checkpoint / "model.safetensors"), framework="pt",
-                   device="cpu") as handle:
-        if set(parameters) != set(handle.keys()):
-            raise ValueError("Checkpoint parameters differ from the "
-                             "TinyLlama configuration")
-        for name, expected in parameters.items():
-            value = handle.get_tensor(name).to(precision)
-            if value.shape != expected.shape:
-                raise ValueError("Checkpoint shape mismatch: " + name)
-            parent, _, attr = name.rpartition(".")
-            setattr(model.get_submodule(parent), attr,
-                    torch.nn.Parameter(value, requires_grad=False))
-    if precision == torch.float32:
-        model.float()
-    return model.eval()
-
-
-def native_forward(model, ids, steps, forced=None):
-    from transformers import cache_utils
-
-    cache = cache_utils.DynamicCache(config=model.config)
-    tokens, logits = [], []
-    for step in range(steps):
-        current = ids if step == 0 else [
-            tokens[-1] if forced is None else forced[step - 1]]
-        output = model(input_ids=torch.tensor([current], dtype=torch.int64),
-                       past_key_values=cache, use_cache=True)
-        value = output.logits[0, -1].float().contiguous().clone()
-        tokens.append(int(value.argmax()))
-        logits.append(value)
+def native(model, ids, steps):
+    """Greedy native FP32 decode: tokens and last-position logits per step."""
+    past, tokens, logits = None, [], []
+    for _ in range(steps):
+        output = model(input_ids=torch.tensor([tokens[-1:] or ids]), past_key_values=past, use_cache=True)
+        past = output.past_key_values
+        logits.append(output.logits[0, -1].float())
+        tokens.append(int(logits[-1].argmax()))
     return tokens, logits
 
 
 def run(args):
-    if args.steps < 1:
-        raise ValueError("--steps must be positive")
-    with torch.inference_mode():
-        return _run(args)
+    from transformers import LlamaForCausalLM
 
-
-def _run(args):
     engine = Engine(args)
-    if args.inputs:
-        data = json.loads(args.inputs.read_text())
-        prompts = data["prompts"] if isinstance(data, dict) else data
-    else:
-        prompts = [{"id": "capture", "token_ids":
-                    engine.receipt["target_trace"][0]["input_tokens"][0]}]
-    if not prompts:
-        raise ValueError("Input prompt set is empty")
-    if len({p["id"] for p in prompts}) != len(prompts):
-        raise ValueError("Prompt IDs must be unique")
-    for prompt in prompts:
-        ids = prompt["token_ids"]
-        if not ids or not all(isinstance(i, int)
-                              and 0 <= i < engine.embedding.shape[0]
-                              for i in ids):
-            raise ValueError("Prompt token_ids must contain valid "
-                             "vocabulary IDs")
-        if len(ids) + args.steps - 1 > engine.cos.shape[0]:
-            raise ValueError("Sequence exceeds the capture rotary table")
-    native = {}
-    for precision in ("float32",):
-        model = native_model(args.checkpoint, getattr(torch, precision))
-        for index, prompt in enumerate(prompts):
-            tokens, logits = native_forward(model, prompt["token_ids"],
-                                             args.steps)
-            native.setdefault(prompt["id"], {})[precision] = (tokens, logits)
-        del model
-        gc.collect()
-    result = {"model": "tiny", "steps": args.steps, "prompts": [],
-              "torch_version": torch.__version__,
-              "arithmetic": "offline CPU emulation; no target timing"}
-    capture_gate = not (args.inputs or args.finer_scales or args.k_split
-                        or args.two_term)
-    for index, prompt in enumerate(prompts):
-        ids = prompt["token_ids"]
-        references = native.get(prompt["id"], {})
-        row = {"id": prompt["id"], "tokens": [], "steps": [], "native": {}}
-        for precision, (tokens, logits) in references.items():
-            row["native"][precision] = {"tokens": tokens,
-                                       "steps": [summarize(x) for x in logits]}
-        free_cache, forced_cache = ([None] * engine.layers,
-                                    [None] * engine.layers)
-        reference = references.get("float32", references.get("bfloat16"))
+    prompts = (json.loads(args.inputs.read_text())["prompts"] if args.inputs else
+               [{"id": "capture", "token_ids": engine.receipt["target_trace"][0]["input_tokens"][0]}])
+    model = LlamaForCausalLM.from_pretrained(str(args.checkpoint), torch_dtype=torch.float32,
+                                             attn_implementation="eager", local_files_only=True).eval()
+    references = [native(model, prompt["token_ids"], args.steps) for prompt in prompts]
+    del model
+    report = dict(model="tiny", prompts=[])
+    for prompt, (native_tokens, native_logits) in zip(prompts, references):
+        tokens, steps, free = [], [], [None] * engine.layers
         for step in range(args.steps):
-            shared = reference is None or row["tokens"] == reference[0][:step]
-            current = ids if step == 0 else [row["tokens"][-1]]
-            logits, free_cache = engine.forward(current, list(free_cache), step)
-            if shared:
-                forced_logits, forced_cache = logits, list(free_cache)
+            logits, free = engine.forward(tokens[-1:] or prompt["token_ids"], list(free))
+            if tokens == native_tokens[:step]:
+                forced_logits, forced = logits, free
             else:
-                forced_logits, forced_cache = engine.forward(
-                    [reference[0][step - 1]], list(forced_cache), step)
-            item = {"step": step, **summarize(logits)}
-            row["tokens"].append(item["token"])
-            if reference is not None:
-                item["forced_native_token"] = int(forced_logits.argmax())
-                item["forced_top1_match"] = (item["forced_native_token"]
-                                             == reference[0][step])
-                item["forced_logit_error"] = metric(forced_logits,
-                                                    reference[1][step])
-            if capture_gate and step < len(engine.receipt["target_trace"]):
-                target = engine.receipt["target_trace"][step]
-                item["capture_exact"] = (
-                    item["logits_sha256"] == target["logits"]["sha256"]
-                    and item["token"] == target["next_token"])
-                if not item["capture_exact"]:
-                    raise ValueError("Default Tiny capture mismatch at "
-                                     f"step {step}")
-            row["steps"].append(item)
-        if reference is not None:
-            matches = [a == b for a, b in zip(row["tokens"], reference[0])]
-            row["matching_prefix"] = next(
-                (i for i, x in enumerate(matches) if not x), args.steps)
-            row["all_match"] = all(matches)
-            row["forced_top1_matches"] = sum(
-                x["forced_top1_match"] for x in row["steps"])
-        result["prompts"].append(row)
-    result["panel_calls"] = engine.panel_calls
-    result["capture_exact"] = all(
-        x.get("capture_exact", False)
-        for p in result["prompts"] for x in p["steps"])
-    return result
+                forced_logits, forced = engine.forward([native_tokens[step - 1]], list(forced))
+            tokens.append(int(logits.argmax()))
+            error = (forced_logits.double() - native_logits[step].double()).square().mean().sqrt()
+            steps.append(dict(token=tokens[-1], logits_sha256=sha(logits), forced_token=int(forced_logits.argmax()),
+                              forced_rmse=float(error)))
+        report["prompts"].append(dict(id=prompt["id"], tokens=tokens, native_tokens=native_tokens,
+                                      forced_top1=sum(s["forced_token"] == t for s, t in zip(steps, native_tokens)),
+                                      steps=steps))
+    if not (args.inputs or args.finer_scales or args.k_split or args.two_term):
+        report["capture_exact"] = all(
+            step["logits_sha256"] == target["logits"]["sha256"] and step["token"] == target["next_token"]
+            for step, target in zip(report["prompts"][0]["steps"], engine.receipt["target_trace"]))
+    return report
