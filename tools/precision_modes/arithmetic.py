@@ -1,197 +1,78 @@
-"""CPU emulation only. No compiler, runtime, or device program uses this code.
+"""Offline CPU emulation of the Atlas MXU arithmetic. No compiler, runtime, or device program uses this code.
 
-Operands have a BF16 front cast and normal-only E4M3 packing. Every exact
-product is added in ascending K with BF16 RNE after each MAC. Candidate
-recipes scale raw partials and merge in FP64, then round directly to BF16.
+Operands get a BF16 front cast and Atlas E4M3 packing with a power-of-two scale. Exact products are added in
+ascending K with BF16 nearest-even rounding after every MAC. Recipes start a fresh chain for each K chunk and weight
+term, add the scaled chains in FP64, and round once, directly, to BF16.
 """
 
 import ctypes
 import fnmatch
+import functools
 import json
-import math
 import os
 from pathlib import Path
 
 import torch
-import torch.nn.functional as F
-
-_mac = None
-
-
-def configure_library(path):
-    """Load the separately compiled, single-threaded ordered-MAC helper."""
-    global _mac
-    library = ctypes.CDLL(str(Path(path).resolve()))
-    _mac = library.ordered
-    _mac.argtypes = [ctypes.c_void_p] * 3 + [ctypes.c_int] * 4
-    _mac.restype = ctypes.c_int
-
-
-def _finite(x, label):
-    if x.device.type != "cpu" or not bool(torch.isfinite(x).all()):
-        raise ValueError(f"{label} must contain finite CPU values")
 
 
 def direct_bf16(x):
-    """RNE directly from binary64; a float32 bridge can double round.
-
-    The experiments admit normal finite BF16 outputs and canonical +zero.
-    Reject subnormal and overflowing inputs instead of extending that domain.
-    """
-    x = x.to(torch.float64).contiguous()
-    _finite(x, "host merge")
-    magnitude = x.abs()
-    if bool(((magnitude != 0) & (magnitude < 2.0**-126)).any()):
-        raise ValueError("host merge outside normal BF16 domain")
-    if bool((magnitude >= 2.0**128 - 2.0**119).any()):
-        raise ValueError("host merge overflows BF16")
-    bits = x.view(torch.int64)
-    sign = bits & (-9223372036854775808)
-    mag = bits & 9223372036854775807
-    rounded = (mag + 0xfffffffffff + ((mag >> 45) & 1)) & (-35184372088832)
-    result = (rounded | sign).view(torch.float64)
-    return torch.where(x == 0, 0.0, result).float()
-
-
-def _exponents(maximum):
-    """Smallest power of two keeping each BF16 group maximum <= 448."""
-    field, fraction = maximum >> 7, maximum & 127
-    top = torch.zeros_like(fraction)
-    for bit in range(1, 7):
-        top = torch.where(fraction >= (1 << bit), bit, top)
-    significand = torch.where(field == 0, fraction << (7 - top),
-                              128 + fraction)
-    power = torch.where(field == 0, top - 133, field - 127)
-    exponent = power - 8 + (significand > 224).int()
-    exponent = torch.where(maximum == 0, 0, exponent).to(torch.int32)
-    if not bool(((exponent >= -126) & (exponent <= 127)).all()):
-        raise ValueError("scale outside admitted exponent range [-126, 127]")
-    return exponent
+    """Binary64 to BF16 nearest-even in one step; a float32 bridge can double round. Zero becomes +0."""
+    bits = x.double().contiguous().view(torch.int64)
+    bits = (bits + 0xfffffffffff + ((bits >> 45) & 1)) & -(1 << 45)
+    return torch.where(x == 0, 0.0, bits.view(torch.float64)).float()
 
 
 def scale(x, axis="tensor"):
-    front = x.to(torch.bfloat16).contiguous()
-    _finite(front, "BF16 operand")
-    if front.ndim != 2 or not front.numel():
-        raise ValueError("operand must be a nonempty matrix")
-    words = front.view(torch.int16).int() & 32767
-    if axis == "tensor":
-        return _exponents(words.max())
-    if axis not in ("row", "column", "m32", "n32"):
-        raise ValueError(f"unknown scale axis: {axis}")
-    rows = axis in ("row", "m32")
-    maxima = words.amax(dim=1 if rows else 0)
-    if axis in ("m32", "n32"):
-        count = maxima.numel()
-        maxima = F.pad(maxima, (0, (-count) % 32)).reshape(-1, 32).amax(1)
-        maxima = maxima.repeat_interleave(32)[:count]
-    exponent = _exponents(maxima)
-    return exponent[:, None] if rows else exponent[None, :]
+    """Smallest power-of-two exponent keeping the BF16 maximum of each tensor, row, or column within 448."""
+    magnitude = x.bfloat16().float().abs()
+    maximum = magnitude.max() if axis == "tensor" else magnitude.amax(dim=1 if axis == "row" else 0, keepdim=True)
+    fraction, power = torch.frexp(maximum)
+    return torch.where(maximum == 0, 0, power - 9 + (fraction > 0.875).int())
 
 
-def encode(x, exponent=None):
-    """Atlas E4M3 RNE, flush exponent-zero values, saturate at +/-448."""
-    front = x.to(torch.bfloat16).contiguous()
-    _finite(front, "BF16 operand")
-    exponent = scale(front) if exponent is None else torch.as_tensor(exponent)
-    if not bool(((exponent >= -126) & (exponent <= 127)).all()):
-        raise ValueError("scale outside admitted exponent range [-126, 127]")
-    word = front.view(torch.int16).int() & 65535
-    field = (word >> 7) & 255
-    significand = 128 + (word & 127)
-    rounded = (significand + 7 + ((significand >> 4) & 1)) >> 4
-    power = field - 127 - exponent + (rounded == 16).int()
-    rounded = torch.where(rounded == 16, 8, rounded)
-    sign = (word >> 8) & 128
-    code = sign | ((torch.clamp(power, min=-6, max=8) + 7) << 3)
-    code = code | (rounded - 8)
-    code = torch.where((power > 8) | ((power == 8) & (rounded >= 15)),
-                       sign | 126, code)
-    codes = torch.where((field == 0) | (power < -6), 0, code).to(torch.uint8)
-    return codes, exponent
-
-
-def decode(code):
-    words = code.to(torch.int32)
-    if bool(((words < 0) | (words > 255) | ((words & 127) == 127)).any()):
-        raise ValueError("invalid or reserved FP8 code")
-    exponent, fraction = (words >> 3) & 15, words & 7
-    values = torch.ldexp((8 + fraction).double(), exponent - 10)
-    values = torch.where((words & 128) != 0, -values, values)
-    return torch.where(exponent == 0, 0.0, values)
+def quantize(x, exponent):
+    """Decoded Atlas E4M3 of BF16(x) / 2^exponent: nearest even, BF16 subnormals and values below 2^-6 flush to
+    +0, and magnitudes saturate at 448."""
+    front = x.bfloat16().double()
+    fraction, power = torch.frexp(torch.ldexp(front, -torch.as_tensor(exponent)))
+    value = torch.ldexp(torch.round(fraction * 16), power - 4).clamp(-448, 448)
+    return torch.where((value.abs() < 2**-6) | (front.abs() < 2**-126), 0.0, value)
 
 
 def pack(x, axis="tensor"):
-    codes, exponent = encode(x, scale(x, axis))
-    return decode(codes), exponent
+    exponent = scale(x, axis)
+    return quantize(x, exponent), exponent
 
 
-def two_term(x, low_axis="tensor"):
-    """Original tensor-scaled high, plus an encoded FP32 weight residual.
-
-    Subtract from the checkpoint's FP32 weight, before its BF16 front cast,
-    matching the explored weight recipe. Only the low scale can be finer.
-    """
-    high, exponent = pack(x)
-    residual = x.double() - torch.ldexp(high, exponent)
-    if not torch.equal(residual, residual.float().double()):
-        raise ValueError("weight residual is not exactly representable in FP32")
-    return (high, exponent), pack(residual.float(), low_axis)
+def two_term(weight, low_axis="tensor"):
+    """The default tensor-scaled FP8 weight, plus FP8 of its FP32 residual with a separate scale."""
+    high, exponent = pack(weight)
+    return (high, exponent), pack((weight.double() - torch.ldexp(high, exponent)).float(), low_axis)
 
 
-def ordered_mm(a, b, rescale=0):
-    """Exact ordered products; the C++ loop is independent of Torch BLAS."""
-    if a.ndim != 2 or b.ndim != 2 or a.shape[1] != b.shape[0]:
-        raise ValueError("incompatible contraction matrices")
-    if not min(*a.shape, *b.shape) > 0:
-        raise ValueError("empty contraction")
+@functools.cache
+def _library():
+    library = ctypes.CDLL(os.environ["ATLAS_PRECISION_MAC_LIBRARY"])
+    library.ordered.argtypes = [ctypes.c_void_p] * 3 + [ctypes.c_int] * 3
+    return library.ordered
+
+
+def ordered_mm(a, b):
+    """Unscaled ordered MAC chain of decoded FP8 operands, through the compiled ordered_mac.cpp."""
     a, b = a.double().contiguous(), b.double().contiguous()
-    _finite(a, "decoded activation")
-    _finite(b, "decoded weight")
-    if float(a.abs().max()) > 448 or float(b.abs().max()) > 448:
-        raise ValueError("ordered MAC requires decoded FP8 operands")
-    # Every FP8 product lies on the 2^-18 lattice. The conservative bound
-    # certifies every ordered prefix, including values not saved by the loop.
-    k = a.shape[1]
-    bound = math.log2(k) + 2 * math.log2(448) + k * math.log2(1 + 2**-8)
-    if bound >= 127:
-        raise ValueError("cannot certify normal finite BF16 prefix range")
-    if _mac is None:
-        path = os.environ.get("ATLAS_PRECISION_MAC_LIBRARY")
-        if path is None:
-            raise RuntimeError(
-                "build ordered_mac.cpp, then pass --ordered-library "
-                "or set ATLAS_PRECISION_MAC_LIBRARY")
-        configure_library(path)
-    out = torch.empty((a.shape[0], b.shape[1]), dtype=torch.float32)
-    status = _mac(a.data_ptr(), b.data_ptr(), out.data_ptr(),
-                  a.shape[0], k, b.shape[1], int(rescale))
-    if status:
-        raise RuntimeError(f"ordered MAC returned {status}")
-    _finite(out, "ordered MAC output")
+    out = torch.empty((a.shape[0], b.shape[1]), dtype=torch.float64)
+    _library()(a.data_ptr(), b.data_ptr(), out.data_ptr(), a.shape[0], a.shape[1], b.shape[1])
     return out
 
 
 def contraction(a, b, ea, eb, k_chunk=0, low=None):
-    """Fresh raw BF16 chains; ascending K, high then low, FP64 merge."""
-    if k_chunk < 0 or (k_chunk and k_chunk % 32):
-        raise ValueError("K chunk must be zero or a positive multiple of 32")
-    if a.shape[1] != b.shape[0]:
-        raise ValueError("incompatible contraction matrices")
-    k = a.shape[1]
-    padded = (k + 31) // 32 * 32
-    a = F.pad(a, (0, padded - k))
-    branches = [(b, eb)] if low is None else [(b, eb), low]
-    branches = [(F.pad(weight, (0, 0, 0, padded - k)), ea + exponent)
-                for weight, exponent in branches]
-    merged = torch.zeros((a.shape[0], b.shape[1]), dtype=torch.float64)
-    chunk = k_chunk or padded
-    for start in range(0, padded, chunk):
-        for weight, exponent in branches:
-            raw = ordered_mm(a[:, start:start + chunk],
-                             weight[start:start + chunk])
-            merged = merged + torch.ldexp(raw.double(), exponent)
-    return direct_bf16(merged)
+    """Fresh chains per K chunk, high then low term, scaled and added in ascending order in FP64."""
+    total = 0
+    chunk = k_chunk or a.shape[1]
+    for start in range(0, a.shape[1], chunk):
+        for weight, exponent in [(b, eb)] + ([low] if low else []):
+            total = total + torch.ldexp(ordered_mm(a[:, start:start + chunk], weight[start:start + chunk]), ea + exponent)
+    return direct_bf16(total)
 
 
 def settings(args, site):

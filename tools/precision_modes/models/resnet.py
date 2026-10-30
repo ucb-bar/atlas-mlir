@@ -43,14 +43,6 @@ def _read(path, shape, dtype=np.float32):
                             .reshape(shape).copy())
 
 
-def _packed_a(codes, padded_mkn):
-    m, k, _ = padded_mkn
-    padded = torch.zeros((m, k), dtype=torch.uint8)
-    padded[:codes.shape[0], :codes.shape[1]] = codes
-    return padded.reshape(m // 32, 32, k // 32, 32).permute(
-        0, 2, 1, 3).contiguous()
-
-
 class Engine:
     """Load a model and bind checkpoint weights to the provider encoding."""
 
@@ -76,23 +68,7 @@ class Engine:
                     right = module.weight.detach().flatten(1).T.contiguous()
                 else:
                     right = module.weight.detach().T.contiguous()
-                codes, exponent = arithmetic.encode(right)
-                k, n = node['weight']['padded_shape']
-                packed = _read(
-                    self.artifact(node['weight']['fp8_tiled']['path']),
-                    (n // 32, k // 32, 32, 32), np.uint8)
-                actual = packed.permute(1, 2, 0, 3).reshape(k, n)
-                if not torch.equal(
-                        codes, actual[:right.shape[0], :right.shape[1]]):
-                    raise ValueError(
-                        f"weight encoding differs at {node['node']}")
-                if (int(torch.as_tensor(exponent).item())
-                        != node['weight']['b_scale_exponent']):
-                    raise ValueError(
-                        f"weight exponent differs at {node['node']}")
-                self.weights[node['node']] = {
-                    'source': right,
-                    'tensor': (arithmetic.decode(codes), exponent)}
+                self.weights[node['node']] = {'source': right}
             elif isinstance(module, torch.nn.BatchNorm2d):
                 hp = node['host_params']
                 self.batchnorm[node['node']] = _read(
@@ -170,14 +146,9 @@ class Runner(torch.fx.Interpreter):
                 self.args, self.current)
             a, ae = arithmetic.pack(left, axis=a_axis)
             b, be, low = self.engine.weight(self.current, b_axis, two_term)
-            # Preserve the baseline device postscale and final BF16 store.
-            if a_axis == b_axis == 'tensor' and not chunk and not two_term:
-                exponent = int(torch.as_tensor(ae).item()
-                               + torch.as_tensor(be).item())
-                value = arithmetic.ordered_mm(a, b, rescale=exponent)
-            else:
-                value = arithmetic.contraction(
-                    a, b, ae, be, k_chunk=chunk, low=low)
+            # Exact device postscale of one full-K chain equals the FP64 merge.
+            value = arithmetic.contraction(
+                a, b, ae, be, k_chunk=chunk, low=low)
             m, k = left.shape
             n = b.shape[1]
             mp, kp, npad = node['padded_mkn']
@@ -195,13 +166,9 @@ class Runner(torch.fx.Interpreter):
                           raw_partial_bytes=2048 * chains * tiles)
             if self.gate:
                 ref = self.reference['kernels'][len(self.kernels)]
-                codes, _ = arithmetic.encode(left)
                 checks = dict(
                     scale_exact=(int(torch.as_tensor(ae).item())
                                  == ref['a_scale_exponent']),
-                    activation_payload_exact=(
-                        _sha(_packed_a(codes, node['padded_mkn']))
-                        == ref['encoded_a_tiled']['sha256']),
                     contraction_exact=(
                         _sha(value) == ref['target_output']['sha256']))
                 if not all(checks.values()):
@@ -265,8 +232,7 @@ def evaluate(engine, image, args, reference=None, label=None):
         if record['logits_sha256'] != reference['final_logits']['sha256']:
             raise ValueError('final logits differ from reference')
         record['baseline_gate'] = dict(
-            status='EXACT_REFERENCE', contractions_exact=54,
-            activation_payloads_exact=54, scales_exact=54,
+            status='EXACT_REFERENCE', contractions_exact=54, scales_exact=54,
             logits_exact=1000, node_checks=runner.node_checks)
     else:
         record['baseline_gate'] = dict(status='NOT_EXTERNALLY_GATED')

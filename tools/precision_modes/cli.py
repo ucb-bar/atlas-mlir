@@ -23,14 +23,12 @@ def parser(model_name=None):
         model.add_argument("--finer-scales", action="store_true",
                            help="Combine finer scales with another recipe")
         model.add_argument("--activation-scale",
-                           choices=("tensor", "row", "m32"))
+                           choices=("tensor", "row"))
         model.add_argument("--weight-scale",
-                           choices=("tensor", "column", "n32"))
+                           choices=("tensor", "column"))
         model.add_argument("--sites", default="all",
                            help="Comma-separated site names/globs, @file, or "
                                 "Tiny mask head, attention-head, mlp, or down")
-        model.add_argument("--ordered-library", type=Path,
-                           help="Compiled ordered_mac.cpp shared library")
         model.add_argument("--output", type=Path, help="Write JSON metrics")
         model.add_argument("--output-dir", type=Path,
                            help="Also save model output arrays")
@@ -55,12 +53,9 @@ def main(argv=None):
             args.sites != "all"):
         command.error("scale and site overrides require an opt-in mode")
     import torch
-    from . import arithmetic
 
     torch.set_num_threads(1)
     torch.set_num_interop_threads(1)
-    if args.ordered_library:
-        arithmetic.configure_library(args.ordered_library)
     driver = importlib.import_module(f".models.{args.model}", __package__)
     with torch.inference_mode():
         report = driver.run(args)

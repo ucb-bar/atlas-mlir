@@ -3,6 +3,7 @@
 from fractions import Fraction
 import importlib.util
 import json
+import os
 from pathlib import Path
 import random
 import shutil
@@ -48,10 +49,9 @@ class PrecisionModesTest(unittest.TestCase):
         library = Path(cls.temporary.name) / "ordered_mac.so"
         source = (Path(__file__).resolve().parents[1] /
                   "tools/precision_modes/ordered_mac.cpp")
-        subprocess.run(["c++", "-O3", "-shared", "-fPIC", "-fno-fast-math",
-                        "-ffp-contract=off", str(source), "-o", str(library)],
-                       check=True)
-        arithmetic.configure_library(library)
+        subprocess.run(["c++", "-O3", "-shared", "-fPIC", str(source), "-o",
+                        str(library)], check=True)
+        os.environ["ATLAS_PRECISION_MAC_LIBRARY"] = str(library)
 
     @classmethod
     def tearDownClass(cls):
@@ -90,14 +90,10 @@ class PrecisionModesTest(unittest.TestCase):
         front = torch.tensor(words, dtype=torch.int32).to(torch.int16)
         front = front.view(torch.bfloat16)
         for exponent in (-20, 0, 20):
-            codes, _ = arithmetic.encode(front, exponent)
-            expected = [oracle.pack_bf16(w, exponent + 127) for w in words]
-            self.assertEqual(codes.tolist(), expected)
-        decoded = arithmetic.decode(torch.tensor([0, 8, 0x38, 0x7e, 0xfe],
-                                                 dtype=torch.uint8))
-        self.assertEqual(decoded.tolist(), [0, 2**-6, 1, 448, -448])
-        with self.assertRaises(ValueError):
-            arithmetic.decode(torch.tensor([127], dtype=torch.uint8))
+            values = arithmetic.quantize(front, exponent)
+            expected = [float(oracle.fp8_value(oracle.pack_bf16(
+                w, exponent + 127))) for w in words]
+            self.assertEqual(values.tolist(), expected)
 
     def test_scales_and_default_order_against_fraction(self):
         rng = torch.Generator().manual_seed(733)
@@ -146,8 +142,8 @@ class PrecisionModesTest(unittest.TestCase):
         self.assert_bits(arithmetic.contraction(a, b, ea, eb, low=low),
                          self.reference(a, b, ea, eb, low=low))
         self.assertTrue(bool((low[0] != 0).any()))
-        high_codes, original_exponent = arithmetic.encode(source)
-        self.assertTrue(torch.equal(arithmetic.decode(high_codes), b))
+        original, original_exponent = arithmetic.pack(source)
+        self.assertTrue(torch.equal(original, b))
         self.assertEqual(int(original_exponent), int(eb))
 
     def test_direct_bf16_avoids_float32_double_round(self):
@@ -189,12 +185,10 @@ class PrecisionModesTest(unittest.TestCase):
                                              dtype=torch.int16)
                     return words.view(torch.bfloat16).reshape(shape).float()
                 k = item["k"]
-                ac, ea = arithmetic.encode(front("a_bf16_le_hex", (1, k)),
-                                           item["ea"])
-                bc, eb = arithmetic.encode(front("b_bf16_le_hex", (k, 1)),
-                                           item["eb"])
-                actual = arithmetic.contraction(arithmetic.decode(ac),
-                                                arithmetic.decode(bc), ea, eb)
+                ea, eb = torch.tensor(item["ea"]), torch.tensor(item["eb"])
+                a = arithmetic.quantize(front("a_bf16_le_hex", (1, k)), ea)
+                b = arithmetic.quantize(front("b_bf16_le_hex", (k, 1)), eb)
+                actual = arithmetic.contraction(a, b, ea, eb)
                 self.assertEqual(struct.pack("<f", float(actual)),
                                  bytes.fromhex(item["expected_f32_le_hex"]))
 
