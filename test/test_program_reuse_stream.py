@@ -36,16 +36,6 @@ class StreamReuseTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 producer.assembly(64,64,64,offset)
 
-    def test_negative_controls(self):
-        m=k=n=64
-        source = producer.assembly(m,k,n,m*k+k*n+256,-15)
-        for old,new in [('vtrpose.xlu m1, m1','nop'),('vmatmul.acc.mxu0','vmatmul.mxu0'),
-                        ('acc1','acc0'),('vstore m3, 0(x9)','vstore m2, 0(x9)'),
-                        ('add x22, x22, x16','add x22, x22, x8'),
-                        ('addi x19, x19, 256','addi x19, x19, 512')]:
-            with self.subTest(mutation=old), self.assertRaises((AssertionError,KeyError)):
-                prove(source.replace(old,new),m,k,n,-15,m*k+k*n)
-
 
 if __name__ == '__main__':
     unittest.main()

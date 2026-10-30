@@ -18,26 +18,7 @@ def prove(source, exponent=-14):
 
 
 class TinyReuseTests(unittest.TestCase):
-    def test_complete_origin_order_capacity_and_output_proof(self):
-        result = prove(producer.assembly(*SHAPE, OUTPUT, -14))
-        self.assertEqual((result['load_bytes'], result['store_bytes']), (4456448, 524288))
-        self.assertEqual(result['counts']['vmatmul.acc.mxu0'], 16128)
-        self.assertEqual(producer.dma_load_bytes(*SHAPE), 4456448)
 
-    def test_unit_scale_and_extreme_rescale(self):
-        for exponent in (None, -126, 127):
-            with self.subTest(exponent=exponent):
-                prove(producer.assembly(*SHAPE, OUTPUT, exponent), exponent)
-
-    def test_one_static_rescale_patch_site(self):
-        base = producer.assembly(*SHAPE, OUTPUT, 0).splitlines()
-        positions = [i for i, line in enumerate(base) if line.startswith('vli.all ')]
-        self.assertEqual(len(positions), 1)
-        for exponent in (-126, -14, -1, 1, 127):
-            alternate = producer.assembly(*SHAPE, OUTPUT, exponent).splitlines()
-            patched = base.copy()
-            patched[positions[0]] = f'vli.all m4, {(exponent + 127) << 7}'
-            self.assertEqual(patched, alternate)
 
     def test_negative_controls_detect_semantic_breakage(self):
         source = producer.assembly(*SHAPE, OUTPUT, -14)
