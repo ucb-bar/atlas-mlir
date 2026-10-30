@@ -156,7 +156,7 @@ class ModelHandoffTest(unittest.TestCase):
             self.assertEqual((root / "good" / "soc-memmap.json").read_bytes(), mapping.read_bytes())
 
     def test_restricted_paths_refused_before_io(self):
-        with patch("atlas_model_handoff.checked") as check:
+        with patch("pathlib.Path.lstat", side_effect=AssertionError("restricted path inspected")) as check:
             for value in ("/safe/HaMmEr-artifact/x", "/safe/vLsI-map.json"):
                 with self.assertRaisesRegex(ValueError, "restricted"):
                     physical(value)

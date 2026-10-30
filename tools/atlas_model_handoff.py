@@ -2,13 +2,13 @@
 """Package an unchanged bare-metal model ELF for existing TSI loaders."""
 
 import argparse
-import hashlib
 import json
 from pathlib import Path
 import re
 
 from atlas_host_embed import _cover_span, _mapped_regions, check_host_elf
 from atlas_path_guard import checked
+from atlas_tooling import sha as digest
 from atlas_host_layout import (ATLAS_IMEM_BASE as IMEM_BASE, ATLAS_IMEM_BYTES as IMEM_BYTES,
                                ATLAS_CSR_BASE as CSR_BASE, ATLAS_VMEM_BASE,
                                ATLAS_DRAM_BASE, HEADER_SHA256)
@@ -18,14 +18,7 @@ DEFAULT_PLATFORM = Path(__file__).absolute().parents[1] / "runtime/ee290-model-p
 
 
 def physical(value):
-    path = Path(value)
-    if any(re.search(r"hammer|vlsi", part, re.I) for part in path.parts):
-        raise ValueError("restricted path")
-    return checked(path)
-
-
-def digest(raw):
-    return hashlib.sha256(raw).hexdigest()
+    return checked(value)
 
 
 def overlaps(left, left_size, right, right_size):
