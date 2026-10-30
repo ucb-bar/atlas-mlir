@@ -109,7 +109,7 @@ def execute(args):
         Transport.pin(pins)
         for module in (contract, sys.modules["process_cleanup"], sys.modules["segment_boundary"], sys.modules["model_device"],
                        sys.modules["elf_image"], sys.modules["gdb_remote"], sys.modules["smol_full_contract"],
-                       sys.modules["smol_full_plan"], sys.modules["smol_native_controls"],
+                       sys.modules["smol_full_plan"],
                        sys.modules["atlas_program"], sys.modules["placement"],
                        sys.modules["full_bundle"], sys.modules["bundle"], sys.modules["result_lines"],
                        sys.modules["run_model_tile"], sys.modules["atlas_host_layout"],
