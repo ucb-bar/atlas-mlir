@@ -30,7 +30,7 @@ Projection = ct.CFUNCTYPE(ct.c_int, ct.c_void_p, ct.c_uint, ct.c_uint, ct.c_void
                          ct.c_size_t, ct.c_size_t, ct.c_size_t, ct.c_void_p)
 
 
-class FullModelTest(unittest.TestCase):
+class ModelFixture:
     @classmethod
     def setUpClass(cls):
         value = os.environ.get("TINY_MERLIN_COMPARISONS")
@@ -79,6 +79,8 @@ class FullModelTest(unittest.TestCase):
             callback, None, self.workspace.ctypes.data, self.workspace.nbytes,
             self.logits.ctypes.data, self.logits.size)
 
+
+class FullModelTest(ModelFixture, unittest.TestCase):
     def test_argmax_first_tie_signed_zero_and_nonfinite(self):
         words = np.full(32000, 0xbf80, np.uint16)
         words[31] = words[91] = 0x3f80

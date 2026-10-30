@@ -75,17 +75,12 @@ class ResnetBlockHostTest(unittest.TestCase):
             admission = Admission()
             self.assertEqual(admission.read(path, sha(b"admitted")), b"admitted")
             self.assertTrue(admission.recheck())
+            with self.assertRaises(ValueError):
+                Admission().read(path, sha(b"old"))
             path.write_bytes(b"changed")
             self.assertFalse(admission.recheck())
             with self.assertRaises(ValueError):
                 admission.read(path)
-
-    def test_stale_digest_refused(self):
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "input.bin"
-            path.write_bytes(b"current")
-            with self.assertRaises(ValueError):
-                Admission().read(path, sha(b"old"))
 
     def test_elf_accepts_exact_ro_assets_stack_and_high_dram(self):
         raw, assets = synthetic_elf()

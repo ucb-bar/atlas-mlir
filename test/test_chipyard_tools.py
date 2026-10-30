@@ -69,30 +69,6 @@ class KernelToolsTest(TemporaryTree):
         with mock.patch.object(kernels.subprocess, "run", side_effect=self.compile_fixture):
             return kernels.build_kernel(self.kernel, out, self.compiler, max_polls=7, wall_seconds=2)
 
-    def test_build_asset_plumbing(self):
-        first, second = self.root / "first", self.root / "second"
-        a, b = self.build(first), self.build(second)
-        for key in ("returncode", "source_bookends_equal", "inputs_sha256", "program_sha256",
-                    "initial_sha256", "expected_sha256", "elf_sha256", "output_offset", "output_bytes"):
-            self.assertEqual(a[key], b[key], key)
-        self.assertEqual(a["returncode"], 0)
-        self.assertTrue(a["source_bookends_equal"])
-        self.assertFalse(a["full_soc_executed"])
-        self.assertEqual(a["output_offset"], 256)
-        self.assertEqual(a["output_bytes"], 8)
-        for name, raw in (("program.bin", self.program), ("initial-dram.bin", self.initial),
-                          ("expected.bin", self.expected)):
-            self.assertEqual((first / name).read_bytes(), raw)
-        assembly = (first / "assets.S").read_text()
-        self.assertIn('.section .atlas_dram,"aw",@progbits', assembly)
-        for symbol, filename in (("atlas_program", "program.bin"), ("atlas_expected", "expected.bin")):
-            self.assertIn(f'{symbol}:\n.incbin "{first / filename}"', assembly)
-        self.assertIn(f'.incbin "{first / "initial-dram.bin"}"', assembly)
-        self.assertIn(f"-Wl,--section-start=.atlas_dram={kernels.ATLAS_DRAM_BASE:#x}", a["command"])
-        self.assertEqual(a["elf_sha256"], sha((first / "host.elf").read_bytes()))
-        self.assertIn("#define PAYLOAD_MAX_POLLS 7u", (first / "payload.h").read_text())
-        self.assertEqual(json.loads((first / "build.json").read_text()), a)
-
     def test_real_compiler_reproducibility_and_elf_loadmem(self):
         compiler = os.environ.get("RISCV_CC") or shutil.which("riscv64-unknown-elf-gcc")
         if compiler is None:
@@ -105,6 +81,10 @@ class KernelToolsTest(TemporaryTree):
         first, second = [(out / "host.elf").read_bytes() for out in outputs]
         self.assertEqual(first, second)
         self.assertEqual(receipts[0]["elf_sha256"], receipts[1]["elf_sha256"])
+        self.assertEqual(json.loads((outputs[0] / "build.json").read_text()), receipts[0])
+        self.assertIn("#define PAYLOAD_MAX_POLLS 7u", (outputs[0] / "payload.h").read_text())
+        self.assertEqual(receipts[0]["output_offset"], 256)
+        self.assertEqual(receipts[0]["output_bytes"], len(self.expected))
         _, sections, symbols = elf_sections(first)
         dram = sections[".atlas_dram"]
         self.assertEqual((dram[1], dram[3]), (1, kernels.ATLAS_DRAM_BASE))

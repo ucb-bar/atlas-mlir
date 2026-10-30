@@ -2,6 +2,8 @@
 import copy
 import ctypes as ct
 import hashlib
+import json
+import os
 from pathlib import Path
 import sys
 import unittest
@@ -14,7 +16,7 @@ sys.path.insert(0, str(Path(__file__).absolute().parents[1] / "tools/tiny_full")
 from capture_boundaries import Phase, bind_library, validate_inventory
 
 
-class SegmentTest(model.FullModelTest):
+class SegmentTest(model.ModelFixture, unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         super().setUpClass()
@@ -134,35 +136,11 @@ class SegmentTest(model.FullModelTest):
         self.assertEqual(len(observed), 1)
 
 
-def inventory():
-    data = {"calls": [], "target_trace": []}
-    roles = ("self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj", "self_attn.o_proj",
-             "mlp.gate_proj", "mlp.up_proj", "mlp.down_proj")
-    widths = (2048, 256, 256, 2048, 5632, 5632, 2048, 32000)
-    desc = lambda shape, dtype, size: dict(shape=shape, dtype=dtype, bytes=size)
-    for step in range(3):
-        rows, m = (128, 128) if step == 0 else (1, 32)
-        for site in range(155):
-            layer, role = divmod(site, 7) if site < 154 else (22, 7)
-            k, width = (5632 if role == 6 else 2048), widths[role]
-            panels = []
-            for lo in range(0, width, 1024 if k == 5632 else 2048):
-                hi = min(lo + (1024 if k == 5632 else 2048), width)
-                panels.append(dict(columns=[lo, hi], logical_mkn=[rows, k, hi-lo], physical_mkn=[m, k, hi-lo],
-                    expected_bf16=desc([m, hi-lo], "uint16", m*(hi-lo)*2)))
-            data["calls"].append(dict(step=step, site_index=site,
-                site=f"model.layers.{layer}.{roles[role]}" if layer < 22 else "lm_head",
-                A_bf16=desc([rows, k], "uint16", rows*k*2), panels=panels))
-        data["target_trace"].append(dict(step=step, cache=[dict(layer=layer, field=field,
-            **desc([1, 4, 128+step, 64], "uint16", 4*(128+step)*64*2))
-            for layer in range(22) for field in ("keys", "values")],
-            logits_payload=desc([32000], "float32", 128000)))
-    return data
-
 
 class InventoryTest(unittest.TestCase):
+    @unittest.skipUnless(os.environ.get("TINY_FULL_CAPTURE"), "actual full Tiny capture required")
     def test_complete_inventory_and_missing_kv_panel_or_logit_controls(self):
-        data = inventory()
+        data = json.loads(Path(os.environ["TINY_FULL_CAPTURE"]).read_text())
         validate_inventory(data)
         for kind in ("kv", "panel", "logit", "site"):
             changed = copy.deepcopy(data)

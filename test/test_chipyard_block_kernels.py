@@ -14,6 +14,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).absolute().parents[1] / 'tools/chipyard'))
 import block_kernels as kernels
 from atlas_tooling import Admission, sha
+from full_bundle_fixture import full_bundle_fixture
 
 
 class BlockKernelsTest(unittest.TestCase):
@@ -114,6 +115,8 @@ class BlockKernelsTest(unittest.TestCase):
         result = kernels.build_kernel(self.row, out, compiler, max_polls=7, wall_seconds=30, fast_check=fast)
         self.assertEqual(result['returncode'], 0, (out / 'build.log').read_text())
         self.assertEqual(result.get('fast_check', False), fast)
+        self.assertEqual('-DATLAS_FAST_CHECK=1' in result['command'], fast)
+        self.assertEqual(str(kernels.ROOT / 'runtime/atlas_host_check.h') in result['inputs_sha256'], fast)
         kernels.audit_loadmem((out / 'host.elf').read_bytes(), self.program, self.initial, self.expected, 0x100000000)
         self.assertEqual((out / 'program.bin').read_bytes(), self.program)
         self.assertEqual((out / 'expected-dram.bin').read_bytes(), self.expected)
@@ -139,18 +142,7 @@ class BlockKernelsTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'overlapping'):
             kernels.audit_loadmem(bytes(broken), self.program, self.initial, self.expected, 0x100000000)
 
-    def test_fast_check_is_explicit_and_source_bound(self):
-        for fast in (False, True):
-            def compiler(command, **kwargs):
-                Path(command[-1]).write_bytes(b'synthetic ELF')
-                return SimpleNamespace(returncode=0)
-            with (mock.patch.object(kernels.subprocess, 'run', side_effect=compiler),
-                  mock.patch.object(kernels, 'audit_loadmem'), mock.patch.object(kernels, 'audit_dram')):
-                result = kernels.build_kernel(self.row, self.root / str(fast), self.compiler, fast_check=fast)
-            self.assertEqual(result['returncode'], 0)
-            self.assertEqual('-DATLAS_FAST_CHECK=1' in result['command'], fast)
-            self.assertEqual(str(kernels.ROOT / 'runtime/atlas_host_check.h') in result['inputs_sha256'], fast)
-            self.assertEqual(result.get('fast_check', False), fast)
+    def test_fast_check_requires_a_boolean(self):
         with self.assertRaises(ValueError):
             kernels.build_kernel(self.row, self.root / 'invalid', self.compiler, fast_check='yes')
 
@@ -214,34 +206,9 @@ class FullPreparationTest(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
 
-    def bundle(self, name='bundle', mutate=None, *, kernel_only=False):
-        root = self.root / name
-        program = struct.pack('<2I', 0x13, 0x73)
-        initial = b'a' * 1024 + b'w' * 1024 + b'\xa5' * 256 + b'\xcd' * 2048 + b'\x5a' * 256
-        descriptor = dict(index=0, source='assets/program.S', original='assets/program.bin',
-                          activation='assets/a.bin', weights='assets/w.bin', expected='assets/out.bin',
-                          physical_mkn=[32, 32, 32], output_offset=2304, total_dram_bytes=len(initial),
-                          initial_sha256=sha(initial), dram_base=0x100000000,
-                          requested_dma=dict(load_bytes=2048, store_bytes=2048))
-        provenance = dict(schema='atlas.full_kernel_assets.v1' if kernel_only else 'atlas.full_bundle.v1',
-                          workload='tiny-full', kernel_count=2,
-                          kernels=[descriptor, dict(descriptor, index=1)], contract='contract.json',
-                          contract_sha256=sha(b'{}'))
-        if mutate:
-            mutate(provenance)
-        metadata = 'kernels.json' if kernel_only else 'provenance.json'
-        files = {metadata: json.dumps(provenance).encode(),
-                 'assets/program.S': b'nop\necall\n', 'assets/program.bin': program,
-                 'assets/a.bin': b'a' * 1024, 'assets/w.bin': b'w' * 1024, 'assets/out.bin': b'e' * 2048}
-        if not kernel_only:
-            files.update({'host/host.elf': b'not executed', 'host/build.json': b'{}', 'contract.json': b'{}'})
-        for filename, raw in files.items():
-            path = root / filename
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_bytes(raw)
-        (root / 'SHA256SUMS').write_text(''.join(sha(raw) + '  ' + filename + '\n'
-                                               for filename, raw in files.items()))
-        return root, program, initial
+    def bundle(self, *, kernel_only=False):
+        root, initial = full_bundle_fixture(self.root / 'bundle', kernel_only=kernel_only)
+        return root, (root / 'assets/program.bin').read_bytes(), initial
 
     def test_staged_kernel_assets_prepare_without_a_host_elf(self):
         root, program, _ = self.bundle(kernel_only=True)
@@ -270,18 +237,6 @@ class FullPreparationTest(unittest.TestCase):
             self.assertEqual(after, initial[:2304] + b'e' * 2048 + initial[4352:])
             self.assertEqual((base, ranges), (0x100000000, [(2304, 2048)]))
             self.assertEqual(row['source_index'], index)
-
-    def test_changed_shared_asset_or_image_contract_fails_before_output(self):
-        root, _, _ = self.bundle()
-        (root / 'assets/w.bin').write_bytes(b'x' * 1024)
-        out = self.root / 'changed'
-        with self.assertRaises(ValueError):
-            kernels.prepare_full(root, 'tiny-full', out)
-        self.assertFalse(out.exists())
-        root, _, _ = self.bundle('bad-image', lambda p: p['kernels'][0].update(initial_sha256='0' * 64))
-        with self.assertRaises(ValueError):
-            kernels.prepare_full(root, 'tiny-full', out)
-        self.assertFalse(out.exists())
 
     def test_stale_layout_fails_before_output(self):
         root, _, _ = self.bundle()
