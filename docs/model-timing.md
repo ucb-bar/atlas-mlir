@@ -247,6 +247,12 @@ Configuration literals in `npu_model/hardware/config.py` and
 Outstanding-DMA depth, maximum transfer size, and curve-backend parameters may
 change within extraction, backend, and loader bounds; target geometry,
 dispatch, and backend mode remain fixed.
+The loader accepts DMA maximum transfer sizes from 32 bytes through VMEM's
+1,572,864 bytes in whole 32-byte beats. Timing values, including startups and
+issue ages, are bounded by 4,096; positive timing fields start at one.
+Outstanding-DMA depth and minimum latency are positive integers through
+2,147,483,647. DMA estimates must also fit that cycle limit. Integer refusals
+name the field, the bound, and its inclusive range.
 
 Inspect the named file, then update the matching `tools/atlas_derive_*.py`
 interpretation and the C++ reader when their representation changes. Inspect

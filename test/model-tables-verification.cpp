@@ -280,6 +280,54 @@ void loaderRefusal(llvm::StringRef bytes) {
   check(!truncated, "truncated facts refuse");
   if (!truncated) llvm::consumeError(truncated.takeError());
 }
+
+void integerBounds(llvm::StringRef bytes) {
+  auto document = llvm::json::parse(bytes);
+  if (!document) { llvm::consumeError(document.takeError()); return; }
+  for (int maximum : {32, 8192, mlir::atlas::kAtlasVmemBytes}) {
+    auto changed = *document;
+    (*changed.getAsObject()->getObject("dma_timing"))["max_transfer_bytes"] = maximum;
+    auto facts = parseModelTimingTables(jsonText(changed));
+    check(bool(facts), "DMA maximum transfer accepts the explicit VMEM bound");
+    if (facts)
+      check(facts->dma.maxBytes == maximum, "DMA maximum transfer loads the supplied bound");
+    else llvm::consumeError(facts.takeError());
+  }
+  struct Refusal {
+    const char *object, *field;
+    int value;
+    const char *message;
+  };
+  for (const auto &refusal : {
+           Refusal{"dma_timing", "max_transfer_bytes", 0, "DMA transfer bytes in [1, 1572864]"},
+           Refusal{"dma_timing", "max_transfer_bytes", mlir::atlas::kAtlasVmemBytes + 32,
+                   "DMA transfer bytes in [1, 1572864]"},
+           Refusal{"dma_timing", "issue_interval_cycles", 4097, "positive timing value in [1, 4096]"}}) {
+    auto changed = *document;
+    (*changed.getAsObject()->getObject(refusal.object))[refusal.field] = refusal.value;
+    auto facts = parseModelTimingTables(jsonText(changed));
+    check(!facts, "integer outside its named loader bound refuses");
+    if (!facts)
+      check(llvm::toString(facts.takeError()).find(refusal.message) != std::string::npos,
+            "integer refusal reports its named loader bound");
+  }
+  auto changed = *document;
+  auto *startup = changed.getAsObject()->getObject("dma_timing")->getObject("startup_cycles");
+  (*startup)["load"] = 4097;
+  auto facts = parseModelTimingTables(jsonText(changed));
+  check(!facts, "DMA startup outside the timing bound refuses");
+  if (!facts)
+    check(llvm::toString(facts.takeError()).find("positive timing value in [1, 4096]") != std::string::npos,
+          "DMA startup refusal names the timing bound");
+  changed = *document;
+  auto *scalar = changed.getAsObject()->getObject("frontend_timing")->getObject("scalar");
+  (*scalar)["read_age"] = 4097;
+  auto age = parseModelTimingTables(jsonText(changed));
+  check(!age, "scalar age outside the timing bound refuses");
+  if (!age)
+    check(llvm::toString(age.takeError()).find("timing value in [0, 4096]") != std::string::npos,
+          "scalar age refusal names the timing bound");
+}
 } // namespace
 
 void atlas_test::runModelTables(MLIRContext &context) {
@@ -306,6 +354,7 @@ void atlas_test::runModelTables(MLIRContext &context) {
   instructionMemory(*facts);
   probeGeometry(*facts, context);
   loaderRefusal((*file)->getBuffer());
+  integerBounds((*file)->getBuffer());
   auto wrongHash = loadModelTimingTables(path, std::string(64, '0'));
   check(!wrongHash, "selected facts hash mismatch refuses");
   if (!wrongHash) llvm::consumeError(wrongHash.takeError());

@@ -21,6 +21,18 @@ namespace {
 using Object = llvm::json::Object;
 using Array = llvm::json::Array;
 
+struct IntegerBounds {
+  int minimum, maximum;
+  const char *name;
+};
+constexpr int kMaximumTimingValue = 4096;
+constexpr IntegerBounds kTimingValue{0, kMaximumTimingValue, "timing value"};
+constexpr IntegerBounds kPositiveTimingValue{1, kMaximumTimingValue, "positive timing value"};
+constexpr IntegerBounds kPositiveInteger{1, INT_MAX, "positive integer"};
+constexpr IntegerBounds kTransferBytes{1, kAtlasVmemBytes, "DMA transfer bytes"};
+constexpr IntegerBounds kVpuSlots{1, 3, "VPU issue slots"};
+constexpr IntegerBounds kMxuCapacity{1, 64, "MXU compute capacity"};
+
 struct Reader {
   std::string error;
   void fail(const std::string &message) { if (error.empty()) error = message; }
@@ -29,11 +41,11 @@ struct Reader {
     if (!value) fail("missing object " + key.str());
     return value;
   }
-  int integer(const Object *parent, llvm::StringRef key, int minimum = 0,
-              int maximum = 4096) {
+  int integer(const Object *parent, llvm::StringRef key, IntegerBounds bounds) {
     auto value = parent ? parent->getInteger(key) : std::nullopt;
-    if (!value || *value < minimum || *value > maximum) {
-      fail("invalid integer " + key.str());
+    if (!value || *value < bounds.minimum || *value > bounds.maximum) {
+      fail("invalid integer " + key.str() + ": expected " + bounds.name + " in [" +
+           std::to_string(bounds.minimum) + ", " + std::to_string(bounds.maximum) + "]");
       return 0;
     }
     return int(*value);
@@ -60,8 +72,10 @@ struct Reader {
     return name.str();
   }
   TimingEvent event(const Object *value) {
-    TimingEvent result{integer(value, "first_age"), integer(value, "last_age"),
-                       integer(value, "count", 1), integer(value, "step", 1)};
+    TimingEvent result{integer(value, "first_age", kTimingValue),
+                       integer(value, "last_age", kTimingValue),
+                       integer(value, "count", kPositiveTimingValue),
+                       integer(value, "step", kPositiveTimingValue)};
     if (result.lastAge != result.firstAge + (result.count - 1) * result.step)
       fail("event ages do not form an affine stream");
     return result;
@@ -80,7 +94,7 @@ void readOperations(Reader &r, const Object &root, TimingTables &tables) {
     }
     std::string mnemonic = r.mnemonic(*name);
     OperationTiming timing;
-    timing.firstFreeAge = r.integer(block, "first_free_age", 1);
+    timing.firstFreeAge = r.integer(block, "first_free_age", kPositiveTimingValue);
     const Object *events = r.object(block, "events");
     if (events) for (const auto &[key, entry] : *events) {
       const Object *group = entry.getAsObject();
@@ -91,8 +105,8 @@ void readOperations(Reader &r, const Object &root, TimingTables &tables) {
     const Object *reservations = r.object(releases, *name);
     if (reservations) for (const auto &[key, entry] : *reservations) {
       const Object *record = entry.getAsObject();
-      int first = r.integer(record, "first_age");
-      int release = r.integer(record, "release_age");
+      int first = r.integer(record, "first_age", kTimingValue);
+      int release = r.integer(record, "release_age", kTimingValue);
       if (release < first || release >= timing.firstFreeAge)
         r.fail("reservation does not fit operation lifetime: " + name->str());
       timing.releases.emplace(key.str(), TimingWindow{first, release});
@@ -108,16 +122,16 @@ void readFrontend(Reader &r, const Object &root, TimingTables &tables,
   const Object *delay = r.object(frontend, "delay");
   const Object *scalar = r.object(frontend, "scalar");
   const Object *control = r.object(frontend, "control");
-  tables.ordinaryIssueGap = r.integer(frontend, "ordinary_issue_gap", 1);
-  tables.delayBaseGap = r.integer(delay, "base_gap", 1);
-  tables.delayImmediateMask = r.integer(delay, "immediate_mask");
-  tables.scalarReadAge = r.integer(scalar, "read_age");
-  tables.scalarWriteAge = r.integer(scalar, "write_age");
-  tables.controlReadAge = r.integer(control, "operand_read_age");
-  int slots = r.integer(control, "delay_slots", 1);
+  tables.ordinaryIssueGap = r.integer(frontend, "ordinary_issue_gap", kPositiveTimingValue);
+  tables.delayBaseGap = r.integer(delay, "base_gap", kPositiveTimingValue);
+  tables.delayImmediateMask = r.integer(delay, "immediate_mask", kTimingValue);
+  tables.scalarReadAge = r.integer(scalar, "read_age", kTimingValue);
+  tables.scalarWriteAge = r.integer(scalar, "write_age", kTimingValue);
+  tables.controlReadAge = r.integer(control, "operand_read_age", kTimingValue);
+  int slots = r.integer(control, "delay_slots", kPositiveTimingValue);
   if (tables.ordinaryIssueGap != 1 || tables.delayBaseGap != 1 ||
       tables.delayImmediateMask != 4095 || slots != 1 ||
-      r.integer(delay, "decrement_per_tick", 1) != 1)
+      r.integer(delay, "decrement_per_tick", kPositiveTimingValue) != 1)
     r.fail("unsupported frontend issue or delay encoding");
   facts.frontend = {tables.ordinaryIssueGap, slots};
   const Object *instructions = r.object(frontend, "instructions");
@@ -164,15 +178,15 @@ void readGeometry(Reader &r, const Object &root, TimingTables &tables,
       {"vmem_bank_count", kVmemBanks}, {"dma_channels", kAtlasDMAChannels},
       {"scalar_word_bytes", 4}, {"bf16_registers_per_tile", kAtlasBF16Registers},
       {"bf16_element_bytes", 2}, {"fp8_registers_per_tile", 1}, {"fp8_element_bytes", 1}})
-    if (r.integer(arch, key, 1, INT_MAX) != expected)
+    if (r.integer(arch, key, kPositiveInteger) != expected)
       r.fail(std::string("unsupported architecture ") + key);
   if (!arch || arch->getInteger("dram_base") != 0x80000000LL ||
       arch->getInteger("dram_bytes") != 0x1000000000LL)
     r.fail("unsupported DRAM geometry");
-  if (r.integer(arch, "mreg_bytes", 1) != kAtlasRegisterBytes)
+  if (r.integer(arch, "mreg_bytes", kPositiveInteger) != kAtlasRegisterBytes)
     r.fail("unsupported architecture mreg_bytes");
-  tables.bf16RegistersPerTile = r.integer(arch, "bf16_registers_per_tile", 1);
-  facts.instructionMemoryWords = r.integer(arch, "instruction_memory_words", 1, INT_MAX);
+  tables.bf16RegistersPerTile = r.integer(arch, "bf16_registers_per_tile", kPositiveInteger);
+  facts.instructionMemoryWords = r.integer(arch, "instruction_memory_words", kPositiveInteger);
   if (facts.instructionMemoryWords != 32768)
     r.fail("unsupported architecture instruction_memory_words");
 }
@@ -180,26 +194,26 @@ void readGeometry(Reader &r, const Object &root, TimingTables &tables,
 void readDMA(Reader &r, const Object &root, ModelDMATiming &dma) {
   const Object *timing = r.object(&root, "dma_timing");
   const Object *startup = r.object(timing, "startup_cycles");
-  dma.beatBytes = r.integer(timing, "beat_bytes", 1);
-  dma.maxBytes = r.integer(timing, "max_transfer_bytes", 1);
+  dma.beatBytes = r.integer(timing, "beat_bytes", kPositiveInteger);
+  dma.maxBytes = r.integer(timing, "max_transfer_bytes", kTransferBytes);
   if (dma.beatBytes != kLineBytes) r.fail("unsupported DMA beat geometry");
-  dma.loadStartup = r.integer(startup, "load", 1);
-  dma.storeStartup = r.integer(startup, "store", 1);
-  dma.retireToWait = r.integer(timing, "retire_to_wait_issue_cycles", 1);
-  double maximum = r.integer(timing, "min_latency", 1, INT_MAX);
+  dma.loadStartup = r.integer(startup, "load", kPositiveTimingValue);
+  dma.storeStartup = r.integer(startup, "store", kPositiveTimingValue);
+  dma.retireToWait = r.integer(timing, "retire_to_wait_issue_cycles", kPositiveTimingValue);
+  double maximum = r.integer(timing, "min_latency", kPositiveInteger);
   const Array *curves = timing ? timing->getArray("curves") : nullptr;
   if (!curves || curves->empty()) r.fail("missing DMA curves");
   else for (const auto &value : *curves) {
     const Object *curve = value.getAsObject();
     for (const char *key : {"unloaded_latency_cycles", "cycles_per_beat"}) {
       auto number = curve ? curve->getNumber(key) : std::nullopt;
-      if (!number || !std::isfinite(*number) || *number <= 0 || *number > INT_MAX - 4096)
+      if (!number || !std::isfinite(*number) || *number <= 0 || *number > INT_MAX - kMaximumTimingValue)
         r.fail(std::string("invalid DMA curve ") + key);
       else maximum = std::max(maximum, *number);
     }
   }
   // Compiler policy: bound every beat by the slowest curve plus issue spacing.
-  int interval = r.integer(timing, "issue_interval_cycles", 1);
+  int interval = r.integer(timing, "issue_interval_cycles", kPositiveTimingValue);
   if (maximum > INT_MAX - interval) r.fail("DMA per-beat bound exceeds cycle domain");
   else dma.perBeatBound = int(std::ceil(maximum)) + interval;
   if (dma.maxBytes % std::max(dma.beatBytes, 1))
@@ -213,7 +227,7 @@ void readDMA(Reader &r, const Object &root, ModelDMATiming &dma) {
 void readVpu(Reader &r, const Object *resources, TimingTables &tables) {
   const Object *capacity = r.object(resources, "capacity");
   const Object *vpu = r.object(resources, "vpu");
-  tables.vpuIssueSlots = r.integer(capacity, "vpu_slots", 1, 3);
+  tables.vpuIssueSlots = r.integer(capacity, "vpu_slots", kVpuSlots);
   auto names = [&](const Array *array) {
     std::vector<std::string> result;
     if (!array) r.fail("missing VPU operation set");
@@ -233,7 +247,7 @@ void readVpu(Reader &r, const Object *resources, TimingTables &tables) {
   if (!groups) r.fail("missing VPU logic groups");
   else for (const auto &group : *groups) tables.vpuLogicGroups.push_back(names(group.getAsArray()));
   const Object *scalar = r.object(resources, "scalar_lsu");
-  tables.scalarLoadGap = r.integer(scalar, "load_response_gap", 1);
+  tables.scalarLoadGap = r.integer(scalar, "load_response_gap", kPositiveTimingValue);
 }
 
 void readWeights(Reader &r, const Object &root, const Object *resources,
@@ -242,17 +256,17 @@ void readWeights(Reader &r, const Object &root, const Object *resources,
   const Object *mxu = r.object(resources, "mxu");
   const Object *ports = r.object(mxu, "ports");
   const Object *weights = r.object(r.object(&root, "mxu_weight_timing"), "engines");
-  int sequencer = r.integer(capacity, "sequencer_cycles", 1);
+  int sequencer = r.integer(capacity, "sequencer_cycles", kPositiveTimingValue);
   for (int i = 0; i < 2; ++i) {
     auto &rules = tables.mxu[i];
     std::string engine = "mxu" + std::to_string(i);
-    rules.computeCapacity = r.integer(capacity, engine + "_compute", 1, 64);
+    rules.computeCapacity = r.integer(capacity, engine + "_compute", kMxuCapacity);
     rules.sourcePorts = rules.resultPorts = {0, sequencer - 1};
     rules.weightOverwriteAfterCompute =
-        i == 0 ? r.integer(mxu, "mxu0_weight_drain_last") + 1 : sequencer;
+        i == 0 ? r.integer(mxu, "mxu0_weight_drain_last", kTimingValue) + 1 : sequencer;
     rules.weightUseAfterPush = sequencer;
-    rules.accumulatorUseAfterPush = r.integer(mxu, "acc_push_last") + 1;
-    rules.accumulatorForwardGap = r.integer(mxu, "accumulator_forward_gap", 1);
+    rules.accumulatorUseAfterPush = r.integer(mxu, "acc_push_last", kTimingValue) + 1;
+    rules.accumulatorForwardGap = r.integer(mxu, "accumulator_forward_gap", kPositiveTimingValue);
     rules.computePorts = r.ports(ports, "compute");
     rules.pushBf16Ports = r.ports(ports, "push_bf16");
     rules.popFp8Ports = r.ports(ports, "pop_fp8");
@@ -264,7 +278,8 @@ void readWeights(Reader &r, const Object &root, const Object *resources,
     std::vector<std::pair<int, int>> ages;
     for (const auto &value : *rows) {
       const Object *row = value.getAsObject();
-      ages.emplace_back(r.integer(row, "first_age"), r.integer(row, "last_age"));
+      ages.emplace_back(r.integer(row, "first_age", kTimingValue),
+                        r.integer(row, "last_age", kTimingValue));
     }
     int step = ages[1].first - ages[0].first;
     if (step < 0) r.fail("negative MXU weight row step");
