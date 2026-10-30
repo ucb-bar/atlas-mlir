@@ -6,16 +6,10 @@ An MXU operand instead needs each row's left and right 16-byte halves together.
 The compiler repairs this layout in registers when a free accumulator is
 available, retaining the scalar VMEM interleave as a fallback.
 
-Selection groups two logical rows per PACK relayout iteration for every
-provider. Direct lowering defaults to two rows for the model provider and one
-for the default provider; `pack-relayout-rows` can select either shape. This is
-compiler policy to reduce loop control overhead. Both forms copy the same 256
-words through two temporary registers. Virtual costs use the same grouped body
-and extracted scalar load intervals; generated buffer checks verify every
-copied word.
-
-The analysis and measurements below describe the default provider's one-row
-loop.
+The scalar fallback copies one logical row per iteration for every provider.
+Virtual costs use the same body and extracted scalar load intervals; generated
+buffer checks verify every copied word. The analysis and measurements below
+describe this one-row loop.
 
 ## Register-only repair
 
@@ -59,17 +53,17 @@ Direct virtual-to-machine lowering also retains the scalar fallback. After the
 repair, the scheduled pipeline runs virtual scheduling again with the selected
 timing provider and random seed, using the same automatic lookahead selection
 as the first pass. An explicit search order is preserved through its expansion,
-and graph output retains the prepared node IDs used by group search. Spilling and allocation own the new BF16 value and accumulator
-lifetime.
+and graph output retains the prepared node IDs used by group search. Spilling
+and allocation own the new BF16 value and accumulator lifetime.
 
 ## Scalar fallback
 
 The fallback applies `vpu_pack`, a raw-result VSTORE, the scalar interleave
-below, and a VLOAD. The default provider copies one row per iteration: eight
+below, and a VLOAD. Every provider copies one row per iteration: eight
 words, 32 iterations, 16-byte source-half steps and a 32-byte destination step.
-Selection groups two rows as described above. The mandatory one-row scalar
-stream branches back 27 instruction words, with a B immediate of -54. [Explicit
-DMA may remain in flight across the loop](pack-dma-overlap.md).
+The mandatory scalar stream branches back 27 instruction words, with a B
+immediate of -54. [Explicit DMA may remain in flight across the
+loop](pack-dma-overlap.md).
 
 ## Original serial loop
 

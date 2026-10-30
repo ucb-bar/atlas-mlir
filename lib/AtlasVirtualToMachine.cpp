@@ -1,6 +1,5 @@
 #include "llvm/ADT/Twine.h"
 #include "Atlas/AtlasModelTables.h"
-#include "Atlas/AtlasPackLoop.h"
 #include "Atlas/AtlasVirtualToMachine.h"
 #include "Atlas/AtlasBoundaryABI.h"
 #include "Atlas/AtlasImmutableWeightReuse.h"
@@ -45,10 +44,9 @@ namespace {
 class VirtualPlanner {
 public:
   VirtualPlanner(ModuleOp module, func::FuncOp function,
-                 ArrayRef<unsigned> mregRanks = {}, unsigned packRelayoutRows = 1)
+                 ArrayRef<unsigned> mregRanks = {})
       : module(module), function(function), attrs(module.getContext()),
-        emitter(module.getContext()), allocation(mregRanks),
-        packRelayoutRows(packRelayoutRows) {}
+        emitter(module.getContext()), allocation(mregRanks) {}
 
   LogicalResult plan() {
     if (failed(readABI()))
@@ -594,41 +592,36 @@ private:
     materializeScalar(fixed().packRowsReg, kAtlasMregRows, loc);
     unsigned loop = newLabel();
     mark(loop);
-    // Group adjacent logical rows while retaining the same two temporary
-    // registers. The target geometry defines every byte offset; grouping is
-    // compiler policy, not a timing fact. Stores of one row pipeline behind
-    // loads of the next, so the scalar load path stays occupied across rows.
+    // Each row pipelines stores behind the next copy's load, keeping the
+    // scalar load path occupied with two temporaries. Advance each pointer
+    // after its final word and the counter during the first load's busy cycles.
     static_assert(kPackRelayoutRowWords == 8,
                   "the copy loop moves two halves of four words a row");
-    const unsigned copies = packRelayoutRows * kPackRelayoutRowWords;
-    auto rowOf = [&](unsigned copy) { return copy / kPackRelayoutRowWords; };
-    auto wordOf = [&](unsigned copy) { return (copy % kPackRelayoutRowWords) / 2; };
     auto copyLoad = [&](unsigned copy) {
       emit<ScalarLoadOp>(loc, "lw", /*dst=*/fixed().packTemporaryRegs[copy % 2],
-          /*base=*/fixed().packSourceRegs[copy % 2],
-          /*offset=*/rowOf(copy) * (kAtlasMregRowBytes / 2) + sizeof(uint32_t) * wordOf(copy));
+          /*base=*/fixed().packSourceRegs[copy % 2], /*offset=*/sizeof(uint32_t) * (copy / 2));
     };
     auto copyStore = [&](unsigned copy) {
       emit<ScalarStoreOp>(loc, "sw", /*src=*/fixed().packTemporaryRegs[copy % 2],
           /*base=*/fixed().packDestinationReg,
-          /*offset=*/rowOf(copy) * kAtlasMregRowBytes + sizeof(uint32_t) * wordOf(copy) +
-                     (kAtlasMregRowBytes / 2) * (copy % 2));
+          /*offset=*/sizeof(uint32_t) * (copy / 2) + (kAtlasMregRowBytes / 2) * (copy % 2));
     };
     auto advance = [&](unsigned reg, int32_t step) {
       emit<ALUImmOp>(loc, "addi", /*dst=*/reg, /*src=*/reg, /*immediate=*/step);
     };
     copyLoad(0);
-    advance(fixed().packRowReg, packRelayoutRows);
-    for (unsigned copy = 1; copy < copies; ++copy) {
+    advance(fixed().packRowReg, 1);
+    for (unsigned copy = 1; copy < kPackRelayoutRowWords; ++copy) {
       copyLoad(copy);
       copyStore(copy - 1);
-      if (copy >= copies - 2)
-        advance(fixed().packSourceRegs[copy % 2], packRelayoutRows * (kAtlasMregRowBytes / 2));
+      if (copy >= kPackRelayoutRowWords - 2)
+        advance(fixed().packSourceRegs[copy % 2], kAtlasMregRowBytes / 2);
     }
-    copyStore(copies - 1);
-    advance(fixed().packDestinationReg, packRelayoutRows * kAtlasMregRowBytes);
+    copyStore(kPackRelayoutRowWords - 1);
+    advance(fixed().packDestinationReg, kAtlasMregRowBytes);
     redirect(emit<BranchOp>(loc, "blt", /*lhs=*/fixed().packRowReg,
-                            /*rhs=*/fixed().packRowsReg, /*offset_bytes=*/0), loop);
+                            /*rhs=*/fixed().packRowsReg, /*offset_bytes=*/0),
+             loop);
     materializeScalar(fixed().inputBaseReg, fixed().packRelayoutWord, loc);
     emit<VLoadOp>(loc, /*dst=*/fp8(pack.getResult()), /*base=*/fixed().inputBaseReg, /*offset=*/0, "raw");
     return success();
@@ -954,7 +947,6 @@ private:
   std::vector<Operation *> planned;
   SmallVector<std::pair<size_t, unsigned>> redirects;
   VirtualAllocationPlan allocation;
-  unsigned packRelayoutRows;
   llvm::DenseMap<Value, std::optional<uint32_t>> constantAddresses;
   llvm::DenseMap<Block *, unsigned> blockLabels;
   llvm::DenseMap<unsigned, size_t> labelPC;
@@ -1000,8 +992,6 @@ struct LowerAtlasVirtualToMachinePass
       *this, "provider", llvm::cl::desc("Timing provider for model selection candidates"), llvm::cl::init("")};
   Option<std::string> mregRanks{
       *this, "mreg-ranks", llvm::cl::desc("Cyclic free MREG color ranks"), llvm::cl::init("")};
-  Option<unsigned> packRelayoutRows{*this, "pack-relayout-rows",
-      llvm::cl::desc("PACK rows per iteration (0 keeps provider policy)"), llvm::cl::init(0)};
 
   void runOnOperation() override {
     ModuleOp module = getOperation();
@@ -1032,13 +1022,8 @@ struct LowerAtlasVirtualToMachinePass
     auto selected = selectAtlasTimingProvider(module, provider.getValue());
     if (failed(selected))
       return signalPassFailure();
-    const bool modelProvider = selected->model != nullptr;
     reuseAtlasImmutableWeights(function);
-    if (packRelayoutRows && packRelayoutRows != 1 && packRelayoutRows != 2)
-      return refuse("pack-relayout-rows must be 0, 1, or 2");
-    unsigned rows = packRelayoutRows ? packRelayoutRows.getValue() :
-        atlasPackRelayoutRowsPerIteration(modelProvider);
-    VirtualPlanner planner(module, function, registerRanks, rows);
+    VirtualPlanner planner(module, function, registerRanks);
     if (allocationReport.empty()) {
       if (failed(planner.plan()) || failed(planner.materialize()))
         signalPassFailure();
@@ -1092,12 +1077,10 @@ void mlir::atlas::registerLowerAtlasVirtualToMachinePass() {
 
 std::unique_ptr<Pass>
 mlir::atlas::createLowerAtlasVirtualToMachinePass(
-    StringRef allocationReport, StringRef provider, StringRef mregRanks,
-    unsigned packRelayoutRows) {
+    StringRef allocationReport, StringRef provider, StringRef mregRanks) {
   auto pass = std::make_unique<LowerAtlasVirtualToMachinePass>();
   pass->allocationReport = allocationReport.str();
   pass->provider = provider.str();
   pass->mregRanks = mregRanks.str();
-  pass->packRelayoutRows = packRelayoutRows;
   return pass;
 }

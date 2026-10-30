@@ -10,8 +10,7 @@ void registerScheduleAtlasVirtualPass();
 std::unique_ptr<Pass> createScheduleAtlasVirtualPass(
     llvm::StringRef provider = "", int randomSeed = -1,
     llvm::StringRef orderFile = "", llvm::StringRef graphOutput = "",
-    unsigned packRelayoutRows = 0, bool orderApplied = false,
-    bool rememberOptions = false);
+    bool orderApplied = false, bool rememberOptions = false);
 
 } // namespace mlir::atlas
 

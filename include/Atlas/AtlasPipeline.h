@@ -7,8 +7,6 @@
 namespace mlir::atlas {
 
 struct AtlasCompileOptions : PassPipelineOptions<AtlasCompileOptions> {
-  Option<unsigned> packRelayoutRows{*this, "pack-relayout-rows",
-      llvm::cl::desc("PACK rows per iteration (0 keeps provider policy)"), llvm::cl::init(0)};
   Option<bool> waitReusedDMASlots{*this, "wait-reused-dma-slots",
       llvm::cl::desc("Wait before reusing DMA command slots"), llvm::cl::init(false)};
   Option<std::string> mregRanks{*this, "mreg-ranks", llvm::cl::desc("Free MREG ranks"), llvm::cl::init("")};

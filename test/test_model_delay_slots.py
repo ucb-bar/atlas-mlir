@@ -16,9 +16,6 @@ from test_stream_scheduling import branch_target, issue_cycles
 from test_virtual_scheduling import F, S, T, function, inp, outp, start
 
 
-GROUPED_ROWS = 2  # kPackRelayoutUnrollFactor, compiler policy
-
-
 @requires_model_evidence
 class ModelDelaySlotTest(unittest.TestCase):
     def setUp(self) -> None:
@@ -78,25 +75,25 @@ class ModelDelaySlotTest(unittest.TestCase):
         self.assertEqual(lowered.returncode, 0, lowered.stderr)
         timing = json.loads((facts / "model-timing.json").read_text())
         geometry = timing["architecture"]
-        words = GROUPED_ROWS * geometry["mreg_row_bytes"] // geometry["scalar_word_bytes"]
+        words = geometry["mreg_row_bytes"] // geometry["scalar_word_bytes"]
         updates = stream(lowered.stdout)
         loop = updates[branch_target(updates):next(i for i, (op, _, _) in enumerate(updates) if op == "branch")]
         steps = [fields for op, fields, _ in loop if op == "alu_imm"]
-        self.assertEqual(sum(f"immediate = {GROUPED_ROWS} : i32" in fields for fields in steps), 1)
-        self.assertEqual(sum(f"immediate = {GROUPED_ROWS * geometry['mreg_row_bytes'] // 2} : i32" in fields
+        self.assertEqual(sum("immediate = 1 : i32" in fields for fields in steps), 1)
+        self.assertEqual(sum(f"immediate = {geometry['mreg_row_bytes'] // 2} : i32" in fields
                              for fields in steps), 2)
         scheduled = self.schedule(lowered.stdout)
         lines = scheduled.splitlines()
         branch_line = next(i for i, line in enumerate(lines)
                            if '"atlas.branch"' in line and 'cfg_helper = "pack"' in line)
         self.assertIn('"atlas.alu_imm"', lines[branch_line + 1])
-        self.assertIn(f"immediate = {GROUPED_ROWS * geometry['mreg_row_bytes']} : i32", lines[branch_line + 1])
+        self.assertIn(f"immediate = {geometry['mreg_row_bytes']} : i32", lines[branch_line + 1])
         ops = stream(scheduled)
         body = ops[branch_target(ops):next(i for i, (op, _, _) in enumerate(ops) if op == "branch") + 2]
         self.assertEqual(sum(op == "scalar_load" for op, _, _ in body), words)
         self.assertEqual(sum(op == "scalar_store" for op, _, _ in body), words)
-        # All copy loads, including the cross-row pair, sustain the derived
-        # scalar result age, keeping the relayout loop pipelined.
+        # Consecutive copy loads sustain the derived scalar result age,
+        # keeping the one-row relayout loop pipelined.
         load_timing = next(row for row in timing["op_timing"] if row["name"] == "lw")
         load_age = load_timing["events"]["load_write"]["last_age"]
         issues = issue_cycles(body)

@@ -8,8 +8,7 @@ void registerLowerAtlasVirtualToMachinePass();
 std::unique_ptr<Pass>
 createLowerAtlasVirtualToMachinePass(
     llvm::StringRef allocationReport = "", llvm::StringRef provider = "",
-    llvm::StringRef mregRanks = "",
-    unsigned packRelayoutRows = 0);
+    llvm::StringRef mregRanks = "");
 }
 
 #endif

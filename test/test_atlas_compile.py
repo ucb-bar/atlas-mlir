@@ -37,7 +37,7 @@ class AtlasCompileTest(unittest.TestCase):
     def test_relayout_schedule_keeps_candidate_options(self) -> None:
         facts = Path(os.environ["ATLAS_TEST_MODEL_FACTS"])
         evidence = f"--select-atlas-model-evidence=facts={facts}"
-        for control in ("pack-relayout-rows=1", "random-seed=7"):
+        for control in ("random-seed=-1", "random-seed=7"):
             result = run("atlas-opt", PROGRAMS[1].read_text(), evidence,
                          f"--atlas-compile=provider=model {control}",
                          "--dump-pass-pipeline")

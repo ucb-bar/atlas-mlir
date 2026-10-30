@@ -7,7 +7,6 @@
 #include "Atlas/AtlasVirtualScheduling.h"
 #include "Atlas/AtlasImmutableWeightReuse.h"
 #include "Atlas/AtlasOps.h"
-#include "Atlas/AtlasPackLoop.h"
 #include "Atlas/AtlasSpilling.h"
 #include "Atlas/AtlasTarget.h"
 #include "Atlas/AtlasStream.h"
@@ -366,7 +365,7 @@ int64_t scalarSlotCycles(bool store, int64_t word,
 }
 
 Cost packCost(const timing::TimingProvider &provider) {
-  // Pack, then relayout the FP8 tile through VMEM in the same grouped-row
+  // Pack, then relayout the FP8 tile through VMEM in the same one-row
   // scalar loop as lowerPack. Each store hides behind the next word's load,
   // so a row takes a load per load-path interval, then the last word's load
   // and store, and the back-edge, whose delay slot takes the destination step.
@@ -375,17 +374,14 @@ Cost packCost(const timing::TimingProvider &provider) {
   const auto &lw = provider.machineTiming.at("lw");
   const auto &sw = provider.machineTiming.at("sw");
   const auto &vload = provider.machineTiming.at("vload");
-  const int groupedRows = provider.packRelayoutRows ? provider.packRelayoutRows :
-      atlasPackRelayoutRowsPerIteration(provider.model != nullptr);
-  const int rowWords = kAtlasMregRowBytes / 4 * groupedRows;
-  const int rows = kAtlasMregRows / groupedRows;
+  const int rowWords = kAtlasMregRowBytes / 4;
   // Policy: this proposal omits general scalar setup and assumes the
   // destination increment can fill the slot when filling is enabled.
   // The physical scheduler separately proves an actual available filler.
   const int rowControl = provider.frontendSpacing.successorGap() +
       (timing::fillsDelaySlots(provider) ? 0 : provider.frontendSpacing.ordinaryGap);
   int64_t row = int64_t(rowWords - 1) * lw.interval + lw.latency + sw.latency + rowControl;
-  return blocking(Unit::Lsu, int64_t(pack.latency) + vstore.latency + rows * row + vload.latency);
+  return blocking(Unit::Lsu, int64_t(pack.latency) + vstore.latency + kAtlasMregRows * row + vload.latency);
 }
 
 // An operation costs the machine operations it lowers to, as they issue in
@@ -1005,14 +1001,12 @@ struct ScheduleAtlasVirtualPass
     if (!options)
       return success();
     auto savedProvider = options.getAs<StringAttr>("provider");
-    auto savedRows = options.getAs<IntegerAttr>("pack_relayout_rows");
     auto savedSeed = options.getAs<IntegerAttr>("random_seed");
     auto savedOrder = options.getAs<StringAttr>("order_file");
     auto savedGraph = options.getAs<StringAttr>("graph_output");
-    if (!savedProvider || !savedRows || !savedSeed || !savedOrder || !savedGraph)
+    if (!savedProvider || !savedSeed || !savedOrder || !savedGraph)
       return module.emitError("virtual schedule options are incomplete");
     provider = savedProvider.str();
-    packRelayoutRows = savedRows.getInt();
     randomSeed = savedSeed.getInt();
     orderFile = savedOrder.str();
     graphOutput = savedGraph.str();
@@ -1023,7 +1017,6 @@ struct ScheduleAtlasVirtualPass
     Builder builder(module.getContext());
     module->setAttr(scheduleOptions, builder.getDictionaryAttr({
         builder.getNamedAttr("provider", builder.getStringAttr(selectedProvider)),
-        builder.getNamedAttr("pack_relayout_rows", builder.getI64IntegerAttr(packRelayoutRows)),
         builder.getNamedAttr("random_seed", builder.getI64IntegerAttr(randomSeed)),
         builder.getNamedAttr("order_file", builder.getStringAttr(orderFile)),
         builder.getNamedAttr("graph_output", builder.getStringAttr(graphOutput))}));
@@ -1054,9 +1047,6 @@ struct ScheduleAtlasVirtualPass
       *this, "graph-output", llvm::cl::desc("Write dependence graphs and selected orders as JSON"),
       llvm::cl::init("")};
 
-  Option<unsigned> packRelayoutRows{*this, "pack-relayout-rows",
-      llvm::cl::desc("PACK rows per iteration (0 keeps provider policy)"), llvm::cl::init(0)};
-
   void runOnOperation() override {
     ModuleOp module = getOperation();
     if (orderApplied && failed(restoreOptions(module)))
@@ -1069,9 +1059,6 @@ struct ScheduleAtlasVirtualPass
       return signalPassFailure();
     if (!orderFile.empty() && randomSeed >= 0)
       return refuse("order-file excludes random-seed");
-    if (packRelayoutRows && packRelayoutRows != 1 && packRelayoutRows != 2)
-      return refuse("pack-relayout-rows must be 0, 1, or 2");
-    selected->packRelayoutRows = packRelayoutRows;
     std::optional<llvm::json::Value> requested;
     if (!orderFile.empty() && !orderApplied) {
       auto file = llvm::MemoryBuffer::getFile(orderFile);
@@ -1187,14 +1174,13 @@ void mlir::atlas::registerScheduleAtlasVirtualPass() {
 
 std::unique_ptr<Pass> mlir::atlas::createScheduleAtlasVirtualPass(
     StringRef provider, int randomSeed, StringRef orderFile,
-    StringRef graphOutput, unsigned packRelayoutRows, bool orderApplied,
+    StringRef graphOutput, bool orderApplied,
     bool rememberOptions) {
   auto pass = std::make_unique<ScheduleAtlasVirtualPass>();
   pass->provider = provider.str();
   pass->randomSeed = randomSeed;
   pass->orderFile = orderFile.str();
   pass->graphOutput = graphOutput.str();
-  pass->packRelayoutRows = packRelayoutRows;
   pass->orderApplied = orderApplied;
   pass->rememberOptions = rememberOptions;
   return pass;

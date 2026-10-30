@@ -56,7 +56,6 @@ struct TimingProvider {
   std::string id;
   // Add recovery guidance to a new model refusal.
   std::string diagnostic(llvm::StringRef error) const;
-  unsigned packRelayoutRows = 0; // Explicit compiler code-size policy override.
   FrontendSpacing frontendSpacing;
   std::shared_ptr<const TimingTables> model;
   std::map<std::string, MachineOpTiming> machineTiming;

@@ -80,7 +80,7 @@ class ModelSelectionTest(SelectionFixture, unittest.TestCase):
         self.assertEqual(candidate_options(Candidate(mreg_ranks=(31, 0, 7),
                                                       wait_placement="source"), "model", True),
                          ["--atlas-compile-candidate=provider=model spill=true allocation-report=allocation.json "
-                          "pack-relayout-rows=2 wait-reused-dma-slots=true "
+                          "wait-reused-dma-slots=true "
                           "wait-placement=source mreg-ranks='31,0,7'"])
         self.assertNotIn("wait-placement", candidate_options(Candidate(), "model", True)[0])
         self.assertIn("order-file=order.json", candidate_options(Candidate(order_file=((0,),)), "model", True)[0])
@@ -204,8 +204,6 @@ class CandidateControlsTest(unittest.TestCase):
         source = (ROOT / "test/examples/virtual_bf16_shared_relu.mlir").read_text()
         cases = [("--schedule-atlas-virtual=order-file=missing.json", "cannot read order-file"),
                  ("--schedule-atlas-stream=wait-placement=unknown", "wait-placement must be")]
-        cases += [(f"--{stage}=pack-relayout-rows=3", "pack-relayout-rows must be")
-                  for stage in ("schedule-atlas-virtual", "lower-atlas-virtual-to-machine")]
         cases += [(f"--lower-atlas-virtual-to-machine=provider=model mreg-ranks='{ranks}'",
                    "mreg-ranks must contain") for ranks in ("-1", "1,,2", "4294967296", "unknown")]
         for option, diagnostic in cases:

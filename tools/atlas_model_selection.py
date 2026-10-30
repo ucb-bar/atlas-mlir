@@ -62,7 +62,7 @@ def evidence_option(model_facts: Path | None = None) -> list[str]:
 
 def candidate_options(candidate: Candidate, provider: str, spill: bool, *, graph_output: bool = False) -> list[str]:
     options = [f"provider={provider}", f"spill={str(spill).lower()}", "allocation-report=allocation.json",
-               "pack-relayout-rows=2", "wait-reused-dma-slots=true"]
+               "wait-reused-dma-slots=true"]
     for field in fields(candidate):
         value = getattr(candidate, field.name)
         if value == field.default:

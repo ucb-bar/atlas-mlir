@@ -78,11 +78,11 @@ The compiler chooses these policies and structural mappings:
   up maximum curve latency/per-beat cost and issue interval. The maximum
   includes the configured minimum latency. Estimates serialize with a
   one-cycle gap; the extracted retire-to-wait age places the proposed wait.
-- Selection passes two rows per PACK relayout iteration and waits before
-  reuse of an eight-slot DMA command-ring entry for every provider. The ring
-  wait is an RTL rule. PACK cost omits general scalar setup and assumes the
-  destination increment fills a delay slot when filling is enabled; physical
-  scheduling proves that an actual filler is available.
+- PACK relayout copies one row per iteration for every provider. Selection
+  waits before reuse of an eight-slot DMA command-ring entry for every
+  provider; this wait is an RTL rule. PACK cost omits general scalar setup and
+  assumes the destination increment fills a delay slot when filling is enabled;
+  physical scheduling proves that an actual filler is available.
 - Native scoring stops at 200,000 cycles. Same-unit interval search stops
   at 100,000 cycles, and model program scope is at most 32,768 instructions.
 - The synthetic `fifo43` target uses latency 43, one cycle per beat, and four
