@@ -39,7 +39,10 @@ CTest runs the portable tests with no hardware. Tests that run the RTL need
 `ATLAS_RTL_ROOT`, `ATLAS_MODEL_ROOT`, `ATLAS_ASSEMBLER_ROOT`, `ATLAS_ARC_MODEL`,
 `ATLAS_ARC_STATE`, `ATLAS_MODELIR_ROOT`, and `ATLAS_LLVM_BIN`; without them they
 skip. To run the Python tests against another build, set `ATLAS_OOT_BIN_DIR` to
-its `bin` directory.
+its `bin` directory. Model tests use `ATLAS_DERIVE_MODEL_ROOT` for the
+`npu_model` checkout and `ATLAS_TEST_MODEL_FACTS` for regenerated timing facts;
+see [model testing](docs/model-timing.md#testing). Set these before configuring
+CMake so CTest forwards them to the suites.
 
 `ATLAS_ASSEMBLER_ROOT` selects the directory containing `atlas_asm.py`.
 The shared test helper runs canonical npu_model assembly in a Python 3.14

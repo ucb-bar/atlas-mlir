@@ -98,3 +98,5 @@ foreach(suite buffer-contract cfg-contract dma-allocation dma-helper mxu-allocat
     pack-loop source-memory-contract tile-contract timing-provider model-tables)
   add_test(NAME atlas-${suite} COMMAND atlas-verification-test ${suite})
 endforeach()
+
+atlas_forward_model_test_environment()

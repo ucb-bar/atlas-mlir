@@ -92,6 +92,28 @@ MXU weight windows, DMA estimates, and concurrent issue rely on extraction
 and compiler checks. Source files recorded in the facts are checked again
 before output is written. A changed contract refuses output.
 
+## Testing
+
+Regenerate facts from the checkout used for testing, then configure CTest with
+both paths set:
+
+```sh
+export ATLAS_DERIVE_MODEL_ROOT=/path/to/npu_model
+python -B tools/atlas_model_facts.py --npu-model "$ATLAS_DERIVE_MODEL_ROOT" \
+  --out /path/to/new-facts
+export ATLAS_TEST_MODEL_FACTS=/path/to/new-facts
+cmake -S . -B build
+ctest --test-dir build --output-on-failure
+```
+
+`ATLAS_DERIVE_MODEL_ROOT` enables extraction, scorer, and spill execution tests.
+`ATLAS_TEST_MODEL_FACTS` enables the native model-table and timing-provider
+checks and Python suites marked `requires_model_evidence`, including model
+selection and pipeline execution. Without these inputs, those checks skip;
+the portable tests still run. CMake forwards variables set at configuration
+time to both native and Python tests. Direct Python test runs read the same
+environment variables.
+
 ## What comes from `npu_model` and what the compiler chooses
 
 Scalar reads and writes at age zero follow the guarded issue-edge methods.

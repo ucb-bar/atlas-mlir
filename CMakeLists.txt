@@ -21,6 +21,16 @@ add_subdirectory(tools)
 add_subdirectory(runtime)
 
 enable_testing()
+# Capture optional model test inputs in each directory that defines suites.
+function(atlas_forward_model_test_environment)
+  get_property(atlas_tests DIRECTORY PROPERTY TESTS)
+  foreach(variable ATLAS_DERIVE_MODEL_ROOT ATLAS_TEST_MODEL_FACTS)
+    if(DEFINED ENV{${variable}})
+      set_property(TEST ${atlas_tests} APPEND PROPERTY
+        ENVIRONMENT "${variable}=$ENV{${variable}}")
+    endif()
+  endforeach()
+endfunction()
 add_subdirectory(test)
 # One test per Python test module, run from test/ as discovery would, with the
 # native binding package importable. Modules of plain test functions use
@@ -41,3 +51,4 @@ foreach(test_file IN LISTS atlas_python_tests)
     ENVIRONMENT ATLAS_OOT_BIN_DIR=$<TARGET_FILE_DIR:atlas-opt>
     ENVIRONMENT_MODIFICATION PYTHONPATH=path_list_prepend:${PROJECT_SOURCE_DIR}/python)
 endforeach()
+atlas_forward_model_test_environment()
