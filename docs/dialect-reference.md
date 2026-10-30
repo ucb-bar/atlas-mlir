@@ -162,7 +162,7 @@ Scheduling and timing passes take `provider=<id>` (default: the module's
 The `model` provider loads `model-timing.json` through
 `--select-atlas-model-evidence="facts=DIR"`, and timing, verification, and
 emission bind the selected file's bytes.
-See [NPU Model timing](model-timing.md) for regeneration, timing rules, DMA
+See [`npu_model` timing](model-timing.md) for regeneration, timing rules, DMA
 estimates, and native program selection.
 
 ## Machine operations
@@ -229,8 +229,8 @@ numerical policy, or availability across the stream.
 | `tools/export_llvm_handoff.py` | script | Build the full Atlas → LLVM → ELF bundle for the handoff examples. |
 | `tools/lower_atlas_program.py` | script | Run the stages of `--atlas-compile` and emission, keeping every stage's artifact. |
 
-By default, scheduling and timing passes use NPU Model's `rtl-match` rules, ported from
-atlas-compiler-experiments `3ae2b5d`, with DMA VMEM addresses counted in
+By default, scheduling and timing passes use the `builtin` rules, ported from
+npu-model's earlier `rtl-match` mode at atlas-compiler-experiments `3ae2b5d`, with DMA VMEM addresses counted in
 words; they are a model, not RTL timing. The LLVM handoff uses one
 inline-assembly block so stock LLVM, which has no Atlas instructions, cannot
 put code between a branch and its delay slot. There is no instruction

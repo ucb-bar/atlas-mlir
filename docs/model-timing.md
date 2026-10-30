@@ -1,11 +1,53 @@
-# NPU Model timing
+# `npu_model` timing
 
 A timing provider supplies the rules used by scheduling, waits, delay slots,
 and lowering. The default `builtin` provider uses handwritten rules ported
-from npu_model. The `model` provider reads facts extracted from a selected
-npu_model checkout. A candidate is one compiled program; selection runs
-candidates on npu_model and keeps the one with the fewest cycles. A profile
+from [`npu_model`](https://github.com/ucb-ee194-tapeout/npu_model). The `model` provider reads facts extracted from a selected
+`npu_model` checkout. A candidate is one compiled program; selection runs
+candidates on `npu_model` and keeps the one with the fewest cycles. A profile
 chooses the memory behavior used to score those programs.
+
+## How the pieces fit
+
+```
+npu_model checkout ──► tools/atlas_model_facts.py ──► model-timing.json
+  (source + config)      reads each unit's timing         │
+                         code, checks it natively         ▼
+                                              lib/AtlasModelTables.cpp
+                                              (load, check, TimingTables)
+                                                          │
+                                                          ▼
+source.mlir ──► compiler passes ◄── `model` timing provider
+                  │  (virtual scheduling, stream scheduling,
+                  │   DMA waits, delays, timing verification)
+                  ▼
+           candidate programs ──► tools/atlas_model_scorer.py ──► cycles
+                  ▲                (runs each on npu_model,           │
+                  │                 checks expected bytes)            │
+                  └────────── tools/atlas_model_selection.py ◄────────┘
+                               (keeps the fastest; program.hex)
+```
+
+1. Extraction. `tools/atlas_model_facts.py` reads a `npu_model` checkout.
+   The `tools/atlas_derive_*.py` modules interpret the ISA, architecture,
+   frontend, VPU, MXU, LSU and XLU, DMA, and curve memory code.
+   `tools/model-pins.json` records the source digests that interpretation was
+   reviewed against, so an unreviewed change refuses instead of producing
+   stale facts. Each of the 49 timing blocks is then run alone in
+   `npu_model` and compared with the extracted events before
+   `model-timing.json` is written.
+2. Loading. `lib/AtlasModelTables.cpp` reads the facts, checks them against
+   the compiler's target geometry and operand metadata, and builds
+   `TimingTables`.
+3. Compilation. With `provider=model`, the existing scheduling, DMA wait,
+   delay, and timing-verification passes do the work; the shared rules in
+   `lib/AtlasTiming.cpp` (footprints, dependences, reservations) read the
+   tables where the `builtin` provider uses its handwritten values.
+4. Selection. `tools/atlas_model_selection.py` compiles a fixed set of
+   candidate schedules, `tools/atlas_model_scorer.py` runs each one on
+   `npu_model` with the supplied expected regions, and the fastest exact
+   candidate is written out. `tools/lower_atlas_program.py --provider model`
+   is the entry point.
 
 ## Regenerating the facts
 
@@ -18,7 +60,7 @@ python -B tools/atlas_model_facts.py --npu-model PATH --out NEW_DIR
 The output directory must be new. The command writes `model-timing.json`,
 containing operation events and the parameters consumed by the compiler.
 Regenerate it when changing the model checkout or supported configuration.
-The tested checkout is npu_model revision
+The tested checkout is `npu_model` revision
 `74982e7c68bd28ba6505b4df37290f198102ccce`.
 
 One guard table, `tools/model-pins.json`, records digests for 17 modules and
@@ -34,7 +76,7 @@ re-pin with the single command
 It prints each changed pin and updates the tested revision. This explicit
 mode is separate from `--out`; regeneration never calls it or changes pins.
 
-| Guarded npu_model input | Facts the compiler consumes |
+| Guarded `npu_model` input | Facts the compiler consumes |
 | --- | --- |
 | ISA, Core, scalar unit, and fetch unit | Operand roles, issue ages, delays |
 | Architecture and bank mapping | Register spans, sizes, and VMEM layout |
@@ -50,7 +92,7 @@ MXU weight windows, DMA estimates, and concurrent issue rely on extraction
 and compiler checks. Source files recorded in the facts are checked again
 before output is written. A changed contract refuses output.
 
-## What comes from npu_model and what the compiler chooses
+## What comes from `npu_model` and what the compiler chooses
 
 Scalar reads and writes at age zero follow the guarded issue-edge methods.
 The loader checks scalar operand roles against compiler metadata. VPU operand
@@ -155,7 +197,7 @@ faults stop the search. Exhausting legal neighbors may end it before the limit.
 or group search. Fixed seeds and index-based ties make candidate order and
 winner independent of worker count and machine load.
 
-## Updating for NPU Model changes
+## Updating for `npu_model` changes
 
 Supported source changes are the `VPU_OP_LATENCIES` table and integer
 `ISSUE_SLOTS` from 1 through 3 in `npu_model/hardware/vpu.py`; and the
@@ -188,7 +230,7 @@ regions before using new facts. See
 
 ## Limits
 
-npu_model is a software model, so its cycles are not RTL measurements.
+`npu_model` is a software model, so its cycles are not RTL measurements.
 Isolated native event checks do not test arbitrary concurrent programs.
 Curve estimates ignore address effects, and close rankings can reverse on
 the SoC. Exactness depends on the chosen numerical policy and input regions.

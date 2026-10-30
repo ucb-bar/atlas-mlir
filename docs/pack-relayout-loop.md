@@ -1,69 +1,25 @@
 # PACK layout repair
 
-VPU PACK converts all 32 physical BF16 rows of the left-half register, then all
-32 rows of the right-half register. Its FP8 result contains two 512-byte halves.
-An MXU operand instead needs each row's left and right 16-byte halves together.
-The compiler repairs this layout in registers when a free accumulator is
-available, retaining the scalar VMEM interleave as a fallback.
-
-The scalar fallback copies one logical row per iteration for every provider.
-Virtual costs use the same body and extracted scalar load intervals; generated
-buffer checks verify every copied word. The analysis and measurements below
-describe this one-row loop.
+VPU PACK converts all 32 physical BF16 rows of the left-half register, then all 32 rows of the right-half register. Its FP8 result contains two 512-byte halves. An MXU operand instead needs each row's left and right 16-byte halves together. The compiler repairs this layout in registers when a free accumulator is available, retaining the scalar VMEM interleave as a fallback.
 
 ## Register-only repair
 
-The scheduled compile pipeline runs `--lower-atlas-pack-relayout` in the spill
-stage, after virtual scheduling and the first pressure recovery; the unscheduled
-pipeline runs the same spill stage in source order. Both rerun spilling
-afterward to allocate the new BF16 value. The pass preserves the existing order,
-finds the current state token and a free accumulator on either MXU, and replaces
-an admitted `virtual_pack_fp8` with:
+The scheduled compile pipeline runs `--lower-atlas-pack-relayout` in the spill stage, after virtual scheduling and the first pressure recovery; the unscheduled pipeline runs the same spill stage in source order. Both rerun spilling afterward to allocate the new BF16 value. The pass preserves the existing order, finds the current state token and a free accumulator on either MXU, and replaces an admitted `virtual_pack_fp8` with:
 
 1. `virtual_pack_roundtrip_bf16`, which applies the original VPU PACK quantization, then unit-scale UNPACK into a BF16 tile.
 2. A BF16 accumulator push followed by a unit-scale FP8 readout, which produces the canonical FP8 layout.
 
-The roundtrip operation lowers to PACK using reserved scratch register m62, then
-UNPACK using an allocated BF16 destination pair. The source and destination
-pairs exclude m62. UNPACK reverses PACK's physical-row arrangement; the
-accumulator push reads the restored logical BF16 tile, and the FP8 pop writes
-ordinary row-major bytes. The conversion needs no VMEM scratch or DRAM transfer.
-Scale registers are rematerialized for each conversion, and the CFG contract
-checks the source, temporary, result pair and both scales.
+The roundtrip operation lowers to PACK using reserved scratch register m62, then UNPACK using an allocated BF16 destination pair. The source and destination pairs exclude m62. UNPACK reverses PACK's physical-row arrangement; the accumulator push reads the restored logical BF16 tile, and the FP8 pop writes ordinary row-major bytes. The conversion needs no VMEM scratch or DRAM transfer. Scale registers are rematerialized for each conversion, and the CFG contract checks the source, temporary, result pair and both scales.
 
-The original PACK handles every exceptional BF16 input before UNPACK executes.
-Its output has exactly 239 possible codes: `0x00`, `0x08..0x7e`, and
-`0x88..0xfe`. It emits no negative zero, subnormal or `0x7f`/`0xff` code. Unit-
-scale UNPACK maps these codes to exact finite BF16 values; the MXU unit-scale
-converter maps them back byte-identically. In particular, the largest magnitude
-is 448, so the MXU converter's different treatment of rounded 480 cannot occur.
-Unlike direct guarded MXU conversion, this route needs no source-finiteness
-proof or clamping.
+The original PACK handles every exceptional BF16 input before UNPACK executes. Its output has exactly 239 possible codes: `0x00`, `0x08..0x7e`, and `0x88..0xfe`. It emits no negative zero, subnormal or `0x7f`/`0xff` code. Unit-scale UNPACK maps these codes to exact finite BF16 values; the MXU unit-scale converter maps them back byte-identically. In particular, the largest magnitude is 448, so the MXU converter's different treatment of rounded 480 cannot occur. Unlike direct guarded MXU conversion, this route needs no source-finiteness proof or clamping.
 
-Read-only analysis exhaustively checked all 65,536 BF16 encodings at each
-admitted source scale `122..128`, with zero converter mismatches. Direct
-functional ISA checks also covered both MXUs and all these encodings in
-asymmetric tiles: 896 chains and 917,504 compared output bytes, all identical.
-These checks establish the selected model's conversion and layout behavior; they
-do not exercise encoded decode or timed execution.
+Read-only analysis exhaustively checked all 65,536 BF16 encodings at each admitted source scale `122..128`, with zero converter mismatches. Direct functional ISA checks also covered both MXUs and all these encodings in asymmetric tiles: 896 chains and 917,504 compared output bytes, all identical. These checks establish the selected model's conversion and layout behavior; they do not exercise encoded decode or timed execution.
 
-If both MXUs' accumulator slots are occupied, the current block has no state
-token, or the scale is outside `122..128`, the pass leaves PACK unchanged.
-Direct virtual-to-machine lowering also retains the scalar fallback. After the
-repair, the scheduled pipeline runs virtual scheduling again with the selected
-timing provider and random seed, using the same automatic lookahead selection
-as the first pass. An explicit search order is preserved through its expansion,
-and graph output retains the prepared node IDs used by group search. Spilling
-and allocation own the new BF16 value and accumulator lifetime.
+If both MXUs' accumulator slots are occupied, the current block has no state token, or the scale is outside `122..128`, the pass leaves PACK unchanged. Direct virtual-to-machine lowering also retains the scalar fallback. The late placement avoids changing virtual scheduling priorities for tiled programs; the existing spilling and allocation machinery owns the new BF16 value and accumulator lifetime. The second virtual scheduling pass after the repair uses the same timing provider and search options as the first.
 
 ## Scalar fallback
 
-The fallback applies `vpu_pack`, a raw-result VSTORE, the scalar interleave
-below, and a VLOAD. Every provider copies one row per iteration: eight
-words, 32 iterations, 16-byte source-half steps and a 32-byte destination step.
-The mandatory scalar stream branches back 27 instruction words, with a B
-immediate of -54. [Explicit DMA may remain in flight across the
-loop](pack-dma-overlap.md).
+The fallback applies `vpu_pack`, a raw-result VSTORE, the scalar interleave below, and a VLOAD. The body copies one row per iteration: eight words, 32 iterations, 16-byte source-half steps and a 32-byte destination step. The mandatory scalar stream branches back 27 instruction words, with a B immediate of -54. [Explicit DMA may remain in flight across the loop](pack-dma-overlap.md).
 
 ## Original serial loop
 
