@@ -4,6 +4,7 @@
 #include "mlir/IR/Builders.h"
 #include "mlir/Pass/Pass.h"
 #include "llvm/ADT/StringExtras.h"
+#include "llvm/Support/FileSystem.h"
 #include "llvm/Support/JSON.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/Path.h"
@@ -600,8 +601,11 @@ struct SelectAtlasModelEvidencePass : PassWrapper<SelectAtlasModelEvidencePass, 
       return fail("select model facts before timing");
     if (module->hasAttr(kAtlasTimingProvider)) return fail("model selection cannot replace a retained timing provider");
     if (factsDirectory.empty()) return fail("facts requires a model facts directory");
+    llvm::SmallString<256> directory(factsDirectory.getValue());
+    if (auto error = llvm::sys::fs::make_absolute(directory))
+      return fail("cannot resolve model facts directory: " + error.message());
     auto file = [&](llvm::StringRef name) {
-      llvm::SmallString<256> path(factsDirectory.getValue());
+      llvm::SmallString<256> path(directory);
       llvm::sys::path::append(path, name);
       return path.str().str();
     };

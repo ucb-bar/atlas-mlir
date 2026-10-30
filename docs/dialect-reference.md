@@ -234,8 +234,9 @@ numerical policy, or availability across the stream.
 
 By default, scheduling and timing passes use the `builtin` rules, ported from
 `npu_model`'s earlier `rtl-match` mode at atlas-compiler-experiments `3ae2b5d`,
-with DMA VMEM addresses counted in words; they are a model, not RTL timing. The LLVM handoff uses one
-inline-assembly block so stock LLVM, which has no Atlas instructions, cannot
+with DMA VMEM addresses counted in words; they are a model, not RTL timing.
+The LLVM handoff uses one inline-assembly block so stock LLVM, which has no
+Atlas instructions, cannot
 put code between a branch and its delay slot. There is no instruction
 selector, whole-program allocator, Linalg-to-Atlas pass, or callable ABI here.
 

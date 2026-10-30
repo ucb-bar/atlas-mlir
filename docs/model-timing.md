@@ -196,8 +196,9 @@ second pass, including when the stages run as separate commands.
 
 The default scoring profile is `curve` for `model` and `fifo43` for `builtin`;
 `--profile curve|fifo43` changes the scoring memory behavior. `--guarded-pack`
-converts proven-finite PACK inputs through MXU0 for exact results. `--workers` controls parallel work. `--no-bank-candidates`
-skips the eight MREG rank vectors in full mode.
+converts proven-finite PACK inputs through MXU0 for exact results.
+`--workers` controls parallel work. `--no-bank-candidates` skips the eight MREG
+rank vectors in full mode.
 
 The output contains `selection.json`, `program.hex`, `program.json`,
 `allocation.json`, and `final.mlir`, plus `commands.txt`, `log.txt`, and each
@@ -208,7 +209,8 @@ Choose a fresh output directory to prevent stale program artifacts.
 
 1. Run `--atlas-compile-prepare` once, then use `--atlas-compile-candidate`
    for the default candidate and fixed random seeds. Try source-wait placement
-   from the current winner, then MREG rank vectors. Candidate numbers are assigned before parallel compilation.
+   from the current winner, then MREG rank vectors. Candidate numbers are
+   assigned before parallel compilation.
 2. Compile and verify every candidate. Execute legal words natively through
    ECALL, require drained engines and DMA, and check supplied DRAM regions.
 3. Keep the lowest cycle count, breaking ties by the earliest candidate

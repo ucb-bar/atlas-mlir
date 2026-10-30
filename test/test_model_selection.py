@@ -230,6 +230,24 @@ class ModelFactsBundleTest(unittest.TestCase):
         self.assertEqual(selected.returncode, 0, selected.stderr)
         self.assertIn(hashlib.sha256(self.facts.read_bytes()).hexdigest(), selected.stdout)
 
+    def test_selected_relative_facts_survive_another_working_directory(self):
+        source = (ROOT / "test/examples/virtual_bf16_shared_relu.mlir").read_text()
+        selected = subprocess.run(
+            [str((BIN / "atlas-opt").resolve()),
+             f"--select-atlas-model-evidence=facts={self.bundle.name}",
+             "--atlas-compile-prepare", "-"],
+            cwd=self.bundle.parent, input=source, text=True, capture_output=True)
+        self.assertEqual(selected.returncode, 0, selected.stderr)
+        other = self.bundle / "candidate"
+        other.mkdir()
+        compiled = subprocess.run(
+            [str((BIN / "atlas-opt").resolve()),
+             "--atlas-compile-candidate=provider=model", "-"],
+            cwd=other, input=selected.stdout, text=True, capture_output=True)
+        self.assertEqual(compiled.returncode, 0, compiled.stderr)
+        self.assertIn(str(self.facts), selected.stdout)
+        self.assertIn('atlas.timing_provider = "model"', compiled.stdout)
+
     def test_malformed_facts_refuse(self):
         self.facts.write_text("{")
         selected = run("atlas-opt", "module {}", *evidence_option(self.bundle))
