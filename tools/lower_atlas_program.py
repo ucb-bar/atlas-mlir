@@ -36,6 +36,8 @@ from pathlib import Path
 
 
 if __package__:
+    # Match direct-script imports; spawn workers inherit this module search path.
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
     from .atlas_model_selection import add_model_arguments, model_arguments, select_program
 else:
     from atlas_model_selection import add_model_arguments, model_arguments, select_program
