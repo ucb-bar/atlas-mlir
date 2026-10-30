@@ -99,8 +99,6 @@ void readOperations(Reader &r, const Object &root, TimingTables &tables) {
     const Object *events = r.object(block, "events");
     if (events) for (const auto &[key, entry] : *events) {
       const Object *group = entry.getAsObject();
-      // Empty optional streams are emitted for inactive operand roles.
-      if (group && group->getInteger("count") == 0) continue;
       timing.events.emplace(key.str(), r.event(group));
     }
     const Object *reservations = r.object(releases, *name);

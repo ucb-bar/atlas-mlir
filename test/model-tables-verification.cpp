@@ -273,6 +273,14 @@ void loaderRefusal(llvm::StringRef bytes) {
     check(!bad, mutation.message);
     if (!bad) llvm::consumeError(bad.takeError());
   }
+  auto emptyEvent = *document;
+  auto *events = emptyEvent.getAsObject()->getArray("op_timing")->front()
+                     .getAsObject()->getObject("events");
+  (*events)["unused"] = llvm::json::Object{
+      {"count", 0}, {"first_age", 0}, {"last_age", 0}, {"step", 1}};
+  auto empty = parseModelTimingTables(jsonText(emptyEvent));
+  check(!empty, "empty timing event refuses");
+  if (!empty) llvm::consumeError(empty.takeError());
   auto malformed = parseModelTimingTables("{}");
   check(!malformed, "missing timing tables refuse");
   if (!malformed) llvm::consumeError(malformed.takeError());
