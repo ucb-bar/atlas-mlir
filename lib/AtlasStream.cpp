@@ -781,7 +781,7 @@ LogicalResult mlir::atlas::verifyAtlasTiming(
   if (failed(verifyAtlasTimingState(module)))
     return failure();
   if (auto selected = module->getAttrOfType<StringAttr>(kAtlasTimingProvider);
-      selected && selected.getValue() != provider.id)
+      selected && canonicalTimingProviderId(selected.getValue()) != provider.id)
     return module.emitOpError("supplied timing policy disagrees with retained provider identity");
   assert(ctx.stream && "a timed stream is decoded");
   return verifyAtlasTimedStream(*ctx.stream, provider);
@@ -796,9 +796,12 @@ LogicalResult mlir::atlas::verifyAtlasTiming(
 FailureOr<TimingProvider> mlir::atlas::selectAtlasTimingProvider(
     ModuleOp module, StringRef requested) {
   auto retained = module->getAttrOfType<StringAttr>(kAtlasTimingProvider);
-  if (!requested.empty() && retained && retained.getValue() != requested)
+  if (!requested.empty() && retained &&
+      canonicalTimingProviderId(retained.getValue()) !=
+          canonicalTimingProviderId(requested))
     return module.emitOpError("supplied timing policy disagrees with retained provider identity");
-  std::string id = !requested.empty() ? requested.str() : retained ? retained.getValue().str() : kNpuModelTimingProviderId.str();
+  std::string id =
+      !requested.empty() ? requested.str() : retained ? retained.getValue().str() : kBuiltinTimingProviderId.str();
   auto provider = lookupTimingProvider(id, module);
   if (!provider.error.empty())
     return module.emitOpError(provider.error);
@@ -822,7 +825,7 @@ struct VerifyAtlasTimingPass
   VerifyAtlasTimingPass() = default;
   VerifyAtlasTimingPass(const VerifyAtlasTimingPass &other) : PassWrapper(other) {}
   Option<std::string> provider{*this, "provider",
-                               llvm::cl::desc("Registered timing provider id (default: the retained atlas.timing_provider, else npu-model-rtl-match-v1)"),
+                               llvm::cl::desc("Timing provider (default: atlas.timing_provider, else builtin)"),
                                llvm::cl::init("")};
   StringRef getArgument() const final { return "verify-atlas-timing"; }
   StringRef getDescription() const final {

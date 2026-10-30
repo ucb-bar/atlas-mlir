@@ -1,0 +1,75 @@
+{
+  "vpu_blocks": [
+    {"mnemonic": "vadd.bf16", "two_input": true, "op_class": "VpuElementwise"},
+    {"mnemonic": "vsub.bf16", "two_input": true, "op_class": "VpuElementwise"},
+    {"mnemonic": "vmul.bf16", "two_input": true, "op_class": "VpuElementwise"},
+    {"mnemonic": "vmaximum.bf16", "two_input": true, "op_class": "VpuElementwise"},
+    {"mnemonic": "vminimum.bf16", "two_input": true, "op_class": "VpuElementwise"},
+    {"mnemonic": "vmov", "two_input": false, "op_class": "VpuElementwise"},
+    {"mnemonic": "vrecip.bf16", "two_input": false, "op_class": "VpuElementwise"},
+    {"mnemonic": "vexp.bf16", "two_input": false, "op_class": "VpuElementwise"},
+    {"mnemonic": "vexp2.bf16", "two_input": false, "op_class": "VpuElementwise"},
+    {"mnemonic": "vrelu.bf16", "two_input": false, "op_class": "VpuElementwise"},
+    {"mnemonic": "vsin.bf16", "two_input": false, "op_class": "VpuElementwise"},
+    {"mnemonic": "vcos.bf16", "two_input": false, "op_class": "VpuElementwise"},
+    {"mnemonic": "vtanh.bf16", "two_input": false, "op_class": "VpuElementwise"},
+    {"mnemonic": "vlog2.bf16", "two_input": false, "op_class": "VpuElementwise"},
+    {"mnemonic": "vsqrt.bf16", "two_input": false, "op_class": "VpuElementwise"},
+    {"mnemonic": "vsquare.bf16", "two_input": false, "op_class": "VpuElementwise"},
+    {"mnemonic": "vcube.bf16", "two_input": false, "op_class": "VpuElementwise"},
+    {"mnemonic": "vredsum.row.bf16", "two_input": false, "op_class": "VpuRowReduce"},
+    {"mnemonic": "vredmax.row.bf16", "two_input": false, "op_class": "VpuRowReduce"},
+    {"mnemonic": "vredmin.row.bf16", "two_input": false, "op_class": "VpuRowReduce"},
+    {"mnemonic": "vredsum.bf16", "two_input": false, "op_class": "VpuColReduce"},
+    {"mnemonic": "vredmax.bf16", "two_input": false, "op_class": "VpuColReduce"},
+    {"mnemonic": "vredmin.bf16", "two_input": false, "op_class": "VpuColReduce"},
+    {"mnemonic": "vpack.bf16.fp8", "two_input": false, "op_class": "VpuPack"},
+    {"mnemonic": "vunpack.fp8.bf16", "two_input": false, "op_class": "VpuUnpack"},
+    {"mnemonic": "vli.all", "two_input": false, "op_class": "VpuLoadImmPair"},
+    {"mnemonic": "vli.row", "two_input": false, "op_class": "VpuLoadImmPair"},
+    {"mnemonic": "vli.col", "two_input": false, "op_class": "VpuLoadImmSingle"},
+    {"mnemonic": "vli.one", "two_input": false, "op_class": "VpuLoadImmSingle"}
+  ],
+  "mxu_blocks": [
+    "vmatpush.weight",
+    "vmatpush.acc.fp8",
+    "vmatpush.acc.bf16",
+    "vmatpop.fp8.acc",
+    "vmatpop.bf16.acc",
+    "vmatmul",
+    "vmatmul.acc"
+  ],
+  "vpu_operand_roles": {
+    "VpuElementwise": [
+      {"key": "read0", "operand": "rs1", "write": false, "registers": 2, "offset": 0, "two_input": false},
+      {"key": "read1", "operand": "rs2", "write": false, "registers": 2, "offset": 0, "two_input": true},
+      {"key": "write0", "operand": "rd", "write": true, "registers": 2, "offset": 0, "two_input": false}
+    ],
+    "VpuPack": [
+      {"key": "read0", "operand": "rs2", "write": false, "registers": 2, "offset": 0, "two_input": false},
+      {"key": null, "operand": "rs1", "write": false, "registers": 1, "offset": 0, "two_input": false},
+      {"key": "write0", "operand": "rd", "write": true, "registers": 1, "offset": 0, "two_input": false}
+    ],
+    "VpuUnpack": [
+      {"key": "read0", "operand": "rs2", "write": false, "registers": 1, "offset": 0, "two_input": false},
+      {"key": null, "operand": "rs1", "write": false, "registers": 1, "offset": 0, "two_input": false},
+      {"key": "write0", "operand": "rd", "write": true, "registers": 2, "offset": 0, "two_input": false}
+    ],
+    "VpuRowReduce": [
+      {"key": "read0", "operand": "rs1", "write": false, "registers": 1, "offset": 0, "two_input": false},
+      {"key": "read1", "operand": "rs1", "write": false, "registers": 1, "offset": 1, "two_input": false},
+      {"key": "write0", "operand": "rd", "write": true, "registers": 1, "offset": 0, "two_input": false},
+      {"key": "write1", "operand": "rd", "write": true, "registers": 1, "offset": 1, "two_input": false}
+    ],
+    "VpuColReduce": [
+      {"key": "read0", "operand": "rs1", "write": false, "registers": 2, "offset": 0, "two_input": false},
+      {"key": "write0", "operand": "rd", "write": true, "registers": 2, "offset": 0, "two_input": false}
+    ],
+    "VpuLoadImmPair": [
+      {"key": "write0", "operand": "rd", "write": true, "registers": 2, "offset": 0, "two_input": false}
+    ],
+    "VpuLoadImmSingle": [
+      {"key": "write0", "operand": "rd", "write": true, "registers": 1, "offset": 0, "two_input": false}
+    ]
+  }
+}

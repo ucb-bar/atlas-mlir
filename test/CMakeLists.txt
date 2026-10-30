@@ -85,6 +85,7 @@ add_llvm_executable(atlas-verification-test
   source-memory-effect-contract.cpp
   tile-contract-verification.cpp
   timing-provider-verification.cpp
+  model-tables-verification.cpp
   PARTIAL_SOURCES_INTENDED)
 llvm_update_compile_flags(atlas-verification-test)
 target_compile_definitions(atlas-verification-test PRIVATE
@@ -94,6 +95,8 @@ target_link_libraries(atlas-verification-test PRIVATE
   MLIRFuncDialect)
 mlir_check_all_link_libraries(atlas-verification-test)
 foreach(suite buffer-contract cfg-contract dma-allocation dma-helper mxu-allocation mxu-contract
-    pack-loop source-memory-contract tile-contract timing-provider)
+    pack-loop source-memory-contract tile-contract timing-provider model-tables)
   add_test(NAME atlas-${suite} COMMAND atlas-verification-test ${suite})
 endforeach()
+
+atlas_forward_model_test_environment()

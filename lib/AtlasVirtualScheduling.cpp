@@ -9,6 +9,7 @@
 #include "Atlas/AtlasOps.h"
 #include "Atlas/AtlasSpilling.h"
 #include "Atlas/AtlasTarget.h"
+#include "Atlas/AtlasStream.h"
 #include "Atlas/AtlasTiming.h"
 #include "Atlas/AtlasVirtualAllocation.h"
 #include "Atlas/AtlasVirtualVerification.h"
@@ -21,9 +22,13 @@
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/Twine.h"
+#include "llvm/Support/JSON.h"
+#include "llvm/Support/MemoryBuffer.h"
+#include "llvm/Support/raw_ostream.h"
 #include <algorithm>
 #include <array>
 #include <cassert>
+#include <limits>
 #include <numeric>
 #include <optional>
 #include <random>
@@ -305,9 +310,9 @@ constexpr unsigned kUnits = static_cast<unsigned>(Unit::Weights1) + 1;
 // next operation `frontend` cycles after it starts.
 struct Cost {
   Unit unit;
-  int busy;
-  int latency;
-  int frontend = 1;
+  int64_t busy;
+  int64_t latency;
+  int64_t frontend = 1;
   // An atomic DMA lowers to a launch the frontend issues without waiting for
   // the engine; its transfer (`busy` cycles) queues behind earlier ones after
   // `frontend` staging cycles, and `latency` counts from the transfer start.
@@ -319,125 +324,130 @@ struct Cost {
 // Explicit transfers in flight at once: one per DMA channel and staging window.
 constexpr unsigned kMaxQueuedDMA = kAtlasDMAChannels;
 
-// A machine operation's timing by npu_model's rules: cycles until its work
-// is done, and until the same operation on other registers and slots can
-// issue behind it on its unit.
-struct MachineTiming {
-  int latency;
-  int interval;
-};
-
-MachineTiming timingOf(const std::string &name) {
-  auto instruction = [&](int rd, int rs1, int rs2) {
-    timing::Instr in;
-    in.op = timing::findOp(name);
-    assert(in.op && "the timing model knows every machine operation");
-    in.rd = rd;
-    in.rs1 = rs1;
-    in.rs2 = rs2;
-    return in;
-  };
-  // Two instances that share no register, slot, or BF16 pair.
-  timing::Instr first = instruction(0, 2, 4), second = instruction(6, 8, 10);
-  switch (first.op->opClass) {
-  case timing::OpClass::WeightPush:
-  case timing::OpClass::AccPushFp8:
-  case timing::OpClass::AccPushBf16:
-  case timing::OpClass::MatMul:
-  case timing::OpClass::MatMulAcc:
-  case timing::OpClass::PopFp8:
-  case timing::OpClass::PopBf16:
-    // MXU slot operands are 0 or 1.
-    first = instruction(0, 0, 0);
-    second = instruction(1, 2, 1);
-    break;
-  default:
-    break;
-  }
-  timing::Footprint firstFootprint =
-      timing::footprintOf(first, timing::unknownRegs());
-  timing::Footprint secondFootprint =
-      timing::footprintOf(second, timing::unknownRegs());
-  timing::ReservationTable table;
-  table.reserve(first, firstFootprint, 0);
-  int interval = 1;
-  while (!table.conflict(second, secondFootprint, interval).empty())
-    ++interval;
-  return {firstFootprint.doneAge + 1, interval};
-}
-
 // A tile is 32 x 32 elements: one M register of FP8 or a pair of BF16.
 int registersOf(bool fp8) { return fp8 ? 1 : 2; }
 
-Cost onMxu(StringRef name, unsigned unit) {
-  MachineTiming t = timingOf((name + ".mxu" + Twine(unit)).str());
-  return {unit ? Unit::Mxu1 : Unit::Mxu0, t.interval, t.latency};
-}
-
-Cost onVpu(const std::string &name) {
-  MachineTiming t = timingOf(name);
-  return {Unit::Vpu, t.interval, t.latency};
-}
-
 // Work that holds the frontend from start to finish.
-Cost blocking(Unit unit, int cycles) { return {unit, cycles, cycles, cycles}; }
+Cost blocking(Unit unit, int64_t cycles) {
+  return {unit, cycles, cycles, cycles};
+}
 
 // A VMEM store or load of `halves` tile registers, back to back, as a spill
 // save or reload issues them.
-int vmemCycles(unsigned halves, bool store) {
-  static const MachineTiming vload = timingOf("vload");
-  static const MachineTiming vstore = timingOf("vstore");
-  const MachineTiming &timing = store ? vstore : vload;
-  return (halves - 1) * timing.interval + timing.latency;
+int64_t vmemCycles(unsigned halves, bool store,
+                   const timing::TimingProvider &provider) {
+  const auto &t = provider.machineTiming.at(store ? "vstore" : "vload");
+  return int64_t(halves - 1) * t.interval + t.latency;
 }
 
-// A scalar slot save or restore.
-constexpr int kScalarSlotCycles = 8;
+// Scalar slots lower to materializeScalar(byte address), then LW or SW.
+// Before slot allocation the address is unknown, so include both LUI and
+// ADDI; an allocated address uses the same zero-part elision as lowering.
+// These are serial proposal costs, not additional overlap admissions.
+int64_t scalarSlotCycles(bool store, int64_t word,
+                         const timing::TimingProvider &provider) {
+  if (provider.scalarSlotProposalCycles > 0)
+    return provider.scalarSlotProposalCycles;
+  uint32_t address = static_cast<uint32_t>(word) * 4;
+  uint32_t upper = ((static_cast<uint64_t>(address) + 0x800) >> 12) & 0xfffff;
+  bool unknown = word < 0;
+  int64_t cycles = 0;
+  auto append = [&](const char *name) {
+    const auto &t = provider.machineTiming.at(name);
+    cycles += std::max(t.latency, t.interval);
+  };
+  if (unknown || upper)
+    append("lui");
+  if (unknown || (address & 0xfff) || !upper)
+    append("addi");
+  append(store ? "sw" : "lw");
+  return cycles;
+}
+
+Cost packCost(const timing::TimingProvider &provider) {
+  // Pack, then relayout the FP8 tile through VMEM in the same one-row
+  // scalar loop as lowerPack. Each store hides behind the next word's load,
+  // so a row takes a load per load-path interval, then the last word's load
+  // and store, and the back-edge, whose delay slot takes the destination step.
+  const auto &pack = provider.machineTiming.at("vpack.bf16.fp8");
+  const auto &vstore = provider.machineTiming.at("vstore");
+  const auto &lw = provider.machineTiming.at("lw");
+  const auto &sw = provider.machineTiming.at("sw");
+  const auto &vload = provider.machineTiming.at("vload");
+  const int rowWords = kAtlasMregRowBytes / 4;
+  // Policy: this proposal omits general scalar setup and assumes the
+  // destination increment can fill the slot when filling is enabled.
+  // The physical scheduler separately proves an actual available filler.
+  const int rowControl = provider.frontendSpacing.successorGap() +
+      (timing::fillsDelaySlots(provider) ? 0 : provider.frontendSpacing.ordinaryGap);
+  int64_t row = int64_t(rowWords - 1) * lw.interval + lw.latency + sw.latency + rowControl;
+  return blocking(Unit::Lsu, int64_t(pack.latency) + vstore.latency + kAtlasMregRows * row + vload.latency);
+}
 
 // An operation costs the machine operations it lowers to, as they issue in
 // order on the unit doing its work.
-Cost costOf(Operation *op) {
-  static const MachineTiming vload = timingOf("vload");
-  static const MachineTiming vstore = timingOf("vstore");
-  static const int registerLoad = timing::dmaTransferCycles(kAtlasRegisterBytes, false);
-  static const int registerStore = timing::dmaTransferCycles(kAtlasRegisterBytes, true);
+Cost costOf(Operation *op, const timing::TimingProvider &provider, int transfer) {
+  const int registerWords = kAtlasRegisterBytes / 4;
+  auto onUnit = [&](const std::string &name, Unit unit) {
+    const auto &t = provider.machineTiming.at(name);
+    return Cost{unit, t.interval, t.latency};
+  };
+  auto onMxu = [&](StringRef name, unsigned unit) {
+    return onUnit((name + ".mxu" + Twine(unit)).str(),
+                  unit ? Unit::Mxu1 : Unit::Mxu0);
+  };
+  auto onVpu = [&](const std::string &name) { return onUnit(name, Unit::Vpu); };
   // Boundary tiles move one register at a time, each transfer waited for
   // before the next instruction issues.
-  if (isa<VirtualInputBF16Op, VirtualInputFP8Op>(op))
-    return blocking(Unit::Dma, registersOf(isa<VirtualInputFP8Op>(op)) *
-                                   (registerLoad + vload.latency));
-  if (isa<VirtualOutputBF16Op>(op))
-    return blocking(Unit::Dma,
-                    registersOf(false) * (vstore.latency + registerStore));
+  if (isa<VirtualInputBF16Op, VirtualInputFP8Op>(op)) {
+    const auto &vload = provider.machineTiming.at("vload");
+    return blocking(Unit::Dma, registersOf(isa<VirtualInputFP8Op>(op)) * (int64_t(transfer) + vload.latency));
+  }
+  if (isa<VirtualOutputBF16Op>(op)) {
+    const auto &vstore = provider.machineTiming.at("vstore");
+    return blocking(Unit::Dma, registersOf(false) * (int64_t(vstore.latency) + transfer));
+  }
   // An atomic load's tile is ready once its transfer lands and its VLOADs
   // (one per register) finish. A consumer cannot start before then, so the
   // list scheduler puts independent work between the load and its MXU, VPU,
   // pack or store user, where insert-atlas-dma-waits will put the DMA.WAIT.
   if (isa<VirtualDMALoadBF16Op, VirtualDMALoadFP8Op>(op)) {
+    const auto &vload = provider.machineTiming.at("vload");
     int registers = registersOf(isa<VirtualDMALoadFP8Op>(op));
-    int cycles = timing::dmaTransferCycles(registers * kAtlasRegisterBytes, false);
-    int loaded = (registers - 1) * vload.interval + vload.latency;
-    Cost cost{Unit::Dma, cycles, cycles + loaded};
-    cost.queuedDMA = true;
-    return cost;
+    int64_t loaded = int64_t(registers - 1) * vload.interval + vload.latency;
+    return {Unit::Dma, transfer, int64_t(transfer) + loaded, 1, true};
   }
   if (isa<VirtualDMAStoreBF16Op, VirtualDMAStoreFP8Op>(op)) {
+    const auto &vstore = provider.machineTiming.at("vstore");
     // VSTOREs into the staging window, then the transfer once they land.
     int registers = registersOf(isa<VirtualDMAStoreFP8Op>(op));
-    int staged = (registers - 1) * vstore.interval + vstore.latency;
-    int cycles = timing::dmaTransferCycles(registers * kAtlasRegisterBytes, true);
-    Cost cost{Unit::Dma, cycles, cycles, staged + 1};
-    cost.queuedDMA = true;
-    return cost;
+    int64_t staged = int64_t(registers - 1) * vstore.interval + vstore.latency;
+    return {Unit::Dma, transfer, transfer, staged + 1, true};
   }
   if (isAtlasSpillStore(op) || isAtlasSpillLoad(op)) {
     Operation *writer = atlasSpillSaved(op).getDefiningOp();
-    return blocking(Unit::Dma, vmemCycles(atlasSpillWords(writer) / kAtlasRegisterWords, isAtlasSpillStore(op)));
+    int64_t cycles = vmemCycles(
+        atlasSpillWords(writer) / registerWords, isAtlasSpillStore(op), provider);
+    return blocking(Unit::Dma, cycles);
   }
   if (isAtlasSlotAccess(op)) {
+    const auto &vload = provider.machineTiming.at("vload");
+    const auto &vstore = provider.machineTiming.at("vstore");
     auto slot = atlasAccessedSlot(op).getDefiningOp<VirtualSlotOp>();
     unsigned words = slot.getWords();
-    unsigned cycles = words == 1 ? kScalarSlotCycles : (words / kAtlasRegisterWords) * (vload.latency + vstore.latency);
+    int64_t cycles;
+    if (words == 1) {
+      cycles = scalarSlotCycles(isa<VirtualSaveOp>(op), slot.getSlotWordAttr().getInt(), provider);
+      if (auto copy = dyn_cast<VirtualSlotCopyOp>(op)) {
+        // A fixed slot proposal covers the whole copy; derived costs include both accesses.
+        if (provider.scalarSlotProposalCycles == 0) {
+          auto destination = copy.getDst().getDefiningOp<VirtualSlotOp>();
+          cycles += scalarSlotCycles(true, destination.getSlotWordAttr().getInt(), provider);
+        }
+      }
+    } else {
+      cycles = int64_t(words / registerWords) * (int64_t(vload.latency) + vstore.latency);
+    }
     return blocking(Unit::Dma, cycles);
   }
   if (auto load = dyn_cast<VirtualMXULoadWeightOp>(op)) {
@@ -461,10 +471,10 @@ Cost costOf(Operation *op) {
   if (auto matmul = dyn_cast<VirtualMXUMatmulOp>(op)) {
     // Push, multiply, and pop, each waiting for the one before.
     unsigned unit = matmul.getUnit();
-    return blocking(unit ? Unit::Mxu1 : Unit::Mxu0,
-                    onMxu("vmatpush.weight", unit).latency +
-                        onMxu("vmatmul", unit).latency +
-                        onMxu("vmatpop.bf16.acc", unit).latency);
+    Cost push = onMxu("vmatpush.weight", unit);
+    Cost multiply = onMxu("vmatmul", unit);
+    Cost pop = onMxu("vmatpop.bf16.acc", unit);
+    return blocking(unit ? Unit::Mxu1 : Unit::Mxu0, int64_t(push.latency) + multiply.latency + pop.latency);
   }
   if (isa<VirtualVPUUnaryOp, VirtualVPUBinaryOp, VirtualVPUReduceOp>(op))
     return onVpu(
@@ -472,27 +482,20 @@ Cost costOf(Operation *op) {
   if (isa<VirtualVPUSplatOp>(op))
     return onVpu("vli.all");
   if (isa<VirtualXLUTransposeOp>(op)) {
-    MachineTiming t = timingOf("vtrpose.xlu");
-    return {Unit::Xlu, t.interval, t.latency};
+    return onUnit("vtrpose.xlu", Unit::Xlu);
   }
-  if (isa<VirtualPackRoundTripBF16Op>(op))
-    // Both conversions use the reserved tensor temporary and scratch ERF.
+  if (isa<VirtualPackRoundTripBF16Op>(op)) {
+    const auto &pack = provider.machineTiming.at("vpack.bf16.fp8");
+    const auto &unpack = provider.machineTiming.at("vunpack.fp8.bf16");
+    const auto &scale = provider.machineTiming.at("seli");
     return blocking(Unit::Vpu,
-        timingOf("vpack.bf16.fp8").latency + timingOf("vunpack.fp8.bf16").latency + 2 * timingOf("seli").latency);
-  if (isa<VirtualPackFP8Op>(op)) {
-    // Pack, then relayout the FP8 tile through VMEM in a scalar loop of eight
-    // words a row (lowerPack). Each store hides behind the next word's load,
-    // so a row takes a load per load-path interval, then the last word's load
-    // and store, and the back-edge, whose delay slot takes the destination step.
-    static const MachineTiming lw = timingOf("lw"), sw = timingOf("sw");
-    constexpr int rowWords = kPackRelayoutRowWords, rowControl = 2;
-    int rows = registersOf(true) * kAtlasRegisterBytes / 4 / rowWords;
-    int row = (rowWords - 1) * lw.interval + lw.latency + sw.latency + rowControl;
-    return blocking(Unit::Lsu, timingOf("vpack.bf16.fp8").latency +
-                                   vstore.latency + rows * row + vload.latency);
+                    int64_t(pack.latency) + unpack.latency + 2 * scale.latency);
   }
+  if (isa<VirtualPackFP8Op>(op))
+    return packCost(provider);
   // Scalar control, a DMA wait, or nothing at all.
-  return {Unit::Scalar, 1, timingOf("addi").latency};
+  const auto &scalar = provider.machineTiming.at("addi");
+  return {Unit::Scalar, scalar.interval, scalar.latency};
 }
 
 // Register kinds as the allocator colors them; counts are indexed by kind.
@@ -502,18 +505,56 @@ using KindCounts = std::array<int, kKinds.size()>;
 
 unsigned indexOf(RegisterKind kind) { return static_cast<unsigned>(kind); }
 
+// One validated set of provider operands serves scheduling and graph metadata.
+FailureOr<std::vector<Cost>> costsOf(const BlockGraph &g, const timing::TimingProvider &provider) {
+  std::vector<Cost> costs;
+  int64_t cycleBound = 0;
+  for (Operation *op : g.nodes) {
+    int transfer = 0;
+    if (isa<VirtualInputBF16Op, VirtualInputFP8Op, VirtualOutputBF16Op,
+            VirtualDMALoadBF16Op, VirtualDMALoadFP8Op,
+            VirtualDMAStoreBF16Op, VirtualDMAStoreFP8Op>(op)) {
+      if (!provider.dmaEstimate)
+        return op->emitOpError("timing provider has no DMA proposal estimator");
+      bool store = isa<VirtualOutputBF16Op, VirtualDMAStoreBF16Op, VirtualDMAStoreFP8Op>(op);
+      int registers = isa<VirtualDMALoadBF16Op, VirtualDMAStoreBF16Op>(op) ? registersOf(false) : 1;
+      auto estimate = provider.dmaEstimate(int64_t(registers) * kAtlasRegisterBytes, store);
+      if (!estimate.error.empty()) return op->emitOpError(estimate.error);
+      if (estimate.value < 1) return op->emitOpError("provider returned a nonpositive DMA proposal estimate");
+      transfer = estimate.value;
+    }
+    Cost cost = costOf(op, provider, transfer);
+    // Bound heights and cycle arithmetic by conservatively serializing all cost fields.
+    cycleBound += cost.busy + cost.latency + cost.frontend;
+    if (cycleBound > std::numeric_limits<int>::max())
+      return op->emitOpError("virtual block cost exceeds nonnegative cycle domain");
+    cost.drains = isImplicitMemory(op);
+    costs.push_back(cost);
+  }
+  return costs;
+}
+
 // What spilling one value of `kind` costs: a save and `reloads` reloads, as
 // costOf charges the operations --spill-atlas-virtual inserts.
-int spillCycles(RegisterKind kind, int reloads) {
-  switch (kind) {
-  case RegisterKind::BF16:
-    return vmemCycles(2, true) + reloads * vmemCycles(2, false);
-  case RegisterKind::FP8:
-    return vmemCycles(1, true) + reloads * vmemCycles(1, false);
-  case RegisterKind::Scalar:
-    return (1 + reloads) * kScalarSlotCycles;
+struct SpillCycles {
+  std::array<int64_t, kKinds.size()> save, reload;
+  int64_t of(RegisterKind kind, int reloads) const {
+    return save[indexOf(kind)] + int64_t(reloads) * reload[indexOf(kind)];
   }
-  llvm_unreachable("unknown register kind");
+};
+
+SpillCycles spillCycles(const timing::TimingProvider &provider) {
+  SpillCycles spill{};
+  for (RegisterKind kind : kKinds) {
+    unsigned k = indexOf(kind);
+    auto cycles = [&](bool store) {
+      return kind == RegisterKind::Scalar ? scalarSlotCycles(store, -1, provider)
+          : vmemCycles(registersOf(kind == RegisterKind::FP8), store, provider);
+    };
+    spill.save[k] = cycles(true);
+    spill.reload[k] = cycles(false);
+  }
+  return spill;
 }
 
 SmallVector<Value, 4> distinctOperands(Operation *op) {
@@ -531,8 +572,8 @@ SmallVector<Value, 4> distinctOperands(Operation *op) {
 class Pressure {
 public:
   Pressure(Block &block, ArrayRef<Operation *> nodes, const Liveness &liveness,
-           const KindCounts &capacity)
-      : capacity(capacity) {
+           const KindCounts &capacity, const SpillCycles &spill)
+      : capacity(capacity), spill(spill) {
     for (auto [index, op] : llvm::enumerate(nodes))
       for (Value operand : distinctOperands(op)) {
         ++remaining[operand];
@@ -582,9 +623,9 @@ public:
   // spills are already counted), --spill-atlas-virtual saves the
   // longest-lived value and reloads it before each of its uses. The live
   // value of that kind used last in source order stands in for it.
-  int spillCost(Operation *op) const {
+  int64_t spillCost(Operation *op) const {
     KindCounts counts = during(op);
-    int cycles = 0;
+    int64_t cycles = 0;
     for (unsigned k = 0; k < kKinds.size(); ++k) {
       int spills = counts[k] - std::max(capacity[k], peak[k]);
       if (spills <= 0)
@@ -595,7 +636,7 @@ public:
             (!victim || lastUse.lookup(value) > lastUse.lookup(victim)))
           victim = value;
       int reloads = victim ? std::max(1u, remaining.lookup(victim)) : 1;
-      cycles += spills * spillCycles(kKinds[k], reloads);
+      cycles += spills * spill.of(kKinds[k], reloads);
     }
     return cycles;
   }
@@ -623,7 +664,7 @@ public:
   }
 
   // The spill cycles of the operations placed so far.
-  int spilled = 0;
+  int64_t spilled = 0;
 
 private:
   bool needed(Value value) const {
@@ -644,6 +685,7 @@ private:
   }
 
   KindCounts capacity;
+  SpillCycles spill;
   llvm::DenseMap<Value, unsigned> remaining;
   // Each value's last user, by its index in source order.
   llvm::DenseMap<Value, unsigned> lastUse;
@@ -694,12 +736,14 @@ public:
     const Cost &cost = costs[node];
     // A queued transfer starts after its staging and every earlier transfer.
     int work = cost.queuedDMA
-                   ? std::max(cycle + cost.frontend - 1, unitFree[unit(node)])
+                   ? std::max<int64_t>(cycle + cost.frontend - 1, unitFree[unit(node)])
                    : cycle;
     finished[node] = work + cost.latency;
     unitFree[unit(node)] = work + cost.busy;
-    if (cost.queuedDMA)
+    if (cost.queuedDMA) {
+      llvm::erase_if(transfers, [&](int end) { return end <= cycle; });
       transfers.push_back(work + cost.busy);
+    }
     frontend = frontendAfter(node, cycle);
     makespan = std::max(makespan, finished[node]);
   }
@@ -722,14 +766,10 @@ private:
 
 class BlockScheduler {
 public:
-  BlockScheduler(Block &block, const BlockGraph &g, const Liveness &liveness)
-      : block(block), g(g), liveness(liveness) {
+  BlockScheduler(Block &block, const BlockGraph &g, const Liveness &liveness,
+                 std::vector<Cost> nodeCosts, const SpillCycles &spill)
+      : block(block), g(g), liveness(liveness), costs(std::move(nodeCosts)), spill(spill) {
     unsigned n = g.nodes.size();
-    for (Operation *op : g.nodes) {
-      Cost cost = costOf(op);
-      cost.drains = isImplicitMemory(op);
-      costs.push_back(cost);
-    }
     // The earliest output each value reaches through non-state operands, or n
     // for none. Among equal starts, prefer it: shared operands load for their
     // first tile, and an available tile finishes before another tile's first
@@ -771,8 +811,8 @@ public:
   }
 
   // The spill cycles `order` needs (Pressure::spillCost).
-  int spillCost(ArrayRef<Operation *> order, const KindCounts &capacity) const {
-    Pressure pressure(block, g.nodes, liveness, capacity);
+  int64_t spillCost(ArrayRef<Operation *> order, const KindCounts &capacity) const {
+    Pressure pressure(block, g.nodes, liveness, capacity, spill);
     for (Operation *op : order)
       pressure.place(op);
     return pressure.spilled;
@@ -791,7 +831,7 @@ public:
   // after it, and each holds a staging window until its first use.
   std::vector<unsigned> listSchedule(const KindCounts &capacity,
                                      unsigned lookahead) const {
-    Pressure pressure(block, g.nodes, liveness, capacity);
+    Pressure pressure(block, g.nodes, liveness, capacity, spill);
     llvm::SmallDenseSet<Value> unused;
     auto isLoad = [](Operation *op) {
       return isa<VirtualDMALoadFP8Op, VirtualDMALoadBF16Op>(op);
@@ -868,6 +908,7 @@ private:
   const BlockGraph &g;
   const Liveness &liveness;
   std::vector<Cost> costs;
+  SpillCycles spill;
   std::vector<int> heights;
   std::vector<unsigned> firstOutput;
 };
@@ -898,12 +939,16 @@ void reorder(Block &block, ArrayRef<Operation *> ops) {
 LogicalResult scheduleBlock(Block &block, unsigned index,
                             const Liveness &liveness,
                             const KindCounts &capacity,
-                            std::optional<unsigned> randomSeed) {
+                            std::optional<unsigned> randomSeed,
+                            const timing::TimingProvider &provider) {
   FailureOr<BlockGraph> graph = buildGraph(block);
   if (failed(graph))
     return failure();
   const BlockGraph &g = *graph;
-  BlockScheduler scheduler(block, g, liveness);
+  auto costs = costsOf(g, provider);
+  if (failed(costs)) return failure();
+  BlockScheduler scheduler(block, g, liveness, std::move(*costs),
+                           spillCycles(provider));
   auto opsOf = [&](ArrayRef<unsigned> order) {
     SmallVector<Operation *> ops;
     for (unsigned node : order)
@@ -919,10 +964,10 @@ LogicalResult scheduleBlock(Block &block, unsigned index,
     return scheduler.makespan(order) + scheduler.spillCost(opsOf(order), capacity);
   };
   std::vector<unsigned> order;
-  int best = 0;
+  int64_t best = 0;
   for (unsigned lookahead : {1u, 2u, 4u, kMaxQueuedDMA}) {
     std::vector<unsigned> candidate = scheduler.listSchedule(capacity, lookahead);
-    int estimate = cycles(candidate);
+    int64_t estimate = cycles(candidate);
     if (order.empty() || estimate < best) {
       order = std::move(candidate);
       best = estimate;
@@ -941,7 +986,41 @@ struct ScheduleAtlasVirtualPass
 
   ScheduleAtlasVirtualPass() = default;
   ScheduleAtlasVirtualPass(const ScheduleAtlasVirtualPass &other)
-      : PassWrapper(other) {}
+      : PassWrapper(other), orderApplied(other.orderApplied),
+        rememberOptions(other.rememberOptions) {}
+
+  // Spilling and PACK repair expand an explicit order without changing it.
+  // Its node IDs and graph output still refer to the prepared search graph.
+  bool orderApplied = false;
+  bool rememberOptions = false;
+
+  static constexpr StringLiteral scheduleOptions = "atlas.virtual_schedule_options";
+
+  LogicalResult restoreOptions(ModuleOp module) {
+    auto options = module->getAttrOfType<DictionaryAttr>(scheduleOptions);
+    if (!options)
+      return success();
+    auto savedProvider = options.getAs<StringAttr>("provider");
+    auto savedSeed = options.getAs<IntegerAttr>("random_seed");
+    auto savedOrder = options.getAs<StringAttr>("order_file");
+    auto savedGraph = options.getAs<StringAttr>("graph_output");
+    if (!savedProvider || !savedSeed || !savedOrder || !savedGraph)
+      return module.emitError("virtual schedule options are incomplete");
+    provider = savedProvider.str();
+    randomSeed = savedSeed.getInt();
+    orderFile = savedOrder.str();
+    graphOutput = savedGraph.str();
+    return success();
+  }
+
+  void saveOptions(ModuleOp module, StringRef selectedProvider) {
+    Builder builder(module.getContext());
+    module->setAttr(scheduleOptions, builder.getDictionaryAttr({
+        builder.getNamedAttr("provider", builder.getStringAttr(selectedProvider)),
+        builder.getNamedAttr("random_seed", builder.getI64IntegerAttr(randomSeed)),
+        builder.getNamedAttr("order_file", builder.getStringAttr(orderFile)),
+        builder.getNamedAttr("graph_output", builder.getStringAttr(graphOutput))}));
+  }
 
   StringRef getArgument() const final { return "schedule-atlas-virtual"; }
   StringRef getDescription() const final {
@@ -955,10 +1034,46 @@ struct ScheduleAtlasVirtualPass
                      "testing; negative disables"),
       llvm::cl::init(-1)};
 
+  Option<std::string> provider{
+      *this, "provider",
+      llvm::cl::desc("Timing provider (default: atlas.timing_provider, else builtin)"),
+      llvm::cl::init("")};
+
+  Option<std::string> orderFile{
+      *this, "order-file", llvm::cl::desc("Explicit per-block topological orders as JSON"),
+      llvm::cl::init("")};
+
+  Option<std::string> graphOutput{
+      *this, "graph-output", llvm::cl::desc("Write dependence graphs and selected orders as JSON"),
+      llvm::cl::init("")};
+
   void runOnOperation() override {
     ModuleOp module = getOperation();
+    if (orderApplied && failed(restoreOptions(module)))
+      return signalPassFailure();
     if (failed(verifyAtlasVirtualModule(module)))
       return signalPassFailure();
+    auto refuse = [&](const Twine &why) { module.emitError(why); signalPassFailure(); };
+    FailureOr<timing::TimingProvider> selected = selectAtlasTimingProvider(module, provider.getValue());
+    if (failed(selected))
+      return signalPassFailure();
+    if (!orderFile.empty() && randomSeed >= 0)
+      return refuse("order-file excludes random-seed");
+    std::optional<llvm::json::Value> requested;
+    if (!orderFile.empty() && !orderApplied) {
+      auto file = llvm::MemoryBuffer::getFile(orderFile);
+      if (!file)
+        return refuse(Twine("cannot read order-file: ") + file.getError().message());
+      auto parsed = llvm::json::parse((*file)->getBuffer());
+      if (!parsed)
+        return refuse(Twine("invalid order-file JSON: ") + llvm::toString(parsed.takeError()));
+      requested = std::move(*parsed);
+      if (!requested->getAsArray())
+        return refuse("order-file must contain an array of block permutations");
+    }
+    llvm::json::Array graphs;
+    const bool exportGraph = !graphOutput.empty() && !orderApplied;
+    unsigned blockIndex = 0;
     std::optional<unsigned> seed;
     if (randomSeed >= 0)
       seed = static_cast<unsigned>(randomSeed);
@@ -970,9 +1085,62 @@ struct ScheduleAtlasVirtualPass
         capacity[indexOf(kind)] = capacities[indexOf(kind)];
       Liveness liveness(function);
       unsigned index = 0;
-      for (Block &block : function.getBody())
-        if (failed(scheduleBlock(block, index++, liveness, capacity, seed)))
+      for (Block &block : function.getBody()) {
+        std::optional<BlockGraph> graph;
+        if (requested || exportGraph) {
+          auto built = buildGraph(block);
+          if (failed(built))
+            return signalPassFailure();
+          graph = std::move(*built);
+        }
+        if (requested) {
+          const auto &blocks = *requested->getAsArray();
+          const auto *order = blockIndex < blocks.size() ? blocks[blockIndex].getAsArray() : nullptr;
+          if (!order || order->size() != graph->nodes.size())
+            return refuse("order-file must contain one complete permutation per block");
+          SmallVector<Operation *> ops;
+          std::vector<bool> placed(graph->nodes.size(), false);
+          for (const auto &value : *order) {
+            auto node = value.getAsInteger();
+            if (!node || *node < 0 || static_cast<uint64_t>(*node) >= placed.size() || placed[*node])
+              return refuse("order-file contains an invalid or duplicate node");
+            for (unsigned pred : graph->preds[*node])
+              if (!placed[pred])
+                return refuse("order-file violates a dependence");
+            placed[*node] = true;
+            ops.push_back(graph->nodes[*node]);
+          }
+          reorder(block, ops);
+        } else if (!(orderApplied && !orderFile.empty()) &&
+                   failed(scheduleBlock(block, index, liveness,
+                                        capacity, seed, *selected))) {
           return signalPassFailure();
+        }
+        if (exportGraph) {
+          llvm::json::Array preds, names, order;
+          llvm::DenseMap<Operation *, unsigned> ids;
+          for (unsigned node = 0; node < graph->nodes.size(); ++node) {
+            ids[graph->nodes[node]] = node;
+            llvm::json::Array incoming;
+            for (unsigned pred : graph->preds[node])
+              incoming.push_back(pred);
+            preds.push_back(std::move(incoming));
+            names.push_back(graph->nodes[node]->getName().getStringRef());
+          }
+          for (Operation *op : freeOperations(block)) {
+            unsigned node = ids.lookup(op);
+            order.push_back(node);
+          }
+          graphs.push_back(llvm::json::Object{{"preds", std::move(preds)}, {"operations", std::move(names)},
+              {"order", std::move(order)}});
+        }
+        ++index;
+        ++blockIndex;
+      }
+    }
+    if (requested && requested->getAsArray()->size() != blockIndex) {
+      module.emitError("order-file has extra block permutations");
+      return signalPassFailure();
     }
     // Every order the dependence graph allows must verify, so a failure here
     // is a dependence the graph is missing.
@@ -981,6 +1149,20 @@ struct ScheduleAtlasVirtualPass
                        "not verify");
       return signalPassFailure();
     }
+    if (exportGraph) {
+      std::error_code error;
+      llvm::raw_fd_ostream output(graphOutput, error);
+      if (error)
+        return refuse(Twine("cannot write graph-output: ") + error.message());
+      output << llvm::json::Value(std::move(graphs)) << "\n";
+      output.flush();
+      if (output.has_error())
+        return refuse("cannot write graph-output");
+    }
+    if (rememberOptions)
+      saveOptions(module, selected->id);
+    if (orderApplied)
+      module->removeAttr(scheduleOptions);
   }
 };
 
@@ -990,6 +1172,16 @@ void mlir::atlas::registerScheduleAtlasVirtualPass() {
   PassRegistration<ScheduleAtlasVirtualPass>();
 }
 
-std::unique_ptr<Pass> mlir::atlas::createScheduleAtlasVirtualPass() {
-  return std::make_unique<ScheduleAtlasVirtualPass>();
+std::unique_ptr<Pass> mlir::atlas::createScheduleAtlasVirtualPass(
+    StringRef provider, int randomSeed, StringRef orderFile,
+    StringRef graphOutput, bool orderApplied,
+    bool rememberOptions) {
+  auto pass = std::make_unique<ScheduleAtlasVirtualPass>();
+  pass->provider = provider.str();
+  pass->randomSeed = randomSeed;
+  pass->orderFile = orderFile.str();
+  pass->graphOutput = graphOutput.str();
+  pass->orderApplied = orderApplied;
+  pass->rememberOptions = rememberOptions;
+  return pass;
 }

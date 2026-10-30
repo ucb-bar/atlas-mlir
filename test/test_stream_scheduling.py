@@ -46,6 +46,23 @@ def work_overlapping_first_dma(ops: list[tuple[str, str, str]]) -> int:
 
 
 class StreamSchedulingTest(unittest.TestCase):
+    def test_main_timed_provider_identity(self) -> None:
+        source = (ROOT / "test/examples/timed_main_provider.mlir").read_text()
+        for option in ("--verify-atlas-timing", "--verify-atlas-timing=provider=builtin",
+                       "--schedule-atlas-stream", "--schedule-atlas-stream=provider=builtin"):
+            with self.subTest(option=option):
+                result = run(OPT, source, option)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                emitted = run(EMIT, result.stdout)
+                self.assertEqual(emitted.returncode, 0, emitted.stderr)
+                self.assertEqual(emitted.stdout.strip(), "00000073")
+                if option.startswith("--schedule"):
+                    self.assertIn('atlas.timing_provider = "builtin"', result.stdout)
+        self.assertEqual(run(EMIT, source).returncode, 0)
+        model = run(OPT, source, "--verify-atlas-timing=provider=model")
+        self.assertNotEqual(model.returncode, 0)
+        self.assertIn("disagrees with retained provider identity", model.stderr)
+
     def test_handoff_examples(self) -> None:
         for name in ("mlp", "attention"):
             with self.subTest(example=name):

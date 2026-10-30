@@ -1,4 +1,5 @@
 #include "Atlas/AtlasGeneratedArtifact.h"
+#include "Atlas/AtlasModelTables.h"
 #include "llvm/ADT/STLExtras.h"
 
 using namespace mlir;
@@ -16,7 +17,7 @@ constexpr llvm::StringRef kContracts[] = {kAtlasDMAContract, kAtlasMXUContract,
 constexpr llvm::StringRef kPreserved[] = {
     kAtlasGeneratedMarker, kAtlasDMAContract, kAtlasMXUContract,
     kAtlasTileContract, kAtlasCFGContract, kAtlasSourceMemoryContract, kAtlasBufferContract,
-    kAtlasTimingState, kAtlasTimingProvider};
+    kAtlasTimingState, kAtlasTimingProvider, kAtlasModelEvidence};
 } // namespace
 
 ArrayRef<StringRef> mlir::atlas::atlasPreservedModuleAttrs() { return kPreserved; }

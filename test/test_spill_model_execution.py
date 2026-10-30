@@ -1,8 +1,6 @@
 """Optional spill execution on a pinned npu_model, separate from RTL checks."""
 
 import dataclasses
-import importlib.metadata
-import inspect
 import json
 import os
 import sys
@@ -26,45 +24,31 @@ from test_spill_resources import (
 )
 from test_virtual_spilling import ROOT, compile_program, pressure
 
-MODEL_REVISION = '337e9f249f938a1dff007ddf8a763e5cd4b3aa2b'
+sys.path.insert(0, str(ROOT / "tools"))
+from atlas_model_scorer import model_instruction
+from atlas_model_facts import regenerate
+from model_evidence import isolate_model_imports
 
 
-def model_instruction(row, inventory, isa):
-    """Bind a decoded instruction and require an identical re-encoded word.
-
-    npu_model executes instruction objects. Decode uses the existing RTL
-    inventory, independently of the emitter and its JSON operand annotations.
-    """
-    from npu_model.isa import SBType, SType, UJType, UType, VIType
-
-    mode = row['mode_id']
-    variant = next(v for v in inventory['variants'] if v['id'] == mode)
-    name = mode.removesuffix('_ANY') if mode.startswith('DMA_') else variant['model_classes'][0]
-    cls, word = getattr(isa, name), row['word_u32']
-    operands = {'rd': (word >> 7) & 31, 'rs1': (word >> 15) & 31, 'rs2': (word >> 20) & 31,
-                'vd': (word >> 7) & 63, 'vs1': (word >> 13) & 63, 'vs2': (word >> 19) & 63,
-                'ch': (word >> 12) & 7}
-    if issubclass(cls, SBType):
-        immediate = row['fields']['offset_bytes']
-    elif issubclass(cls, UJType):
-        immediate = row['fields']['offset']
-    elif issubclass(cls, SType):
-        immediate = ((word >> 25) << 5) | ((word >> 7) & 31)
-    elif issubclass(cls, VIType):
-        immediate = word >> 16
-    elif issubclass(cls, UType):
-        immediate = word >> 12
-    else:
-        immediate = word >> 20
-    operands['imm'] = immediate
-    instruction = cls(**{name: operands[name] for name in inspect.signature(cls).parameters})
-    if instruction.to_bytecode() != word:
-        raise ValueError(f'npu_model instruction differs from word {row["word_index"]}')
-    return instruction
-
-
-@unittest.skipUnless(os.environ.get('ATLAS_RUN_NPU_MODEL') == '1', 'set ATLAS_RUN_NPU_MODEL=1 with the documented model pin')
+@unittest.skipUnless(os.environ.get("ATLAS_RUN_NPU_MODEL") == "1",
+                     "set ATLAS_RUN_NPU_MODEL=1 and ATLAS_DERIVE_MODEL_ROOT")
 class SpillModelExecutionTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        selected = os.environ.get("ATLAS_DERIVE_MODEL_ROOT")
+        if not selected:
+            raise ValueError("ATLAS_RUN_NPU_MODEL=1 requires ATLAS_DERIVE_MODEL_ROOT")
+        root = Path(selected).absolute()
+        isolate_model_imports(cls, str(root))
+        import npu_model
+        import torch
+        imported = Path(npu_model.__file__).absolute().parent.parent
+        if imported != root:
+            raise ValueError("imported npu_model differs from ATLAS_DERIVE_MODEL_ROOT")
+        with tempfile.TemporaryDirectory() as directory:
+            regenerate(root, Path(directory) / "facts")
+        torch.set_num_threads(1)
+
     def test_mxu_spills_restore_before_continuation_on_both_units(self):
         import torch
         from npu_model.configs import isa_definition as isa
@@ -75,11 +59,7 @@ class SpillModelExecutionTest(unittest.TestCase):
 
         from tools.check_program_decode import decode_binary
 
-        origin = json.loads(importlib.metadata.distribution('npu-model').read_text('direct_url.json') or '{}')
-        self.assertTrue(MODEL_REVISION in origin.get('url', '') or
-                        origin.get('vcs_info', {}).get('commit_id') == MODEL_REVISION)
         inventory = json.loads((ROOT / 'docs/selected-variant-inventory.json').read_text())
-        torch.set_num_threads(1)
         with tempfile.TemporaryDirectory(prefix='atlas-mxu-spill-model-') as directory:
             cases = [(unit, continuation, reset, iterations, None)
                      for unit in (0, 1)
@@ -139,16 +119,11 @@ class SpillModelExecutionTest(unittest.TestCase):
         finally:
             sys.path.pop(0)
 
-        origin = json.loads(importlib.metadata.distribution('npu-model').read_text('direct_url.json') or '{}')
-        self.assertTrue(MODEL_REVISION in origin.get('url', '') or
-                        origin.get('vcs_info', {}).get('commit_id') == MODEL_REVISION,
-                        'install the documented npu_model revision')
         inventory = json.loads((ROOT / 'docs/selected-variant-inventory.json').read_text())
         cases = [('bf16', pressure(), 32), ('block-loop', block_pressure(True), 16),
                  ('scalar', scalar_pressure(), 2), ('scalar-loop', scalar_pressure(True), 2),
                  ('entry', entry_pressure(), 2), ('entry-i1', entry_pressure(True), 2),
                  ('fp8-loop', fp8_block_pressure(), 33)]
-        torch.set_num_threads(1)
         with tempfile.TemporaryDirectory(prefix='atlas-spill-model-') as directory:
             for name, source, count in cases:
                 with self.subTest(case=name):

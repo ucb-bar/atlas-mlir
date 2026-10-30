@@ -15,7 +15,7 @@ The original PACK handles every exceptional BF16 input before UNPACK executes. I
 
 Read-only analysis exhaustively checked all 65,536 BF16 encodings at each admitted source scale `122..128`, with zero converter mismatches. Direct functional ISA checks also covered both MXUs and all these encodings in asymmetric tiles: 896 chains and 917,504 compared output bytes, all identical. These checks establish the selected model's conversion and layout behavior; they do not exercise encoded decode or timed execution.
 
-If both MXUs' accumulator slots are occupied, the current block has no state token, or the scale is outside `122..128`, the pass leaves PACK unchanged. Direct virtual-to-machine lowering also retains the scalar fallback. The late placement avoids changing virtual scheduling priorities for tiled programs; the existing spilling and allocation machinery owns the new BF16 value and accumulator lifetime.
+If both MXUs' accumulator slots are occupied, the current block has no state token, or the scale is outside `122..128`, the pass leaves PACK unchanged. Direct virtual-to-machine lowering also retains the scalar fallback. The late placement avoids changing virtual scheduling priorities for tiled programs; the existing spilling and allocation machinery owns the new BF16 value and accumulator lifetime. The second virtual scheduling pass after the repair uses the same timing provider and search options as the first.
 
 ## Scalar fallback
 

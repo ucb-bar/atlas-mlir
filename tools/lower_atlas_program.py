@@ -17,6 +17,9 @@ The output directory receives:
   commands.txt      every command, in order
   log.txt           each command's diagnostics and exit status
 
+Model selection writes selection.json, program.hex, program.json, allocation.json,
+and final.mlir alongside commands.txt, log.txt, and each attempted candidate.
+
 The driver stops at the first failing command; its diagnostic ends log.txt.
 If allocation fails, 3-allocation.json still names each resource that does
 not fit.
@@ -31,6 +34,13 @@ import subprocess
 import sys
 from pathlib import Path
 
+
+if __package__:
+    # Match direct-script imports; spawn workers inherit this module search path.
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from .atlas_model_selection import add_model_arguments, model_arguments, select_program
+else:
+    from atlas_model_selection import add_model_arguments, model_arguments, select_program
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -57,9 +67,18 @@ def main() -> int:
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--atlas-bin-dir", type=Path,
                         default=Path(os.environ.get("ATLAS_OOT_BIN_DIR", ROOT / "build/bin")))
-    parser.add_argument("--guarded-pack", action="store_true",
+    parser.add_argument("--guarded-pack", action="store_true", default=False,
                         help="opt in to bit-exact PACK via MXU0 for proven-finite sources")
+    add_model_arguments(parser)
     args = parser.parse_args()
+    if args.provider == "model" or args.npu_model is not None:
+        try:
+            select_program(args.source, args.output_dir, args.atlas_bin_dir,
+                           model_arguments(args))
+        except (OSError, ValueError) as error:
+            print(error, file=sys.stderr)
+            return 1
+        return 0
     try:
         source = args.source.resolve(strict=True)
         bin_dir = args.atlas_bin_dir.resolve(strict=True)

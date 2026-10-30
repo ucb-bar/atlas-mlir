@@ -17,7 +17,7 @@ from verification_support import (
 TAGS = ("atlas.virtual_dma_transfer", "atlas.virtual_mxu_command", "atlas.virtual_tile_command")
 CONTRACTS = ("dma", "mxu", "tile", "cfg", "source_memory")
 TWO_RESOURCE = {row.name: row.source for row in ROWS if row.name in ("two_dma_reverse_await", "two_chains_same_unit")}
-DEFAULT = "npu-model-rtl-match-v1"
+DEFAULT = "builtin"
 VLOAD = ("vload", 'dst = 0 : i32, base = 6 : i32, offset = 0 : i32, format = "raw"')
 PUBLISH = ("csr", 'kind = "rrw", dst = 0 : i32, source = 0 : i32, address = 3088 : i32')
 HALT = ("trap", 'kind = "ecall"')
@@ -94,9 +94,13 @@ class UntimedPipelineTest(unittest.TestCase):
         for timing in ("--insert-atlas-delays", "--schedule-atlas-stream"):
             with self.subTest(timing=timing):
                 implicit = checked(self, untimed, timing)
-                self.assertEqual(checked(self, untimed, f"{timing}=provider={DEFAULT}"), implicit)
                 self.assertIn(PROVIDER, implicit)
-                self.assertEqual(checked(self, implicit, f"--verify-atlas-timing=provider={DEFAULT}"), checked(self, implicit, "--verify-atlas-timing"))
+                self.assertEqual(checked(self, untimed, f"{timing}=provider={DEFAULT}"), implicit)
+                self.assertEqual(checked(self, implicit, f"--verify-atlas-timing=provider={DEFAULT}"),
+                                 checked(self, implicit, "--verify-atlas-timing"))
+        source = (EXAMPLES / "virtual_bf16_shared_relu.mlir").read_text()
+        implicit = checked(self, source, "--schedule-atlas-virtual")
+        self.assertEqual(checked(self, source, f"--schedule-atlas-virtual=provider={DEFAULT}"), implicit)
 
     def test_unregistered_or_different_provider_fails_without_fallback(self) -> None:
         untimed = lower((EXAMPLES / "virtual_dma_mxu.mlir").read_text(), timed=False)
@@ -104,7 +108,10 @@ class UntimedPipelineTest(unittest.TestCase):
         legacy = program([addi(1, 0, 0), HALT])
         for timing, source in (("--insert-atlas-delays", untimed), ("--schedule-atlas-stream", untimed), ("--verify-atlas-timing", legacy)):
             with self.subTest(timing=timing):
-                self.rejected(source, f"{timing}=provider=unknown-policy", diagnostic="unknown Atlas timing provider: unknown-policy")
+                for provider in ("unknown-policy", "circt-rtl"):
+                    self.rejected(source, f"{timing}=provider={provider}",
+                                  diagnostic=f"unknown Atlas timing provider: {provider}")
+                self.rejected(source, f"{timing}=provider=model", diagnostic="atlas.model_evidence")
                 self.rejected(source, f"{timing}=provider=atlas.vls.conservative.v1", diagnostic="footprint-only coverage cannot borrow model rules")
                 self.rejected(timed, f"{timing}=provider=another-policy", diagnostic="supplied timing policy disagrees with retained provider identity")
 

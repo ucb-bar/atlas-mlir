@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 import sys
@@ -10,6 +11,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from model_evidence import requires_model_evidence
 from test_virtual_scheduling import wide_return_block
 from test_virtual_ssa import BIN, ROOT
 from test_virtual_lowering import virtual_chain
@@ -33,6 +35,32 @@ def drive(source: Path, output: Path, *options: str) -> subprocess.CompletedProc
 
 
 class LowerAtlasProgramTest(unittest.TestCase):
+    @requires_model_evidence
+    @unittest.skipUnless(os.environ.get("ATLAS_DERIVE_MODEL_ROOT"),
+                         "set ATLAS_DERIVE_MODEL_ROOT")
+    def test_package_model_compilation_with_spawn(self) -> None:
+        environment = os.environ.copy()
+        environment.pop("PYTHONPATH", None)
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "selected"
+            result = subprocess.run(
+                [sys.executable, "-B", "-m", "tools.lower_atlas_program",
+                 "test/examples/virtual_bf16_shared_relu.mlir",
+                 "--provider", "model", "--npu-model", os.environ["ATLAS_DERIVE_MODEL_ROOT"],
+                 "--model-facts", os.environ["ATLAS_TEST_MODEL_FACTS"],
+                 "--atlas-bin-dir", str(BIN), "--output-dir", str(output),
+                 "--workers", "2", "--max-candidates", "2", "--search-group-evaluations", "0"],
+                cwd=ROOT, env=environment, text=True, capture_output=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            selection = json.loads((output / "selection.json").read_text())
+            self.assertEqual(len(selection["candidates"]), 2)
+            self.assertTrue(all(row["status"] == "PASS" for row in selection["candidates"]))
+            winner = min(selection["candidates"], key=lambda row: (row["cycles"], row["index"]))
+            self.assertEqual((selection["selected_index"], selection["selected_cycles"]),
+                             (winner["index"], winner["cycles"]))
+            self.assertIn('atlas.timing_provider = "model"', (output / "final.mlir").read_text())
+            self.assertTrue((output / "program.hex").read_text().strip())
+
     def test_spill_stage_is_retained_before_allocation(self) -> None:
         from test_virtual_spilling import raw_roundtrip
 

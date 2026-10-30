@@ -1,20 +1,27 @@
 #ifndef ATLAS_TIMING_H
 #define ATLAS_TIMING_H
 
-// npu_model rtl-match timing rules, ported from atlas-compiler-experiments
-// 3ae2b5d (src/core) with its names. DMA VMEM addresses count words, as in
-// Atlas RTL. An age counts cycles after an instruction issues.
+// Handwritten rules ported from npu_model rtl-match mode in
+// atlas-compiler-experiments 3ae2b5d (src/core). DMA VMEM addresses count
+// words, as in Atlas RTL. An age counts cycles after an instruction issues.
 
 #include "Atlas/AtlasTarget.h"
 #include <array>
 #include <cstdint>
 #include <functional>
 #include <map>
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
 
 namespace mlir::atlas::timing {
+
+// A missing or unsupported rule returns an error instead of a timing value.
+template <typename T> struct TimingRuleResult {
+  T value{};
+  std::string error;
+};
 
 enum class Engine { Scalar, Lsu, Mxu0, Mxu1, Vpu, Xlu, Dma };
 
@@ -40,6 +47,7 @@ struct OpInfo {
   bool twoInput = false;
 };
 
+const std::vector<OpInfo> &machineOperations();
 const OpInfo *findOp(const std::string &name);
 // The BF16 VPU instruction for an atlas.vpu_unary, vpu_binary or vpu_reduce
 // kind, such as "exp2", "max" or "row_sum".
@@ -71,9 +79,9 @@ struct ScalarAccess {
 };
 ScalarAccess scalarAccess(const Instr &in, const RegValues &regs);
 
-const int kVmemBankBytes = 256 * 1024;
+const int kVmemBankBytes = kAtlasVmemBankBytes;
 const int kVmemBanks = kAtlasVmemBytes / kVmemBankBytes;
-const int kLineBytes = 32;
+const int kLineBytes = kAtlasMregRowBytes;
 
 enum class Res { XReg, EReg, MReg, Acc, Weight, Vmem, DmaBase };
 
@@ -112,6 +120,46 @@ struct Hold {
   int alt = -1;
 };
 
+// Extracted events are affine streams; reservation windows are inclusive.
+struct TimingEvent {
+  int firstAge = 0, lastAge = 0, count = 0, step = 1;
+};
+struct TimingWindow {
+  int from = 0, to = 0;
+};
+struct OperationTiming {
+  std::map<std::string, TimingEvent> events;
+  std::map<std::string, TimingWindow> releases;
+  int firstFreeAge = 0;
+};
+struct MxuRules {
+  int computeCapacity = 0;
+  int weightOverwriteAfterCompute = 0, weightUseAfterPush = 0;
+  int accumulatorUseAfterPush = 0, accumulatorForwardGap = 0;
+  TimingWindow sourcePorts, resultPorts;
+  std::vector<int> computePorts, pushBf16Ports, popFp8Ports, popBf16Ports;
+  std::vector<int> singlePushPriority;
+  TimingEvent weightFirst, weightLast;
+};
+struct TimingTables {
+  std::map<std::string, OperationTiming> operations;
+  int bf16RegistersPerTile = 0;
+  int ordinaryIssueGap = 0, delayBaseGap = 0, delayImmediateMask = 0;
+  int scalarReadAge = 0, scalarWriteAge = 0, controlReadAge = 0;
+  int scalarLoadGap = 0;
+  unsigned vpuIssueSlots = 0;
+  std::vector<std::string> vpuDouble;
+  std::vector<std::vector<std::string>> vpuLogicGroups;
+  std::array<MxuRules, 2> mxu;
+  std::function<TimingRuleResult<int>(long long, bool)> dmaEstimate;
+};
+
+int naturalGap(const Instr &in, const TimingTables &tables);
+bool vpuUsesBothSlots(const OpInfo &op, const TimingTables &tables);
+bool vpuCanOverlap(const OpInfo &a, const OpInfo &b,
+                   const TimingTables &tables);
+int unitCapacity(Unit unit, int index, const TimingTables &tables);
+
 struct Footprint {
   std::vector<Access> accesses;
   std::vector<Hold> holds;
@@ -124,9 +172,11 @@ struct Footprint {
   std::string error;
 };
 
-Footprint footprintOf(const Instr &in, const RegValues &regs);
-// Supplied timing rules; the built-in footprintOf provider is the unqualified
-// npu-model rtl-match model, not an independently qualified RTL contract.
+Footprint footprintOf(const Instr &in, const RegValues &regs,
+                      const TimingTables *tables = nullptr);
+Footprint footprintOf(const Instr &in, const RegValues &regs,
+                      const TimingTables &tables);
+// Rules supplied by the selected timing provider.
 using FootprintResolver = std::function<Footprint(const Instr &, const RegValues &)>;
 
 enum class EdgeKind { RAW, WAR, WAW, Rule, Order };
@@ -140,9 +190,11 @@ struct Dependence {
 
 // Cycles b must issue after a, which precedes it; DMA completion is excluded.
 Dependence dependence(const Instr &a, const Footprint &fa, const Instr &b,
-                      const Footprint &fb);
+                      const Footprint &fb, const TimingTables *tables = nullptr);
+Dependence dependence(const Instr &a, const Footprint &fa, const Instr &b,
+                      const Footprint &fb, const TimingTables &tables);
 bool conflictsAtCompletion(const Footprint &dma, const Footprint &other,
-                           EdgeKind &kind);
+                           EdgeKind &kind, const TimingTables *tables = nullptr);
 
 // b issues at least `distance` cycles after a.
 struct Edge {
@@ -162,25 +214,28 @@ struct DepGraph {
 
 // Pending transfers per channel at block entry; null keeps broad barriers.
 using IncomingDma = std::array<std::vector<Footprint>, kAtlasDMAChannels>;
+
+struct TimingProvider;
 DepGraph buildGraph(const std::vector<Instr> &instrs, const RegValues &entry,
+                    const TimingTables *tables = nullptr,
                     const IncomingDma *incomingDma = nullptr);
-// Longest path in cycles from each node until everything after it finishes.
-std::vector<int> criticalHeights(const DepGraph &g);
+
+TimingRuleResult<std::vector<int64_t>> criticalHeights(
+    const DepGraph &g, const TimingProvider &provider);
 
 bool isBarrier(const Instr &in);
 bool vpuCanOverlap(const OpInfo &a, const OpInfo &b);
 bool vpuUsesBothSlots(const OpInfo &op);
 int unitCapacity(Unit u, int index);
 const char *unitName(Unit u);
-// Cycles from launching one DMA transfer on an idle engine to its completed
-// wait, by npu_model main's DMA model: the beat-level engine against its
-// default DRAM, the bandwidth-latency curves measured on VCS EE290SimConfig
-// (ee290sim_vcs_probe.json). Beats stream at the curve's peak bandwidth after a
-// fixed start; transfers queued behind one another pay only the beats.
+// Hand-chosen DMA proposal estimate for the default provider.
+// Model providers supply their own estimates; matching waits establish completion.
 int dmaTransferCycles(long long bytes, bool store);
 
 class ReservationTable {
 public:
+  explicit ReservationTable(std::shared_ptr<const TimingTables> tables = {})
+      : tables_(std::move(tables)) {}
   // Empty if `in` can issue at `cycle`, otherwise the reason it cannot.
   std::string conflict(const Instr &in, const Footprint &f, int cycle) const;
   void reserve(const Instr &in, const Footprint &f, int cycle);
@@ -188,6 +243,7 @@ public:
   void extendForWait(int cycle);
 
 private:
+  std::shared_ptr<const TimingTables> tables_;
   struct PortUse {
     int reg = -1, row = -1;
     bool shareable = false;

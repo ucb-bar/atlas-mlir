@@ -12,7 +12,12 @@
 //     loop, redirects, CSR, the halt;
 //   - an analyzed loop whose VMEM meets its staging window;
 //   - entry to any other branch target, so the wait stays on the fall-through
-//     path.
+//     path;
+//   - when the provider asks for it, the launch that reuses its command slot:
+//     the RTL holds eight commands in a ring, so launch n needs launch n-8
+//     complete. Helpers count as launches. Launches stay outside analyzed
+//     loops; outside them, redirects and branch targets drain all transfers,
+//     so counting launches in program order is safe between drain points.
 // The wait goes immediately before that instruction. Timing passes may still
 // move it earlier within its block.
 
@@ -23,12 +28,15 @@
 #include "Atlas/AtlasGeneratedSchedule.h"
 #include "Atlas/AtlasOps.h"
 #include "Atlas/AtlasStream.h"
+#include "Atlas/AtlasTarget.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/Pass/Pass.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/STLExtras.h"
+#include <array>
 #include <limits>
 #include <optional>
+#include <utility>
 #include <vector>
 
 using namespace mlir;
@@ -158,7 +166,7 @@ bool meets(const AtlasVmemAccess &access, const Transfer &t) {
 }
 } // namespace
 
-LogicalResult mlir::atlas::insertAtlasDMAWaits(ModuleOp module) {
+LogicalResult mlir::atlas::insertAtlasDMAWaits(ModuleOp module, bool waitReusedSlots) {
   if (!module->hasAttr(kAtlasDMAWaitsPending))
     return success();
   auto transfers = readTransfers(module);
@@ -198,6 +206,10 @@ LogicalResult mlir::atlas::insertAtlasDMAWaits(ModuleOp module) {
     }
   };
   auto all = [](const Transfer &) { return true; };
+  // The explicit transfer each command slot last launched; helpers wait at once.
+  std::array<int32_t, kAtlasDMACommandSlots> slots;
+  slots.fill(-1);
+  size_t launches = 0;
   for (size_t pc = 0; pc < n; ++pc) {
     Operation *op = ops[pc];
     // An analyzed loop's only other entry is its own back-edge, so transfers stay
@@ -210,6 +222,11 @@ LogicalResult mlir::atlas::insertAtlasDMAWaits(ModuleOp module) {
       complete(pc, all);
     }
     if (auto dma = dyn_cast<DMAOp>(op)) {
+      // Defensive check of the stream reader invariant: loops cannot launch DMA.
+      if (waitReusedSlots && loop)
+        return op->emitOpError("command-slot waits require DMA launches outside analyzed loops");
+      int32_t &slot = slots[launches++ % kAtlasDMACommandSlots];
+      int32_t reused = std::exchange(slot, -1);
       auto id = contractTag(op, kAtlasTagDMATransfer);
       if (!id) {
         complete(pc, all); // Helper DMA moves memory beside no explicit transfer.
@@ -221,9 +238,10 @@ LogicalResult mlir::atlas::insertAtlasDMAWaits(ModuleOp module) {
       const Transfer &launch = found->second;
       complete(pc, [&](const Transfer &t) {
         return t.channel == launch.channel || t.staging.overlaps(launch.staging) ||
-               ((t.store || launch.store) && t.dram.overlaps(launch.dram));
+               ((t.store || launch.store) && t.dram.overlaps(launch.dram)) || (waitReusedSlots && t.id == reused);
       });
       pending.push_back(*id);
+      slot = *id;
     } else if (isa<VLoadOp, VStoreOp>(op)) {
       auto command = contractTag(op, kAtlasTagTileCommand);
       auto record = command ? tiles->find(*command) : tiles->end();
@@ -286,6 +304,14 @@ namespace {
 struct InsertAtlasDMAWaitsPass
     : PassWrapper<InsertAtlasDMAWaitsPass, OperationPass<ModuleOp>> {
   MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(InsertAtlasDMAWaitsPass)
+  InsertAtlasDMAWaitsPass() = default;
+  InsertAtlasDMAWaitsPass(const InsertAtlasDMAWaitsPass &other) : PassWrapper(other) {}
+  Option<std::string> provider{*this, "provider",
+                               llvm::cl::desc("Timing provider (default: atlas.timing_provider, else builtin)"),
+                               llvm::cl::init("")};
+
+  Option<bool> waitReusedDMASlots{*this, "wait-reused-dma-slots",
+      llvm::cl::desc("Wait before reusing DMA command slots"), llvm::cl::init(false)};
 
   StringRef getArgument() const final { return "insert-atlas-dma-waits"; }
   StringRef getDescription() const final {
@@ -295,7 +321,15 @@ struct InsertAtlasDMAWaitsPass
   }
 
   void runOnOperation() override {
-    if (failed(insertAtlasDMAWaits(getOperation())))
+    ModuleOp module = getOperation();
+    bool waitReusedSlots = waitReusedDMASlots;
+    if (module->hasAttr(kAtlasDMAWaitsPending)) {
+      auto selected = selectAtlasTimingProvider(module, provider.getValue());
+      if (failed(selected))
+        return signalPassFailure();
+      waitReusedSlots |= selected->waitReusedDMASlots;
+    }
+    if (failed(insertAtlasDMAWaits(module, waitReusedSlots)))
       signalPassFailure();
   }
 };
@@ -305,6 +339,10 @@ void mlir::atlas::registerInsertAtlasDMAWaitsPass() {
   PassRegistration<InsertAtlasDMAWaitsPass>();
 }
 
-std::unique_ptr<Pass> mlir::atlas::createInsertAtlasDMAWaitsPass() {
-  return std::make_unique<InsertAtlasDMAWaitsPass>();
+std::unique_ptr<Pass> mlir::atlas::createInsertAtlasDMAWaitsPass(StringRef provider,
+                                                                               bool waitReusedSlots) {
+  auto pass = std::make_unique<InsertAtlasDMAWaitsPass>();
+  pass->provider = provider.str();
+  pass->waitReusedDMASlots = waitReusedSlots;
+  return pass;
 }

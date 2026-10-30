@@ -2,6 +2,7 @@ cmake_minimum_required(VERSION 3.22)
 project(atlas_mlir LANGUAGES CXX C)
 
 find_package(MLIR REQUIRED CONFIG)
+find_package(Python3 COMPONENTS Interpreter REQUIRED)
 set(CMAKE_CXX_STANDARD 17 CACHE STRING "C++ standard")
 set(LLVM_RUNTIME_OUTPUT_INTDIR ${CMAKE_BINARY_DIR}/bin)
 set(LLVM_LIBRARY_OUTPUT_INTDIR ${CMAKE_BINARY_DIR}/lib)
@@ -20,8 +21,17 @@ add_subdirectory(tools)
 add_subdirectory(runtime)
 
 enable_testing()
+# Capture optional model test inputs in each directory that defines suites.
+function(atlas_forward_model_test_environment)
+  get_property(atlas_tests DIRECTORY PROPERTY TESTS)
+  foreach(variable ATLAS_DERIVE_MODEL_ROOT ATLAS_TEST_MODEL_FACTS)
+    if(DEFINED ENV{${variable}})
+      set_property(TEST ${atlas_tests} APPEND PROPERTY
+        ENVIRONMENT "${variable}=$ENV{${variable}}")
+    endif()
+  endforeach()
+endfunction()
 add_subdirectory(test)
-find_package(Python3 COMPONENTS Interpreter REQUIRED)
 # One test per Python test module, run from test/ as discovery would, with the
 # native binding package importable. Modules of plain test functions use
 # pytest; the rest are unittest suites.
@@ -41,3 +51,4 @@ foreach(test_file IN LISTS atlas_python_tests)
     ENVIRONMENT ATLAS_OOT_BIN_DIR=$<TARGET_FILE_DIR:atlas-opt>
     ENVIRONMENT_MODIFICATION PYTHONPATH=path_list_prepend:${PROJECT_SOURCE_DIR}/python)
 endforeach()
+atlas_forward_model_test_environment()

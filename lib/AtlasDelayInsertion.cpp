@@ -71,6 +71,8 @@ LogicalResult timeBlock(const AtlasStream &s, size_t block,
     }
     return cycle;
   };
+  // doneAge includes the last EXU event. Core S1 (including ECALL) runs
+  // before same-edge EXUs, so drain/ECALL must reach the next ordinary edge.
   auto drained = [&] {
     int cycle = 0;
     for (const Issued &x : issued)
@@ -148,8 +150,8 @@ LogicalResult timeBlock(const AtlasStream &s, size_t block,
       Footprint sf = p.footprint(slot, after);
       if (!sf.error.empty())
         return ops[s.delaySlots ? slotIndex : i]->emitOpError(sf.error);
-      if (drained() - 2 > cycle) {
-        cycle = drained() - 2;
+      if (drained() - p.frontendSpacing.successorGap() > cycle) {
+        cycle = drained() - p.frontendSpacing.successorGap();
         reason = "this block finishes before the branch's successors start";
       }
       auto fits = [&](int c) -> std::string {
@@ -157,26 +159,26 @@ LogicalResult timeBlock(const AtlasStream &s, size_t block,
         if (!why.empty())
           return why;
         std::string slotReason;
-        int slotCycle = earliest(slot, sf, c + 1, slotReason);
+        int slotCycle = earliest(slot, sf, c + p.frontendSpacing.ordinaryGap, slotReason);
         Dependence d = rule(p.dependence(in, f, slot, sf));
         if (c + d.distance > slotCycle) {
           slotCycle = c + d.distance;
           slotReason = d.reason + " after " + name(i);
         }
-        if (slotCycle > c + 1)
+        if (slotCycle > c + p.frontendSpacing.ordinaryGap)
           return "delay slot: " + slotReason;
         auto withBranch = replay();
         if (!withBranch)
           return why;
         note(withBranch->reserve(in, f, c));
-        why = rule(withBranch->conflict(slot, sf, c + 1));
+        why = rule(withBranch->conflict(slot, sf, c + p.frontendSpacing.ordinaryGap));
         return why.empty() ? why : "delay slot: " + why;
       };
       if (failed(search(i, cycle, reason, fits)))
         return failure();
       place(i, f, cycle, reason);
       if (s.delaySlots)
-        place(slotIndex, sf, cycle + 1, "");
+        place(slotIndex, sf, cycle + p.frontendSpacing.ordinaryGap, "");
       if (!fault.empty())
         return ops[i]->emitOpError(fault);
       if (s.delaySlots)
@@ -225,14 +227,14 @@ struct InsertAtlasDelaysPass
   InsertAtlasDelaysPass() = default;
   InsertAtlasDelaysPass(const InsertAtlasDelaysPass &other) : PassWrapper(other) {}
   Option<std::string> provider{*this, "provider",
-                               llvm::cl::desc("Registered timing provider id (default: the retained atlas.timing_provider, else npu-model-rtl-match-v1)"),
+                               llvm::cl::desc("Timing provider (default: atlas.timing_provider, else builtin)"),
                                llvm::cl::init("")};
 
   StringRef getArgument() const final { return "insert-atlas-delays"; }
   StringRef getDescription() const final {
     return "Insert the minimum in-order delays of the selected timing "
-           "provider (default: the npu_model rtl-match model, ported from "
-           "atlas-compiler-experiments) into a stream without atlas.delay";
+           "provider (default: atlas.timing_provider, else builtin) into a "
+           "stream without atlas.delay";
   }
 
   void runOnOperation() override {
@@ -247,6 +249,9 @@ void mlir::atlas::registerInsertAtlasDelaysPass() {
   PassRegistration<InsertAtlasDelaysPass>();
 }
 
-std::unique_ptr<Pass> mlir::atlas::createInsertAtlasDelaysPass() {
-  return std::make_unique<InsertAtlasDelaysPass>();
+std::unique_ptr<Pass> mlir::atlas::createInsertAtlasDelaysPass(
+    const std::string &provider) {
+  auto pass = std::make_unique<InsertAtlasDelaysPass>();
+  pass->provider = provider;
+  return pass;
 }
