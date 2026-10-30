@@ -82,58 +82,6 @@ graph/runtime and audits every embedded asset and ELF load segment. Its
 RV64GC/LP64D startup enables FP, sets RNE, and supplies a 64 KiB stack, aligned
 mailbox and high-address DMA arena. Linking does not execute the ELF.
 
-## Prepare and run the C54 RTL harness
-
-C54 preparation additionally requires the reviewed, completed model-partition
-fixture, including its parent receipt, all 54 child receipts and their
-hash-bound raw artifacts. Supply the matching reference and fresh generated host
-assets. The fixture must declare `passed_model_partition`, 54 ordered exact
-contractions, unchanged producer/model/input bookends, and the same candidate
-logits as the reference. This fixture is an external prerequisite; the checkout
-does not generate it.
-
-To relocate a fixture, pass explicit repeatable `--relocate
-OLD_PREFIX=NEW_PREFIX` mappings. The preparation command hashes the original
-receipt bytes before constructing a relocated view of absolute path values and
-keys. It rejects unsafe paths and mapping collisions and verifies each
-referenced file's original hash at its new location. Fresh host, reference and
-template paths are supplied directly and are not rewritten.
-
-To link, also supply an AtlasCore generated object directory and matching
-Verilator headers. Preparation reconstructs every initial/expected DRAM image,
-immutable program, DMA count and VMEM guard. It does not run a model or RTL
-simulator.
-
-```sh
-python tools/prepare_resnet_graph_rtl.py --host out/resnet-host \
-  --model-partition "$MODEL_PARTITION_FIXTURE/receipt.json" \
-  --reference "$PROVIDER/reference" --templates out/resnet-templates/receipt.json \
-  --rtl-object-dir "$RTL_OBJECTS" --verilator-include "$VERILATOR_INCLUDE" \
-  --cc "$NATIVE_CC" --cxx "$NATIVE_CXX" --out out/resnet-rtl
-# Explicit numerical execution, after allocating resources:
-timeout 21600 out/resnet-rtl/resnet_graph_runner out/resnet-rtl/graph.plan 200000000
-```
-
-The harness uses the complete C graph, raw host runtime and Verilated AtlasCore
-with one reset and 54 sequenced starts. Its declared synthetic TileLink
-responder supplies backpressure and 43-cycle responses. It checks live inputs,
-patched programs, DMA traffic, guards, markers, a quiet completion margin and
-1,000 exact target logit words. Waveforms and DMA transaction logs are off by
-default; `--vcd PATH` and `--dma-trace` are explicit diagnostic options.
-
-The RTL harness measures device execution with a synthetic memory responder;
-host CPU computation is outside that RTL clock. The [host-ISS
-runner](host-iss.md) provides a separate RV64 execution path for a compatible
-checksum-bound fixture bundle. The commands above do not produce that bundle
-format. Exact target arithmetic and platform timing are separate from
-task-quality accuracy. Task-quality admission and integrated platform execution
-require independent evidence.
-
-When a model receipt binds a separate producer source snapshot, pass it with
-`--model-producer-tools`. Every named helper is checked against the unchanged
-receipt digest; the current templates and all prepared launch bytes are still
-compared to the recorded model payloads.
-
 ## EE290 SoC kernels
 
 The frozen per-kernel network-model fixture supplies `kernel-*/model/{program.bin,initial-dram.bin,expected-bf16-tiles.bin}`. Build one independent ELF per kernel with a RISC-V GCC toolchain that supplies `htif_nano.specs` and `htif.ld`; the builder links the shared host runtime in place. Provide physical paths without symbolic links for all inputs and toolchain executables. LOADMEM places the initial device image at `0x100000000`; HTIF reports completion and the ELF checks every output word, both guards and the runtime sequence markers.

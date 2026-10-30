@@ -39,7 +39,6 @@ Exclusive raw ownership and quiescence are required because compiled clients may
 | --- | --- |
 | Raw host | Raw words plus five marker words must fit 32,768 words. |
 | ResNet graph host and segments | Actual raw bytes and descriptor counts must fit the 32,763-word copy buffer. |
-| Standalone RTL driver | Loaded words, including its eight-word wrapper, must fit 8,192 words. |
 
 All admitted programs fit these limits; builders validate actual bytes, structure and declared counts before linking.
 

@@ -32,8 +32,8 @@ set_target_properties(atlas-source-mn PROPERTIES C_STANDARD 11)
 install(TARGETS atlas-source-mn ARCHIVE DESTINATION lib)
 install(FILES atlas_source_mn.h DESTINATION include)
 
-# Full graph geometry is generated after admission; this shared callback backend
-# and math library also serve native conformance and retained RTL harnesses.
+# Full graph geometry is generated after checking inputs. The callback backend
+# and math library also support native conformance checks.
 add_library(atlas-resnet-graph STATIC atlas_resnet_graph_math.c atlas_resnet_graph_device.c)
 target_include_directories(atlas-resnet-graph PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(atlas-resnet-graph PUBLIC atlas-host)

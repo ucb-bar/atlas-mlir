@@ -15,8 +15,7 @@ Start with the [repository README](../README.md) for the build, and the
 | [Full-model contracts](full-model-contracts.md) | Bundles, placement, UART results, and Tiny segment inputs. |
 | [Full Smol host](smol-full-host.md) | Policy inputs, program selection, and the phase archive. |
 | [Model tile runner](model-tile-runner.md) | Source-bound model arithmetic, contraction providers and workload execution. |
-| [Contraction capsule](contraction-capsule.md) | Package matching recorded model and standalone RTL evidence. |
-| [Complete ResNet50 host](resnet-full-host.md) | Generate templates, replay the graph, build an ELF and prepare RTL execution. |
+| [Complete ResNet50 host](resnet-full-host.md) | Generate programs, replay the graph, and build a full-host bundle. |
 | [Task accuracy](task-accuracy.md) | How bit-exact Atlas results differ from PyTorch, and possible opt-in precision modes. |
 | [RV64 host ISS](host-iss.md) | Execute a compatible ResNet ELF and external fixture bundle with a model device. |
 | [Hardware status](hardware-status.md) | Per-instruction status, RTL/model differences, and how to rerun the RTL core tests. |

@@ -92,13 +92,8 @@ class VectorArithmeticTest(unittest.TestCase):
                 rescale_bf16_array(np.array([0x3F80], dtype=np.uint16), exponent)
         np.testing.assert_array_equal(rescale_bf16_array(np.array([0, 0x8000], dtype=np.uint16), 127), [0, 0x8000])
 
-    def test_physical_tile_layout_and_existing_producer_epoch(self):
+    def test_physical_tile_layout(self):
         from atlas_tile_arithmetic import output_halves
-        from atlas_program import code_sources
-        from rtl_core.prepare_program import PRODUCER_NAMES
-
-        self.assertEqual(set(code_sources()), set(PRODUCER_NAMES))
-        self.assertNotIn("atlas_vector_arithmetic.py", code_sources())
         rng = np.random.default_rng(1819)
         domain = np.array([c for c in range(256) if c not in (0x7F, 0xFF)], dtype=np.uint8)
         a = rng.choice(domain, size=(32, 32))
