@@ -32,15 +32,6 @@ set_target_properties(atlas-source-mn PROPERTIES C_STANDARD 11)
 install(TARGETS atlas-source-mn ARCHIVE DESTINATION lib)
 install(FILES atlas_source_mn.h DESTINATION include)
 
-add_library(atlas-resnet-block STATIC atlas_resnet_host.c atlas_resnet_block.c)
-target_include_directories(atlas-resnet-block PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(atlas-resnet-block PUBLIC atlas-resnet-graph)
-set_target_properties(atlas-resnet-block PROPERTIES C_STANDARD 11)
-# The exported target derivative requires two separately rounded FP32 operations.
-target_compile_options(atlas-resnet-block PRIVATE -ffp-contract=off)
-install(TARGETS atlas-resnet-block ARCHIVE DESTINATION lib)
-install(FILES atlas_numeric.h atlas_resnet_host.h atlas_resnet_block.h DESTINATION include)
-
 # Full graph geometry is generated after admission; this shared callback backend
 # and math library also serve native conformance and retained RTL harnesses.
 add_library(atlas-resnet-graph STATIC atlas_resnet_graph_math.c atlas_resnet_graph_device.c)
@@ -49,7 +40,7 @@ target_link_libraries(atlas-resnet-graph PUBLIC atlas-host)
 set_target_properties(atlas-resnet-graph PROPERTIES C_STANDARD 11)
 target_compile_options(atlas-resnet-graph PRIVATE -ffp-contract=off -fno-fast-math)
 install(TARGETS atlas-resnet-graph ARCHIVE DESTINATION lib)
-install(FILES atlas_resnet_graph_device.h atlas_resnet_graph_math.h DESTINATION include)
+install(FILES atlas_numeric.h atlas_resnet_graph_device.h atlas_resnet_graph_math.h DESTINATION include)
 
 # Workload adapters compile independently; embedding callers supply packing APIs.
 add_library(atlas-block-adapters STATIC tiny_projection.c smol_block_raw_adapter.c)

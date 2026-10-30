@@ -269,12 +269,6 @@ driver (`add52b0a7c96d72e0079b7938e07ca5080871e82`).
 
 ## ResNet host integration
 
-`atlas_resnet_block_run` packs each live activation, checks its fixed scale
-before launch, uses the raw invocation-marker runtime, checks DRAM guards,
-decodes BF16 output and applies FP32 affine/ReLU/residual host work with
-contraction disabled. Its external entry has shape 64×56×56. A failure retains
-live workspace and, for device faults or timeouts, runtime ownership.
-
 For the supported complete-graph build route, see [Complete ResNet50 host
 graph](resnet-full-host.md). The graph builder enables `mstatus.FS`, initializes
 `fcsr` to nearest-even, reserves a 64 KiB stack and checks ELF assets and load

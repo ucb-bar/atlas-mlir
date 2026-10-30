@@ -111,7 +111,7 @@ class GraphMathTest(unittest.TestCase):
         out = Path(cls.directory.name) / "math.so"
         source = Path(__file__).absolute().parent.parent / "runtime/atlas_resnet_graph_math.c"
         subprocess.run(["/usr/bin/cc", "-std=c11", "-O2", "-ffp-contract=off", "-fno-fast-math", "-Wall", "-Wextra",
-            "-Werror", "-pedantic", "-shared", "-fPIC", str(source), str(source.with_name("atlas_resnet_host.c")), "-o",
+            "-Werror", "-pedantic", "-shared", "-fPIC", str(source), "-o",
             str(out)], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         cls.lib = c.CDLL(str(out))
         cls.lib.atlas_graph_pack.argtypes = [c.POINTER(c.c_float), c.c_uint, c.c_uint, c.c_uint, c.c_uint, c.c_uint,
@@ -127,33 +127,22 @@ class GraphMathTest(unittest.TestCase):
         del cls.lib
         cls.directory.cleanup()
 
-    def test_bottleneck_pack_retains_geometry_and_admission(self):
-        self.lib.atlas_resnet_pack_a.argtypes = [c.POINTER(c.c_float), c.c_uint, c.c_uint, c.c_uint, c.c_uint,
-            c.POINTER(c.c_uint8), c.c_size_t, c.POINTER(c.c_int)]
-        data = (c.c_float * 4)(-2.0, 0.5, 1.0, 3.0)
-        for kernel in (1, 3):
-            expected, actual = (c.c_uint8 * 1024)(), (c.c_uint8 * 1024)()
-            graph_scale, block_scale = c.c_int(), c.c_int()
-            self.assertEqual(self.lib.atlas_graph_pack(data, 1, 2, 2, kernel, 1, kernel // 2, expected, 1024,
-                c.byref(graph_scale)), 0)
-            self.assertEqual(self.lib.atlas_resnet_pack_a(data, 1, 2, 2, kernel, actual, 1024, c.byref(block_scale)), 0)
-            self.assertEqual(bytes(actual), bytes(expected))
-            self.assertEqual(block_scale.value, graph_scale.value)
-        self.assertEqual(self.lib.atlas_resnet_pack_a(data, 1, 2, 2, 7, actual, 1024, c.byref(block_scale)), 1)
-        self.assertEqual(self.lib.atlas_resnet_pack_a(data, 1, 2, 2, 3, actual, 1023, c.byref(block_scale)), 1)
 
-    def test_bottleneck_affine_and_residual_in_place(self):
+    def test_graph_affine_and_residual_in_place(self):
         ptr = c.POINTER(c.c_float)
-        self.lib.atlas_resnet_affine.argtypes = [ptr, ptr, ptr, ptr, c.c_uint, c.c_uint, c.c_uint, c.c_int]
-        self.lib.atlas_resnet_residual_relu.argtypes = [ptr, ptr, ptr, c.c_size_t]
+        self.lib.atlas_graph_affine.argtypes = [ptr, ptr, ptr, ptr, c.c_uint, c.c_size_t]
+        self.lib.atlas_graph_add.argtypes = [ptr, ptr, ptr, c.c_size_t]
+        self.lib.atlas_graph_relu.argtypes = [ptr, ptr, c.c_size_t]
         data = (c.c_float * 4)(-2.0, 1.0, 2.0, 3.0)
         scale, bias = (c.c_float * 2)(2.0, -1.0), (c.c_float * 2)(1.0, 2.0)
-        self.assertEqual(self.lib.atlas_resnet_affine(data, data, scale, bias, 2, 1, 2, 1), 0)
+        self.assertEqual(self.lib.atlas_graph_affine(data, data, scale, bias, 2, 2), 0)
+        self.assertEqual(self.lib.atlas_graph_relu(data, data, 4), 0)
         self.assertEqual(list(data), [0.0, 3.0, 0.0, 0.0])
         identity = (c.c_float * 4)(-1.0, 0.5, 2.0, -2.0)
-        self.assertEqual(self.lib.atlas_resnet_residual_relu(data, identity, data, 4), 0)
+        self.assertEqual(self.lib.atlas_graph_add(data, identity, data, 4), 0)
+        self.assertEqual(self.lib.atlas_graph_relu(data, data, 4), 0)
         self.assertEqual(list(data), [0.0, 3.5, 2.0, 0.0])
-        self.assertEqual(self.lib.atlas_resnet_affine(data, data, scale, bias, 2, 0, 2, 0), 1)
+        self.assertEqual(self.lib.atlas_graph_affine(data, data, scale, bias, 2, 0), 1)
 
     def packed(self, values, h, w, kernel, stride, padding):
         data = (c.c_float * len(values))(*values)
