@@ -4,6 +4,7 @@
 #include "Atlas/AtlasModelTables.h"
 #include "Atlas/AtlasScheduling.h"
 #include "Atlas/AtlasStream.h"
+#include "Atlas/AtlasVirtualScheduling.h"
 #include "VerificationTestSupport.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include <cstdlib>
@@ -489,7 +490,7 @@ void registerPolicy(TimingProvider provider) {
         }).empty(), "synthetic virtual cost policy registers");
 }
 
-void testVirtualCosts(MLIRContext &) {
+void testVirtualCosts(MLIRContext &context) {
   auto p = toy();
   p.footprint = [](const Instr &, const RegValues &) {
     Footprint f;
@@ -500,6 +501,43 @@ void testVirtualCosts(MLIRContext &) {
   check(fillMachineTiming(p).empty() && p.machineTiming.at("vmov").latency == 13 &&
             p.machineTiming.at("vmov").interval == 7,
         "virtual machine costs use provider latency and issue gap");
+
+  const char *scalarSource = R"mlir(module {
+    func.func @scalar_spacing() -> !atlas.virtual_state {
+      %s0 = "atlas.virtual_start"() : () -> !atlas.virtual_state
+      %base = arith.constant -1879048192 : i32
+      %offset = arith.constant 0 : i32
+      %size = arith.constant 2048 : i32
+      %address = arith.addi %base, %offset : i32
+      %tile = "atlas.virtual_vpu_splat"() {bits = 0 : i32} : () -> !atlas.virtual_bf16
+      %s1 = "atlas.virtual_dma_store_bf16"(%s0, %tile, %address, %size)
+        : (!atlas.virtual_state, !atlas.virtual_bf16, i32, i32) -> !atlas.virtual_state
+      return %s1 : !atlas.virtual_state
+    }
+  })mlir";
+  registerScheduleAtlasVirtualPass();
+  for (int interval : {1, 7}) {
+    auto scalar = toy();
+    scalar.id = "synthetic-scalar-interval-" + std::to_string(interval);
+    scalar.issueGap = [interval](const Instr &in) {
+      return TimingRuleResult<int>{in.op->name == "addi" ? interval : 1, {}};
+    };
+    scalar.dmaEstimate = [](int64_t, bool) { return TimingRuleResult<int>{1, {}}; };
+    registerPolicy(scalar);
+    diagnostics.clear();
+    auto scheduled = runPipeline(context, scalarSource,
+        "schedule-atlas-virtual{provider=" + scalar.id + "}");
+    check(bool(scheduled), "virtual scalar interval fixture schedules", diagnostics);
+    if (!scheduled) continue;
+    Operation *offset = nullptr, *splat = nullptr;
+    scheduled->walk([&](Operation *op) {
+      if (auto constant = dyn_cast<arith::ConstantOp>(op))
+        if (cast<IntegerAttr>(constant.getValue()).getInt() == 0) offset = op;
+      if (isa<VirtualVPUSplatOp>(op)) splat = op;
+    });
+    check(offset && splat && splat->isBeforeInBlock(offset) == (interval == 7),
+          "virtual scheduling overlaps VPU work with the provider's scalar issue interval");
+  }
 
   auto cached = builtinTimingProvider();
   auto footprint = cached.footprint;

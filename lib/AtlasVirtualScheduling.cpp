@@ -495,7 +495,7 @@ Cost costOf(Operation *op, const timing::TimingProvider &provider, int transfer)
     return packCost(provider);
   // Scalar control, a DMA wait, or nothing at all.
   const auto &scalar = provider.machineTiming.at("addi");
-  return {Unit::Scalar, 1, scalar.latency};
+  return {Unit::Scalar, scalar.interval, scalar.latency};
 }
 
 // Register kinds as the allocator colors them; counts are indexed by kind.

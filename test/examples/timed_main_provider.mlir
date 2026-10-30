@@ -3,4 +3,3 @@ module attributes {atlas.timing_provider = "npu-model-rtl-match-v1", atlas.timin
   %0 = "atlas.start"() : () -> !atlas.state
   %1 = "atlas.trap"(%0) <{kind = "ecall"}> : (!atlas.state) -> !atlas.state
 }
-

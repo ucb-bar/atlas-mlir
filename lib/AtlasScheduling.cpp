@@ -19,6 +19,8 @@ namespace {
 constexpr int kMaxIdle = 100000;
 
 void constrainSourceWaits(DepGraph &g) {
+  // Compiler policy: these edges preserve source order only. nextIssue applies
+  // each node's actual issue gap separately.
   auto edge = [&](int from, int to) {
     int index = static_cast<int>(g.edges.size());
     g.edges.push_back({from, to, 1, EdgeKind::Order, "source DMA wait placement"});
