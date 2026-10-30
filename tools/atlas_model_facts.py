@@ -46,6 +46,12 @@ def write(directory, name, value):
 
 def accept_source(model):
     try:
+        top_level = subprocess.check_output(
+            ["git", "-C", str(model), "rev-parse", "--show-toplevel"], text=True,
+            stderr=subprocess.PIPE).strip()
+        if Path(top_level).resolve() != Path(model).resolve():
+            raise UnsupportedModelTiming(
+                "--accept-source requires the model directory to be the git checkout root")
         revision = subprocess.check_output(
             ["git", "-C", str(model), "rev-parse", "HEAD"], text=True,
             stderr=subprocess.PIPE).strip()

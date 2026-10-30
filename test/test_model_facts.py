@@ -373,6 +373,61 @@ else:
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("scoring model configuration differs from provider facts", result.stderr)
 
+    def test_accept_source_refuses_ancestor_checkout(self):
+        pins = (TOOLS / "model-pins.json").read_bytes()
+        with tempfile.TemporaryDirectory(dir=self.root) as directory:
+            parent = Path(directory)
+            for command in (("init", "-q"),
+                            ("-c", "commit.gpgsign=false", "-c", "user.name=Fixture",
+                             "-c", "user.email=fixture@example.invalid",
+                             "commit", "--allow-empty", "-qm", "unrelated repository")):
+                subprocess.run(["git", "-C", str(parent), *command], check=True, capture_output=True)
+            model = parent / "model"
+            shutil.copytree(self.model / "npu_model", model / "npu_model")
+            self.assertFalse((model / ".git").exists())
+            target = parent / "model-pins.json"
+            code = """
+from pathlib import Path
+import sys
+sys.path.insert(0, sys.argv[1])
+import atlas_model_facts as driver
+driver.PIN_PATH = Path(sys.argv.pop(2))
+sys.argv = [sys.argv[0], *sys.argv[2:]]
+driver.main()
+"""
+            for original in (None, b"existing pins\n"):
+                with self.subTest(pins_exist=original is not None):
+                    if original is not None:
+                        target.write_bytes(original)
+                    result = subprocess.run(
+                        [sys.executable, "-B", "-c", code, str(TOOLS), str(target),
+                         "--npu-model", str(model), "--accept-source"],
+                        cwd=parent, env=self.env, text=True, capture_output=True)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("model directory to be the git checkout root", result.stderr)
+                    self.assertIn(UPDATE_GUIDANCE, result.stderr)
+                    self.assertNotIn("Traceback", result.stderr)
+                    self.assertEqual(target.read_bytes() if target.exists() else None, original)
+        self.assertEqual((TOOLS / "model-pins.json").read_bytes(), pins)
+
+    def test_accept_source_supports_worktree(self):
+        import atlas_model_facts as driver
+        with tempfile.TemporaryDirectory(dir=self.root) as directory:
+            model = Path(directory) / "worktree"
+            subprocess.run(["git", "-C", str(self.model), "worktree", "add", "--detach",
+                            str(model), "HEAD"], check=True, capture_output=True)
+            try:
+                self.assertTrue((model / ".git").is_file())
+                target = Path(directory) / "model-pins.json"
+                with patch.object(driver, "PIN_PATH", target):
+                    driver.accept_source(model)
+                revision = subprocess.check_output(
+                    ["git", "-C", str(model), "rev-parse", "HEAD"], text=True).strip()
+                self.assertEqual(json.loads(target.read_text())["model_revision"], revision)
+            finally:
+                subprocess.run(["git", "-C", str(self.model), "worktree", "remove", "--force",
+                                str(model)], check=True, capture_output=True)
+
     def test_source_pin_writer(self):
         from contextlib import redirect_stdout
         from io import StringIO
