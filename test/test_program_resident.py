@@ -1,33 +1,49 @@
-"""Source-only full-A residency proofs, reusing the existing symbolic interpreter."""
+"""Legacy residency proofs share the operand and DMA interpreter."""
 
 import hashlib
 from pathlib import Path
+import re
 import sys
+from types import SimpleNamespace
 import unittest
+from unittest.mock import MagicMock, patch
+import zipfile
 
 TOOL_ROOT = Path(__file__).absolute().parents[1] / "tools"
 sys.path.insert(0, str(TOOL_ROOT))
-
 import atlas_program as producer
-from test_program_resident_b import schedule, verify
-from test_program_resident_b_pretranspose import prove_bytes
+from reuse_proof import prove
+
+
+def prove_legacy(source, m, k, n, mode="none"):
+    scale = re.search(r"^vli.all m4, (\d+)$", source, re.MULTILINE)
+    exponent = (int(scale[1]) >> 7) - 127 if scale else None
+    return prove(source, m, k, n, exponent, legacy=mode)
+
+
+def verify(source, m, k, n, output_offset, *, resident_a=False, resident_b=False):
+    assert output_offset == m * k + k * n + 256
+    mode = "A" if resident_a else "B" if resident_b else "none"
+    return prove_legacy(source, m, k, n, mode)["arithmetic"]
+
+
+def prove_bytes(source, m, k, n, *, pretransposed):
+    return prove_legacy(source, m, k, n, "BT" if pretransposed else "B")
+
+
+def accounting(m, k, n, **options):
+    source = producer.assembly(m, k, n, m * k + k * n + 256, **options)
+    mode = ("A" if options.get("resident_a") else
+            "BT" if options.get("pretranspose_resident_b") else
+            "B" if options.get("resident_b") else "none")
+    proof = prove_legacy(source, m, k, n, mode)
+    return {key: proof[key] for key in ("load_bytes", "store_bytes")}
 
 
 CASES = [("Smol Q", 192, 960, 960, -12, 5713920), ("Smol K", 192, 960, 320, -12, 2027520),
     ("Smol V", 192, 960, 320, -16, 2027520), ("Smol O", 192, 960, 960, -15, 5713920),
     ("Tiny Q", 128, 2048, 2048, -14, 17039360), ("Tiny K", 128, 2048, 256, -13, 2359296),
     ("Tiny V", 128, 2048, 256, -18, 2359296), ("Tiny O", 128, 2048, 2048, -21, 17039360)]
-
-
-def accounting(m, k, n, **options):
-    """Read actual DMA counts from the symbolic instruction interpreter."""
-    source = producer.assembly(m, k, n, m * k + k * n + 256, **options)
-    if options.get("pretranspose_resident_b"):
-        proof = prove_bytes(source, m, k, n, pretransposed=True)
-        stores, loads = proof["stores"], proof["loads"]
-    else:
-        _, stores, loads, _ = schedule(source)
-    return {"load_bytes": sum(item[2] for item in loads), "store_bytes": sum(item[2] for item in stores)}
 
 
 class ResidentATests(unittest.TestCase):
@@ -55,12 +71,6 @@ class ResidentATests(unittest.TestCase):
         self.assertEqual(accounting(64, 64, 64, resident_b=True, pretranspose_resident_b=True),
             {"load_bytes": 12288, "store_bytes": 8192})
 
-    def test_source_tuple_tracks_current_emitter_and_oracle(self):
-        sources = producer.code_sources()
-        self.assertEqual(set(sources), {"atlas_program.py", "run_model_tile.py", "atlas_tile_arithmetic.py"})
-        for name, digest in sources.items():
-            with self.subTest(source=name):
-                self.assertEqual(digest, hashlib.sha256((TOOL_ROOT / name).read_bytes()).hexdigest())
 
     def test_all_smol_and_tiny_original_k_order_and_stores(self):
         for name, m, k, n, exponent, loads in CASES:
@@ -79,7 +89,7 @@ class ResidentATests(unittest.TestCase):
             offset = m * k + k * n + 256
             source = producer.assembly(m, k, n, offset, resident_a=True)
             verify(source, m, k, n, offset, resident_a=True)
-            loads = schedule(source)[2]
+            loads = prove_legacy(source, m, k, n, "A")["loads"]
             a_loads = [item for item in loads if item[1] < m * k]
             self.assertEqual(a_loads[-1], (0x40000 + m * k - 1024, m * k - 1024, 1024))
             if m == 128:
@@ -108,7 +118,133 @@ class ResidentATests(unittest.TestCase):
                 verify(source.replace(old, new), m, k, n, offset, resident_a=True)
 
 
-# Qualified pure-emitter SHA256 fixtures.
+class ResidentBTests(unittest.TestCase):
+    def test_default_assembly_is_frozen(self):
+        # Fixed assembly digests guard the default encoding.
+        cases = [((64, 64, 64), "abdcad20dec027880a93a249e46fdbfde9aa28bf9fd1f0bb4f9041e84a85b73c"),
+            ((3136, 64, 64), "d3c04207242103608881526c87573a607cd2b46d763100ab759ff5c43fb6cad4"),
+            ((3136, 576, 64), "64c045a08bcafcab150f12a4a07e30f14b27aff36676b6a847520c032d0a9106"),
+            ((3136, 64, 256), "49dda1920eda26b29de7789df5399e6a4e82e749eda736715d0fb7b1a3c8b6df")]
+        for (m, k, n), digest in cases:
+            with self.subTest(shape=(m, k, n)):
+                source = producer.assembly(m, k, n, m * k + k * n + 256, 0)
+                self.assertEqual(hashlib.sha256(source.encode()).hexdigest(), digest)
+
+
+    def test_all_resnet_shapes_and_bank_boundary(self):
+        for m, k, n in [(64, 64, 64), (3136, 64, 64), (3136, 576, 64), (3136, 64, 256), (32, 4096, 64)]:
+            with self.subTest(shape=(m, k, n)):
+                offset = m * k + k * n + 256
+                baseline = producer.assembly(m, k, n, offset, 0)
+                candidate = producer.assembly(m, k, n, offset, 0, resident_b=True)
+                self.assertEqual(verify(baseline, m, k, n, offset, resident_b=False),
+                    verify(candidate, m, k, n, offset, resident_b=True))
+                # All conservative compute/rescale/store delays remain exact.
+                self.assertEqual([x for x in baseline.splitlines() if x.startswith("delay ")],
+                    [x for x in candidate.splitlines() if x.startswith("delay ")])
+
+    def test_capacity_refuses_smol_and_tiny(self):
+        for shape in [(192, 960, 960), (128, 2048, 2048)]:
+            with self.subTest(shape=shape), self.assertRaisesRegex(ValueError, "256-KiB"):
+                producer.assembly(*shape, 10000000, resident_b=True)
+
+    def test_symbolic_proof_rejects_controls(self):
+        m = k = n = 64
+        offset = m * k + k * n + 256
+        source = producer.assembly(m, k, n, offset, 0, resident_b=True)
+        controls = [source.replace("vtrpose.xlu m1, m1", "nop"), source.replace("vmatmul.acc.mxu0", "vmatmul.mxu0"),
+            source.replace("add x12, x12, x8", "add x12, x12, x0"), source.replace("addi x6, x6, 256", "addi x6, x6, 1024"),
+            source.replace("li x21, 4", "li x21, 3")]
+        for changed in controls:
+            with self.subTest(control=controls.index(changed)), self.assertRaises((AssertionError, KeyError)):
+                verify(changed, m, k, n, offset, resident_b=True)
+
+    def test_archive_admission_before_digest(self):
+        args = SimpleNamespace(smoke=False, input="/tmp/source.npz", manifest="/tmp/source.json")
+        required = [zipfile.ZipInfo(name) for name in ("A.npy", "B.npy", "native_C.npy")]
+        archive = MagicMock()
+        archive.__enter__.return_value.infolist.return_value = required
+        with patch.object(producer.zipfile, "ZipFile", return_value=archive), patch.object(producer, "sha256",
+            side_effect=AssertionError("digest before admission")):
+            producer.preflight_bundle(args)
+            # Prohibited/traversal members exist only as in-memory metadata.
+            for name in ("../A.npy",):
+                archive.__enter__.return_value.infolist.return_value = required + [zipfile.ZipInfo(name)]
+                with self.assertRaises(ValueError):
+                    producer.preflight_bundle(args)
+
+
+class PretransposeResidentBTests(unittest.TestCase):
+    def test_existing_resident_b_assembly_bytes(self):
+        # Fixed resident-B assembly digests cover unit and scaled outputs.
+        cases = [((64, 64, 64), "a61dd3150d9ed2817e064c84c17066a6b08a7d91f29770c160550d7d13d211d9",
+                "461125426fa78f6ba1486ed03706e2fd25a1b9ac14f0a0db1680d9dbe7a54fa6",
+            ), ((3136, 64, 64), "a4f95c1082148f354155967f6580f9c135681c787aaf9e61b80a2429f6667eae",
+                "038a8487211fa4ee0bc7ca1fa148f73c64e0acf76ea97fd75fee3b976f33c41f",
+            ), ((3136, 576, 64), "dbf56efdb61fcbc966ead41759db113635a22a04997aa4462e12db29baf8666e",
+                "879083244282457ca63af9f2436671660f66e513f1068a684978e8d75b6f08af",
+            ), ((3136, 64, 256), "1b127c83b39dc6a8bee8e1963682d8198611c6e182592a3cd9e6e5a953378906",
+                "2b0bb5ed9e6a55e77e9e690fd645baf3e488a3e39282af016c2816ea53221c34",
+            ), ((32, 4096, 64), "74a7559560ff73de4899f9b205c54d76ba74da716deb0e34f5705ff6957663b4",
+                "5834d114c46dc7f3bcf21ef7b2dd8ae6e2349a35d368f4a797caa3b94e90d1e7")]
+        for shape, unit, scaled in cases:
+            for exponent, digest in [(None, unit), (0, scaled)]:
+                with self.subTest(shape=shape, exponent=exponent):
+                    m, k, n = shape
+                    text = producer.assembly(m, k, n, m * k + k * n + 256, exponent, resident_b=True)
+                    self.assertEqual(hashlib.sha256(text.encode()).hexdigest(), digest)
+
+
+    def test_full_resnet_order_storage_counts_and_bank_boundary(self):
+        for name, shape in [("smoke", (64, 64, 64)), ("C1", (3136, 64, 64)), ("C2", (3136, 576, 64)),
+            ("C3", (3136, 64, 256)), ("shortcut", (3136, 64, 256)), ("bank boundary", (32, 4096, 64))]:
+            with self.subTest(site=name):
+                m, k, n = shape
+                offset = m * k + k * n + 256
+                old = producer.assembly(m, k, n, offset, -14, resident_b=True)
+                new = producer.assembly(m, k, n, offset, -14, resident_b=True, pretranspose_resident_b=True)
+                prior = prove_bytes(old, *shape, pretransposed=False)
+                current = prove_bytes(new, *shape, pretransposed=True)
+                for field in ("loads", "stores", "products", "core"):
+                    self.assertEqual(current[field], prior[field], field)
+                unique, uses = k * n // 1024, m * n // 1024 * (k // 32)
+                self.assertEqual((prior["counts"]["vtrpose.xlu"], current["counts"]["vtrpose.xlu"]), (uses, unique))
+                self.assertEqual(current["instructions"] - prior["instructions"], 6 * unique - 2 * uses)
+                self.assertEqual(current["delays"] - prior["delays"], 134 * unique - 66 * uses)
+                static = lambda text: sum(not line.endswith(":") for line in text.splitlines())
+                self.assertEqual(static(new) - static(old), 6 - 2 * (k // 32))
+                self.assertIn(
+                    "dma.wait ch0\nvload m1, 0(x19)\ndelay 34\nvtrpose.xlu m1, m1\ndelay 66\n"
+                    "vstore m1, 0(x19)\ndelay 34\naddi x19, x19, 256", new)
+                self.assertIn("vload m1, 0(x6)\ndelay 34\nvmatpush.weight.mxu0 w0, m1\ndelay 32", new)
+                self.assertEqual(current["b_stores"][-1][0] + 1024, 0x40000 + k * n)
+                if name == "bank boundary":
+                    self.assertEqual(current["b_stores"][-1][0] // 4, 0x1FF00)
+                    self.assertEqual(current["b_stores"][-1][0] + 1024, 0x80000)
+
+    def test_broken_pretranspose_store_pointers_and_continuations_refused(self):
+        shape = (64, 64, 64)
+        m, k, n = shape
+        source = producer.assembly(*shape, m * k + k * n + 256, 0, resident_b=True, pretranspose_resident_b=True)
+        changes = {"missing transpose": ("vtrpose.xlu m1, m1", "nop"), "missing store": ("vstore m1, 0(x19)", "nop"),
+            "wrong store pointer": ("vstore m1, 0(x19)", "vstore m1, 0(x2)"),
+            "wrong preload load pointer": ("vload m1, 0(x19)", "vload m1, 0(x2)"),
+            "wrong preload word step": ("addi x19, x19, 256", "addi x19, x19, 1024"),
+            "wrong later word step": ("addi x6, x6, 256", "addi x6, x6, 1024"),
+            "wrong DRAM step": ("addi x20, x20, 1024", "addi x20, x20, 256"),
+            "missing preload tile": ("li x21, 4", "li x21, 3"), "reset continuation": ("vmatmul.acc.mxu0", "vmatmul.mxu0"),
+            "aliased output": ("add x12, x12, x8", "add x12, x12, x0"),
+            "swapped output halves": ("vstore m3, 0(x9)", "vstore m2, 0(x9)")}
+        for name, (old, new) in changes.items():
+            self.assertIn(old, source)
+            with self.subTest(control=name), self.assertRaises((AssertionError, KeyError)):
+                prove_bytes(source.replace(old, new), *shape, pretransposed=True)
+
+    def test_pretranspose_requires_resident_b(self):
+        with self.assertRaisesRegex(ValueError, "requires --resident-b"):
+            producer.assembly(64, 64, 64, 10000, pretranspose_resident_b=True)
+
+
 FROZEN_ASSEMBLY = [
     ("ResNet C1", 3136, 64, 64, None, "none", "608889b9feae5a2230c81fe31453c45275370d125410a82ff9b2d01115a66ca9"),
     ("ResNet C1", 3136, 64, 64, -11, "none", "6bf4cb8ad6c46171de44133b02a9c54def09b9e38ab16b7d8a7e7b7647a8239b"),

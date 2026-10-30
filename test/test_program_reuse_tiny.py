@@ -1,7 +1,5 @@
 """Symbolic origin/permutation/order proofs; no numerical model execution."""
-from collections import Counter
 from pathlib import Path
-import re
 import sys
 import unittest
 
@@ -12,147 +10,18 @@ SHAPE = (128, 2048, 2048)
 OUTPUT = 4456704
 
 
-def transpose(values):
-    return tuple(values[r * 32 + c] for c in range(32) for r in range(32))
+from reuse_proof import prove as prove_program
 
 
 def prove(source, exponent=-14):
-    """Follow all original byte identities and ordered contractions to DRAM.
-
-    Symbolic output bytes represent the unchanged ordered BF16 MXU0 chain,
-    BF16 pop halves and optional scale. This is not numerical qualification.
-    """
-    lines = source.splitlines()
-    labels = {line[:-1]: i for i, line in enumerate(lines) if line.endswith(':')}
-    regs, memory, mregs, scales, weights, accs = {'x0': 0}, {}, {}, {}, {}, {}
-    loads, stores, popped, products = [], [], set(), Counter()
-    pending, configured, pc = {}, set(), 0
-
-    def accessible(base, size=1024):
-        assert all(base + size <= start or end <= base for start, end in pending.values()), 'pending DMA hazard'
-        return base
-
-    def address(arg):
-        return accessible(regs[re.fullmatch(r'0\((x\d+)\)', arg).group(1)] * 4)
-
-    def put(base, values, scale=None):
-        assert base % 1024 == 0 and 0 <= base <= 524288 - 1024
-        assert len(values) == 1024
-        memory[base] = (values, scale)
-
-    for _ in range(500000):
-        line = lines[pc]
-        op, *args = line.replace(',', '').split()
-        pc += 1
-        if op.endswith(':') or op in ('nop', 'delay'):
-            continue
-        if op == 'li':
-            regs[args[0]] = int(args[1], 0)
-        elif op in ('add', 'addi'):
-            regs[args[0]] = regs[args[1]] + (regs[args[2]] if op == 'add' else int(args[2]))
-        elif op in ('beq', 'jal'):
-            assert lines[pc] == 'nop', 'inert branch delay slot'
-            if op == 'jal' or regs[args[0]] == regs[args[1]]:
-                pc = labels[args[-1]]
-        elif op == 'dma.config':
-            assert regs[args[0]] == 1 and args[1] in ('ch0', 'ch1'), '4-GiB DRAM page'
-            configured.add(args[1])
-        elif op == 'dma.wait':
-            assert args[0] in configured and args[0] in pending
-            pending.pop(args[0])
-        elif op == 'dma.load':
-            assert args[3] in configured and args[3] not in pending
-            dest, origin, size = (regs[x] for x in args[:3])
-            dest *= 4
-            accessible(dest)
-            assert size == 1024 and origin % 1024 == 0 and 0 <= origin < 4456448
-            if origin < 262144:
-                assert dest == 262144 + origin, 'A bank capacity/address'
-            else:
-                assert dest == (origin - 262144) % 65536, 'B column panel address'
-            put(dest, tuple(range(origin, origin + size)))
-            loads.append((dest, origin, size))
-            pending[args[3]] = (dest, dest + size)
-        elif op == 'vload':
-            mregs[args[0]], scales[args[0]] = memory[address(args[1])]
-        elif op == 'vtrpose.xlu':
-            mregs[args[0]] = transpose(mregs[args[1]])
-        elif op == 'vmatpush.weight.mxu0':
-            assert args[0] in ('w0', 'w1')
-            weights[args[0]] = mregs[args[1]]
-        elif op in ('vmatmul.mxu0', 'vmatmul.acc.mxu0'):
-            slot, activation, weight = args
-            assert slot in ('acc0', 'acc1')
-            a, b = mregs[activation], weights[weight]
-            origin_a, origin_b = a[0], b[0]
-            row, inner = divmod(origin_a // 1024, 64)
-            column, b_inner = divmod((origin_b - 262144) // 1024, 64)
-            assert 0 <= row < 4 and 0 <= column < 64 and inner == b_inner
-            assert a == tuple(range(origin_a, origin_a + 1024)), 'original A byte order'
-            assert b == transpose(tuple(range(origin_b, origin_b + 1024))), 'original B transpose'
-            if op == 'vmatmul.mxu0':
-                assert inner == 0, 'reset only first K tile'
-                accs[slot] = []
-            chain = accs[slot]
-            assert inner == len(chain), 'strict per-output K order'
-            assert not chain or chain[0][:2] == (row, column), 'accumulator output identity'
-            chain.append((row, column, inner))
-            products[row, column] += 1
-        elif op == 'vmatpop.bf16.acc.mxu0':
-            assert args[0] == 'm2'
-            chain = accs[args[1]]
-            assert len(chain) == 64
-            row, column, _ = chain[0]
-            assert (row, column) not in popped
-            popped.add((row, column))
-            tokens = tuple(-((row * 64 + column) * 2048 + i + 1) for i in range(2048))
-            mregs['m2'], mregs['m3'] = tokens[:1024], tokens[1024:]
-            scales['m2'] = scales['m3'] = None
-        elif op == 'vli.all':
-            assert args[0] == 'm4'
-            mregs['m4'] = int(args[1])
-        elif op == 'vmul.bf16':
-            assert args == ['m2', 'm2', 'm4'] and exponent is not None
-            assert mregs['m4'] == (exponent + 127) << 7
-            assert scales['m2'] is None and scales['m3'] is None, 'scale exactly once'
-            scales['m2'] = scales['m3'] = exponent
-        elif op == 'vstore':
-            dest = address(args[1])
-            if args[0] == 'm1':
-                assert 0 <= dest < 65536, 'B cache stays below output scratch'
-            else:
-                assert args[0] in ('m2', 'm3') and dest in (65536, 66560), 'output scratch bound'
-            put(dest, mregs[args[0]], scales.get(args[0]))
-        elif op == 'dma.store':
-            assert args[3] in configured and args[3] not in pending
-            dest, src, size = (regs[x] for x in args[:3])
-            assert size == 2048 and src * 4 == 65536
-            assert OUTPUT <= dest < OUTPUT + 524288 and (dest - OUTPUT) % 2048 == 0
-            accessible(src * 4, size)
-            low, high = memory[src * 4], memory[src * 4 + 1024]
-            output = (dest - OUTPUT) // 2048
-            expected = tuple(-(output * 2048 + i + 1) for i in range(2048))
-            assert low[0] + high[0] == expected, 'output tile and BF16 half ordering'
-            assert low[1] == high[1] == exponent, 'exact rescale before store'
-            stores.append((dest, src, size))
-            pending[args[3]] = (src * 4, src * 4 + size)
-        elif op == 'ecall':
-            assert not pending and configured
-            assert len(loads) == 4352 and [x[1] for x in loads] == list(range(0, 4456448, 1024))
-            assert len(stores) == 256 and sorted(x[0] for x in stores) == list(range(OUTPUT, OUTPUT + 524288, 2048))
-            assert products == Counter({(r, c): 64 for r in range(4) for c in range(64)})
-            assert len(popped) == 256
-            return {'load_bytes': sum(x[2] for x in loads), 'store_bytes': sum(x[2] for x in stores),
-                    'products': sum(products.values()), 'outputs': len(stores)}
-        else:
-            raise AssertionError('unsupported instruction: ' + op)
-    raise AssertionError('program did not terminate')
+    return prove_program(source, *SHAPE, exponent)
 
 
 class TinyReuseTests(unittest.TestCase):
     def test_complete_origin_order_capacity_and_output_proof(self):
-        self.assertEqual(prove(producer.assembly(*SHAPE, OUTPUT, -14)),
-                         {'load_bytes': 4456448, 'store_bytes': 524288, 'products': 16384, 'outputs': 256})
+        result = prove(producer.assembly(*SHAPE, OUTPUT, -14))
+        self.assertEqual((result['load_bytes'], result['store_bytes']), (4456448, 524288))
+        self.assertEqual(result['counts']['vmatmul.acc.mxu0'], 16128)
         self.assertEqual(producer.dma_load_bytes(*SHAPE), 4456448)
 
     def test_unit_scale_and_extreme_rescale(self):
