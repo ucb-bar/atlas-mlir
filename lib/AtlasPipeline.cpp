@@ -118,7 +118,7 @@ void mlir::atlas::buildAtlasCompileUnscheduledPipeline(
   buildSpillStage(pm, options, /*scheduled=*/false);
   buildLowerStage(pm, options);
   insertDMAWaits(pm, options);
-  pm.addPass(createInsertAtlasDelaysPass());
+  pm.addPass(createInsertAtlasDelaysPass(options.provider));
   verifyTimedStream(pm);
 }
 

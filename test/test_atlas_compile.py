@@ -34,6 +34,45 @@ PROGRAMS = [
 
 class AtlasCompileTest(unittest.TestCase):
     @requires_model_evidence
+    def test_unscheduled_uses_selected_model_timing(self) -> None:
+        source = (ROOT / "test/examples/virtual_bf16_shared_relu.mlir").read_text()
+        facts = Path(os.environ["ATLAS_TEST_MODEL_FACTS"])
+
+        def compile_with(directory):
+            result = run("atlas-opt", source,
+                         f"--select-atlas-model-evidence=facts={directory}",
+                         "--atlas-compile-unscheduled=provider=model",
+                         "--dump-pass-pipeline")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn('atlas.timing_provider = "model"', result.stdout)
+            self.assertIn("insert-atlas-delays{provider=model}", result.stderr)
+            checked = run("atlas-opt", result.stdout, "--verify-atlas-timing")
+            self.assertEqual(checked.returncode, 0, checked.stderr)
+            return result.stdout
+
+        original = compile_with(facts)
+        with tempfile.TemporaryDirectory() as directory:
+            # Delay ReLU's entire event stream to make provider loss observable.
+            timing = json.loads((facts / "model-timing.json").read_text())
+            operation = next(row for row in timing["op_timing"]
+                             if row["name"] == "vrelu.bf16")
+            operation["first_free_age"] += 20
+            for event in operation["events"].values():
+                event["first_age"] += 20
+                event["last_age"] += 20
+            for release in timing["reservation_releases"]["vrelu.bf16"].values():
+                release["first_age"] += 20
+                release["release_age"] += 20
+            changed = Path(directory)
+            (changed / "model-timing.json").write_text(json.dumps(timing))
+            delayed = compile_with(changed)
+            # Compare emitted words so the changed facts hash cannot satisfy this check.
+            images = [run("atlas-emit", text) for text in (original, delayed)]
+            for image in images:
+                self.assertEqual(image.returncode, 0, image.stderr)
+            self.assertNotEqual(images[0].stdout, images[1].stdout)
+
+    @requires_model_evidence
     def test_relayout_schedule_keeps_candidate_options(self) -> None:
         facts = Path(os.environ["ATLAS_TEST_MODEL_FACTS"])
         evidence = f"--select-atlas-model-evidence=facts={facts}"
