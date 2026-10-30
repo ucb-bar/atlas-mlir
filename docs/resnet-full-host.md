@@ -82,12 +82,6 @@ graph/runtime and audits every embedded asset and ELF load segment. Its
 RV64GC/LP64D startup enables FP, sets RNE, and supplies a 64 KiB stack, aligned
 mailbox and high-address DMA arena. Linking does not execute the ELF.
 
-The optional `check_resnet_graph_device.py --build out/resnet-host --reference
-"$PROVIDER/reference" --cc "$NATIVE_CC" --out out/resnet-device-check` checks
-the actual C callback and raw runtime against an MMIO mock, with controls for
-sequence, capacity, scaling, patch corruption, guards, timeout ownership and
-aliasing. This remains saved-reply conformance.
-
 ## Prepare and run the C54 RTL harness
 
 C54 preparation additionally requires the reviewed, completed model-partition
