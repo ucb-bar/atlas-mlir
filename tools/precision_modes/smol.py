@@ -6,29 +6,13 @@ the model's native Torch behavior; only Linear and patch Conv2d are replaced.
 """
 from pathlib import Path
 import hashlib
-import sys
 import time
 
 import numpy as np
 import torch
 import torch.nn.functional as F
 
-from .. import arithmetic
-
-
-def add_arguments(parser):
-    parser.add_argument("--checkpoint", type=Path, required=True,
-                        help="Local policy config and safetensors directory")
-    parser.add_argument("--backbone", type=Path, required=True,
-                        help="Local SmolVLM backbone directory")
-    parser.add_argument("--observation", type=Path, required=True,
-                        help="Prepared observation and explicit noise NPZ")
-    parser.add_argument("--model-source", type=Path,
-                        help="Optional Python source root containing lerobot")
-    parser.add_argument("--reference", type=Path,
-                        help="Captured default trajectory NPZ for byte gate")
-    parser.add_argument("--native-reference", type=Path,
-                        help="Captured native trajectory NPZ for byte gate")
+from . import arithmetic
 
 
 def array(value):
@@ -84,8 +68,6 @@ class Engine:
         for name in ("checkpoint", "backbone"):
             if not Path(getattr(args, name)).is_dir():
                 raise ValueError("Expected a local " + name + " directory")
-        if args.model_source is not None:
-            sys.path.insert(0, str(args.model_source))
         from lerobot.configs.policies import PreTrainedConfig
         from lerobot.policies.smolvla.modeling_smolvla import SmolVLAPolicy
 
@@ -109,7 +91,7 @@ class Engine:
         if not required.issubset(self.inputs):
             missing = ", ".join(sorted(required - self.inputs.keys()))
             raise ValueError("Missing observation fields: " + missing)
-        self.cache = {}
+        self.linear = arithmetic.Linear(args)
         self.native = None
 
     def projection(self, name, module, incoming, args):
@@ -132,19 +114,7 @@ class Engine:
             matrix = incoming.reshape(-1, module.in_features)
             weight = module.weight.t().contiguous()
             shape = (*incoming.shape[:-1], module.out_features)
-        a_axis, b_axis, chunk, two_term = arithmetic.settings(args, name)
-        left, ea = arithmetic.pack(matrix, a_axis)
-        cache_key = (name, b_axis, two_term)
-        if cache_key not in self.cache:
-            if two_term:
-                (right, eb), low = arithmetic.two_term(weight, b_axis)
-            else:
-                right, eb = arithmetic.pack(weight, b_axis)
-                low = None
-            self.cache[cache_key] = right, eb, low
-        right, eb, low = self.cache[cache_key]
-        out = arithmetic.contraction(left, right, ea, eb,
-                                     k_chunk=chunk, low=low)
+        out = self.linear(name, matrix, lambda: weight)
         out = out.to(incoming.dtype).reshape(shape)
         if module.bias is not None:
             out = out + module.bias
@@ -230,29 +200,14 @@ class Engine:
             trajectory[key] = trajectory[source].copy()
         return trajectory, calls
 
-    def evaluate(self, args, output_dir):
+    def evaluate(self, args):
         started = time.monotonic()
-        output_dir = Path(output_dir) if output_dir is not None else None
-        if output_dir is not None:
-            output_dir.mkdir(parents=True, exist_ok=True)
         if self.native is None:
             self.native, _ = self.sample()
-        native_gate = (check_reference(self.native, args.native_reference)
-                       if args.native_reference else None)
-        if output_dir is not None:
-            np.savez(output_dir / "native-trajectory.npz", **self.native)
         trajectory, calls = self.sample(args)
-        if output_dir is not None:
-            np.savez(output_dir / "trajectory.npz", **trajectory)
-        gate = None
-        if args.reference:
-            gate = (check_reference(trajectory, args.reference)
-                    if args.precision_mode == "default" else
-                    dict(status="not-applicable",
-                         reason="Captured reference gates the default mode"))
+        gate = check_reference(trajectory, args.reference) if args.reference else None
         actions = trajectory["final_actions"]
-        return dict(model="smol", precision_mode=args.precision_mode,
-                    projection_calls=calls,
+        return dict(model="smol", projection_calls=calls,
                     action_metrics=metrics(actions,
                                            self.native["final_actions"]),
                     action_sha256=hashlib.sha256(actions.tobytes()).hexdigest(),
@@ -260,11 +215,10 @@ class Engine:
                                         for name, value in trajectory.items()
                                         if value.dtype != np.bool_},
                     captured_reference=gate,
-                    captured_native_reference=native_gate,
                     elapsed_seconds=time.monotonic() - started,
                     arithmetic=("ordered BF16 MAC; ascending FP64 scale "
                                 "and merge; direct BF16 store"))
 
 
 def run(args):
-    return Engine(args).evaluate(args, args.output_dir)
+    return Engine(args).evaluate(args)

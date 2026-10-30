@@ -14,22 +14,7 @@ import numpy as np
 import torch
 import torchvision
 
-from .. import arithmetic
-
-
-def add_arguments(parser):
-    parser.add_argument('--artifact-dir', type=Path, required=True,
-                        help='Provider directory containing host-plan.json')
-    parser.add_argument('--checkpoint', type=Path, required=True,
-                        help='local torchvision ResNet50 state dictionary')
-    parser.add_argument('--input', type=Path, required=True,
-                        help='Preprocessed f32 binary, .npy, or .npz inputs')
-    parser.add_argument('--reference', type=Path,
-                        help='optional provider arithmetic reference receipt')
-    parser.add_argument('--labels', type=Path,
-                        help='JSON labels list, or object with samples')
-    parser.add_argument('--input-index', type=int,
-                        help='evaluate only this index in an input array')
+from . import arithmetic
 
 
 def _sha(value):
@@ -268,26 +253,13 @@ def run(args):
         labels = [x['label'] if isinstance(x, dict) else x for x in labels]
         if len(labels) != len(images):
             raise ValueError('labels and input array lengths differ')
-    indices = ([args.input_index] if args.input_index is not None
-               else range(len(images)))
     records = []
-    for index in indices:
-        if not 0 <= index < len(images):
-            raise ValueError('input index out of range')
+    for index in range(len(images)):
         record = evaluate(engine, torch.from_numpy(images[index].copy()), args,
                           reference, labels[index] if labels else None)
         record['index'] = index
         records.append(record)
-    if getattr(args, 'output_dir', None):
-        output = Path(args.output_dir)
-        output.mkdir(parents=True, exist_ok=True)
-        np.savez(output / 'logits.npz', **{
-            f'{kind}_{record["index"]}': np.asarray(
-                record[key], dtype=np.float32)
-            for record in records
-            for kind, key in [('mode', 'logits'), ('native', 'native_logits')]})
-    return dict(model='resnet50', precision_mode=args.precision_mode,
-                scope=('offline CPU arithmetic emulation; '
+    return dict(model='resnet50', scope=('offline CPU arithmetic emulation; '
                        'no hardware execution or cycle claim'),
                 checkpoint_sha256=engine.checkpoint_sha256,
                 versions=dict(torch=torch.__version__,

@@ -8,9 +8,7 @@ term, add the scaled chains in FP64, and round once, directly, to BF16.
 import ctypes
 import fnmatch
 import functools
-import json
 import os
-from pathlib import Path
 
 import torch
 
@@ -76,31 +74,24 @@ def contraction(a, b, ea, eb, k_chunk=0, low=None):
 
 
 def settings(args, site):
-    """Resolve a recipe at one site; unselected sites use the frozen default."""
-    mode = args.precision_mode
-    selection = getattr(args, "sites", "all")
-    if selection.startswith("@"):
-        contents = Path(selection[1:]).read_text()
-        selection = (json.loads(contents) if contents.lstrip().startswith("[")
-                     else contents.split())
-    if isinstance(selection, str):
-        selection = selection.split(",")
-    aliases = {
-        "head": site == "lm_head",
-        "attention-head": "self_attn." in site or site == "lm_head",
-        "nonmlp": "mlp." not in site,
-        "mlp": "mlp." in site,
-        "down": site.endswith("mlp.down_proj"),
-    }
-    selected = any(pattern == "all" or aliases.get(pattern, False) or
-                   fnmatch.fnmatchcase(site, pattern) for pattern in selection)
-    finer = mode == "finer-scales" or getattr(args, "finer_scales", False)
-    keep_finer = mode == "k-split" and finer
-    if mode == "default" or (not selected and not keep_finer):
-        return "tensor", "tensor", 0, False
-    a_axis = (getattr(args, "activation_scale", None) or
-              ("row" if finer else "tensor"))
-    b_axis = (getattr(args, "weight_scale", None) or
-              ("column" if finer else "tensor"))
-    chunk = args.k_chunk if mode == "k-split" and selected else 0
-    return a_axis, b_axis, chunk, mode == "two-term"
+    """Finer scales apply at every site; K split and two-term weights only at sites matching --sites."""
+    finer = args.finer_scales or ""
+    selected = any(fnmatch.fnmatchcase(site, pattern) for pattern in args.sites)
+    return ("row" if finer in ("activation", "both") else "tensor", "column" if finer in ("weight", "both") else "tensor",
+            args.k_split if selected else 0, args.two_term and selected)
+
+
+class Linear:
+    """Emulated x @ weight at named sites, packing each weight once per key."""
+
+    def __init__(self, args):
+        self.args, self.weights = args, {}
+
+    def __call__(self, site, x, weight, key=None):
+        a_axis, b_axis, chunk, two = settings(self.args, site)
+        key = key or site
+        if key not in self.weights:
+            self.weights[key] = two_term(weight(), b_axis) if two else (pack(weight(), b_axis), None)
+        (b, eb), low = self.weights[key]
+        a, ea = pack(x, a_axis)
+        return contraction(a, b, ea, eb, chunk, low)

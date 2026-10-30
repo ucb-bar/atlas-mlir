@@ -8,32 +8,15 @@ Token IDs are used verbatim; tokenization and downloads are never performed.
 import gc
 import hashlib
 import json
-from pathlib import Path
 
 import torch
 from safetensors import safe_open
 
-from .. import arithmetic
+from . import arithmetic
 from . import tiny_host as host
 
 SITES = ("self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj",
          "self_attn.o_proj", "mlp.gate_proj", "mlp.up_proj", "mlp.down_proj")
-
-
-def add_arguments(parser):
-    parser.add_argument("--capture", required=True, type=Path,
-                        help="Tiny arithmetic capture directory with "
-                             "receipt.json")
-    parser.add_argument("--checkpoint", required=True, type=Path,
-                        help="Local TinyLlama config.json and "
-                             "model.safetensors")
-    parser.add_argument("--inputs", type=Path,
-                        help="JSON prompts with id and token_ids; omit for "
-                             "capture prompt")
-    parser.add_argument("--steps", type=int, default=3)
-    parser.add_argument("--native-precision", default="both",
-                        choices=("float32", "bfloat16", "both", "none"),
-                        help="Local Torch reference precision(s)")
 
 
 def digest(tensor):
@@ -55,16 +38,6 @@ def summarize(logits):
             "top5_ids": top.tolist(), "top5_logits": logits[top].tolist()}
 
 
-def save_logits(args, prompt_index, filename, logits):
-    directory = getattr(args, "output_dir", None)
-    if directory is None:
-        return None
-    path = Path(directory) / f"prompt-{prompt_index:03d}" / filename
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(logits.contiguous().float().numpy().tobytes())
-    return str(path)
-
-
 class Engine:
     def __init__(self, args):
         self.args = args
@@ -82,7 +55,7 @@ class Engine:
             raise ValueError("Tiny host recipe requires hidden size 2048, "
                              "32 query heads, and 4 KV heads")
         self.embedding = self.weights.get_tensor("model.embed_tokens.weight")
-        self.packed = {}
+        self.linear = arithmetic.Linear(args)
         self.norms = {}
         self.panel_calls = 0
 
@@ -97,28 +70,11 @@ class Engine:
         return self.weights.get_tensor(site + ".weight").float()
 
     def project(self, x, site, step):
-        a_axis, b_axis, chunk, two_term = arithmetic.settings(self.args, site)
-        call = self.calls[0 if step == 0 else 1, site]
-        a, ea = arithmetic.pack(x, axis=a_axis)
-        key = (site, b_axis, two_term)
-        if key not in self.packed:
-            weight = self.weight(site).T.contiguous()
-            panels = []
-            for panel in call["panels"]:
-                lo, hi = panel["columns"]
-                original = weight[:, lo:hi]
-                low = None
-                if two_term:
-                    (b, eb), low = arithmetic.two_term(original,
-                                                       low_axis=b_axis)
-                else:
-                    b, eb = arithmetic.pack(original, axis=b_axis)
-                panels.append((b, eb, low))
-            self.packed[key] = panels
+        # Each weight panel of the prefill launch has its own tensor scale.
         outputs = []
-        for b, eb, low in self.packed[key]:
-            y = arithmetic.contraction(a, b, ea, eb, k_chunk=chunk, low=low)
-            outputs.append(torch.as_tensor(y).float())
+        for index, panel in enumerate(self.calls[0, site]["panels"]):
+            lo, hi = panel["columns"]
+            outputs.append(self.linear(site, x, lambda: self.weight(site)[lo:hi].T, key=(site, index)))
             self.panel_calls += 1
         return torch.cat(outputs, dim=1)
 
@@ -222,34 +178,19 @@ def _run(args):
         if len(ids) + args.steps - 1 > engine.cos.shape[0]:
             raise ValueError("Sequence exceeds the capture rotary table")
     native = {}
-    precisions = ("float32", "bfloat16") if args.native_precision == "both" \
-        else (() if args.native_precision == "none"
-              else (args.native_precision,))
-    for precision in precisions:
+    for precision in ("float32",):
         model = native_model(args.checkpoint, getattr(torch, precision))
         for index, prompt in enumerate(prompts):
             tokens, logits = native_forward(model, prompt["token_ids"],
                                              args.steps)
             native.setdefault(prompt["id"], {})[precision] = (tokens, logits)
-            for step, value in enumerate(logits):
-                save_logits(args, index,
-                            f"native-{precision}-step-{step}.f32.bin", value)
         del model
         gc.collect()
-    result = {"model": "tiny", "precision_mode": args.precision_mode,
-              "steps": args.steps, "prompts": [],
-              "recipe": {"sites": getattr(args, "sites", "all"),
-                         "finer_scales": getattr(args, "finer_scales", False),
-                         "activation_scale": getattr(args, "activation_scale",
-                                                     None),
-                         "weight_scale": getattr(args, "weight_scale", None),
-                         "k_chunk": getattr(args, "k_chunk", 128)},
+    result = {"model": "tiny", "steps": args.steps, "prompts": [],
               "torch_version": torch.__version__,
               "arithmetic": "offline CPU emulation; no target timing"}
-    capture_gate = (not args.inputs and args.precision_mode == "default"
-                    and getattr(args, "activation_scale", None) is None
-                    and getattr(args, "weight_scale", None) is None
-                    and not getattr(args, "finer_scales", False))
+    capture_gate = not (args.inputs or args.finer_scales or args.k_split
+                        or args.two_term)
     for index, prompt in enumerate(prompts):
         ids = prompt["token_ids"]
         references = native.get(prompt["id"], {})
@@ -270,8 +211,6 @@ def _run(args):
                 forced_logits, forced_cache = engine.forward(
                     [reference[0][step - 1]], list(forced_cache), step)
             item = {"step": step, **summarize(logits)}
-            item["logits_file"] = save_logits(
-                args, index, f"free-step-{step}.f32.bin", logits)
             row["tokens"].append(item["token"])
             if reference is not None:
                 item["forced_native_token"] = int(forced_logits.argmax())
@@ -279,8 +218,6 @@ def _run(args):
                                              == reference[0][step])
                 item["forced_logit_error"] = metric(forced_logits,
                                                     reference[1][step])
-                item["forced_logits_file"] = save_logits(
-                    args, index, f"forced-step-{step}.f32.bin", forced_logits)
             if capture_gate and step < len(engine.receipt["target_trace"]):
                 target = engine.receipt["target_trace"][step]
                 item["capture_exact"] = (

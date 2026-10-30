@@ -27,18 +27,6 @@ def bits(value):
     return struct.unpack("<I", struct.pack("<f", float(value)))[0] >> 16
 
 
-class PrecisionModesCliTest(unittest.TestCase):
-    def test_help_without_optional_model_dependencies(self):
-        root = Path(__file__).resolve().parents[1]
-        entries = ([str(root / "tools/precision_modes/cli.py")],
-                   ["-m", "tools.precision_modes"])
-        for entry in entries:
-            result = subprocess.run([sys.executable, "-S", *entry, "--help"],
-                                    cwd=root, capture_output=True, text=True)
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertIn("{tiny,smol,resnet}", result.stdout)
-
-
 @unittest.skipUnless(HAS_TORCH and shutil.which("c++"),
                      "precision tests require optional Torch and C++")
 class PrecisionModesTest(unittest.TestCase):
@@ -158,21 +146,22 @@ class PrecisionModesTest(unittest.TestCase):
         self.assertEqual(bits(arithmetic.direct_bf16(torch.tensor([-0.0]))), 0)
 
     def test_site_masks_and_opt_in_defaults(self):
-        args = SimpleNamespace(precision_mode="default", sites="all",
-                               k_chunk=128, finer_scales=False,
-                               activation_scale=None, weight_scale=None)
+        args = SimpleNamespace(finer_scales=None, k_split=0, two_term=False,
+                               sites=["*"])
         self.assertEqual(arithmetic.settings(args, "lm_head"),
                          ("tensor", "tensor", 0, False))
-        args.precision_mode, args.sites = "two-term", "layer1_0_conv1"
+        args.two_term, args.sites = True, ["layer1_0_conv1"]
         self.assertTrue(arithmetic.settings(args, "layer1_0_conv1")[-1])
         self.assertFalse(arithmetic.settings(args, "fc")[-1])
-        args.precision_mode = "k-split"
-        args.sites, args.finer_scales = "attention-head", True
+        args.two_term, args.k_split, args.finer_scales = False, 128, "both"
+        args.sites = ["*self_attn.*", "lm_head"]
         self.assertEqual(arithmetic.settings(args, "lm_head"),
                          ("row", "column", 128, False))
         site = "model.layers.0.mlp.down_proj"
         self.assertEqual(arithmetic.settings(args, site),
                          ("row", "column", 0, False))
+        args.finer_scales = "activation"
+        self.assertEqual(arithmetic.settings(args, site)[:2], ("row", "tensor"))
 
     def test_frozen_default_contraction_cells(self):
         path = (Path(__file__).parent /
