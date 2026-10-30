@@ -19,7 +19,8 @@ LogicalResult insertAtlasDMAWaits(ModuleOp module, bool waitReusedSlots = false)
 // Register the DMA wait insertion pass with atlas-opt.
 void registerInsertAtlasDMAWaitsPass();
 // The selected provider decides whether launches wait for reused command slots.
-std::unique_ptr<Pass> createInsertAtlasDMAWaitsPass(llvm::StringRef provider = {});
+std::unique_ptr<Pass> createInsertAtlasDMAWaitsPass(llvm::StringRef provider = {},
+                                                    bool waitReusedSlots = false);
 
 } // namespace mlir::atlas
 

@@ -7,7 +7,8 @@ namespace mlir::atlas {
 
 // Register the list scheduling pass with atlas-opt.
 void registerScheduleAtlasStreamPass();
-std::unique_ptr<Pass> createScheduleAtlasStreamPass(llvm::StringRef provider = "", llvm::StringRef waitPlacement = "default");
+std::unique_ptr<Pass> createScheduleAtlasStreamPass(
+    llvm::StringRef provider = "", llvm::StringRef waitPlacement = "default");
 
 } // namespace mlir::atlas
 

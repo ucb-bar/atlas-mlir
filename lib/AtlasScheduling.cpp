@@ -1,8 +1,7 @@
-#include "Atlas/AtlasSearchPolicy.h"
 #include "Atlas/AtlasScheduling.h"
 #include "Atlas/AtlasGeneratedArtifact.h"
 #include "Atlas/AtlasGeneratedSchedule.h"
-#include "Atlas/AtlasModelTiming.h"
+#include "Atlas/AtlasModelTables.h"
 #include "Atlas/AtlasOps.h"
 #include "Atlas/AtlasStream.h"
 #include "Atlas/AtlasVerificationContext.h"
@@ -17,12 +16,30 @@ using namespace mlir::atlas::timing;
 
 namespace {
 
-constexpr int kMaxIdle = search_policy::kTimingSearchCycles;
+constexpr int kMaxIdle = 100000;
+
+void constrainSourceWaits(DepGraph &g) {
+  auto edge = [&](int from, int to) {
+    int index = static_cast<int>(g.edges.size());
+    g.edges.push_back({from, to, 1, EdgeKind::Order, "source DMA wait placement"});
+    g.out[from].push_back(index);
+    g.in[to].push_back(index);
+  };
+  int n = static_cast<int>(g.nodes.size());
+  for (int wait = 0; wait < n; ++wait) {
+    if (g.nodes[wait].op->opClass == OpClass::DmaWait) {
+      for (int i = 0; i < wait; ++i)
+        edge(i, wait);
+      for (int i = wait + 1; i < n; ++i)
+        edge(wait, i);
+    }
+  }
+}
 
 // scheduleBlock from atlas-compiler-experiments src/passes/schedule.cpp.
 // Fixed-latency engines drain between blocks; DMA uses waits.
 LogicalResult scheduleBlock(const AtlasStream &s, size_t block, bool generated,
-                            bool sourceWaitPlacement, ArrayRef<int32_t> sourceWaitTransfers,
+                            bool sourceWaitPlacement,
                             const TimingProvider &p, bool fillSlots, std::vector<size_t> &order,
                             std::vector<DelayInsertion> &before, int &tailIdle) {
   size_t begin = s.starts[block];
@@ -35,6 +52,8 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block, bool generated,
   std::vector<Instr> nodes(s.instrs.begin() + begin, s.instrs.begin() + end);
   if (pendingSlot)
     nodes.push_back(atlasNopInstr());
+  if (nodes.size() > INT_MAX)
+    return s.ops[begin]->emitOpError("block has too many instructions");
   int n = static_cast<int>(nodes.size());
   int nb = n - (branch ? 2 : halt ? 1 : 0);
   int term = branch || halt ? nb : -1;
@@ -42,49 +61,10 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block, bool generated,
   auto op = [&](int i) { return s.ops[std::min(begin + i, end - 1)]; };
   auto name = [&](int i) { return op(i)->getName().getStringRef().str(); };
 
-  // Keep the first provider error, including speculative checks.
-  std::string fault;
-  auto note = [&](const std::string &why) {
-    if (!why.empty() && fault.empty())
-      fault = why;
-  };
-  auto rule = [&](auto result) {
-    note(result.error);
-    return std::move(result.value);
-  };
-  auto add = [&](int cycle, int distance, const char *message) {
-    int64_t result = int64_t(cycle) + distance;
-    if (result < 0 || result > INT_MAX) {
-      note(message);
-      return cycle;
-    }
-    return static_cast<int>(result);
-  };
-
-  std::vector<TimingContext> contexts(s.timingContexts.begin() + begin, s.timingContexts.begin() + end);
-  contexts.resize(nodes.size());
-  auto built = buildTimingGraph(nodes, s.entry[block], p, nullptr, &contexts);
-  if (!built.error.empty())
-    return op(0)->emitOpError(built.error);
-  DepGraph g = std::move(built.value);
-  if (sourceWaitPlacement || !sourceWaitTransfers.empty()) {
-    auto edge = [&](int from, int to) {
-      int index = static_cast<int>(g.edges.size());
-      g.edges.push_back({from, to, 1, EdgeKind::Order, "source DMA wait placement"});
-      g.out[from].push_back(index);
-      g.in[to].push_back(index);
-    };
-    for (int wait = 0; wait < n; ++wait) {
-      auto transfer = op(wait)->getAttrOfType<IntegerAttr>(kAtlasTagDMATransfer);
-      if (nodes[wait].op->opClass == OpClass::DmaWait &&
-          (sourceWaitPlacement || (transfer && llvm::is_contained(sourceWaitTransfers, transfer.getInt())))) {
-        for (int i = 0; i < wait; ++i)
-          edge(i, wait);
-        for (int i = wait + 1; i < n; ++i)
-          edge(wait, i);
-      }
-    }
-  }
+  const TimingTables *tables = p.model.get();
+  DepGraph g = buildGraph(nodes, s.entry[block], tables);
+  if (sourceWaitPlacement)
+    constrainSourceWaits(g);
   if (generated) {
     // Preserve the generated DMA interval policy while allowing its permitted
     // compute to overlap. Transfers on several channels may be pending at
@@ -116,26 +96,26 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block, bool generated,
       }
     }
   }
-  auto reservations = [&]() {
-    auto table = rule(p.createReservations());
-    if (!table)
-      note("timing provider returned no reservation state");
-    return table;
-  };
-  std::unique_ptr<TimingReservations> alone = reservations();
-  if (!fault.empty())
-    return op(0)->emitOpError(fault);
+  ReservationTable alone(p.model);
+  if (p.frontendSpacing.ordinaryGap <= 0 || p.frontendSpacing.delaySlots < 0 ||
+      (int64_t(p.frontendSpacing.delaySlots) + 1) *
+              p.frontendSpacing.ordinaryGap > INT_MAX)
+    return op(0)->emitOpError("timing provider frontend spacing exceeds positive cycle domain");
+  int maxSpan = p.frontendSpacing.successorGap();
   std::vector<int> gaps(n);
   for (int i = 0; i < n; i++) {
-    std::string conflict = rule(alone->conflictWithContext(nodes[i], g.footprints[i], 0, contexts[i]));
-    gaps[i] = rule(p.issueGap(nodes[i]));
-    if (gaps[i] <= 0)
-      note("timing provider issue gap exceeds positive cycle domain");
-    if (!fault.empty())
-      return op(i)->emitOpError(fault);
+    std::string conflict = alone.conflict(nodes[i], g.footprints[i], 0);
+    gaps[i] = tables ? naturalGap(nodes[i], *tables) : naturalGap(nodes[i]);
     if (!conflict.empty())
       return op(i)->emitOpError("can never issue: ") << conflict;
+    maxSpan = std::max({maxSpan, gaps[i], g.footprints[i].doneAge + 1});
   }
+  for (const Edge &edge : g.edges)
+    maxSpan = std::max(maxSpan, edge.distance);
+  // Each placement can advance by a dependence, an issue gap, or the idle
+  // limit. Leave room for speculative users, the terminator, and its slot.
+  if ((int64_t(n) + 3) * (int64_t(maxSpan) + kMaxIdle + 1) > INT_MAX)
+    return op(0)->emitOpError("block schedule exceeds cycle domain");
   // Branch, delay slot and successor issue one cycle apart.
   if (slot >= 0 && (gaps[term] != p.frontendSpacing.ordinaryGap || gaps[slot] != p.frontendSpacing.ordinaryGap))
     return op(gaps[term] != p.frontendSpacing.ordinaryGap ? term : slot)->emitOpError(
@@ -145,22 +125,10 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block, bool generated,
       if (g.edges[e].to == slot && g.edges[e].distance > gaps[term])
         return op(slot)->emitOpError("delay-slot dependence exceeds its fixed issue spacing: ") << g.edges[e].reason;
 
-  // Widen critical heights to avoid overflow.
-  std::vector<int64_t> height(n);
-  for (int i = n - 1; i >= 0; --i) {
-    height[i] = int64_t(g.footprints[i].doneAge) + 1;
-    for (int e : g.out[i]) {
-      const Edge &ed = g.edges[e];
-      int64_t distance = ed.distance;
-      if (nodes[ed.to].op->opClass == OpClass::DmaWait && nodes[ed.to].op->channel == nodes[i].op->channel) {
-        if (p.dmaProposal)
-          distance = std::max(distance, int64_t(rule(p.dmaProposal(g.footprints[i].dmaCycles, 0, std::nullopt)).waitIssue));
-        else if (g.footprints[i].dmaCycles > 0)
-          note("timing provider lacks DMA proposal policy");
-      }
-      height[i] = std::max(height[i], distance + height[ed.to]);
-    }
-  }
+  auto heights = criticalHeights(g, p);
+  if (!heights.error.empty())
+    return op(0)->emitOpError(heights.error);
+  std::vector<int64_t> height = std::move(heights.value);
   std::vector<int> earliest(n, 0), waitingPreds(n, 0), issue(n, -1);
   std::vector<std::string> why(n), reason(n);
   for (const Edge &e : g.edges)
@@ -175,33 +143,9 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block, bool generated,
     return nodes[i].op->opClass == OpClass::DmaWait;
   };
 
-  std::unique_ptr<TimingReservations> table = reservations();
-  if (!fault.empty())
-    return op(0)->emitOpError(fault);
-  auto completion = [&](int i, int c) {
-    return add(add(c, g.footprints[i].doneAge,
-                   "timing provider completion age exceeds cycle domain"),
-               1, "timing provider completion age exceeds cycle domain");
-  };
-  auto nextIssue = [&](int i, int c) {
-    return add(c, gaps[i], "timing provider issue gap exceeds positive cycle domain");
-  };
-  auto checkCycle = [&](int i, int c) { completion(i, c); nextIssue(i, c); };
-  auto busy = [&](int i, int c) {
-    checkCycle(i, c);
-    if (!fault.empty())
-      return std::string();
-    return rule(table->conflictWithContext(nodes[i], g.footprints[i], c, contexts[i]));
-  };
-  auto reserve = [&](TimingReservations &state, int i, int c) {
-    checkCycle(i, c);
-    if (!fault.empty())
-      return;
-    std::string error = state.reserveWithContext(nodes[i], g.footprints[i], c, contexts[i]);
-    if (error.empty() && isWait(i))
-      error = state.onWait(nodes[i], c);
-    note(error);
-  };
+  ReservationTable table(p.model);
+  auto completion = [&](int i, int c) { return c + g.footprints[i].doneAge + 1; };
+  auto nextIssue = [&](int i, int c) { return c + gaps[i]; };
   int cycle = 0, placed = 0, nextFree = 0, lastPlaced = 0;
   while (placed < nb) {
     // Take the ready instruction on the longest path that fits this cycle.
@@ -215,7 +159,7 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block, bool generated,
       if (earliest[i] > cycle)
         continue;
       if (isWait(i)) {
-        if (!busy(i, cycle).empty())
+        if (!table.conflict(nodes[i], g.footprints[i], cycle).empty())
           continue;
         if (bestWait < 0 || release(i) < release(bestWait))
           bestWait = i;
@@ -223,7 +167,7 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block, bool generated,
       }
       if (best >= 0 && height[i] <= height[best])
         continue;
-      if (!busy(i, cycle).empty())
+      if (!table.conflict(nodes[i], g.footprints[i], cycle).empty())
         continue;
       best = i;
     }
@@ -235,7 +179,7 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block, bool generated,
       for (int e : g.out[bestWait]) {
         int t = g.edges[e].to;
         if (t < nb && waitingPreds[t] == 1 &&
-            int64_t(earliest[t]) <= int64_t(cycle) + gaps[bestWait] &&
+            earliest[t] <= cycle + gaps[bestWait] &&
             nodes[t].op->engine == Engine::Dma && !isWait(t))
           unlocksDma = true;
       }
@@ -253,10 +197,10 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block, bool generated,
           continue;
         int c = std::max(nextIssue(bestWait, cycle), earliest[t]);
         int start = c;
-        while (fault.empty() && !busy(t, c).empty()) {
-          c = add(c, 1, "scheduler search exceeds cycle domain");
+        while (!table.conflict(nodes[t], g.footprints[t], c).empty()) {
+          c++;
           if (c - start > kMaxIdle)
-            note("scheduler found no free issue cycle for a DMA wait user");
+            return op(t)->emitOpError("scheduler found no free issue cycle for a DMA wait user");
         }
         if (critical < 0 || height[t] > height[critical] ||
             (height[t] == height[critical] && c < firstUse)) {
@@ -271,19 +215,15 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block, bool generated,
           firstUse - gaps[bestWait] <= cycle)
         best = bestWait;
     }
-    if (!fault.empty())
-      return op(0)->emitOpError(fault);
     if (best < 0) {
-      cycle = add(cycle, 1, "scheduler search exceeds cycle domain");
-      if (!fault.empty())
-        return op(0)->emitOpError(fault);
+      cycle++;
       if (cycle - lastPlaced > kMaxIdle)
         return op(0)->emitOpError("scheduler made no progress");
       continue;
     }
 
     if (cycle > nextFree) {
-      std::string held = busy(best, cycle - 1);
+      std::string held = table.conflict(nodes[best], g.footprints[best], cycle - 1);
       if (earliest[best] == cycle)
         reason[best] = why[best];
       else if (!held.empty()) reason[best] = held;
@@ -292,17 +232,21 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block, bool generated,
                                     : "list scheduler priority";
     }
     issue[best] = cycle;
-    reserve(*table, best, cycle);
+    table.reserve(nodes[best], g.footprints[best], cycle);
+    if (isWait(best))
+      table.extendForWait(cycle);
     if (g.footprints[best].dmaCycles > 0) {
       if (!p.dmaProposal)
-        return op(best)->emitOpError("timing provider lacks DMA proposal policy");
-      auto proposal = rule(p.dmaProposal(g.footprints[best].dmaCycles, cycle, dmaQueueEnd));
-      dmaQueueEnd = proposal.queueEnd;
-      channelRelease[nodes[best].op->channel] = proposal.waitIssue;
+        return op(best)->emitOpError(p.diagnostic("timing provider lacks DMA proposal policy"));
+      auto proposal = p.dmaProposal(g.footprints[best].dmaCycles, cycle, dmaQueueEnd);
+      if (!proposal.error.empty())
+        return op(best)->emitOpError(proposal.error);
+      dmaQueueEnd = proposal.value.queueEnd;
+      channelRelease[nodes[best].op->channel] = proposal.value.waitIssue;
     }
     for (int e : g.out[best]) {
       const Edge &ed = g.edges[e];
-      int ready = add(cycle, ed.distance, "timing provider issue distance exceeds cycle domain");
+      int ready = cycle + ed.distance;
       if (ready > earliest[ed.to]) {
         earliest[ed.to] = ready;
         why[ed.to] = ed.reason + " after " + name(best);
@@ -310,8 +254,6 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block, bool generated,
       waitingPreds[ed.to]--;
     }
     nextFree = nextIssue(best, cycle);
-    if (!fault.empty())
-      return op(best)->emitOpError(fault);
     lastPlaced = cycle;
     cycle = nextFree;
     placed++;
@@ -332,8 +274,7 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block, bool generated,
       slot = *filler;
       body.erase(std::next(filler).base());
       // Keep the chosen order, but reclaim the filler's old issue cycle.
-      table = reservations();
-      if (!fault.empty()) return op(0)->emitOpError(fault);
+      table = ReservationTable(p.model);
       nextFree = 0;
       earliest.assign(n, 0);
       why.assign(n, "");
@@ -341,7 +282,7 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block, bool generated,
         cycle = std::max(nextFree, earliest[i]);
         reason[i] = cycle > nextFree ? why[i] : "";
         for (;;) {
-          std::string busy = rule(table->conflictWithContext(nodes[i], g.footprints[i], cycle, contexts[i]));
+          std::string busy = table.conflict(nodes[i], g.footprints[i], cycle);
           if (busy.empty())
             break;
           cycle++;
@@ -350,16 +291,18 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block, bool generated,
             return op(i)->emitOpError("scheduler made no progress");
         }
         issue[i] = cycle;
-        reserve(*table, i, cycle);
+        table.reserve(nodes[i], g.footprints[i], cycle);
+        if (isWait(i))
+          table.extendForWait(cycle);
         for (int e : g.out[i]) {
           const Edge &ed = g.edges[e];
-          if (add(cycle, ed.distance, "timing provider issue distance exceeds cycle domain") > earliest[ed.to]) {
-            earliest[ed.to] = add(cycle, ed.distance, "timing provider issue distance exceeds cycle domain");
+          int ready = cycle + ed.distance;
+          if (ready > earliest[ed.to]) {
+            earliest[ed.to] = ready;
             why[ed.to] = ed.reason + " after " + name(i);
           }
         }
         nextFree = nextIssue(i, cycle);
-        if (!fault.empty()) return op(i)->emitOpError(fault);
       }
     }
   }
@@ -369,7 +312,6 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block, bool generated,
   int drain = 0;
   for (int i : body)
     drain = std::max(drain, completion(i, issue[i]));
-  if (!fault.empty()) return op(0)->emitOpError(fault);
 
   int termCycle = nextFree;
   std::string termReason;
@@ -388,42 +330,33 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block, bool generated,
     if (slot >= 0)
       raise(earliest[slot] - p.frontendSpacing.ordinaryGap, "delay slot: " + why[slot]);
     for (;;) {
-      std::string held = busy(term, termCycle);
-      if (held.empty() && slot >= 0 && fault.empty()) {
+      std::string held = table.conflict(nodes[term], g.footprints[term], termCycle);
+      if (held.empty() && slot >= 0) {
         int slotCycle = nextIssue(term, termCycle);
         // Replay placements to check the slot with the branch reserved.
-        auto withBranch = reservations();
-        if (withBranch && fault.empty()) {
-          for (int i : body)
-            reserve(*withBranch, i, issue[i]);
-          checkCycle(slot, slotCycle);
-          if (fault.empty())
-            reserve(*withBranch, term, termCycle);
-          if (fault.empty())
-            held = rule(withBranch->conflictWithContext(nodes[slot], g.footprints[slot], slotCycle, contexts[slot]));
-          if (!held.empty())
-            held = "delay slot: " + held;
+        ReservationTable withBranch(p.model);
+        for (int i : body) {
+          withBranch.reserve(nodes[i], g.footprints[i], issue[i]);
+          if (isWait(i))
+            withBranch.extendForWait(issue[i]);
         }
+        withBranch.reserve(nodes[term], g.footprints[term], termCycle);
+        held = withBranch.conflict(nodes[slot], g.footprints[slot], slotCycle);
+        if (!held.empty())
+          held = "delay slot: " + held;
       }
-      if (!fault.empty())
-        return op(term)->emitOpError(fault);
       if (held.empty())
         break;
-      termCycle = add(termCycle, 1, "scheduler search exceeds cycle domain");
-      if (!fault.empty())
-        return op(term)->emitOpError(fault);
+      termCycle++;
       termReason = held;
       if (termCycle - nextFree > kMaxIdle)
         return op(term)->emitOpError("found no free issue cycle: ") << held;
     }
-    reserve(*table, term, termCycle);
+    table.reserve(nodes[term], g.footprints[term], termCycle);
     int termEnd = nextIssue(term, termCycle);
     if (slot >= 0) {
-      reserve(*table, slot, termEnd);
-      nextIssue(slot, termEnd);
+      table.reserve(nodes[slot], g.footprints[slot], termEnd);
     }
-    if (!fault.empty())
-      return op(term)->emitOpError(fault);
   }
 
   int free = 0;
@@ -459,30 +392,11 @@ LogicalResult scheduleStream(ModuleOp module, bool insertDelays, StringRef reque
   FailureOr<TimingProvider> provider = selectAtlasTimingProvider(module, requested);
   if (failed(provider))
     return failure();
-  if (waitPlacement != "default" && waitPlacement != "source" && waitPlacement != "preloaded")
-    return module.emitError("wait-placement must be default, source or preloaded");
-  if (waitPlacement != "default" && provider->id != kModelTimingProviderId)
-    return module.emitError() << "wait-placement=" << waitPlacement << " requires the model timing provider";
+  if (waitPlacement != "default" && waitPlacement != "source")
+    return module.emitError("wait-placement must be default or source");
   FailureOr<AtlasStream> stream = readAtlasStream(module);
   if (failed(stream) || failed(checkAtlasStream(*stream, *provider)))
     return failure();
-  SmallVector<int32_t> sourceWaitTransfers;
-  if (waitPlacement == "preloaded") {
-    auto transfers = module->getAttrOfType<DenseI32ArrayAttr>("atlas.model_preloaded_weights");
-    if (!transfers)
-      return module.emitError("wait-placement=preloaded requires preloaded weight transfer IDs");
-    for (int32_t id : transfers.asArrayRef()) {
-      if (id < 0 || llvm::is_contained(sourceWaitTransfers, id))
-        return module.emitError("preloaded weight transfer IDs must be unique and nonnegative");
-      bool found = llvm::any_of(stream->ops, [&](Operation *op) {
-        auto tag = op->getAttrOfType<IntegerAttr>(kAtlasTagDMATransfer);
-        return isa<DMAWaitOp>(op) && tag && tag.getInt() == id;
-      });
-      if (!found)
-        return module.emitError("preloaded weight transfer ID has no DMA wait: ") << id;
-      sourceWaitTransfers.push_back(id);
-    }
-  }
   auto kind = classifyAtlasGeneratedArtifact(module);
   if (failed(kind))
     return failure();
@@ -491,7 +405,7 @@ LogicalResult scheduleStream(ModuleOp module, bool insertDelays, StringRef reque
   std::vector<int> tailIdle(stream->starts.size(), 0);
   for (size_t b = 0; b < stream->starts.size(); ++b)
     if (failed(scheduleBlock(*stream, b, *kind == AtlasArtifactKind::Generated,
-                             waitPlacement == "source", sourceWaitTransfers,
+                             waitPlacement == "source",
                              *provider, insertDelays && fillsDelaySlots(*provider),
                              order, before, tailIdle[b])))
       return failure();
@@ -528,7 +442,8 @@ struct ScheduleAtlasStreamPass
                                llvm::cl::desc("Timing provider (default: atlas.timing_provider, else builtin)"),
                                llvm::cl::init("")};
   Option<std::string> waitPlacement{
-      *this, "wait-placement", llvm::cl::desc("DMA wait placement: default, source or preloaded (model only)"),
+      *this, "wait-placement",
+      llvm::cl::desc("DMA wait placement: default or source"),
       llvm::cl::init("default")};
 
   StringRef getArgument() const final { return "schedule-atlas-stream"; }

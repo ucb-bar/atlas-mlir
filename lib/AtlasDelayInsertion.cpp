@@ -1,4 +1,3 @@
-#include "Atlas/AtlasSearchPolicy.h"
 #include "Atlas/AtlasDelayInsertion.h"
 #include "Atlas/AtlasStream.h"
 #include "mlir/Pass/Pass.h"
@@ -16,7 +15,7 @@ struct Issued {
   int cycle;
 };
 
-constexpr int kMaxSearch = search_policy::kTimingSearchCycles;
+constexpr int kMaxSearch = 100000;
 
 LogicalResult timeBlock(const AtlasStream &s, size_t block,
                         const TimingProvider &p,
@@ -27,7 +26,6 @@ LogicalResult timeBlock(const AtlasStream &s, size_t block,
   size_t begin = s.starts[block];
   size_t end = s.blockEnd(block);
   RegValues regs = s.entry[block];
-  auto context = [&](size_t index) { return index < end ? s.timingContexts[index] : TimingContext{}; };
   // The first uncovered provider rule; checked after each placement.
   std::string fault;
   auto note = [&](const std::string &why) {
@@ -39,8 +37,8 @@ LogicalResult timeBlock(const AtlasStream &s, size_t block,
     return std::move(result.value);
   };
   auto reserve = [&](TimingReservations &table, const Instr &in,
-                     const Footprint &f, int cycle, size_t index) {
-    std::string why = table.reserveWithContext(in, f, cycle, context(index));
+                     const Footprint &f, int cycle) {
+    std::string why = table.reserve(in, f, cycle);
     if (why.empty() && in.op->opClass == OpClass::DmaWait)
       why = table.onWait(in, cycle);
     note(why);
@@ -53,7 +51,7 @@ LogicalResult timeBlock(const AtlasStream &s, size_t block,
       note("timing provider returned no reservation state");
     else
       for (const Issued &x : issued)
-        reserve(*table, instrs[x.index], x.f, x.cycle, x.index);
+        reserve(*table, instrs[x.index], x.f, x.cycle);
     return table;
   };
   std::unique_ptr<TimingReservations> table = replay();
@@ -62,10 +60,10 @@ LogicalResult timeBlock(const AtlasStream &s, size_t block,
   int nextFree = 0;
 
   auto name = [&](size_t i) { return ops[i]->getName().getStringRef().str(); };
-  auto earliest = [&](size_t index, const Instr &in, const Footprint &f, int cycle,
+  auto earliest = [&](const Instr &in, const Footprint &f, int cycle,
                       std::string &reason) {
     for (const Issued &x : issued) {
-      Dependence d = rule(p.dependenceFor(instrs[x.index], x.f, context(x.index), in, f, context(index)));
+      Dependence d = rule(p.dependence(instrs[x.index], x.f, in, f));
       if (d.distance > 0 && x.cycle + d.distance > cycle) {
         cycle = x.cycle + d.distance;
         reason = d.reason + " after " + name(x.index);
@@ -86,7 +84,7 @@ LogicalResult timeBlock(const AtlasStream &s, size_t block,
     if (cycle > nextFree)
       before[i] = {idleDelays(cycle - nextFree), false, reason};
     const Instr &in = instrs[i];
-    reserve(*table, in, f, cycle, i);
+    reserve(*table, in, f, cycle);
     issued.push_back({i, f, cycle});
     applyScalar(in, regs);
     int gap = rule(p.issueGap(in));
@@ -114,7 +112,7 @@ LogicalResult timeBlock(const AtlasStream &s, size_t block,
     if (!f.error.empty())
       return ops[i]->emitOpError(f.error);
     std::string reason;
-    int cycle = earliest(i, in, f, nextFree, reason);
+    int cycle = earliest(in, f, nextFree, reason);
 
     if (in.op->opClass == OpClass::Halt) {
       // A halt neither drains in-flight work nor waits for a delay, so its
@@ -157,12 +155,12 @@ LogicalResult timeBlock(const AtlasStream &s, size_t block,
         reason = "this block finishes before the branch's successors start";
       }
       auto fits = [&](int c) -> std::string {
-        std::string why = rule(table->conflictWithContext(in, f, c, context(i)));
+        std::string why = rule(table->conflict(in, f, c));
         if (!why.empty())
           return why;
         std::string slotReason;
-        int slotCycle = earliest(slotIndex, slot, sf, c + p.frontendSpacing.ordinaryGap, slotReason);
-        Dependence d = rule(p.dependenceFor(in, f, context(i), slot, sf, context(slotIndex)));
+        int slotCycle = earliest(slot, sf, c + p.frontendSpacing.ordinaryGap, slotReason);
+        Dependence d = rule(p.dependence(in, f, slot, sf));
         if (c + d.distance > slotCycle) {
           slotCycle = c + d.distance;
           slotReason = d.reason + " after " + name(i);
@@ -172,8 +170,8 @@ LogicalResult timeBlock(const AtlasStream &s, size_t block,
         auto withBranch = replay();
         if (!withBranch)
           return why;
-        note(withBranch->reserveWithContext(in, f, c, context(i)));
-        why = rule(withBranch->conflictWithContext(slot, sf, c + p.frontendSpacing.ordinaryGap, context(slotIndex)));
+        note(withBranch->reserve(in, f, c));
+        why = rule(withBranch->conflict(slot, sf, c + p.frontendSpacing.ordinaryGap));
         return why.empty() ? why : "delay slot: " + why;
       };
       if (failed(search(i, cycle, reason, fits)))
@@ -189,7 +187,7 @@ LogicalResult timeBlock(const AtlasStream &s, size_t block,
     }
 
     if (failed(search(i, cycle, reason,
-                      [&](int c) { return rule(table->conflictWithContext(in, f, c, context(i))); })))
+                      [&](int c) { return rule(table->conflict(in, f, c)); })))
       return failure();
     place(i, f, cycle, reason);
     if (!fault.empty())

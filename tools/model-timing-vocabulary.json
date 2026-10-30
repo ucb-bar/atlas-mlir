@@ -1,115 +1,75 @@
 {
-  "schema": "atlas.model_timing.vocabulary.v1",
-  "base_relation_keys": ["mreg_banks", "accumulator", "weight_slot"],
-  "relation_values": {
-    "accumulator": ["same", "other"],
-    "weight_slot": ["same", "other"]
-  },
   "vpu_blocks": [
-    {"mnemonic": "vadd.bf16", "block": "add", "two_input": true, "op_class": "VpuElementwise"},
-    {"mnemonic": "vsub.bf16", "block": "sub", "two_input": true, "op_class": "VpuElementwise"},
-    {"mnemonic": "vmul.bf16", "block": "mul", "two_input": true, "op_class": "VpuElementwise"},
-    {"mnemonic": "vmaximum.bf16", "block": "pairmax", "two_input": true, "op_class": "VpuElementwise"},
-    {"mnemonic": "vminimum.bf16", "block": "pairmin", "two_input": true, "op_class": "VpuElementwise"},
-    {"mnemonic": "vmov", "block": "mov", "two_input": false, "op_class": "VpuElementwise"},
-    {"mnemonic": "vrecip.bf16", "block": "rcp", "two_input": false, "op_class": "VpuElementwise"},
-    {"mnemonic": "vexp.bf16", "block": "exp", "two_input": false, "op_class": "VpuElementwise"},
-    {"mnemonic": "vexp2.bf16", "block": "exp2", "two_input": false, "op_class": "VpuElementwise"},
-    {"mnemonic": "vrelu.bf16", "block": "relu", "two_input": false, "op_class": "VpuElementwise"},
-    {"mnemonic": "vsin.bf16", "block": "sin", "two_input": false, "op_class": "VpuElementwise"},
-    {"mnemonic": "vcos.bf16", "block": "cos", "two_input": false, "op_class": "VpuElementwise"},
-    {"mnemonic": "vtanh.bf16", "block": "tanh", "two_input": false, "op_class": "VpuElementwise"},
-    {"mnemonic": "vlog2.bf16", "block": "log", "two_input": false, "op_class": "VpuElementwise"},
-    {"mnemonic": "vsqrt.bf16", "block": "sqrt", "two_input": false, "op_class": "VpuElementwise"},
-    {"mnemonic": "vsquare.bf16", "block": "square", "two_input": false, "op_class": "VpuElementwise"},
-    {"mnemonic": "vcube.bf16", "block": "cube", "two_input": false, "op_class": "VpuElementwise"},
-    {"mnemonic": "vredsum.row.bf16", "block": "rsum", "two_input": false, "op_class": "VpuRowReduce"},
-    {"mnemonic": "vredmax.row.bf16", "block": "rmax", "two_input": false, "op_class": "VpuRowReduce"},
-    {"mnemonic": "vredmin.row.bf16", "block": "rmin", "two_input": false, "op_class": "VpuRowReduce"},
-    {"mnemonic": "vredsum.bf16", "block": "csum", "two_input": false, "op_class": "VpuColReduce"},
-    {"mnemonic": "vredmax.bf16", "block": "cmax", "two_input": false, "op_class": "VpuColReduce"},
-    {"mnemonic": "vredmin.bf16", "block": "cmin", "two_input": false, "op_class": "VpuColReduce"},
-    {"mnemonic": "vpack.bf16.fp8", "block": "fp8pack", "two_input": false, "op_class": "VpuPack"},
-    {"mnemonic": "vunpack.fp8.bf16", "block": "fp8unpack", "two_input": false, "op_class": "VpuUnpack"},
-    {"mnemonic": "vli.all", "block": "vliAll", "two_input": false, "op_class": "VpuLoadImmPair"},
-    {"mnemonic": "vli.row", "block": "vliRow", "two_input": false, "op_class": "VpuLoadImmPair"},
-    {"mnemonic": "vli.col", "block": "vliCol", "two_input": false, "op_class": "VpuLoadImmSingle"},
-    {"mnemonic": "vli.one", "block": "vliOne", "two_input": false, "op_class": "VpuLoadImmSingle"}
+    {"mnemonic": "vadd.bf16", "two_input": true, "op_class": "VpuElementwise"},
+    {"mnemonic": "vsub.bf16", "two_input": true, "op_class": "VpuElementwise"},
+    {"mnemonic": "vmul.bf16", "two_input": true, "op_class": "VpuElementwise"},
+    {"mnemonic": "vmaximum.bf16", "two_input": true, "op_class": "VpuElementwise"},
+    {"mnemonic": "vminimum.bf16", "two_input": true, "op_class": "VpuElementwise"},
+    {"mnemonic": "vmov", "two_input": false, "op_class": "VpuElementwise"},
+    {"mnemonic": "vrecip.bf16", "two_input": false, "op_class": "VpuElementwise"},
+    {"mnemonic": "vexp.bf16", "two_input": false, "op_class": "VpuElementwise"},
+    {"mnemonic": "vexp2.bf16", "two_input": false, "op_class": "VpuElementwise"},
+    {"mnemonic": "vrelu.bf16", "two_input": false, "op_class": "VpuElementwise"},
+    {"mnemonic": "vsin.bf16", "two_input": false, "op_class": "VpuElementwise"},
+    {"mnemonic": "vcos.bf16", "two_input": false, "op_class": "VpuElementwise"},
+    {"mnemonic": "vtanh.bf16", "two_input": false, "op_class": "VpuElementwise"},
+    {"mnemonic": "vlog2.bf16", "two_input": false, "op_class": "VpuElementwise"},
+    {"mnemonic": "vsqrt.bf16", "two_input": false, "op_class": "VpuElementwise"},
+    {"mnemonic": "vsquare.bf16", "two_input": false, "op_class": "VpuElementwise"},
+    {"mnemonic": "vcube.bf16", "two_input": false, "op_class": "VpuElementwise"},
+    {"mnemonic": "vredsum.row.bf16", "two_input": false, "op_class": "VpuRowReduce"},
+    {"mnemonic": "vredmax.row.bf16", "two_input": false, "op_class": "VpuRowReduce"},
+    {"mnemonic": "vredmin.row.bf16", "two_input": false, "op_class": "VpuRowReduce"},
+    {"mnemonic": "vredsum.bf16", "two_input": false, "op_class": "VpuColReduce"},
+    {"mnemonic": "vredmax.bf16", "two_input": false, "op_class": "VpuColReduce"},
+    {"mnemonic": "vredmin.bf16", "two_input": false, "op_class": "VpuColReduce"},
+    {"mnemonic": "vpack.bf16.fp8", "two_input": false, "op_class": "VpuPack"},
+    {"mnemonic": "vunpack.fp8.bf16", "two_input": false, "op_class": "VpuUnpack"},
+    {"mnemonic": "vli.all", "two_input": false, "op_class": "VpuLoadImmPair"},
+    {"mnemonic": "vli.row", "two_input": false, "op_class": "VpuLoadImmPair"},
+    {"mnemonic": "vli.col", "two_input": false, "op_class": "VpuLoadImmSingle"},
+    {"mnemonic": "vli.one", "two_input": false, "op_class": "VpuLoadImmSingle"}
   ],
   "mxu_blocks": [
-    {"mnemonic": "vmatpush.weight", "block": "push_weight", "op_class": "WeightPush"},
-    {"mnemonic": "vmatpush.acc.fp8", "block": "push_acc_fp8", "op_class": "AccPushFp8"},
-    {"mnemonic": "vmatpush.acc.bf16", "block": "push_acc_bf16", "op_class": "AccPushBf16"},
-    {"mnemonic": "vmatpop.fp8.acc", "block": "pop_acc_fp8", "op_class": "PopFp8"},
-    {"mnemonic": "vmatpop.bf16.acc", "block": "pop_acc_bf16", "op_class": "PopBf16"},
-    {"mnemonic": "vmatmul", "block": "matmul", "op_class": "MatMul"},
-    {"mnemonic": "vmatmul.acc", "block": "matmul_acc", "op_class": "MatMulAcc"}
+    "vmatpush.weight",
+    "vmatpush.acc.fp8",
+    "vmatpush.acc.bf16",
+    "vmatpop.fp8.acc",
+    "vmatpop.bf16.acc",
+    "vmatmul",
+    "vmatmul.acc"
   ],
   "vpu_operand_roles": {
     "VpuElementwise": [
-      {"key": "read0", "operand": "rs1", "write": false, "registers": 2, "passes": 1, "offset": 0, "two_input": false},
-      {"key": "read1", "operand": "rs2", "write": false, "registers": 2, "passes": 1, "offset": 0, "two_input": true},
-      {"key": "write0", "operand": "rd", "write": true, "registers": 2, "passes": 1, "offset": 0, "two_input": false}
+      {"key": "read0", "operand": "rs1", "write": false, "registers": 2, "offset": 0, "two_input": false},
+      {"key": "read1", "operand": "rs2", "write": false, "registers": 2, "offset": 0, "two_input": true},
+      {"key": "write0", "operand": "rd", "write": true, "registers": 2, "offset": 0, "two_input": false}
     ],
     "VpuPack": [
-      {"key": "read0", "operand": "rs2", "write": false, "registers": 2, "passes": 1, "offset": 0, "two_input": false},
-      {"key": null, "operand": "rs1", "write": false, "registers": 1, "passes": 1, "offset": 0, "two_input": false},
-      {"key": "write0", "operand": "rd", "write": true, "registers": 1, "passes": 1, "offset": 0, "two_input": false}
+      {"key": "read0", "operand": "rs2", "write": false, "registers": 2, "offset": 0, "two_input": false},
+      {"key": null, "operand": "rs1", "write": false, "registers": 1, "offset": 0, "two_input": false},
+      {"key": "write0", "operand": "rd", "write": true, "registers": 1, "offset": 0, "two_input": false}
     ],
     "VpuUnpack": [
-      {"key": "read0", "operand": "rs2", "write": false, "registers": 1, "passes": 1, "offset": 0, "two_input": false},
-      {"key": null, "operand": "rs1", "write": false, "registers": 1, "passes": 1, "offset": 0, "two_input": false},
-      {"key": "write0", "operand": "rd", "write": true, "registers": 2, "passes": 1, "offset": 0, "two_input": false}
+      {"key": "read0", "operand": "rs2", "write": false, "registers": 1, "offset": 0, "two_input": false},
+      {"key": null, "operand": "rs1", "write": false, "registers": 1, "offset": 0, "two_input": false},
+      {"key": "write0", "operand": "rd", "write": true, "registers": 2, "offset": 0, "two_input": false}
     ],
     "VpuRowReduce": [
-      {"key": "read0", "operand": "rs1", "write": false, "registers": 1, "passes": 1, "offset": 0, "two_input": false},
-      {"key": "read1", "operand": "rs1", "write": false, "registers": 1, "passes": 1, "offset": 1, "two_input": false},
-      {"key": "write0", "operand": "rd", "write": true, "registers": 1, "passes": 1, "offset": 0, "two_input": false},
-      {"key": "write1", "operand": "rd", "write": true, "registers": 1, "passes": 1, "offset": 1, "two_input": false}
+      {"key": "read0", "operand": "rs1", "write": false, "registers": 1, "offset": 0, "two_input": false},
+      {"key": "read1", "operand": "rs1", "write": false, "registers": 1, "offset": 1, "two_input": false},
+      {"key": "write0", "operand": "rd", "write": true, "registers": 1, "offset": 0, "two_input": false},
+      {"key": "write1", "operand": "rd", "write": true, "registers": 1, "offset": 1, "two_input": false}
     ],
     "VpuColReduce": [
-      {"key": "read0", "operand": "rs1", "write": false, "registers": 2, "passes": 2, "offset": 0, "two_input": false},
-      {"key": "write0", "operand": "rd", "write": true, "registers": 2, "passes": 1, "offset": 0, "two_input": false}
+      {"key": "read0", "operand": "rs1", "write": false, "registers": 2, "offset": 0, "two_input": false},
+      {"key": "write0", "operand": "rd", "write": true, "registers": 2, "offset": 0, "two_input": false}
     ],
     "VpuLoadImmPair": [
-      {"key": "write0", "operand": "rd", "write": true, "registers": 2, "passes": 1, "offset": 0, "two_input": false}
+      {"key": "write0", "operand": "rd", "write": true, "registers": 2, "offset": 0, "two_input": false}
     ],
     "VpuLoadImmSingle": [
-      {"key": "write0", "operand": "rd", "write": true, "registers": 1, "passes": 1, "offset": 0, "two_input": false}
-    ]
-  },
-  "mxu_operand_roles": {
-    "WeightPush": [
-      {"key": "mreg_read1", "operand": "rs1", "write": false, "resource": "MReg", "registers": 1, "passes": 1, "offset": 0, "two_input": false},
-      {"key": "weight_write", "operand": "rd", "write": true, "resource": "Weight", "registers": 1, "passes": 1, "offset": 0, "two_input": false}
-    ],
-    "AccPushFp8": [
-      {"key": "mreg_read1", "operand": "rs1", "write": false, "resource": "MReg", "registers": 1, "passes": 1, "offset": 0, "two_input": false},
-      {"key": "acc_load", "operand": "rd", "write": true, "resource": "Acc", "registers": 1, "passes": 1, "offset": 0, "two_input": false}
-    ],
-    "AccPushBf16": [
-      {"key": "mreg_read0", "operand": "rs1", "write": false, "resource": "MReg", "registers": 1, "passes": 1, "offset": 0, "two_input": false},
-      {"key": "mreg_read1", "operand": "rs1", "write": false, "resource": "MReg", "registers": 1, "passes": 1, "offset": 1, "two_input": false},
-      {"key": "acc_load", "operand": "rd", "write": true, "resource": "Acc", "registers": 1, "passes": 1, "offset": 0, "two_input": false}
-    ],
-    "PopFp8": [
-      {"key": "acc_store", "operand": "rs2", "write": false, "resource": "Acc", "registers": 1, "passes": 1, "offset": 0, "two_input": false},
-      {"key": null, "operand": "rs1", "write": false, "resource": "EReg", "registers": 1, "passes": 1, "offset": 0, "two_input": false},
-      {"key": "mreg_write0", "operand": "rd", "write": true, "resource": "MReg", "registers": 1, "passes": 1, "offset": 0, "two_input": false}
-    ],
-    "PopBf16": [
-      {"key": "acc_store", "operand": "rs2", "write": false, "resource": "Acc", "registers": 1, "passes": 1, "offset": 0, "two_input": false},
-      {"key": "mreg_write0", "operand": "rd", "write": true, "resource": "MReg", "registers": 1, "passes": 1, "offset": 0, "two_input": false},
-      {"key": "mreg_write1", "operand": "rd", "write": true, "resource": "MReg", "registers": 1, "passes": 1, "offset": 1, "two_input": false}
-    ],
-    "MatMul": [
-      {"key": "mreg_read0", "operand": "rs1", "write": false, "resource": "MReg", "registers": 1, "passes": 1, "offset": 0, "two_input": false},
-      {"key": "acc_write", "operand": "rd", "write": true, "resource": "Acc", "registers": 1, "passes": 1, "offset": 0, "two_input": false}
-    ],
-    "MatMulAcc": [
-      {"key": "mreg_read0", "operand": "rs1", "write": false, "resource": "MReg", "registers": 1, "passes": 1, "offset": 0, "two_input": false},
-      {"key": "acc_read", "operand": "rd", "write": false, "resource": "Acc", "registers": 1, "passes": 1, "offset": 0, "two_input": false},
-      {"key": "acc_write", "operand": "rd", "write": true, "resource": "Acc", "registers": 1, "passes": 1, "offset": 0, "two_input": false}
+      {"key": "write0", "operand": "rd", "write": true, "registers": 1, "offset": 0, "two_input": false}
     ]
   }
 }

@@ -1,53 +1,24 @@
 """Derive isolated MXU row windows and logical MREG releases from model source."""
 from __future__ import annotations
 
-from atlas_derive_scratchpad import source_path, shape
-from atlas_model_diagnostics import UnsupportedModelTiming
-
 import ast
 from copy import deepcopy
 import inspect
 from pathlib import Path
 
-from atlas_model_timing import MXU_BLOCKS
-from atlas_model_schema import SOURCE_SHAPES, ast_digest, reservation, timing_block, validate_mxu_weight_timing
+from atlas_model_source import (MXU_BLOCKS, SOURCE_SHAPES, UnsupportedModelTiming, age_window,
+                                assignment as _assignment, literal, method as _method,
+                                name as _name, one as _one, positive_int, read_source, reservation, shape,
+                                timing_block)
 
 
 _CLASSES = ("_Operation", "_MatrixExecutionUnit", "MatrixExecutionUnitSystolic", "MatrixExecutionUnitInner")
 _UNITS = {"mxu0": "MatrixExecutionUnitSystolic", "mxu1": "MatrixExecutionUnitInner"}
 
 
-class UnsupportedMXU(UnsupportedModelTiming):
-    """Selected source or metadata has no supported MXU timing interpretation."""
-
-
-def _read(path):
-    return source_path(path, UnsupportedMXU, "model source symlinks are unsupported", parent_error=ValueError).read_text()
-
-
-def _sources(cfg):
+def _source(cfg):
     root = Path(inspect.getfile(cfg.isa)).parent
-    return (_read(root / "hardware" / "mxu.py"), _read(root / "hardware" / "bank_conflict.py"))
-
-
-def _one(values, label):
-    values = list(values)
-    if len(values) != 1:
-        raise UnsupportedMXU(f"unsupported MXU source: expected one {label}")
-    return values[0]
-
-
-def _name(node, name):
-    return isinstance(node, ast.Name) and node.id == name
-
-
-def _assignment(tree, name):
-    return _one((n for n in ast.walk(tree) if isinstance(n, ast.Assign)
-                 and len(n.targets) == 1 and _name(n.targets[0], name)), name)
-
-
-def _method(tree, name):
-    return _one((n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == name), name)
+    return read_source(root / "hardware" / "mxu.py")
 
 
 def _shape(nodes):
@@ -55,37 +26,23 @@ def _shape(nodes):
 
 
 def _integer(expr, compute_first):
-    if isinstance(expr, ast.Constant) and type(expr.value) is int:
-        return expr.value
-    if (isinstance(expr, ast.Attribute) and _name(expr.value, "self") and expr.attr == "compute_first"):
-        return compute_first
-    if isinstance(expr, ast.BinOp) and isinstance(expr.op, (ast.Add, ast.Sub, ast.Mult)):
-        left, right = _integer(expr.left, compute_first), _integer(expr.right, compute_first)
-        return left + right if isinstance(expr.op, ast.Add) else left - right if isinstance(expr.op, ast.Sub) else left * right
-    raise UnsupportedMXU("unsupported MXU timing expression: " + ast.dump(expr, include_attributes=False))
+    return literal(expr, "MXU timing expression", env={"self.compute_first": compute_first},
+                   minimum=None, maximum=None)
 
 
 def _window(comparison, compute_first):
-    if (not isinstance(comparison, ast.Compare) or len(comparison.ops) != 2
-            or not _name(comparison.comparators[0], "age")
-            or not all(isinstance(op, (ast.Lt, ast.LtE)) for op in comparison.ops)):
-        raise UnsupportedMXU("unsupported MXU row window")
-    first = _integer(comparison.left, compute_first) + isinstance(comparison.ops[0], ast.Lt)
-    last = _integer(comparison.comparators[1], compute_first) - isinstance(comparison.ops[1], ast.Lt)
-    if not 0 <= first <= last < 4095:
-        raise UnsupportedMXU("unsupported MXU row window bounds")
-    return dict(count=last - first + 1, first_age=first, last_age=last, step=1)
+    return age_window(comparison, {"self.compute_first": compute_first}, maximum=4095)
 
 
 def _placeholder(name):
     return ast.Name(id="DERIVED_" + name, ctx=ast.Load())
 
 
-def _plan(source):
+def _normalize_source(source):
     tree = ast.parse(source)
     classes = {n.name: n for n in tree.body if isinstance(n, ast.ClassDef)}
     if set(classes) != set(_CLASSES):
-        raise UnsupportedMXU("unsupported MXU source classes")
+        raise UnsupportedModelTiming("unsupported MXU source classes")
     base = classes["_MatrixExecutionUnit"]
     tick = _method(base, "tick")
     comparisons = [n for n in ast.walk(tick) if isinstance(n, ast.Compare) and len(n.ops) == 2
@@ -98,7 +55,7 @@ def _plan(source):
                     and not _name(n.comparators[0], "last")), "MREG release")
     last = _assignment(tick, "last")
     if not isinstance(last.value, ast.IfExp):
-        raise UnsupportedMXU("unsupported MXU completion expression")
+        raise UnsupportedModelTiming("unsupported MXU completion expression")
     slots = {"read": deepcopy(read), "compute": deepcopy(compute), "transfer": deepcopy(transfer),
              "release": deepcopy(release.comparators[0]), "compute_last": deepcopy(last.value.body),
              "transfer_last": deepcopy(last.value.orelse)}
@@ -111,7 +68,7 @@ def _plan(source):
         value = _assignment(classes[name], "compute_first")
         firsts[engine] = _integer(value.value, None)
         if not 0 <= firsts[engine] < 4095:
-            raise UnsupportedMXU("unsupported MXU compute latency")
+            raise UnsupportedModelTiming("unsupported MXU compute latency")
         value.value = _placeholder(engine + "_compute_first")
         # Tracker depth changes admission, not isolated row timing. Normalize
         # only this reviewed class constant; the complete admission predicate
@@ -119,11 +76,22 @@ def _plan(source):
         depth = _assignment(classes[name], "inflight_depth")
         if (not isinstance(depth.value, ast.Constant) or type(depth.value.value) is not int
                 or not 1 <= depth.value.value <= 64):
-            raise UnsupportedMXU("unsupported MXU compute tracker depth (requires 1..64)")
+            raise UnsupportedModelTiming("unsupported MXU compute tracker depth (requires 1..64)")
         depth.value = ast.Constant(value=3 if engine == "mxu0" else 2)
     _assignment(tree, "MXU_OP_LATENCIES").value = _placeholder("execute_delay_table")
+    return tree, slots, firsts
+
+
+def source_shape(source):
+    """Return the MXU source shape using the timing planner's normalization."""
+    tree, _, _ = _normalize_source(source)
+    return _shape(tree.body)
+
+
+def _plan(source):
+    tree, slots, firsts = _normalize_source(source)
     if _shape(tree.body) != SOURCE_SHAPES["mxu.py"]:
-        raise UnsupportedMXU("unsupported MXU control-flow semantics")
+        raise UnsupportedModelTiming("unsupported MXU control-flow semantics")
     plans = {}
     for engine, first in firsts.items():
         values = {key: _window(slots[key], first) for key in ("read", "compute", "transfer")}
@@ -133,67 +101,58 @@ def _plan(source):
         # The source indexes SRAM rows with age, age-1, and age-compute_first.
         for key, offset in (("read", 0), ("transfer", 1), ("compute", first)):
             if (values[key]["first_age"] - offset, values[key]["last_age"] - offset) != (0, 31):
-                raise UnsupportedMXU("unsupported MXU row geometry")
+                raise UnsupportedModelTiming("unsupported MXU row geometry")
         if values["release"] < max(values[key]["last_age"] for key in ("read", "transfer")):
-            raise UnsupportedMXU("MXU reservation releases before its last MREG access")
+            raise UnsupportedModelTiming("MXU reservation releases before its last MREG access")
         for kind, windows in (("compute", ("read", "compute")), ("transfer", ("read", "transfer"))):
             end = values[kind + "_last"]
             if end < max(values[key]["last_age"] for key in windows) or not 0 <= values["release"] <= end:
-                raise UnsupportedMXU("unsupported MXU completion/release bounds")
+                raise UnsupportedModelTiming("unsupported MXU completion/release bounds")
         plans[engine] = values
     return plans
 
 
-def _check_checker(source):
-    tree = ast.parse(source)
-    _one((n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "BankConflictChecker"), "bank checker")
-    if ast_digest(tree) != SOURCE_SHAPES["bank_conflict.py"]:
-        raise UnsupportedMXU("unsupported MXU reservation release semantics")
-
-
 def _validated(cfg):
     geometry = cfg.arch_state_config
+    for field in ("wb_width", "num_wb_registers"):
+        positive_int(getattr(geometry, field), "architecture configuration " + field)
     if (geometry.mrf_depth, geometry.mrf_width, geometry.wb_width, geometry.num_wb_registers) != (32, 32, 1024, 2):
-        raise UnsupportedMXU("unsupported MXU configuration geometry")
+        raise UnsupportedModelTiming("unsupported MXU configuration geometry")
     if geometry.num_m_registers != 64:
-        raise UnsupportedMXU("MXU source requires 64 matrix registers")
+        raise UnsupportedModelTiming("MXU source requires 64 matrix registers")
     operations = cfg.isa.operations
     for engine, unit in _UNITS.items():
         if unit not in cfg.execution_units.values():
-            raise UnsupportedMXU(f"MXU configuration does not provide {unit}")
+            raise UnsupportedModelTiming(f"MXU configuration does not provide {unit}")
         expected = {name + "." + engine for name in MXU_BLOCKS}
         actual = {name for name, insn in operations.items() if str(insn.exu) == unit}
         if actual != expected:
-            raise UnsupportedMXU("unsupported MXU ISA operation coverage")
+            raise UnsupportedModelTiming("unsupported MXU ISA operation coverage")
         for mnemonic in MXU_BLOCKS:
             name = mnemonic + "." + engine
             insn = operations.get(name)
             if insn is None or getattr(insn, "mnemonic", None) != name or str(insn.exu) != unit:
-                raise UnsupportedMXU(f"unsupported MXU ISA metadata for {name}")
+                raise UnsupportedModelTiming(f"unsupported MXU ISA metadata for {name}")
             expected_params = ({"vd", "vs1", "vs2"} if mnemonic.startswith("vmatmul") else
                                {"vd", "vs2", "es1"} if mnemonic == "vmatpop.fp8.acc" else
                                {"vd", "vs2"} if mnemonic.startswith("vmatpop") else {"vd", "vs1"})
             if set(inspect.signature(insn).parameters) != expected_params:
-                raise UnsupportedMXU(f"unsupported MXU ISA operands for {name}")
-    source, checker = _sources(cfg)
-    _check_checker(checker)
+                raise UnsupportedModelTiming(f"unsupported MXU ISA operands for {name}")
+    # The VPU extractor checks the shared bank checker digest once.
+    source = _source(cfg)
     return _plan(source)
-
-
-def _busy(last):
-    if not 0 <= last < 4095:
-        raise UnsupportedMXU("unsupported MXU completion age")
-    return dict(count=last + 1, first_age=0, last_age=last, step=1)
 
 
 def _blocks(plans):
     blocks = {}
     for engine, values in plans.items():
-        for mnemonic, suffix in MXU_BLOCKS.items():
+        for mnemonic in MXU_BLOCKS:
             compute, pop = mnemonic.startswith("vmatmul"), mnemonic.startswith("vmatpop")
             bf16 = ".bf16" in mnemonic
             last = values["compute_last" if compute else "transfer_last"]
-            events = {"compute_busy" if compute else "data_busy": _busy(last)}
+            if not 0 <= last < 4095:
+                raise UnsupportedModelTiming("unsupported MXU completion age")
+            events = {}
             if pop:
                 events["acc_store"] = values["read"]
                 for bank in range(2 if bf16 else 1):
@@ -205,8 +164,8 @@ def _blocks(plans):
                 events[group] = values["compute" if compute else "transfer"]
                 if mnemonic == "vmatmul.acc":
                     events["acc_read"] = values["read"]
-            name = engine + "." + suffix
-            blocks[name] = timing_block(name, engine, deepcopy(events), last)
+            name = mnemonic + "." + engine
+            blocks[name] = timing_block(name, deepcopy(events), last)
     return blocks
 
 
@@ -216,14 +175,12 @@ def derive_mxu(cfg):
     blocks = _blocks(plans)
     releases = {}
     for engine, values in plans.items():
-        for mnemonic, suffix in MXU_BLOCKS.items():
-            name = engine + "." + suffix
+        for mnemonic in MXU_BLOCKS:
+            name = mnemonic + "." + engine
             pop = mnemonic.startswith("vmatpop")
-            first = 4 if pop else 0
-            banks = list(range(first, first + (2 if ".bf16" in mnemonic else 1)))
             end = blocks[name]["first_free_age"]
             releases[name] = {
-                "mreg_write" if pop else "mreg_read": reservation(values["release"], banks=banks),
+                "mreg_write" if pop else "mreg_read": reservation(values["release"]),
                 "unit": reservation(end - 1),
             }
     return blocks, releases
@@ -232,7 +189,7 @@ def derive_mxu(cfg):
 def derive_weight_timing(cfg):
     """Project native PE use windows onto whole output-column weight rows."""
     plans = _validated(cfg)
-    source, _ = _sources(cfg)
+    source = _source(cfg)
     tree = ast.parse(source)
     base = _one((n for n in tree.body if isinstance(n, ast.ClassDef)
                  and n.name == "_MatrixExecutionUnit"), "MXU base class")
@@ -243,9 +200,6 @@ def derive_weight_timing(cfg):
     row = _assignment(uses, "row")
     # Source uses age - offset - output_column - inner. Preserve the two
     # tensor axes explicitly: a push writes output-column rows, not diagonals.
-    expression = ast.parse("age - 1 - _GRID[:, None] - _GRID[None, :]").body[0].value
-    if ast.dump(row.value, include_attributes=False) != ast.dump(expression, include_attributes=False):
-        raise UnsupportedMXU("unsupported MXU weight PE indexing")
     bounds = [n for n in ast.walk(uses) if isinstance(n, ast.Compare) and _name(n.left, "row")
               and len(n.ops) == 1 and isinstance(n.ops[0], (ast.GtE, ast.LtE))]
     lower = _one((n for n in bounds if isinstance(n.ops[0], ast.GtE)), "weight row lower bound")
@@ -262,7 +216,6 @@ def derive_weight_timing(cfg):
                      last_age=window["last_age"] + i * window["row_step"] +
                               31 * window["column_step"]) for i in range(32)]
         if max(row["last_age"] for row in rows) > plans[engine]["compute_last"]:
-            raise UnsupportedMXU("MXU completes before its last weight use")
-        engines[engine] = dict(use_window=window, use_rows=rows,
-                               reads_before_writes=True, resource_row_axis="output_column")
-    return validate_mxu_weight_timing(dict(schema="atlas.mxu_weight_timing.v1", engines=engines))
+            raise UnsupportedModelTiming("MXU completes before its last weight use")
+        engines[engine] = dict(use_rows=rows)
+    return dict(engines=engines)

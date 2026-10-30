@@ -20,8 +20,7 @@ namespace {
 // Live MXU handles become saved tiles before the strict virtual verifier,
 // which bounds each unit's slots.
 void buildVerifyStage(OpPassManager &pm, const AtlasCompileOptions &options) {
-  if (options.spillMXUState)
-    pm.addPass(createSpillAtlasMXUStatePass());
+  pm.addPass(createSpillAtlasMXUStatePass());
   pm.addPass(createVerifyAtlasVirtualStreamPass());
   if (options.guardedPack)
     pm.addPass(createLowerAtlasGuardedPackPass());
@@ -35,9 +34,9 @@ void buildBoundaryStage(OpPassManager &pm, const AtlasCompileOptions &options) {
 }
 
 void buildVirtualScheduleStage(OpPassManager &pm, const AtlasCompileOptions &options) {
-  pm.addPass(createScheduleAtlasVirtualPass(options.provider, options.lookahead, options.randomSeed,
-                                           options.orderFile, options.graphOutput,
-                                           /*orderApplied=*/false, /*rememberOptions=*/true));
+  pm.addPass(createScheduleAtlasVirtualPass(
+      options.provider, options.randomSeed, options.orderFile,
+      options.graphOutput, /*orderApplied=*/false, /*rememberOptions=*/true));
   pm.addPass(createVerifyAtlasVirtualStreamPass());
 }
 
@@ -63,8 +62,8 @@ void buildSpillStage(OpPassManager &pm, const AtlasCompileOptions &options,
   // the MXU round trips that replaced them by their own cost.
   if (scheduled)
     pm.addPass(createScheduleAtlasVirtualPass(
-        options.provider, options.lookahead, options.randomSeed,
-        options.orderFile, options.graphOutput, /*orderApplied=*/true));
+        options.provider, options.randomSeed, options.orderFile,
+        options.graphOutput, /*orderApplied=*/true));
   // Keep the allocated helper values visible in the virtual stage artifact,
   // and recover any register pressure introduced by the quantized BF16 tile.
   pm.addPass(createSpillAtlasVirtualPass());
@@ -72,15 +71,14 @@ void buildSpillStage(OpPassManager &pm, const AtlasCompileOptions &options,
 }
 
 void buildLowerStage(OpPassManager &pm, const AtlasCompileOptions &options) {
-  pm.addPass(createLowerAtlasVirtualToMachinePass(options.allocationReport, options.provider, options.storeWindows,
-                                                     options.mregRanks, options.packReloadAfterWeight,
-                                                     options.packWeightBeforePack));
+  pm.addPass(createLowerAtlasVirtualToMachinePass(
+      options.allocationReport, options.provider, options.mregRanks));
 }
 
 // Each transfer's wait goes before what needs it done; the generated-schedule
 // check requires the waits.
 void insertDMAWaits(OpPassManager &pm, const AtlasCompileOptions &options) {
-  pm.addPass(createInsertAtlasDMAWaitsPass(options.provider));
+  pm.addPass(createInsertAtlasDMAWaitsPass(options.provider, options.waitReusedDMASlots));
   pm.addPass(createVerifyAtlasMachineStreamPass());
   pm.addPass(createVerifyAtlasGeneratedSchedulePass());
 }

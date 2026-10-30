@@ -310,6 +310,9 @@ struct InsertAtlasDMAWaitsPass
                                llvm::cl::desc("Timing provider (default: atlas.timing_provider, else builtin)"),
                                llvm::cl::init("")};
 
+  Option<bool> waitReusedDMASlots{*this, "wait-reused-dma-slots",
+      llvm::cl::desc("Wait before reusing DMA command slots"), llvm::cl::init(false)};
+
   StringRef getArgument() const final { return "insert-atlas-dma-waits"; }
   StringRef getDescription() const final {
     return "Insert each explicit DMA transfer's wait immediately before the "
@@ -319,12 +322,12 @@ struct InsertAtlasDMAWaitsPass
 
   void runOnOperation() override {
     ModuleOp module = getOperation();
-    bool waitReusedSlots = false;
+    bool waitReusedSlots = waitReusedDMASlots;
     if (module->hasAttr(kAtlasDMAWaitsPending)) {
       auto selected = selectAtlasTimingProvider(module, provider.getValue());
       if (failed(selected))
         return signalPassFailure();
-      waitReusedSlots = selected->waitReusedDMASlots;
+      waitReusedSlots |= selected->waitReusedDMASlots;
     }
     if (failed(insertAtlasDMAWaits(module, waitReusedSlots)))
       signalPassFailure();
@@ -336,8 +339,10 @@ void mlir::atlas::registerInsertAtlasDMAWaitsPass() {
   PassRegistration<InsertAtlasDMAWaitsPass>();
 }
 
-std::unique_ptr<Pass> mlir::atlas::createInsertAtlasDMAWaitsPass(StringRef provider) {
+std::unique_ptr<Pass> mlir::atlas::createInsertAtlasDMAWaitsPass(StringRef provider,
+                                                                               bool waitReusedSlots) {
   auto pass = std::make_unique<InsertAtlasDMAWaitsPass>();
   pass->provider = provider.str();
+  pass->waitReusedDMASlots = waitReusedSlots;
   return pass;
 }

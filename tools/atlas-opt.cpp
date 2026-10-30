@@ -2,7 +2,7 @@
 #include "Atlas/AtlasDMAWaitInsertion.h"
 #include "Atlas/AtlasDialect.h"
 #include "Atlas/AtlasImmutableWeightReuse.h"
-#include "Atlas/AtlasModelTiming.h"
+#include "Atlas/AtlasModelTables.h"
 #include "Atlas/AtlasPipeline.h"
 #include "Atlas/AtlasGuardedPack.h"
 #include "Atlas/AtlasScheduling.h"

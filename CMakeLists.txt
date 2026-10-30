@@ -3,15 +3,6 @@ project(atlas_mlir LANGUAGES CXX C)
 
 find_package(MLIR REQUIRED CONFIG)
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
-# Policy is compiler-authored optimization/engineering configuration, not model facts.
-# Reconfigure whenever the single definition or its generator changes.
-set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
-  ${PROJECT_SOURCE_DIR}/tools/model-search-policy.json
-  ${PROJECT_SOURCE_DIR}/tools/atlas_search_policy.py)
-execute_process(COMMAND ${Python3_EXECUTABLE} -B
-  ${PROJECT_SOURCE_DIR}/tools/atlas_search_policy.py
-  --header ${PROJECT_BINARY_DIR}/include/Atlas/AtlasSearchPolicy.h
-  COMMAND_ERROR_IS_FATAL ANY)
 set(CMAKE_CXX_STANDARD 17 CACHE STRING "C++ standard")
 set(LLVM_RUNTIME_OUTPUT_INTDIR ${CMAKE_BINARY_DIR}/bin)
 set(LLVM_LIBRARY_OUTPUT_INTDIR ${CMAKE_BINARY_DIR}/lib)

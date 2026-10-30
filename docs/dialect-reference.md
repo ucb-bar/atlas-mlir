@@ -156,29 +156,14 @@ that with every pending transfer. A transfer may stay pending across a block
 boundary only into or out of such a loop, so a PACK does not complete earlier
 transfers ([DMA across loops](loop-dma-analysis.md)).
 
-Scheduling and timing passes take `provider=<id>` (default: module
-`atlas.timing_provider`, else `builtin`) from the [provider
-registry](../include/Atlas/AtlasTimingProvider.h). The provider supplies
-operation costs, dependence distances, issue gaps, reservations, DMA conflicts
-and verification; unknown IDs, missing rules or conflicting retained metadata
-fail. Legacy ID `npu-model-rtl-match-v1` aliases `builtin`; timed MLIR/program
-JSON record `builtin`. `model` consumes derived facts and qualified overlap
-evidence.
-The schedulers estimate a DMA transfer with npu_model main's DRAM model
-(`timing::dmaTransferCycles`: 30 cycles, then a 32-byte beat per 23.46 cycles
-loading or 21.68 storing); no check depends on that estimate, since every
-transfer completes at an explicit `dma.wait`.
-Emission and LLVM handoff of generated programs need `"timed"` state and the
-provider name; hand-written streams need no timing metadata.
-
-`--select-atlas-model-evidence="facts=DIR"` selects source-derived
-operation/overlap rules bound by `DIR/facts.lock.json` after native validation.
-Set `provider=model` explicitly in virtual/physical scheduling; selecting
-evidence leaves the default unchanged. Missing coverage, unsupported
-operands/configurations, stale hashes and replacing timed evidence fail.
-Verification, emission and LLVM handoff retain selection. See [model
-timing](model-timing.md) for derivation, numerical validation, admission,
-scalar PACK proofs, regeneration and model-scored search.
+Scheduling and timing passes take `provider=<id>` (default: the module's
+`atlas.timing_provider`, else `builtin`) from the
+[registry](../include/Atlas/AtlasTimingProvider.h).
+The `model` provider loads `model-timing.json` through
+`--select-atlas-model-evidence="facts=DIR"`, and timing, verification, and
+emission bind the selected file's bytes.
+See [NPU Model timing](model-timing.md) for regeneration, timing rules, DMA
+estimates, and native program selection.
 
 ## Machine operations
 
@@ -220,21 +205,21 @@ numerical policy, or availability across the stream.
 
 | Name | Kind | What it does |
 | --- | --- | --- |
-| `--atlas-compile` | pipeline | Virtual function to timed machine IR: MXU and tensor spilling, boundary DMA, virtual scheduling, late PACK repair, spilling again, lowering, DMA waits and stream scheduling, with every verifier between them. `--dump-pass-pipeline` lists the passes; `allocation-report=<file>` writes the allocation plan. |
+| `--atlas-compile` | pipeline | Virtual function to timed machine IR: MXU and tensor spilling, boundary DMA, virtual scheduling, late PACK repair, virtual scheduling again, spilling again, lowering, DMA waits and stream scheduling, with every verifier between them. `--dump-pass-pipeline` lists the passes; `allocation-report=<file>` writes the allocation plan. |
 | `--atlas-compile-verify`, `-schedule`, `-spill`, `-lower`, `-time` | pipeline | The five stages of `--atlas-compile`, in order, for tools that keep each stage's IR. |
 | `--atlas-compile-unscheduled` | pipeline | The native binding's qualification lowering: spilling, late PACK repair, spilling again, lowering, DMA waits and in-order delays, with the same verifiers, but no boundary DMA or scheduling. |
 | `--verify-atlas-virtual-stream` | pass | Check virtual types, state edges, output indices, and that no machine op is mixed in. |
 | `--lower-atlas-virtual-boundary-to-dma` | pass | Convert boundary FP8/BF16 inputs and BF16 outputs to explicit DMA loads and stores using the input and output DRAM bases and 2-KiB slot stride; run before virtual scheduling to expose prefetching and overlap. |
-| `--schedule-atlas-virtual` | pass | Reorder each virtual block before spilling and allocation by a latency-aware list schedule that charges estimated spill cycles for values beyond the registers, keeping SSA, handle, and memory order. Run `--spill-atlas-virtual` after it. `random-seed=N` picks a random legal order. `provider=<id>` selects machine-operation timing for costs, spill costs included; lowering recipes and DMA queue estimates remain compiler heuristics. Missing cost coverage fails. |
+| `--schedule-atlas-virtual` | pass | Reorder each virtual block before spilling and allocation by a latency-aware list schedule that charges estimated spill cycles for values beyond the registers, keeping SSA, handle, and memory order. Run `--spill-atlas-virtual` after it. `random-seed=N` picks a random legal order. `provider=<id>` selects machine-operation timing for costs, spill costs included; lowering recipes and DMA serialization remain compiler policy. Missing cost coverage fails. |
 | `--lower-atlas-pack-relayout` | pass | After virtual scheduling, replace PACK with a BF16 quantization roundtrip and unit-scale MXU push/readout when an accumulator is free. Run before spilling and allocation; otherwise retain the scalar relayout fallback. See [PACK layout repair](pack-relayout-loop.md). |
 | `--spill-atlas-mxu-state` | pass | Save and reload completed MXU accumulator/weight state when local slots are exhausted, before virtual scheduling. |
 | `--spill-atlas-virtual` | pass | Recover MXU/tensor/scalar pressure, lower memory edge copies, place spills and scratch, and retry the existing allocator. See [register spilling](register-spilling.md) for the storage operations, control ABI and limits. |
 | `--lower-atlas-virtual-to-machine` | pass | Allocate and emit untimed machine IR with resource contracts: tiles, controls, MXU, pack, block-argument copies, branches, DMA launches with VLOADs moved to first use. Leaves waits to the next pass, and delay slots to the timing passes (`atlas.delay_slots_pending`). `allocation-report=<file>` writes the plan as JSON, even on failure. |
-| `--insert-atlas-dma-waits` | pass | Add each DMA transfer's wait right before the first instruction that needs it done (staging access, channel reuse, DRAM conflict, helper DMA, scalar memory or redirect outside an analyzed scalar loop, an analyzed loop that touches the staging window, CSR, halt, any other branch target). Transfers stay in flight through PACK. Under `provider=model`, launch n also completes launch n-8, whose RTL command slot it reuses. |
+| `--insert-atlas-dma-waits` | pass | Add each DMA transfer's wait right before the first instruction that needs it done (staging access, channel reuse, DRAM conflict, helper DMA, scalar memory or redirect outside an analyzed scalar loop, an analyzed loop that touches the staging window, CSR, halt, any other branch target). Transfers stay in flight through PACK. With `wait-reused-dma-slots=true`, wait for launch n-8 before launch n reuses its RTL command slot. |
 | `--verify-atlas-generated-schedule` | pass | Run the [generated-artifact checks](#generated-artifact-checks), wait matching, and scalar ALU delay slots; on timed streams also recheck issue spacing. |
 | `--verify-atlas-machine-stream` | pass | Check field verifiers, the flat state chain, encoding, delay slots, and in-block targets. |
 | `--insert-atlas-delays` | pass | Time each block in order and add the minimum delays, each with an `atlas.reason`. Each pending delay slot gets a NOP. Rejects input that already has delays, and rejects AUIPC, JALR, and linking JAL. A hazard only a DMA wait can fix is an error. |
-| `--schedule-atlas-stream` | pass | List-schedule each block with the selected provider's dependence graph, issue gaps, reservations and DMA conflicts, then add delays. Ops move only within a block. A pending delay slot takes the block's last-issued single-cycle scalar ALU op that nothing after it depends on, else a NOP. |
+| `--schedule-atlas-stream` | pass | List-schedule each block with shared dependence rules and the selected timing tables' issue gaps, reservations, and DMA conflicts, then add delays. The selected provider verifies the schedule. Ops move only within a block. A pending delay slot takes the block's last-issued single-cycle scalar ALU op that nothing after it depends on, else a NOP. |
 | `--verify-atlas-timing` | pass | Recheck issue cycles, dependencies, DMA waits, halt, and drained block boundaries for `provider=<id>`. |
 | `--convert-atlas-to-llvm-calls` | pass | One `llvm.call @atlas_emit_*` marker per instruction with fields, word, and index. Must be finalized before translation. |
 | `--finalize-atlas-llvm-calls` | pass | Rebuild and recheck the Atlas stream from the markers, then emit one ordered inline-assembly word block. |

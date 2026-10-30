@@ -6,33 +6,10 @@ An MXU operand instead needs each row's left and right 16-byte halves together.
 The compiler repairs this layout in registers when a free accumulator is
 available, retaining the scalar VMEM interleave as a fallback.
 
-## Grouped model-provider loop
-
-The model provider copies two adjacent logical rows per iteration, selected by
-the compiler's explicit two-row unroll policy. The builtin loop keeps the RTL-
-qualified one-row shape; its provider exposes no per-row load interval to
-exploit. This is a compiler code-size choice, not a model-derived timing value
-or an experimentally fitted constant. Both forms copy the same 256 words through
-the same two temporary registers, and every offset and row stride comes from the
-selected geometry.
-
-Grouping pipelines the final store of one row behind the first load of the next
-and halves the counter, pointer and back-edge overhead. The virtual proposal
-uses the same grouped body with model-derived scalar load intervals and
-completion ages. Its algorithm identifier is versioned separately from native
-timing facts.
-
-The scalar timing proof counts decoded copy instructions and replays the actual
-loop to a decided exit. A group must contain equal load/store counts covering
-whole rows; its group size must divide the tile height and the replay must cover
-exactly that height. The immutable 32-address context repeats the actual finite
-cases at shared ordinals for shorter replays. The generated buffer verifier
-still checks each copied word against the complete PACK interleave; generic
-loops gain no scalar-overlap permission.
-
-The rest of this page records the earlier single-row software pipeline and its
-original measurements. The historical numbers below are not measurements of
-grouping.
+The scalar fallback copies one logical row per iteration for every provider.
+Virtual costs use the same body and extracted scalar load intervals; generated
+buffer checks verify every copied word. The analysis and measurements below
+describe this one-row loop.
 
 ## Register-only repair
 
@@ -74,19 +51,19 @@ If both MXUs' accumulator slots are occupied, the current block has no state
 token, or the scale is outside `122..128`, the pass leaves PACK unchanged.
 Direct virtual-to-machine lowering also retains the scalar fallback. After the
 repair, the scheduled pipeline runs virtual scheduling again with the selected
-timing provider, lookahead, and seed. An explicit search order is preserved
-through its expansion, and graph output retains the prepared node IDs used by
-group search. Spilling and allocation own the new BF16 value and accumulator
-lifetime.
+timing provider and random seed, using the same automatic lookahead selection
+as the first pass. An explicit search order is preserved through its expansion,
+and graph output retains the prepared node IDs used by group search. Spilling
+and allocation own the new BF16 value and accumulator lifetime.
 
 ## Scalar fallback
 
 The fallback applies `vpu_pack`, a raw-result VSTORE, the scalar interleave
-below, and a VLOAD. The default provider copies one row per iteration: eight
+below, and a VLOAD. Every provider copies one row per iteration: eight
 words, 32 iterations, 16-byte source-half steps and a 32-byte destination step.
-The model provider groups two rows as described above. The mandatory scalar
-stream branches back 27 instruction words, with a B immediate of -54. [Explicit
-DMA may remain in flight across the loop](pack-dma-overlap.md).
+The mandatory scalar stream branches back 27 instruction words, with a B
+immediate of -54. [Explicit DMA may remain in flight across the
+loop](pack-dma-overlap.md).
 
 ## Original serial loop
 

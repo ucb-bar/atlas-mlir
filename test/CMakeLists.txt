@@ -82,10 +82,10 @@ add_llvm_executable(atlas-verification-test
   mxu-allocation-verification.cpp
   mxu-contract-verification.cpp
   pack-loop-verification.cpp
-  scalar-timing-context-verification.cpp
   source-memory-effect-contract.cpp
   tile-contract-verification.cpp
   timing-provider-verification.cpp
+  model-tables-verification.cpp
   PARTIAL_SOURCES_INTENDED)
 llvm_update_compile_flags(atlas-verification-test)
 target_compile_definitions(atlas-verification-test PRIVATE
@@ -95,12 +95,6 @@ target_link_libraries(atlas-verification-test PRIVATE
   MLIRFuncDialect)
 mlir_check_all_link_libraries(atlas-verification-test)
 foreach(suite buffer-contract cfg-contract dma-allocation dma-helper mxu-allocation mxu-contract
-    pack-loop scalar-timing-context source-memory-contract tile-contract timing-provider)
+    pack-loop source-memory-contract tile-contract timing-provider model-tables)
   add_test(NAME atlas-${suite} COMMAND atlas-verification-test ${suite})
 endforeach()
-
-add_llvm_executable(atlas-model-timing-test model-timing-provider.cpp model-engine-admission.cpp PARTIAL_SOURCES_INTENDED)
-llvm_update_compile_flags(atlas-model-timing-test)
-target_link_libraries(atlas-model-timing-test PRIVATE MLIRAtlas MLIRParser MLIRIR)
-mlir_check_all_link_libraries(atlas-model-timing-test)
-add_test(NAME atlas-model-timing COMMAND atlas-model-timing-test)

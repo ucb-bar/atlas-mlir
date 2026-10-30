@@ -21,7 +21,6 @@ struct AtlasStream {
   bool delaySlots = true;
   llvm::SmallVector<Operation *> ops;
   std::vector<timing::Instr> instrs;
-  std::vector<timing::TimingContext> timingContexts;
   llvm::DenseMap<Operation *, Operation *> targetOf; // nullptr: stream end
   std::vector<size_t> starts;
   std::vector<llvm::SmallVector<size_t, 2>> succs;
@@ -74,7 +73,7 @@ LogicalResult verifyAtlasTiming(const AtlasVerificationContext &ctx,
 LogicalResult verifyAtlasTiming(
     ModuleOp module, const timing::TimingProvider &provider);
 // The provider a timing pass uses: `requested`, else the retained
-// atlas.timing_provider, else the builtin provider. A request that differs
+// atlas.timing_provider, else the default provider. A request that differs
 // from the retained one, or an unregistered or incomplete provider, fails.
 FailureOr<timing::TimingProvider>
 selectAtlasTimingProvider(ModuleOp module, llvm::StringRef requested = {});
