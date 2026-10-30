@@ -6,7 +6,6 @@ import re
 import struct
 import sys
 import tempfile
-from types import SimpleNamespace
 import unittest
 from unittest import mock
 
@@ -16,7 +15,6 @@ sys.path.insert(0, str(ROOT / "tools/chipyard"))
 import atlas_program
 from atlas_host_build import GRAPH_PROGRAM_WORDS, validate_graph_program, wrap
 from atlas_host_layout import ATLAS_IMEM_BYTES
-import resnet_segments
 import build_resnet_graph_host
 
 # The canonical npu-model/npu_model/util/converter.py expands only LI (at
@@ -146,25 +144,6 @@ class ProgramBoundTest(unittest.TestCase):
                     linker.assert_not_called()
                     self.assertFalse(paths["out"].exists())
 
-    def test_segment_rejects_bad_raw_or_descriptor_before_creating_outputs(self):
-        with tempfile.TemporaryDirectory(prefix="atlas-program-bounds-") as directory:
-            root = Path(directory)
-            args = SimpleNamespace(host=root / "host", capture=root / "capture", out=root / "out", segments=[0])
-            for count, declared in ((GRAPH_PROGRAM_WORDS + 1, GRAPH_PROGRAM_WORDS + 1),
-                                    (GRAPH_PROGRAM_WORDS + 1, GRAPH_PROGRAM_WORDS), (4, 3), (4, None)):
-                descriptor = "" if declared is None else f".program_words={declared},"
-                assets = ("graph_kernels[54]={\n{" + descriptor + "}\n};").encode()
-                def bound_file(path, digests):
-                    return assets if path.name == "assets.c" else program(count) if path.suffix == ".bin" else b""
-                with self.subTest(count=count, declared=declared), \
-                     mock.patch.object(resnet_segments, "plan", return_value={"segments": [{}]}), \
-                     mock.patch.object(resnet_segments, "capture_manifest", return_value=({}, "capture", set())), \
-                     mock.patch.object(resnet_segments, "bound_host_file", side_effect=bound_file), \
-                     mock.patch.object(resnet_segments.subprocess, "run") as linker:
-                    with self.assertRaises(ValueError):
-                        resnet_segments.build(args)
-                    linker.assert_not_called()
-                    self.assertFalse(args.out.exists())
 
 
 if __name__ == "__main__":

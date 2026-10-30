@@ -102,36 +102,6 @@ The runner records logs, exit status and ELF identity with finite cycle and wall
 
 For a full host loaded by a loader that zero-fills every PT_LOAD memory tail, `build_resnet_graph_host.py --skip-bss-clear` omits the redundant startup clear. The default still clears BSS.
 
-## Segmented EE290 host graph
-
-Segment k executes the unchanged generated graph statements from the pack feeding launch k up to the pack feeding launch k+1. Segment 0 also copies the input; segment 53 adds the FC bias and writes the logits. All 286 statements and 54 launches are covered once. Each ELF links the shared host runtime, loads captured live-in tensors and DMA state, then checks its live-out tensors, Atlas output and runtime state. The final segment also compares all 1,000 logits with the full-host reference.
-
-Use the complete full-host build above as `FULL_HOST`, the matching frozen network-model directory as `NETWORK_MODEL`, and its successful full-host/model-device receipt as `MODEL_EPOCH`. Capture verifies every staged DMA image and immutable program against the receipt before replaying model outputs. `--npu-model "$MODEL"` instead executes the live model device during capture. QEMU capture and stitching establish state and statement coverage; they do not measure SoC timing.
-
-```sh
-python tools/host_iss/segment_capture.py capture --elf "$FULL_HOST/host.elf" \
-  --host "$FULL_HOST" --model-root "$NETWORK_MODEL" --epoch "$MODEL_EPOCH" \
-  --qemu "$QEMU" --out out/resnet-segment-capture
-python tools/chipyard/resnet_segments.py build --host "$FULL_HOST" \
-  --capture out/resnet-segment-capture --out out/resnet-soc-segments \
-  --clang "$RISCV_CLANG" --lld "$LLD" --start "$FULL_HOST/start.S" \
-  --runtime "$FULL_HOST/runtime"
-python tools/chipyard/resnet_segments.py stitch --host "$FULL_HOST" \
-  --capture out/resnet-segment-capture --out out/resnet-soc-segments
-# Check a segment in QEMU; repeat for indices 0..53 for complete host instruction coverage.
-python tools/host_iss/segment_capture.py check \
-  --elf out/resnet-soc-segments/seg-53/host.elf --host "$FULL_HOST" \
-  --model-root "$NETWORK_MODEL" --epoch "$MODEL_EPOCH" --qemu "$QEMU" \
-  --out out/resnet-segment-qemu/seg-53
-# Use the same prebuilt simulator and environment as the per-kernel runs.
-python tools/chipyard/run_sim.py --elf out/resnet-soc-segments/seg-53/host.elf \
-  --out out/resnet-segment-runs/seg-53 --max-cycles 100000000000 --wall-seconds 604800
-python tools/chipyard/resnet_segments.py results --host "$FULL_HOST" \
-  --out out/resnet-soc-segments --runs out/resnet-segment-runs --segments 53
-```
-
-`build --segments K ...` builds a subset; stitching requires all 54. The builder binds graph text, embedded assets and runtime sources to the supplied full-host build. `results` requires the matching ELF identity in `run.json`, a zero process exit, no timeout or stop marker, exactly one successful final report, every statement marker and every expected region check. Interrupted or incomplete runs are not exact passes. Provide physical paths without symbolic links for all inputs and tools.
-
 ## Opt-in full-graph traffic reuse
 
 `compile_resnet_templates.py --traffic-reuse` selects the qualified public generator dispatch for every declared contraction while preserving the plan, physical operand layout and arithmetic references. This remains compile-only preparation. The graph runtime admits at most 32,763 raw words, reserving five additional words for the sequenced completion wrapper inside the 32,768-word instruction memory; relocated programs are checked again after expansion.
