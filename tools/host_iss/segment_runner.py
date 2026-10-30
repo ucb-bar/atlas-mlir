@@ -57,7 +57,7 @@ class SegmentRunner:
         temporary.write_text(json.dumps(state, indent=2) + "\n")
         temporary.replace(self.out / "run-state.json")
 
-    def admit(self):
+    def check_inputs(self):
         args, pins = self.args, self.pins
         root = checked(args.bundle_root)
         self.elf, self.qemu, self.model_root = (
@@ -302,7 +302,7 @@ class SegmentRunner:
             raise InterruptedError("segment interrupted by signal " + str(signum))
         signal.signal(signal.SIGTERM, interrupted)
         try:
-            self.admit()
+            self.check_inputs()
             self.start_qemu()
             self.restore()
             self.execute_mmio()
