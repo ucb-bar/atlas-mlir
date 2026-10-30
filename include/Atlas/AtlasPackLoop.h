@@ -8,6 +8,5 @@ namespace mlir::atlas {
 // AtlasLoop directly and does not consult these annotations.
 bool isAtlasPackRelayoutLoop(llvm::ArrayRef<Operation *> ops,
                             const AtlasLoop &loop);
-
-} // namespace mlir::atlas
+}
 #endif
