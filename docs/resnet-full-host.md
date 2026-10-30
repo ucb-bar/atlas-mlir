@@ -152,8 +152,6 @@ python tools/chipyard/resnet_kernels.py results --build-root out/resnet-soc-kern
 
 The runner records logs, exit status and ELF identity with finite cycle and wall limits; select them with `--max-cycles` and `--wall-seconds`. Increase `--jobs` only after allocating simulator licenses and CPU resources. Results require a matching ELF identity and runner status in `run.json`, zero exit, no timeout and exactly one matching PASS for every built kernel; the complete fixture must report 54/54 exact. No simulator is built by these tools.
 
-Measured on EE290GenericIOSimConfig with VCS: all 54 kernels are exact, totaling 200,874,497 Atlas cycles, about 3.2 times the standalone AtlasCore total of 63,480,310 because the SoC uses real DRAM. A full host run takes about 4.09 billion host instructions even without the startup BSS clear; at about 2,300 simulated cycles/second (measured on the segment runs) it is impractical in RTL simulation. Coverage combines per-kernel exactness, segment stitching on QEMU and short SoC segments; a full end-to-end run remains for FPGA or FireSim.
-
 For a full host loaded by a loader that zero-fills every PT_LOAD memory tail, `build_resnet_graph_host.py --skip-bss-clear` omits the redundant startup clear. The default still clears BSS.
 
 ## Segmented EE290 host graph
@@ -185,10 +183,6 @@ python tools/chipyard/resnet_segments.py results --host "$FULL_HOST" \
 ```
 
 `build --segments K ...` builds a subset; stitching requires all 54. The builder binds graph text, embedded assets and runtime sources to the supplied full-host build. `results` requires the matching ELF identity in `run.json`, a zero process exit, no timeout or stop marker, exactly one successful final report, every statement marker and every expected region check. Interrupted or incomplete runs are not exact passes. Provide physical paths without symbolic links for all inputs and tools.
-
-Recorded evidence: QEMU passed all 54 segment ELFs; stitching matched 69 producer-to-consumer tensor regions with every statement covered once. A live npu_model capture matched the replay capture in all 356 boundary regions, context fields and final logits.
-
-Short SoC segment results on EE290GenericIOSimConfig with VCS: segments 52 and 53 pass with exact end state. Segment 52 (pack, launch 52, decode, affine, residual add, ReLU, average pool) matched tensor_174 (1,024 words) and the Atlas output (32,768 words) with zero mismatches in 49,851,169 CPU cycles and 2,516,093 Atlas cycles. Segment 53 (pack, launch 53, decode, FC bias, logits) matched the Atlas output (8,192 words) and all 1,000 logits against both the captured and the reference values with zero mismatches in 54,827,923 CPU cycles and 2,358,785 Atlas cycles. Runtime state (completion count, sequence, markers, scale and exponent) was correct in both. Wall time was about 6.4 and 7.1 hours at about 2,300 simulated cycles per second.
 
 ## Opt-in full-graph traffic reuse
 

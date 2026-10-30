@@ -33,9 +33,3 @@ The HTIF kernel CRT reserves its heap and boot-hart stack through symbols beyond
 This stack audit assumes one boot hart, as in the selected EE290 workloads; it does not admit a multihart stack layout.
 
 FireSim exports record the selected physical DDR range; the image owner must supply a matching capacity, clocks, bridges and Atlas composition.
-
-## Remaining board work
-
-The image owner must provide an Atlas/Shuttle/Saturn design with the required memory and MMIO map, resource fit and timing closure, a segment-aware ELF loader, and observable console, exit and trap handling. VCU118 SD boot expects a raw payload, so it cannot load these sparse ELF segments directly; its default configuration also needs a frontend for HTIF or a UART/mailbox port.
-
-Use the image's actual clocks for cycle and timeout interpretation. QEMU plus NPU Model checks establish functional behavior only; they do not establish SoC timing or loader correctness.

@@ -1,6 +1,6 @@
 # Traffic reuse recipes
 
-Use `atlas_program.assembly(..., traffic_reuse=True)` for the 57 shapes in `_TRAFFIC_REUSE_MODULES`.
+Use `atlas_program.assembly(..., traffic_reuse=True)` for the shapes in `_TRAFFIC_REUSE_MODULES`.
 
 Admission requires integer dimensions, the original guarded output offset and an integer BF16 exponent in `[-126,127]`.
 
@@ -13,6 +13,7 @@ Unknown shapes and combinations with legacy residency or pretranspose flags fail
 | `tiny` | A fills bank 1; bank 0 holds one transposed B column and output scratch for two row pairs. |
 | `tiny_breadth` | One or two resident rows use alternating 4-KiB B buffers with transpose at use. |
 | `blocked` | Bank-bounded A blocks reuse transposed B columns across paired rows, including an odd tail. |
+| `smol_connector` | One A row panel spans both banks; alternating B tile buffers stream the long reduction. |
 
 Resident-column loaders prefetch only the next disjoint tile on channel 1 and wait before use.
 
@@ -37,7 +38,7 @@ Exclusive raw ownership and quiescence are required because compiled clients may
 | Consumer | Program limit |
 | --- | --- |
 | Raw host | Raw words plus five marker words must fit 32,768 words. |
-| ResNet graph host and segments | Actual raw bytes and descriptor counts must fit the 8,192-word copy buffer. |
+| ResNet graph host and segments | Actual raw bytes and descriptor counts must fit the 32,763-word copy buffer. |
 | Standalone RTL driver | Loaded words, including its eight-word wrapper, must fit 8,192 words. |
 
 All admitted programs fit these limits; builders validate actual bytes, structure and declared counts before linking.
@@ -46,7 +47,7 @@ Shared symbolic tests cover every public shape, ordered reductions, DMA ownershi
 
 Mutation controls guard waits, transpose, accumulation, rescale, buffer ownership and output placement.
 
-The Tiny byte-permutation proof also checks element order; encoded tests guard the unique rescale patch site.
+Shared symbolic tests check tile origins and output halves; encoded tests guard the unique rescale patch site.
 
 ## Running
 
@@ -62,7 +63,7 @@ loads = dma_load_bytes(m, k, n, traffic_reuse=True)
 assert code_sources(traffic_reuse=True) == sources
 ```
 
-The source closure includes all five recipes and their shared loader/output helper; retain it with generated programs.
+The source closure includes the recipe modules and their shared loader/output helper; retain it with generated programs.
 
 Run the reuse gates with `PYTHONPATH=tools:test python -m unittest discover -s test -p 'test_program_reuse*.py'`.
 
@@ -80,4 +81,4 @@ It emits `ATLAS_KERNEL_*` and `ATLAS_LAYER_*` records; build success alone does 
 
 See [host checking](host-iss.md) for the opt-in checker, stable-span preconditions and fail-closed behavior.
 
-See [host bit copies](host-bit-copies.md) for freestanding BF16 conversion behavior.
+The selected Smol layer uses `runtime/smol_host_bits.h` for freestanding BF16 conversion. C union copies preserve FP32 representation and the BF16 rounding policy without `memcpy`. Widening signaling NaNs preserves sign and payload; narrowing sets the quiet bit. Run `PYTHONPATH=tools:test python -m unittest test_host_check` with an RV64 compiler to check all BF16 patterns, rounding boundaries, and undefined object symbols.
