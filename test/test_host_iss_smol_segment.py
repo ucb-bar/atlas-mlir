@@ -29,7 +29,7 @@ class SmolSegmentTest(unittest.TestCase):
                 contract.runtime_sites(image)
 
     def test_qemu_exit_race_is_reaped_and_timeout_escalates(self):
-        import run_smol_segment as runner
+        import segment_runner as runner
         for race in (True, False):
             process = mock.Mock(pid=123)
             process.poll.side_effect = [None, 0]

@@ -93,7 +93,8 @@ class TinySegmentContractTest(unittest.TestCase):
             validate.assert_not_called()
 
     def test_bad_chain_is_rejected_before_qemu_or_device_creation(self):
-        import run_tiny_segment as runner
+        import run_tiny_segment as entry
+        import segment_runner as runner
         profile = dict(revision="9e6313bddecb8ba936206eb347f5cd4e5335282c", curve_sha256="a"*64,
                        tracked_source_diff_exit=0)
         with tempfile.TemporaryDirectory() as directory:
@@ -112,7 +113,7 @@ class TinySegmentContractTest(unittest.TestCase):
                         mock.patch.object(segment, "validate_bundle", side_effect=ValueError("bad live inventory")), \
                         mock.patch.object(runner, "Device") as device, \
                         mock.patch.object(runner.subprocess, "Popen") as qemu, contextlib.redirect_stdout(io.StringIO()):
-                    self.assertEqual(runner.execute(args), 1)
+                    self.assertEqual(entry.execute(args), 1)
                     device.assert_not_called()
                     qemu.assert_not_called()
                 receipt = json.loads((root/"out/receipt.json").read_text())
