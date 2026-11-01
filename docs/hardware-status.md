@@ -179,6 +179,7 @@ Set these for the Python tests in `test/`:
 | `ATLAS_ASSEMBLER_ROOT` | `baremetal/` of the pinned `atlas-npu` checkout |
 | `ATLAS_RTL_ROOT` | the pinned `atlas-npu` checkout |
 | `ATLAS_MODEL_ROOT` | the pinned `npu_model-atlas` checkout (inventory check only) |
+| `ATLAS_ISSUE_RULES_ROOT` | an `npu_model` checkout with `npu_model/scheduling/issue_rules.py` (staleness check of `lib/AtlasIssueRulesTable.inc` only) |
 | `ATLAS_ARC_MODEL`, `ATLAS_ARC_STATE` | ARC build of the standalone `AtlasCore` from the pinned RTL: shared library and state JSON |
 | `ATLAS_MODELIR_ROOT` | ModeLIR checkout providing `mlc.backends.cosim_atlas` |
 
