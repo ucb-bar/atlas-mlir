@@ -1,5 +1,6 @@
 /build/
 /out/
+/atlas-out/
 # Authored stage-zero/one examples are kept; derived handoff stages live in out/.
 /examples/handoff/mlp_tile/0[2-9]-*
 /examples/handoff/attention_tile/0[2-9]-*

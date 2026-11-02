@@ -15,6 +15,8 @@ from test_virtual_lowering import lower, run  # noqa: E402
 
 
 SOURCE = (ROOT / "test/examples/captured_mlp32_linalg.mlir").read_text()
+# The same model captured by atlasc: torch-mlir's FX importer, without model2mlir.
+TORCH_MLIR_SOURCE = (ROOT / "test/examples/captured_mlp32_torch_mlir_linalg.mlir").read_text()
 MANIFEST = json.loads((ROOT / "test/examples/captured_mlp32_arguments.json").read_text())
 POLICY = json.loads((ROOT / "test/examples/atlas_mlp_numeric_policy.json").read_text())
 
@@ -72,6 +74,31 @@ class CapturedMLPImportTest(unittest.TestCase):
         with self.assertRaisesRegex(UnsupportedLinalg,
                                     "interlayer_pack_scale_code"):
             imported(policy=wrong_policy)
+
+    def test_torch_mlir_capture_imports_to_the_model2mlir_program(self) -> None:
+        original, _ = imported()
+        native, report = imported(TORCH_MLIR_SOURCE)
+        self.assertEqual(native, original)
+        self.assertEqual(report["source_operations_accounted"], 11)
+
+    def test_torch_mlir_relu_mutations_fail(self) -> None:
+        relu = "arith.cmpf ugt, %in, %cst : f32"
+        select = "arith.select %7, %in, %cst : f32"
+        self.assertIn(relu, TORCH_MLIR_SOURCE)
+        self.assertIn(select, TORCH_MLIR_SOURCE)
+        changed_sources = (
+            # UGE keeps -0, which Atlas ReLU turns into +0.
+            TORCH_MLIR_SOURCE.replace(relu, "arith.cmpf uge, %in, %cst : f32"),
+            TORCH_MLIR_SOURCE.replace(relu, "arith.cmpf ugt, %cst, %in : f32"),
+            TORCH_MLIR_SOURCE.replace(select, "arith.select %7, %cst, %in : f32"),
+            TORCH_MLIR_SOURCE.replace("%cst = arith.constant 0.000000e+00 : f32",
+                                      "%cst = arith.constant -0.000000e+00 : f32"),
+        )
+        for changed in changed_sources:
+            with self.subTest(changed=changed != TORCH_MLIR_SOURCE):
+                self.assertNotEqual(changed, TORCH_MLIR_SOURCE)
+                with self.assertRaises((UnsupportedLinalg, ValueError)):
+                    imported(changed)
 
 
 if __name__ == "__main__":
