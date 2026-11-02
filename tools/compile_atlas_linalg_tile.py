@@ -30,6 +30,7 @@ POLICY_SCHEMA = "atlas.oot.quantized_linalg_policy.v1"
 SCALED_POLICY_SCHEMA = "atlas.oot.quantized_linalg_policy.v2"
 SOURCE_BOUND_POLICY_SCHEMA = "atlas.oot.quantized_linalg_policy.v3"
 _CMPF_OLT = 4  # MLIR arith.CmpFPredicate OLT.
+_CMPF_UGT = 9  # MLIR arith.CmpFPredicate UGT.
 
 
 class UnsupportedLinalg(ValueError):
@@ -300,6 +301,27 @@ def generic_kind(op: Any) -> str:
             require_exact_arithmetic(compare)
             # This source pattern selects its input for -0. Atlas ReLU clears
             # the sign bit; the difference belongs to the diagnostic policy.
+            return "relu"
+        if len(args) == 2 and names == ["arith.cmpf", "arith.select", "linalg.yield"]:
+            compare, select, output = body
+            zero = compare.operands[1] if len(compare.operands) == 2 else None
+            predicate = compare.properties.get("predicate")
+            require(
+                zero is not None and is_zero_constant(zero) and
+                set(compare.properties) <= {"predicate", "fastmath"} and
+                isinstance(predicate, builtin.IntegerAttr) and
+                predicate.value.data == _CMPF_UGT and
+                tuple(compare.operands) == (args[0], zero) and
+                tuple(select.operands) == (compare.results[0], args[0], zero) and
+                tuple(output.operands) == (select.results[0],) and
+                not select.properties and
+                all(not item.attributes or all(key.startswith("prov.") for key in item.attributes)
+                    for item in body[:-1]),
+                "ReLU compare/select region uses unexpected values",
+            )
+            require_exact_arithmetic(compare)
+            # torch-mlir's form keeps x > +0 and selects +0 otherwise, so -0
+            # becomes +0 as in Atlas ReLU.
             return "relu"
         raise UnsupportedLinalg("ReLU region is not an admitted scalar pattern")
     raise UnsupportedLinalg("generic indexing maps are outside bias/ReLU admission")

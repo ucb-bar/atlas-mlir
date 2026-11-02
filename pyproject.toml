@@ -1,21 +1,43 @@
 [build-system]
-requires = ["setuptools>=68"]
-build-backend = "setuptools.build_meta"
+requires = ["scikit-build-core>=0.10"]
+build-backend = "scikit_build_core.build"
 
 [project]
-name = "atlas-mlir-native-support"
+name = "atlas-mlir"
 version = "0.1.0"
-description = "Atlas out-of-tree binding for Merlin native compilation"
-requires-python = ">=3.11"
+description = "Atlas NPU compiler: PyTorch model to Atlas program and host ELF, and the Merlin native binding"
+# 3.10 is the Python in Chipyard's conda environment; torch-mlir publishes
+# wheels for 3.10-3.12.
+requires-python = ">=3.10"
+dependencies = [
+  "numpy",
+  "safetensors",
+  "xdsl==0.65.0",
+  "torch",
+  "torch-mlir; python_version < '3.13'",
+]
 
 [project.optional-dependencies]
 test = ["pytest", "numpy", "safetensors"]
 
+[project.scripts]
+atlasc = "atlas_mlir.cli:main"
+atlas-opt = "atlas_mlir.toolchain:atlas_opt"
+atlas-emit = "atlas_mlir.toolchain:atlas_emit"
+
 [project.entry-points."merlin.native_target_compilers"]
 atlas = "atlas_mlir_native.binding:AtlasNativeBinding"
 
-[tool.setuptools]
-package-dir = {"" = "python"}
+[tool.scikit-build]
+minimum-version = "build-system.requires"
+cmake.version = ">=3.22"
+cmake.build-type = "Release"
+# The tools do not use the Python ABI: one wheel per platform.
+wheel.py-api = "py3"
+wheel.packages = ["python/atlas_mlir", "python/atlas_mlir_native"]
+install.components = ["atlas-wheel"]
+install.strip = true
+sdist.exclude = ["build", "out", "notes.md"]
 
-[tool.setuptools.packages.find]
-where = ["python"]
+[tool.scikit-build.cmake.define]
+ATLAS_ENABLE_TESTS = "OFF"

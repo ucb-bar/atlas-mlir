@@ -18,7 +18,10 @@ mlir_check_all_link_libraries(atlas-emit)
 
 # Host-side packaging of a checked reset-entry .text section. This tool is
 # independent of ACT and is deliberately narrower than an ELF loader/ABI.
+# The wheel installs both under atlas_mlir/share instead (root CMakeLists).
 configure_file(atlas_boot_pack.py ${CMAKE_BINARY_DIR}/bin/atlas-boot-pack COPYONLY)
-install(PROGRAMS atlas_boot_pack.py DESTINATION bin RENAME atlas-boot-pack)
 configure_file(atlas_host_embed.py ${CMAKE_BINARY_DIR}/bin/atlas-host-embed COPYONLY)
-install(PROGRAMS atlas_host_embed.py DESTINATION bin RENAME atlas-host-embed)
+if(NOT SKBUILD)
+  install(PROGRAMS atlas_boot_pack.py DESTINATION bin RENAME atlas-boot-pack)
+  install(PROGRAMS atlas_host_embed.py DESTINATION bin RENAME atlas-host-embed)
+endif()
