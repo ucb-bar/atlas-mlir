@@ -41,4 +41,3 @@ def relocate_assembly(source, old_base, new_base, *, force=False, weight_source=
         reg = _dram_register(m[1] == "load", *map(int, m.group(2, 3, 4))) if m else None
         lines.extend([f"add x{reg}, x{reg}, x31", line, f"sub x{reg}, x{reg}, x31"] if m else [line])
     return "\n".join(lines) + "\n"
-

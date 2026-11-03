@@ -189,11 +189,12 @@ static int invoke(smol_policy_raw_context *w, unsigned site, unsigned layer, uns
         w->cycle_delta[w->panel_cursor + w->attention_cursor] =
             w->host->mmio.read32(w->host->mmio.context, w->host->map.csr_base) - before;
         if (result != ATLAS_HOST_OK) return reject(w, SMOL_RAW_RUNTIME);
-#ifndef ATLAS_FAST_MODE
         for (size_t i = 0; i < m * pk; ++i)
             if (((volatile uint8_t *) PANEL_DRAM)[i] != PANEL_ACTIVATION[i]) return reject(w, SMOL_RAW_INPUT);
+#ifndef ATLAS_FAST_MODE
         for (size_t i = 0; i < p->weight_bytes; ++i)
             if (((volatile uint8_t *) PANEL_DRAM)[m * pk + i] != PANEL_WEIGHTS[i]) return reject(w, SMOL_RAW_INPUT);
+#endif
         for (size_t i = m * pk + p->weight_bytes; i < p->output_offset; ++i)
             if (((volatile uint8_t *) PANEL_DRAM)[i] != 0xa5) return reject(w, SMOL_RAW_GUARD);
 #if defined(SMOL_FUSION_RUNTIME) && SMOL_FUSION_RUNTIME
@@ -209,7 +210,6 @@ static int invoke(smol_policy_raw_context *w, unsigned site, unsigned layer, uns
 #else
         for (size_t i = p->output_offset + p->store_bytes; i < p->dram_bytes; ++i)
             if (((volatile uint8_t *) PANEL_DRAM)[i] != 0x5a) return reject(w, SMOL_RAW_GUARD);
-#endif
 #endif
 #if defined(SMOL_FUSION_RUNTIME) && SMOL_FUSION_RUNTIME
         if (fusion_operations & SMOL_FUSION_FP8) {

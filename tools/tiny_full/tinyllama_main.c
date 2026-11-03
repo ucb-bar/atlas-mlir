@@ -106,7 +106,7 @@ static void report(ptrdiff_t index, const tiny_panel *panel, unsigned kind, int 
          (unsigned long)(c->copy + c->load + c->wait + c->check), (unsigned long)c->load, (unsigned long)c->wait,
          (unsigned long)c->atlas_cycles, (unsigned long)c->atlas_instret, (unsigned long)c->model,
          (unsigned long)c->copy, (unsigned long)c->check, (unsigned long)c->instret, (unsigned long)panel->rows,
-         (unsigned long)panel->k, (unsigned long)panel->n, 
+         (unsigned long)panel->k, (unsigned long)panel->n,
 #if ATLAS_FAST_MODE
          (unsigned long)(kind ? panel->program_words : tiny_fast_panels[tiny_full_launch_plan[index].index].program_words));
 #else
