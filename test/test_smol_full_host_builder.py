@@ -88,17 +88,33 @@ class BuilderTest(unittest.TestCase):
             for extent in shape: elements *= extent
             references.append(dict(name=name,actual_symbol='actual_'+name,expected_symbol='expected_'+name,
                 bytes=elements*dict(float32=4,uint16=2,bool=1)[dtype],dtype=dtype))
-        source = builder.make_globals(2715,parameters,references,[],[],
-                                   dict(dram=12706304,vocabulary=32000,arena=0x100000000))
-        self.assertIn('smol_full_vision_frame',source)
-        self.assertIn('smol_full_policy_frame',source)
-        self.assertIn('smol_full_raw',source)
         with tempfile.TemporaryDirectory() as directory:
             out = Path(directory)
             write_config(out,argparse.Namespace(uart_kind='ns16550',uart_base=0x10000000,uart_divisor=None))
-            (out/'main.c').write_text(source)
-            subprocess.run(['cc','-std=c11','-Wall','-Wextra','-Werror','-fsyntax-only',
-                '-I'+str(out),'-I'+str(ROOT/'runtime'),'-I'+os.environ['SMOL_MERLIN'],str(out/'main.c')],check=True)
+            for attention_count in (0,200):
+                source = builder.make_globals(2715,parameters,references,[],[],
+                    dict(dram=12706304,vocabulary=32000,arena=0x100000000),
+                    [dict(c='{0}',symbols=[])]*attention_count)
+                self.assertIn('smol_full_vision_frame',source)
+                self.assertIn('smol_full_policy_frame',source)
+                self.assertIn('smol_full_cycles['+str(2715+attention_count)+']',source)
+                self.assertIn('.attention_panels='+('smol_full_attention_panels' if attention_count else '0'),source)
+                (out/'main.c').write_text(source)
+                flags=['cc','-std=c11','-Wall','-Wextra','-Werror','-fsyntax-only',
+                    '-DSMOL_FULL_LAUNCH_COUNT='+str(2715+attention_count),
+                    '-DSMOL_FULL_ATTENTION='+str(int(bool(attention_count))),
+                    '-I'+str(out),'-I'+str(ROOT/'runtime'),'-I'+os.environ['SMOL_MERLIN']]
+                subprocess.run([*flags,str(out/'main.c')],check=True)
+                subprocess.run([*flags,str(ROOT/'runtime/smol_full_driver.c')],check=True)
+                if attention_count:
+                    fused=builder.make_globals(2715,parameters,references,[],[],
+                        dict(dram=12706304,vocabulary=32000,arena=0x90000000),
+                        [dict(c='{0}',symbols=[])]*attention_count,
+                        [dict(c='{0,0,0,0,0}',symbols=[])]*2715)
+                    self.assertIn('const smol_fusion_panel smol_full_fusion_panels[2715]',fused)
+                    self.assertNotIn('smol_full_fusion_panels',source)
+                    (out/'fused.c').write_text(fused)
+                    subprocess.run([*flags,'-DSMOL_FUSION_RUNTIME=1',str(out/'fused.c')],check=True)
 
 
 if __name__ == '__main__':

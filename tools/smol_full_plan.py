@@ -87,6 +87,19 @@ def validate_reference(replay, manifest):
         or manifest.get('finite_trajectory_verified') is not True):
         raise ValueError('Require complete finite full-policy arithmetic reference')
     expected_calls, expected_panels = calls(), panels()
+    fusion_set = manifest.get('fusion_set', 'none')
+    if fusion_set not in ('none', 'vision-bias', 'vision-bias-gelu', 'fc1-bias-gelu', 'connector',
+                          'vision-bias-gelu-connector', 'fc1-bias-gelu-fp8'):
+        raise ValueError('Unsupported explicit Smol fusion profile')
+
+    def fusion_operations(call):
+        if fusion_set == 'none' or call['site'] != 7: return []
+        if call['role'] == 7:
+            return ['connector_scale'] if fusion_set in ('connector', 'vision-bias-gelu-connector') else []
+        if fusion_set in ('fc1-bias-gelu', 'fc1-bias-gelu-fp8'):
+            return ['bias', 'gelu_tanh'] if call['role'] == 5 else []
+        if fusion_set == 'connector': return []
+        return ['bias', 'gelu_tanh'] if call['role'] == 5 and fusion_set != 'vision-bias' else ['bias']
     actual_calls, actual_panels = replay.get('calls'), manifest.get('kernels')
     if (not isinstance(actual_calls, list) or len(actual_calls) != len(expected_calls)
         or not isinstance(actual_panels, list) or len(actual_panels) != len(expected_panels)
@@ -103,6 +116,32 @@ def validate_reference(replay, manifest):
             or actual['input'].get('shape') != input_shape or actual['output'].get('shape') != output_shape
             or actual['input'].get('dtype') != dtype or actual['output'].get('dtype') != dtype):
             raise ValueError('Full-policy native call order/dtype/geometry differs')
+        if fusion_set == 'none' and (actual.get('input_fp8') or actual.get('output_fp8') or actual.get('fused_operations')):
+            raise ValueError('Typed or fused call requires an explicit fusion profile')
+        if fusion_set != 'none':
+            if actual.get('fused_operations', []) != fusion_operations(expected):
+                raise ValueError('Full-policy call fusion operations differ from explicit profile')
+            for side, width, wanted in (('input', k, expected['site'] == 7 and expected['role'] == 6),
+                                       ('output', n, expected['site'] == 7 and expected['role'] == 5)):
+                wanted = wanted and fusion_set == 'fc1-bias-gelu-fp8'
+                typed = actual.get(side+'_fp8')
+                if bool(typed) != wanted:
+                    raise ValueError('Full-policy typed FP8 view differs from explicit profile')
+                if wanted and (typed.get('dtype') != 'uint8' or typed.get('shape') != [rows//32, width//32, 32, 32]
+                    or typed.get('bytes') != rows*width or actual.get(side+'_source_format') != 'fp8_tiles'
+                    or not isinstance(typed.get('sha256'), str) or len(typed['sha256']) != 64
+                    or any(character not in '0123456789abcdef' for character in typed['sha256'])
+                    or actual.get(side+'_diagnostic_only') is not True
+                    or type(actual.get(side+'_decode_exponent')) is not int
+                    or not -126 <= actual[side+'_decode_exponent'] <= 127):
+                    raise ValueError('Full-policy FP8 extent/layout/scale or diagnostic marker differs')
+            if actual.get('input_fp8'):
+                previous = actual_calls[expected['index']-1]
+                if (previous.get('output_fp8', {}).get('sha256') != actual['input_fp8'].get('sha256')
+                    or previous.get('output_decode_exponent') != actual['input_decode_exponent']
+                    or actual.get('a_scale') != actual['input_decode_exponent']):
+                    raise ValueError('Full-policy FP8 producer/consumer bytes or fixed scale differ')
+    from atlas_program import dma_load_bytes
     scales = {}
     for expected, actual in zip(expected_panels, actual_panels):
         if any(type(actual.get(name)) is not type(value) or actual.get(name) != value
@@ -120,7 +159,31 @@ def validate_reference(replay, manifest):
         m, k, n = actual['physical_mkn']
         loads = (m*k*(n//32)+k*n if k*n <= 262144 else m*k+k*n*(m//32)
                  if m*k <= 262144 else (m//32)*(n//32)*(2*k//32*1024))
-        if (actual.get('dram_base') != 0x100000000 or actual.get('output_offset') != m*k+k*n+256
+        if actual.get('recipe') == 'traffic-reuse-v1': loads = dma_load_bytes(m, k, n, traffic_reuse=True)
+        operations = fusion_operations(expected_calls[actual['call']])
+        if operations:
+            meta = actual.get('fusion', {})
+            fp8 = fusion_set == 'fc1-bias-gelu-fp8'
+            output_bytes = m*n if fp8 else 2*m*n
+            extra_bytes = n*64 if 'bias' in operations else 0
+            extra_offset = actual['output_offset'] + output_bytes + 256
+            total = extra_offset + (extra_bytes+256 if extra_bytes else 0)
+            if (meta.get('operations') != operations or meta.get('host_ops_on_success') != operations
+                or meta.get('output_dtype') != ('fp8' if fp8 else 'bf16') or meta.get('output_layout') != 'tiles'
+                or meta.get('output_offset') != m*k+k*n+256 or meta.get('output_bytes') != output_bytes
+                or actual.get('output_offset') != meta.get('output_offset')
+                or meta.get('extra_offset') != extra_offset or meta.get('extra_bytes') != extra_bytes
+                or meta.get('total_dram_bytes') != total or actual.get('total_dram_bytes') != total
+                or actual.get('dram_base') != 0x90000000 or actual.get('recipe') != 'traffic-reuse-v1'
+                or meta.get('requested_dma') != actual.get('requested_dma')
+                or actual['requested_dma'].get('store_bytes') != output_bytes
+                or type(actual['requested_dma'].get('load_bytes')) is not int or actual['requested_dma']['load_bytes'] <= 0
+                or fp8 and meta.get('output_scale_exponent') != actual_calls[actual['call']]['output_decode_exponent']):
+                raise ValueError('Full-policy fusion output, extras, or DMA geometry differs')
+            continue
+        if actual.get('fusion'):
+            raise ValueError('Unselected full-policy panel declares fusion')
+        if (actual.get('dram_base') != manifest.get('placement', {}).get('arena_base', 0x100000000) or actual.get('output_offset') != m*k+k*n+256
             or actual.get('total_dram_bytes') != m*k+k*n+512+2*m*n
             or actual.get('requested_dma') != {'load_bytes': loads, 'store_bytes': 2*m*n}):
             raise ValueError('Full-policy panel staging or DMA differs')

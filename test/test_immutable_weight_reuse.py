@@ -1,7 +1,7 @@
 """Automatic weight reuse preserves state, aliasing and bounded allocation."""
 import unittest
 
-from test_virtual_ssa import run
+from test_virtual_ssa import BIN, run
 from test_virtual_scheduling import (
     F, S, T, const, dma_load, dma_store, function, inp, mxu_chain, outp, start,
 )
@@ -49,6 +49,7 @@ def repeated(*, typed=False, explicit=False, alias=False, partial=False,
     return function("repeat", [*lines, f"return %{state} : {S}"], attrs=ABI)
 
 
+@unittest.skipUnless((BIN / "atlas-opt").is_file(), "build atlas-opt first")
 class ImmutableWeightReuseTest(unittest.TestCase):
     def checked(self, source, *options):
         result = run("atlas-opt", source, *options)

@@ -11,6 +11,7 @@ atlas_program.py: VLOAD/VSTORE/POP 34, transpose/VLI/MUL 66, weight push 32,
 and MXU0 matmul 96. They are not fitted to a benchmark or memory profile.
 """
 
+from atlas_program_checks import checked_assembly
 from atlas_program_reuse_common import load_b_column, store_output
 
 BANK_BYTES = 256 * 1024
@@ -18,6 +19,7 @@ RESIDENT_BYTE_BASE = BANK_BYTES
 TILE_BYTES = 32 * 32
 OUTPUT_TILE_BYTES = 2 * TILE_BYTES
 GUARD_BYTES = 256
+SCALAR_SCRATCH = (27, 28)
 
 
 def admission(m, k, n, output_offset, rescale_exponent):
@@ -53,8 +55,11 @@ def dma_load_bytes(m, k, n):
     return m * k + k * n
 
 
-def assembly(m, k, n, output_offset, rescale_exponent=0):
+@checked_assembly(scratch_registers=SCALAR_SCRATCH)
+def assembly(m, k, n, output_offset, rescale_exponent=0, *, epilogue=None, weight_source=None):
     regions = admission(m, k, n, output_offset, rescale_exponent)
+    if weight_source is not None:
+        weight_source.validate(k, n)
     a_word = regions["a_byte_range"][0] // 4
     b_word = regions["b_column_byte_range"][0] // 4
     a_row_words = k * 32 // 4
@@ -62,7 +67,7 @@ def assembly(m, k, n, output_offset, rescale_exponent=0):
     lines = [
         f"li x1, {a_word}", f"li x2, {b_word}", "li x3, 0xa00",
         "li x5, 1024", "li x8, 2048", "li x9, 0xb00",
-        f"li x14, {n // 32}", f"li x15, {m * k}",
+        f"li x14, {n // 32}", f"li x15, {weight_source.low if weight_source else m * k}",
         f"li x16, {a_row_words}", f"li x17, {out_row_bytes}",
         f"li x18, {2 * a_row_words}", f"li x23, {output_offset}",
         f"li x26, {2 * out_row_bytes}", "li x30, 1", "dma.config x30, ch0",
@@ -74,9 +79,10 @@ def assembly(m, k, n, output_offset, rescale_exponent=0):
         "reuse_a_load:", "dma.load x19, x20, x5, ch0", "dma.wait ch0",
         "addi x19, x19, 256", "addi x20, x20, 1024", "addi x21, x21, -1",
         "beq x21, x0, reuse_a_loaded", "nop", "jal x0, reuse_a_load", "nop",
-        "reuse_a_loaded:", "reuse_column:",
+        "reuse_a_loaded:",
+        *(weight_source.setup(20) if weight_source else []), "reuse_column:",
         "add x19, x2, x0", "add x20, x15, x0", f"li x21, {k // 32}",
-        *load_b_column("reuse_b_load"), "add x15, x20, x0",
+        *load_b_column("reuse_b_load", (2, 3) if weight_source else (0, 1)), "add x15, x20, x0",
         "add x10, x1, x0", "add x11, x10, x16", "add x24, x23, x0",
         f"li x13, {m // 64}", "reuse_row_pair:",
         "add x4, x10, x0", "add x7, x11, x0", "add x6, x2, x0",
@@ -94,7 +100,7 @@ def assembly(m, k, n, output_offset, rescale_exponent=0):
     for acc in (0, 1):
         # Pops are deliberately sequential: m2/m3 are drained to DRAM before
         # reusing them for the other accumulator. m4/m5 never overlap a pop.
-        lines += store_output(acc, 12, rescale_exponent)
+        lines += store_output(acc, 12, rescale_exponent, epilogue)
         if acc == 0:
             lines += ["add x12, x12, x17"]
     lines += [

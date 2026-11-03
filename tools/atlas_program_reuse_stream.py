@@ -5,9 +5,11 @@ Each accumulator finishes its ordered full K reduction before its sole pop.
 The delays are the existing conservative atlas_program.py instruction recipe.
 """
 
+from atlas_program_checks import checked_assembly
 from atlas_program_reuse_common import load_b_column, store_output
 
 BANK_BYTES = 256 * 1024
+SCALAR_SCRATCH = (10, 11)
 
 
 def layout(m, k, n):
@@ -32,8 +34,11 @@ def a_word(byte_offset):
     return ((BANK_BYTES + byte_offset) if byte_offset < BANK_BYTES else (byte_offset - BANK_BYTES)) // 4
 
 
-def assembly(m, k, n, output_offset, rescale_exponent=None):
+@checked_assembly(scratch_registers=SCALAR_SCRATCH)
+def assembly(m, k, n, output_offset, rescale_exponent=None, *, epilogue=None, weight_source=None):
     plan = layout(m, k, n)
+    if weight_source is not None:
+        weight_source.validate(k, n)
     if (type(output_offset) is not int or output_offset < m * k + k * n
             or output_offset % 32 or output_offset + 2 * m * n > 2**32):
         raise ValueError("output must be aligned, after inputs, and within the DRAM low word")
@@ -41,8 +46,10 @@ def assembly(m, k, n, output_offset, rescale_exponent=None):
         raise ValueError("VPU rescale factor must be normal finite BF16")
     b, out = plan['b_word'], plan['output_word']
     lines = ["li x5, 1024", "li x8, 2048", f"li x3, {out}", f"li x9, {out + 256}",
-             "li x30, 1", "dma.config x30, ch0", *(["dma.config x30, ch1"] if k > 32 else []), f"li x15, {m * k}",
+             "li x30, 1", "dma.config x30, ch0", *(["dma.config x30, ch1"] if k > 32 else []), f"li x15, {weight_source.low if weight_source else m * k}",
              f"li x12, {output_offset}", f"li x17, {n // 32}", f"li x16, {n * 64}"]
+    if weight_source is not None:
+        lines += weight_source.setup(20)
     # One patchable scale immediate preserves the captured host template protocol.
     if rescale_exponent is not None:
         lines += [f"vli.all m4, {(rescale_exponent + 127) << 7}", "delay 66"]
@@ -56,7 +63,7 @@ def assembly(m, k, n, output_offset, rescale_exponent=None):
                   f"beq x21, x0, preload_a_{part}_done", "nop", f"jal x0, preload_a_{part}", "nop",
                   f"preload_a_{part}_done:"]
     lines += ["columns_loop:", f"li x19, {b}", "add x20, x15, x0", f"li x21, {k // 32}",
-              *load_b_column("preload_b"), "add x15, x20, x0", "add x22, x12, x0"]
+              *load_b_column("preload_b", (2, 3) if weight_source else (0, 1)), "add x15, x20, x0", "add x22, x12, x0"]
     for row in range(0, m // 32, 2):
         rows = min(2, m // 32 - row)
         lines += [f"li x6, {b}"]
@@ -69,7 +76,7 @@ def assembly(m, k, n, output_offset, rescale_exponent=None):
                           "delay 96"]
             lines += ["addi x6, x6, 256"]
         for acc in range(rows):
-            lines += store_output(acc, 22, rescale_exponent) + ["add x22, x22, x16"]
+            lines += store_output(acc, 22, rescale_exponent, epilogue) + ["add x22, x22, x16"]
     lines += ["add x12, x12, x8", "addi x17, x17, -1", "beq x17, x0, finished", "nop",
               "jal x0, columns_loop", "nop", "finished:", "nop", "ecall"]
     return "\n".join(lines) + "\n"

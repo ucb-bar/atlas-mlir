@@ -6,15 +6,12 @@ from bundle import runtime_program, verify_kernel_receipt
 from placement import placement
 from segment_boundary import SegmentChain
 from smol_full_plan import calls
+from smol_full_phases import execution_profile, extra_live
 import smol_full_contract as full
 
 require = full.require
-COMPILED_LAYOUT = (1, 40, 28, 16, 16, 160, 144, 80, 112, 2715, 1421, 200)
-EXTRA_LIVE = {
-    "smol_v_tokens": 1572864, "smol_v_output": 122880, "smol_full_image_output": 245760,
-    "smol_b_output": 339840, "smol_g_velocity": 6400, "smol_full_cycles": 10860,
-    "smol_full_graph_state": 16, "smol_full_vision_states": 32, "smol_full_phase_state": 40,
-}
+COMPILED_LAYOUT = (1, 40, 28, 16, 16, 184, 144, 80, 112, 2915, 1421, 200)
+
 
 
 def partitions():
@@ -73,15 +70,17 @@ def runtime_sites(image):
 
 
 def layout(image, data):
+    profile = execution_profile(data)
+    compiled_layout = (*COMPILED_LAYOUT[:9], profile.launch_count, *COMPILED_LAYOUT[10:])
     address, size = symbol(image, "smol_full_compiled_phase_layout", 96, False)
-    require(struct.unpack("<12Q", image.bytes_at(address, size)) == COMPILED_LAYOUT, "compiled phase ABI")
+    require(struct.unpack("<12Q", image.bytes_at(address, size)) == compiled_layout, "compiled phase ABI")
     address, size = symbol(image, "smol_full_driver_observation", 56, False)
     observation = struct.unpack("<7Q", image.bytes_at(address, size))
     parameters = data["host_parameters"]
     require(observation[:6] == tuple(image.symbols[parameters["observation."+name]["symbol"]]["address"]
         for name in ("images", "state", "noise", "image_masks", "language_mask", "language_tokens"))
         and 0 < observation[6] < 1 << 32, "compiled driver observation pointers")
-    expected = dict(EXTRA_LIVE)
+    expected = extra_live(profile)
     for row in data["reference_buffers"]:
         require(row["actual_symbol"] not in expected, "duplicate semantic symbol")
         expected[row["actual_symbol"]] = row["bytes"]
@@ -89,9 +88,10 @@ def layout(image, data):
     regions = [dict(name=name, address=symbol(image, name, size, True)[0], bytes=size)
                for name, size in expected.items()]
     controls = [symbol(image, name, size, True) for name, size in (
-        ("smol_full_raw", 160), ("smol_full_host", 112), ("atlas_workload_mailbox", 128),
+        ("smol_full_raw", 184), ("smol_full_host", 112), ("atlas_workload_mailbox", 128),
         ("tohost", 8), ("fromhost", 8), ("smol_full_segment_request", 8),
-        ("smol_full_segment_observations", 10860))]
+        ("smol_full_segment_observations", profile.cycle_bytes))]
+    if data.get('fusion_set','none')!='none':controls.append(symbol(image,'state',104,True))
     stack = image.symbols["__stack_bottom"]["address"], image.symbols["__stack_top"]["address"]
     require(stack[1]-stack[0] == 65536 and stack[1] % 16 == 0, "fresh phase stack")
     allocations = [(r["address"], r["bytes"]) for r in regions] + controls + [span(
@@ -138,7 +138,7 @@ def validate_image(bundle, image, assemble):
     regions = layout(image, data)
     runtime_sites(image)
     verified = set()
-    for item in data["kernels"]:
+    for item in [*data["kernels"], *data.get("attention_kernels", [])]:
         key = item["source"], item["original"]
         if key not in verified:
             runtime_program(bundle.read(key[0]).decode(), bundle.read(key[1]), assemble)
@@ -148,9 +148,11 @@ def validate_image(bundle, image, assemble):
 
 def validate_bundle(bundle, image, assemble, model_profile):
     data, regions = validate_image(bundle, image, assemble)
+    profile = execution_profile(data)
+    compiled_layout = (*COMPILED_LAYOUT[:9], profile.launch_count, *COMPILED_LAYOUT[10:])
     chain = SegmentChain(bundle.root, "smol-full")
     chain.admit_layout(regions)
-    require(chain.kernel_count == 2715 and chain.placement == placement(bundle.build)
+    require(chain.kernel_count == profile.launch_count and chain.placement == placement(bundle.build)
             and chain.model_profile == model_profile and chain.data["elf"] == "host/host.elf"
             and chain.data["contract"] == bundle.provenance["contract"]
             and chain.data["capture_receipt"] == "segments/receipt.json",
@@ -160,7 +162,8 @@ def validate_bundle(bundle, image, assemble, model_profile):
         indices = [row["index"] for row in data["kernels"]
                    if entry["call_start"] <= row["call"] < entry["call_end"]]
         require(indices and indices == list(range(indices[0], indices[-1]+1)), "contiguous phase launches")
-        entry.update(launch_start=indices[0], launch_end=indices[-1]+1)
+        entry.update(launch_start=indices[0]+(entry["index"] if profile.attention_count else 0),
+                     launch_end=indices[-1]+1+(entry["index"]+1 if profile.attention_count else 0))
     require([b["launch_cursor"] for b in chain.boundaries] == [0]+[p["launch_end"] for p in phases],
             "all200 semantic phase boundaries")
     embedded_boundaries(chain, image, phases, regions)
@@ -171,7 +174,7 @@ def validate_bundle(bundle, image, assemble, model_profile):
             and preparation.get("device_execution") is False and preparation.get("segments") == 200
             and preparation.get("boundaries") == 201 and preparation.get("projection_calls") == 1421
             and preparation.get("physical_panels") == 2715
-            and preparation.get("compiled_phase_layout") == list(COMPILED_LAYOUT), "complete native phase gate")
+            and preparation.get("compiled_phase_layout") == list(compiled_layout), "complete native phase gate")
     for name in ("source_bookends_verified", "all_actual_predecessors_exact", "all_final_references_exact",
                  "full_and_phases_exact", "scratch_reset_each_phase", "arena_reset_each_phase",
                  "canonical_zero_observations", "live_corruption_rejected"):
@@ -184,6 +187,8 @@ def validate_bundle(bundle, image, assemble, model_profile):
         require(path in sources and chain.sums.get("segments/"+member) == sources[path], "phase source snapshot")
     required = {"smol_full_driver.c", "smol_full_driver.h", "smol_policy_graph.c", "smol_policy_graph.h",
                 "smol_vision_graph.c", "smol_vision_graph.h"}
+    if data.get('fusion_set','none')!='none':
+        required.update(('smol_fusion.c','smol_fusion.h','smol_policy_raw.c','smol_policy_raw.h'))
     for name in required:
         require({value for path, value in sources.items() if path.rsplit("/", 1)[-1] == name}
                 == {chain.sums["host/"+name]}, "native/RV64 shared arithmetic/driver source: "+name)
@@ -196,10 +201,10 @@ def validate_bundle(bundle, image, assemble, model_profile):
     for index, boundary in enumerate(chain.boundaries):
         cursor = struct.unpack("<10I", chain.read(boundary["regions"]["smol_full_phase_state"]))
         expected = (1, 0, 0, 0, 0, 0, 0, 0, 0, 0) if index == 0 else (
-            1, index, *phases[index-1]["identity"], phases[index-1]["launch_end"],
+            1, index, *phases[index-1]["identity"], phases[index-1]["launch_end"]-(index if profile.attention_count else 0),
             phases[index-1]["call_end"], phases[index-1]["launch_end"], 0, 0)
         require(cursor == expected, "phase pointer-free cursor/order")
-        require(chain.read(boundary["regions"]["smol_full_cycles"]) == bytes(10860),
+        require(chain.read(boundary["regions"]["smol_full_cycles"]) == bytes(profile.cycle_bytes),
                 "canonical boundary observations must be zero")
     return chain, data
 

@@ -11,19 +11,19 @@ extern const smol_vision_frame smol_full_vision_frame;
 extern const smol_policy_parameters smol_full_policy_parameters;
 extern const smol_policy_frame smol_full_policy_frame;
 extern uint16_t smol_full_image[786432],smol_full_image_output[2][61440];
-extern uint32_t smol_full_cycles[2715];
+extern uint32_t smol_full_cycles[SMOL_FULL_LAUNCH_COUNT];
 extern uint8_t smol_full_actual_prefix_pad_mask[177],smol_full_actual_prefix_attention_mask[177];
 extern float *const smol_step_input_state[10],*const smol_step_output_state[10];
 extern float *const smol_step_timestep[10],*const smol_step_velocity[10];
 extern float smol_full_actual_final_full_state[1600],smol_full_actual_final_actions[300];
 smol_full_phase_cursor smol_full_phase_state={1,0,0,0,0,0,0,0,0,0};
 volatile uint64_t smol_full_segment_request=UINT64_MAX;
-uint32_t smol_full_segment_observations[2715];
+uint32_t smol_full_segment_observations[SMOL_FULL_LAUNCH_COUNT];
 const char *smol_full_segment_error_region;
 const uint64_t smol_full_compiled_phase_layout[12]={1,sizeof(smol_full_phase_cursor),
     offsetof(smol_full_phase_cursor,sequence),sizeof(smol_policy_state),sizeof(smol_vision_state),
     sizeof(smol_policy_raw_context),sizeof(smol_policy_panel),sizeof(smol_policy_call),sizeof(atlas_host),
-    2715,1421,200};
+    SMOL_FULL_LAUNCH_COUNT,1421,200};
 static smol_full_driver_observer observer;
 #ifndef __riscv
 static void (*ready_observer)(void);
@@ -45,14 +45,14 @@ __attribute__((noinline)) void smol_full_segment_ready(void) {
 #endif
 }
 __attribute__((noinline)) void smol_full_segment_done(void) {
-#ifdef __riscv
+#if defined(__riscv) && !defined(ATLAS_WORKLOAD_RETURN_TO_CALLER)
     __asm__ volatile("wfi":::"memory");
 #else
     __asm__ volatile("":::"memory");
 #endif
 }
 __attribute__((noinline)) void smol_full_segment_failed(void) {
-#ifdef __riscv
+#if defined(__riscv) && !defined(ATLAS_WORKLOAD_RETURN_TO_CALLER)
     __asm__ volatile("wfi":::"memory");
 #else
     __asm__ volatile("":::"memory");
@@ -63,10 +63,11 @@ int smol_full_driver_drained(void) {
         && !smol_full_host.active_buffers && !smol_full_host.active_buffer_count
         && !smol_full_host.launch_acknowledged;
 }
-static int boundary(unsigned index) {
+static int boundary(unsigned index,int preserve_cycles) {
     if(index>200) return 1;
     for(unsigned i=0;i<56;++i) {
         const smol_full_phase_region *r=&smol_full_phase_regions[i];
+        if(preserve_cycles && r->actual==(unsigned char*)smol_full_cycles) continue;
         if(smol_full_driver_differ(r->actual,smol_full_phase_expected[index][i],r->bytes)) {
             smol_full_segment_error_region=r->name;
             return 1;
@@ -74,14 +75,15 @@ static int boundary(unsigned index) {
     }
     return 0;
 }
-int smol_full_driver_input(unsigned index) { return boundary(index); }
+int smol_full_driver_input(unsigned index) { return boundary(index,0); }
 int smol_full_driver_phase(unsigned index,int segmented) {
     smol_full_segment_error_region="phase-drain";
     if(index>=200 || !smol_full_driver_drained()) return 1;
     const smol_full_phase_descriptor *p=&smol_full_phase_plan[index];
     smol_full_segment_error_region="phase-cursors";
     if(smol_full_phase_state.version!=1 || smol_full_phase_state.next_segment!=index
-        || smol_full_raw.panel_cursor!=p->launch_start || smol_full_raw.call_cursor!=p->call_start
+        || smol_full_raw.panel_cursor+smol_full_raw.attention_cursor!=p->launch_start
+        || smol_full_raw.attention_cursor!=(SMOL_FULL_ATTENTION?index:0) || smol_full_raw.call_cursor!=p->call_start
         || smol_full_host.invocation_sequence!=p->launch_start) return 2;
     const smol_full_driver_inputs *o=&smol_full_driver_observation;
     int code;
@@ -126,11 +128,12 @@ int smol_full_driver_phase(unsigned index,int segmented) {
     smol_full_segment_error_region="phase-math";
     if(code) return 4;
     smol_full_segment_error_region="phase-drain";
-    if(!smol_full_driver_drained() || smol_full_raw.panel_cursor!=p->launch_end
+    if(!smol_full_driver_drained() || smol_full_raw.panel_cursor+smol_full_raw.attention_cursor!=p->launch_end
+        || smol_full_raw.attention_cursor!=(SMOL_FULL_ATTENTION?index+1:0)
         || smol_full_raw.call_cursor!=p->call_end || smol_full_host.invocation_sequence!=p->launch_end) return 5;
     smol_full_segment_error_region="phase-observations";
     if(segmented) {
-        for(unsigned i=0;i<2715;++i) {
+        for(unsigned i=0;i<SMOL_FULL_LAUNCH_COUNT;++i) {
             if(i>=p->launch_start && i<p->launch_end) {
                 if(!smol_full_cycles[i]) return 6;
                 smol_full_segment_observations[i]=smol_full_cycles[i];
@@ -139,8 +142,13 @@ int smol_full_driver_phase(unsigned index,int segmented) {
         }
     }
     smol_full_phase_state=(smol_full_phase_cursor){1,index+1,p->kind,p->ordinal,p->layer,
-        p->launch_end,p->call_end,p->launch_end,0,0};
-    if(segmented && boundary(index+1)) return 7;
+#if SMOL_FULL_ATTENTION
+        p->launch_end-index-1,
+#else
+        p->launch_end,
+#endif
+        p->call_end,p->launch_end,0,0};
+    if(boundary(index+1,!segmented)) return 7;
     smol_full_segment_error_region=0;
     if(observer && observer(index)) return 8;
     return 0;

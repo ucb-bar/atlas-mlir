@@ -49,7 +49,7 @@ static int transport(void *context, const tiny_panel *panel, uint8_t *dram, size
 
 tiny_full_projection_context tiny_full_projection_state = {
     {tiny_full_panels, TINY_FULL_KERNELS, 0, (uint8_t *)(uintptr_t)TINY_FULL_ARENA_BASE,
-     TINY_FULL_DRAM_BYTES, transport, 0}, 0, TINY_FULL_STEPS
+     TINY_FULL_DRAM_BYTES, transport, 0}, 0, TINY_FULL_STEPS, 0, 0, 0, 0, 0
 };
 
 static void complete(uint64_t state, uint64_t code) {

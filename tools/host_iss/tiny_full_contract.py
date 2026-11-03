@@ -228,9 +228,11 @@ def validate_bundle(bundle, image):
     require(image.symbols["tohost"]["address"] != image.symbols["fromhost"]["address"], "Tiny full distinct HTIF")
     require(image.symbols["tiny_full_mailbox"]["size"] == 128
             and image.symbols["tiny_full_panels"]["size"] == 120 * bundle.kernel_count
-            and image.symbols["tiny_full_projection_state"]["size"] == 72
+            and image.symbols["tiny_full_projection_state"]["size"] == 112
             and image.symbols["tiny_full_state_global"]["size"] == 48
             and image.symbols["tiny_full_host"]["size"] == 112, "Tiny full actual host ABI extents")
+    require(image.bytes_at(image.symbols["tiny_full_projection_state"]["address"] + 72, 40) == bytes(40),
+            "Tiny full legacy attention context must start zero")
     stop_sites(image)
     immutable = [(image.symbols[name]["address"], image.symbols[name]["size"]) for name in
                  ("tohost", "fromhost", "tiny_full_mailbox", "tiny_full_panels", "tiny_full_projection_state",
@@ -313,6 +315,9 @@ def verify_completion(remote, image, device, bundle, out):
             "Tiny full actual KV state")
     context = struct.unpack("<9Q", remote.read(image.symbols["tiny_full_projection_state"]["address"], 72))
     initial = struct.unpack("<9Q", image.bytes_at(image.symbols["tiny_full_projection_state"]["address"], 72))
+    tail = image.symbols["tiny_full_projection_state"]["address"] + 72
+    require(image.bytes_at(tail, 40) == bytes(40) and remote.read(tail, 40) == bytes(40),
+            "Tiny full legacy attention context must remain zero")
     require(context[2] == kernels and context[7] == data["projection_calls"]
             and all(context[i] == initial[i] for i in (0, 1, 3, 4, 5, 6, 8)), "Tiny full actual projection cursor")
     host = remote.read(image.symbols["tiny_full_host"]["address"], 112)

@@ -119,8 +119,9 @@ class TrafficReuseTests(unittest.TestCase):
                     program.code_sources(traffic_reuse=flag)
 
     def test_source_closure_tracks_all_helpers_only_when_enabled(self):
-        legacy = {"atlas_program.py", "run_model_tile.py", "atlas_tile_arithmetic.py"}
-        helpers = {name+".py" for name in program._TRAFFIC_REUSE_MODULES.values()} | {"atlas_program_reuse_common.py"}
+        legacy = {"atlas_program.py", "run_model_tile.py", "atlas_tile_arithmetic.py", "atlas_epilogue.py", "atlas_rne_add.py",
+                  "atlas_resnet_input.py", "atlas_program_checks.py", "atlas_program_reuse_common.py", "atlas_weight_source.py"}
+        helpers = {name+".py" for name in program._TRAFFIC_REUSE_MODULES.values()}
         expanded = legacy | helpers
         self.assertEqual(set(program.code_sources()), legacy)
         self.assertEqual(set(program.code_sources(traffic_reuse=False)), legacy)

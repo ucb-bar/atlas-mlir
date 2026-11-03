@@ -18,7 +18,9 @@ import numpy as np
 class Parameters(ct.Structure):
     _fields_ = [("embedding", ct.c_void_p), ("input_norm", ct.c_void_p * 22),
                 ("post_norm", ct.c_void_p * 22), ("final_norm", ct.c_void_p),
-                ("cosine", ct.c_void_p), ("sine", ct.c_void_p), ("epsilon", ct.c_float)]
+                ("cosine", ct.c_void_p), ("sine", ct.c_void_p), ("epsilon", ct.c_float),
+                ("attention", ct.c_void_p), ("fused_project", ct.c_void_p), ("normalize", ct.c_void_p),
+                ("capabilities", ct.c_uint64)]
 
 
 class State(ct.Structure):
@@ -28,6 +30,10 @@ class State(ct.Structure):
 
 Projection = ct.CFUNCTYPE(ct.c_int, ct.c_void_p, ct.c_uint, ct.c_uint, ct.c_void_p,
                          ct.c_size_t, ct.c_size_t, ct.c_size_t, ct.c_void_p)
+Attention = ct.CFUNCTYPE(ct.c_int, ct.c_void_p, ct.c_uint, ct.c_void_p, ct.c_void_p, ct.c_void_p,
+                        ct.c_size_t, ct.c_size_t, ct.c_void_p)
+FusedProjection = ct.CFUNCTYPE(ct.c_int, ct.c_void_p, ct.c_uint, ct.c_uint, ct.c_void_p,
+                              ct.c_size_t, ct.c_size_t, ct.c_size_t, ct.c_void_p, ct.c_void_p)
 
 
 class ModelFixture:
@@ -45,10 +51,12 @@ class ModelFixture:
         cls.temp = tempfile.TemporaryDirectory()
         cls.addClassCleanup(cls.temp.cleanup)
         cls.root = Path(cls.temp.name)
-        source = Path(__file__).absolute().parents[1] / "tools/tiny_full/tiny_full_model.c"
+        repo = Path(__file__).absolute().parents[1]
+        source = repo / "tools/tiny_full/tiny_full_model.c"
         command = ["cc", "-std=c11", "-O2", "-Wall", "-Wextra", "-Werror", "-pedantic",
                    "-ffp-contract=off", "-fno-fast-math", "-shared", "-fPIC", "-I", str(provider),
-                   str(source), *(str(provider / name) for name in names), "-lm", "-o", str(cls.root / "host.so")]
+                   "-I", str(repo / "runtime"), str(source), str(repo / "runtime/tiny_attention.c"),
+                   *(str(provider / name) for name in names), "-lm", "-o", str(cls.root / "host.so")]
         subprocess.run(command, check=True, capture_output=True, timeout=120)
         cls.lib = ct.CDLL(str(cls.root / "host.so"))
         cls.addClassCleanup(_ctypes.dlclose, cls.lib._handle)
@@ -81,6 +89,64 @@ class ModelFixture:
 
 
 class FullModelTest(ModelFixture, unittest.TestCase):
+    def test_fused_callbacks_keep_norms_and_transport_opaque_tiles_and_fp8(self):
+        if not self.stub_provider:
+            self.skipTest("routing counters require the test host provider")
+        for rows in (1, 128):
+            with self.subTest(rows=rows):
+                p, s = self.fixture()
+                self.embedding[:] = 0x3f80
+                if rows == 128: s.position = 0
+                observed, errors = [], []
+                active_gate = None
+                counters = [ct.c_uint.in_dll(self.lib, "tiny_test_" + name + "_calls")
+                            for name in ("rms", "residual", "silu")]
+                before = [x.value for x in counters]
+
+                @Projection
+                def project(_, layer, role, incoming, count, k, width, output):
+                    observed.append((layer, role))
+                    if role not in (0, 1, 2, 7): errors.append("legacy fused role")
+                    size = ((count + 31) // 32 * 32 if role <= 2 else count) * width * 2
+                    ct.memset(output, 0, size)
+                    if role == 7: ct.c_uint16.from_address(output).value = 0x3f80
+                    return 0
+
+                @Attention
+                def attention(_, layer, query, keys, values, count, key_rows, output):
+                    ct.memset(output, 0, (count + 31) // 32 * 32 * 2048 * 2)
+                    return 0
+
+                @FusedProjection
+                def fused(_, layer, role, incoming, count, k, width, operand, output):
+                    nonlocal active_gate
+                    observed.append((layer, role))
+                    if role in (3, 6):
+                        if operand: errors.append("residual operand")
+                        words = np.ctypeslib.as_array(ct.cast(output, ct.POINTER(ct.c_uint16)), shape=(count * width,))
+                        words[:] = 0x4000 if role == 3 else 0x3f00
+                    elif role == 4:
+                        if operand: errors.append("gate operand")
+                        active_gate = output
+                        ct.memset(output, 0x33, (count + 31) // 32 * 32 * width * 2)
+                    elif role == 5:
+                        if operand != active_gate: errors.append("activated gate routing")
+                        ct.memset(output, 0x61, (count + 31) // 32 * 32 * width)
+                    if role == 6:
+                        raw = ct.string_at(incoming, (count + 31) // 32 * 32 * k)
+                        if raw != bytes([0x61]) * len(raw): errors.append("FP8 routing")
+                    return 0
+
+                p.attention = ct.cast(attention, ct.c_void_p).value
+                p.fused_project = ct.cast(fused, ct.c_void_p).value
+                tokens = np.full(rows, s.next_token, np.uint32)
+                logits = np.zeros((rows, 32000), np.uint16)
+                self.assertEqual(self.lib.tiny_full_model_step(ct.byref(p), ct.byref(s), tokens.ctypes.data, rows,
+                    project, None, self.workspace.ctypes.data, self.workspace.nbytes, logits.ctypes.data, logits.size), 0)
+                self.assertEqual(errors, [])
+                self.assertEqual(observed, [(layer, role) for layer in range(22) for role in range(7)] + [(22, 7)])
+                self.assertEqual([x.value-y for x, y in zip(counters, before)], [45, 44, 0])
+
     def test_argmax_first_tie_signed_zero_and_nonfinite(self):
         words = np.full(32000, 0xbf80, np.uint16)
         words[31] = words[91] = 0x3f80

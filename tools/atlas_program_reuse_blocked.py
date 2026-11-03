@@ -7,9 +7,11 @@ The first K operation overwrites, all later operations accumulate, and each
 output has one BF16 pop/rescale. Delays match the established generator.
 """
 
+from atlas_program_checks import checked_assembly
 from atlas_program_reuse_common import load_b_column, store_output
 
 BANK_BYTES = 262144
+SCALAR_SCRATCH = (10, 11)
 SHAPES = {
     (32, 32, 960),
     (64, 32, 736),
@@ -78,7 +80,9 @@ def layout(m, k, n):
                 dma_store_bytes=2 * m * n)
 
 
-def dma_load_bytes(m, k, n):
+def dma_load_bytes(m, k, n, *, direct_input=None):
+    if direct_input is not None:
+        direct_input.validate(m, k)
     return layout(m, k, n)['dma_load_bytes']
 
 
@@ -86,8 +90,13 @@ def a_word(offset, bank0_base):
     return (BANK_BYTES + offset if offset < BANK_BYTES else bank0_base + offset - BANK_BYTES) // 4
 
 
-def assembly(m, k, n, output_offset, rescale_exponent=0):
+@checked_assembly(scratch_registers=SCALAR_SCRATCH)
+def assembly(m, k, n, output_offset, rescale_exponent=0, *, epilogue=None, direct_input=None, weight_source=None):
     plan = layout(m, k, n)
+    if weight_source is not None:
+        weight_source.validate(k, n)
+    if direct_input is not None:
+        direct_input.validate(m, k, output_offset=output_offset, output_bytes=epilogue.output_bytes if epilogue else 2 * m * n)
     if type(output_offset) is not int or output_offset != m * k + k * n + 256:
         raise ValueError("output must preserve the captured input/guard layout")
     if type(rescale_exponent) is not int or not -126 <= rescale_exponent <= 127:
@@ -97,31 +106,41 @@ def assembly(m, k, n, output_offset, rescale_exponent=0):
     lines = ['li x5, 1024', 'li x8, 2048', f'li x3, {out}', f'li x9, {out + 256}',
              f'li x16, {n * 64}', 'li x30, 1', 'dma.config x30, ch0', *(['dma.config x30, ch1'] if k > 32 else []),
              f'vli.all m4, {(rescale_exponent + 127) << 7}', 'delay 66']
+    if weight_source is not None:
+        lines += weight_source.setup(15)
     for bi, block in enumerate(plan['blocks']):
         tag = f'block_{bi}'
         size = block['row_tiles'] * k * 32
+        if direct_input is not None and direct_input.kernel > 1:
+            lines += direct_input.gather_block(block['first_row_tile'], block['row_tiles'], BANK_BYTES // 4, base0 // 4,
+                                               tag + '_patch')
         for pi, (offset, count) in enumerate(((0, min(size, BANK_BYTES)), (BANK_BYTES, max(0, size - BANK_BYTES)))):
-            if not count:
+            if not count or (direct_input is not None and direct_input.kernel > 1):
                 continue
             label = f'{tag}_a_{pi}'
             lines += [f'li x19, {a_word(offset, base0)}',
                       f"li x20, {block['a_dram_range'][0] + offset}",
-                      f'li x21, {count // 1024}', label + ':',
-                      'dma.load x19, x20, x5, ch0', 'dma.wait ch0',
+                      f'li x21, {count // 1024}', label + ':']
+            lines += (direct_input.gather(19, 20, label + '_direct') if direct_input is not None else
+                      ['dma.load x19, x20, x5, ch0', 'dma.wait ch0'])
+            lines += [
                       'addi x19, x19, 256', 'addi x20, x20, 1024',
                       'addi x21, x21, -1', f'beq x21, x0, {label}_done', 'nop',
                       f'jal x0, {label}', 'nop', label + '_done:']
-        lines += [f'li x15, {m * k}', f'li x17, {n // 32}',
+        lines += [f'li x15, {weight_source.low if weight_source else m * k}', f'li x17, {n // 32}',
                   f"li x12, {output_offset + block['first_row_tile'] * n * 64}",
                   tag + '_columns:', 'li x19, 0', 'add x20, x15, x0',
-                  f'li x21, {k // 32}', *load_b_column(tag + '_b'),
+                  f'li x21, {k // 32}', *load_b_column(tag + '_b', (2, 3) if weight_source else (0, 1)),
                   'add x15, x20, x0', 'add x22, x12, x0']
         groups = []
+        compact_pairs = direct_input is not None or (epilogue is not None and (
+            epilogue.output_dtype == 'fp8' and epilogue.output_layout == 'channels_last'
+            or any(step.operand and step.operand.dtype == 'fp8' for step in epilogue.steps)))
         for row in range(0, block['row_tiles'], 2):
             rows = min(2, block['row_tiles'] - row)
             bank = row * k * 32 // BANK_BYTES
-            # Compact only this qualified shape's pairs wholly inside one bank.
-            if (m, k, n) == (12544, 160, 64) and rows == 2 and (row + 2) * k * 32 <= (bank + 1) * BANK_BYTES:
+            # Keep the new row-DMA paths compact, grouping only pairs within one bank.
+            if (compact_pairs or (m, k, n) == (12544, 160, 64)) and rows == 2 and (row + 2) * k * 32 <= (bank + 1) * BANK_BYTES:
                 if groups and groups[-1][2] == bank:
                     groups[-1][1] += 1
                     continue
@@ -161,7 +180,7 @@ def assembly(m, k, n, output_offset, rescale_exponent=0):
                     lines += ['addi x21, x21, -1', f'beq x21, x0, {label}_done', 'nop',
                               f'jal x0, {label}', 'nop', label + '_done:']
             for acc in range(rows):
-                lines += store_output(acc, 22, rescale_exponent) + ['add x22, x22, x16']
+                lines += store_output(acc, 22, rescale_exponent, epilogue) + ['add x22, x22, x16']
             if repeats > 1:
                 lines += ['add x23, x23, x25', 'addi x24, x24, -1',
                           f'beq x24, x0, {pair_loop}_done', 'nop', f'jal x0, {pair_loop}', 'nop',

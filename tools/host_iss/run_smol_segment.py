@@ -8,13 +8,14 @@ sys.path.insert(0, str(Path(__file__).absolute().parents[1]))
 from atlas_path_guard import checked
 import atlas_host_layout as hal
 from segment_runner import SegmentRunner
+from smol_full_phases import execution_profile
 import smol_segment_contract as contract
 
 WORKLOAD = "smol-full"
 REQUEST_SYMBOL = "smol_full_segment_request"
 RESULT_NAME = "smol-segment"
 CHECK_FAILURE_SOURCES = True
-PIN_MODULES = ("smol_full_plan", "atlas_program", "placement", "atlas_tile_arithmetic")
+PIN_MODULES = ("smol_full_plan", "smol_full_phases", "atlas_program", "placement", "atlas_tile_arithmetic")
 PIN_PATHS = ("chipyard/arena.py",)
 VERIFY_PROGRAM_PINS = True
 CORRUPT_REGIONS = None
@@ -40,7 +41,9 @@ def initialize(remote, image):
     assert initialized_host[72:] == bytes(40), "segment entry host is not freshly initialized"
     assert remote.read(image.symbols["atlas_workload_mailbox"]["address"], 128) == struct.pack(
         "<16Q", contract.full.MAGIC, *([0]*15))
-    assert remote.read(image.symbols["smol_full_segment_observations"]["address"], 10860) == bytes(10860)
+    # Static segment admission already binds this extent to the execution profile.
+    observations = image.symbols["smol_full_segment_observations"]
+    assert remote.read(observations["address"], observations["size"]) == bytes(observations["size"])
     assert remote.read(image.symbols["tohost"]["address"], 8) == bytes(8)
     assert remote.read(image.symbols["fromhost"]["address"], 8) == bytes(8)
     return initialized_host
@@ -61,7 +64,7 @@ def verify_state_after(remote, image, chain, data, index, completed, initial, re
     receipt.update(verify_state(remote.read, image, chain, data, index, completed, initial))
 
 
-def verify_observations(raw, completed, launch_range, kernel_count=2715):
+def verify_observations(raw, completed, launch_range, kernel_count=2915):
     """Bind the preserved guest cycle deltas to only genuinely completed kernels."""
     assert len(raw) == 4 * kernel_count
     assert [row["index"] for row in completed] == list(range(*launch_range))
@@ -76,23 +79,26 @@ def verify_observations(raw, completed, launch_range, kernel_count=2715):
 
 def verify_state(read, image, chain, data, index, completed, initialized_host):
     """Check live ownership separately from the complete semantic byte comparison."""
+    profile = execution_profile(data)
     def actual(name, size):
         return read(image.symbols[name]["address"], size)
     launch_start, launch_end = (b["launch_cursor"] for b in chain.boundaries[index:index + 2])
     cursor = struct.unpack("<10I", chain.read(chain.boundaries[index + 1]["regions"]["smol_full_phase_state"]))
-    assert cursor[0:2] == (1, index + 1) and cursor[5] == cursor[7] == launch_end
-    observation = verify_observations(actual("smol_full_segment_observations", 10860), completed,
-                                      (launch_start, launch_end))
-    assert actual("smol_full_cycles", 10860) == bytes(10860), "semantic cycle array was not canonicalized"
-    raw = actual("smol_full_raw", 160)
-    current = struct.unpack("<15Q24sIIi4s", raw)
-    initial = struct.unpack("<15Q24sIIi4s", image.bytes_at(image.symbols["smol_full_raw"]["address"], 160))
-    assert current[5:7] == (launch_end, cursor[6])
+    attention_cursor = index + 1 if profile.attention_count else 0
+    assert cursor[0:2] == (1, index + 1) and cursor[5]+attention_cursor == cursor[7] == launch_end
+    observation = verify_observations(actual("smol_full_segment_observations", profile.cycle_bytes), completed,
+                                      (launch_start, launch_end), profile.launch_count)
+    assert actual("smol_full_cycles", profile.cycle_bytes) == bytes(profile.cycle_bytes), "semantic cycle array was not canonicalized"
+    raw = actual("smol_full_raw", 184)
+    current = struct.unpack("<15Q24sIIi4s3Q", raw)
+    initial = struct.unpack("<15Q24sIIi4s3Q", image.bytes_at(image.symbols["smol_full_raw"]["address"], 184))
+    assert current[5:7] == (cursor[5], cursor[6])
     assert all(current[i] == initial[i] for i in (*range(5), *range(7,15))), "raw immutable ownership changed"
-    last = data["kernels"][launch_end-1]
+    last_event = profile.events()[launch_end-1]
+    last = data["attention_kernels" if last_event["kind"] == "attention" else "kernels"][last_event["kernel"]]
     assert current[15] == struct.pack("<QQI4s", chain.placement["arena_base"], last["total_dram_bytes"], 2, bytes(4))
     image_index = cursor[3] if cursor[2] == 0 else 1
-    assert current[16:] == (image_index, 0, 0, bytes(4)), "raw image/error state differs"
+    assert current[16:20] == (image_index, 0, 0, bytes(4)) and current[20:22] == initial[20:22] and current[22] == attention_cursor, "raw image/error state differs"
     host = actual("smol_full_host", 112)
     assert host[:72] == initialized_host[:72], "host map/MMIO/cache ownership changed"
     assert struct.unpack_from("<QQ", host, 72) == (0, 0)
@@ -105,7 +111,7 @@ def verify_state(read, image, chain, data, index, completed, initialized_host):
     previous = struct.unpack("<10I", chain.read(chain.boundaries[index]["regions"]["smol_full_phase_state"]))
     graph = struct.unpack("<4I", chain.read(chain.boundaries[index + 1]["regions"]["smol_full_graph_state"]))
     expected_mailbox = (contract.full.MAGIC, 2, launch_end-launch_start, cursor[6]-previous[6],
-                        graph[0], graph[1], 1, 0, 0, launch_end, cursor[6], launch_end, 0, 0, 0, 0)
+                        graph[0], graph[1], 1, 0, 0, cursor[5], cursor[6], launch_end, 0, 0, 0, 0)
     assert mailbox == expected_mailbox, "actual segment mailbox differs"
     return dict(**observation, mailbox_words=mailbox, raw_context_sha256=contract.full.digest(raw),
                 host_global_sequence=launch_end, logical_call_cursor=cursor[6])

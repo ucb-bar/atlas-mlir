@@ -230,7 +230,7 @@ class SegmentRunner:
         assert len(device.completed) == device.launch_count == self.count
         assert [row["index"] for row in device.completed] == list(range(*self.launch_range))
         for summary in device.completed:
-            item = dict(self.data["kernels"][summary["index"]])
+            item = self.bundle.kernel_paths(summary["index"])
             item.update(program=bundle.read(item["original"]), expected_sha256=bundle.sums[item["expected"]])
             self.contract.verify_kernel(summary, item, summary["index"])
         self.workload.verify_state_after(self.remote, self.image, chain, self.data,

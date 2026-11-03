@@ -103,7 +103,7 @@ def validate_image(bundle, image, assemble):
     for item in data["reference_buffers"]:
         symbol(image, item["expected_symbol"], item["bytes"], False)
     controls = []
-    for name, size in (("tiny_full_state_global", 48), ("tiny_full_projection_state", 72),
+    for name, size in (("tiny_full_state_global", 48), ("tiny_full_projection_state", 112),
                        ("tiny_full_host", 112), ("tiny_full_mailbox", 128), ("tohost", 8), ("fromhost", 8),
                        ("tiny_full_segment_request", 8)):
         controls.append(symbol(image, name, size, True))
@@ -119,6 +119,8 @@ def validate_image(bundle, image, assemble):
              for field in ("keys", "values") for bank in range(2)]
     require(state == (*banks, 0, 0, 0), "segment initial KV pointer/state ABI")
     context = struct.unpack("<9Q", image.bytes_at(image.symbols["tiny_full_projection_state"]["address"], 72))
+    require(image.bytes_at(image.symbols["tiny_full_projection_state"]["address"] + 72, 40) == bytes(40),
+            "segment legacy attention context must be zero")
     require(context == (image.symbols["tiny_full_panels"]["address"], 840, 0, placement(bundle.build)["arena_base"],
         max(k["total_dram_bytes"] for k in data["kernels"]), image.symbols["transport"]["address"], 0, 0, 3),
         "segment immutable projection context ABI")

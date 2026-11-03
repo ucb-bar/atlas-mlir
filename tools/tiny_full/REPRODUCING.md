@@ -1,0 +1,13 @@
+# TinyLlama D2 capture and qualification
+
+Set physical absolute paths in ATLAS_ROOT, MERLIN_ROOT, ATLAS_NPU_MODEL_ROOT, and TINY_WORK_ROOT. The model must be unmodified original 47b8599d8ffbe5ddd96059ffe2b5be2427a410f5. TINY_WORK_ROOT holds generated captures and receipts. Set OMP_NUM_THREADS=1 and MKL_NUM_THREADS=1. Use at most 16 workers.
+
+Merlin examples/atlas/comparisons/d1-capture-c-v2.py is the D2 C graph driver. Its --help lists the checksum-bound parameter capture, projection scale contract, attention scale contract, layout module, compiler, worker interpreter, and output arguments. The external parameter and scale assets remain required inputs. Use Merlin examples/atlas/comparisons/d1-worker.py for projections and atlas-mlir tools/tiny_full/attention_v2_worker.py for attention. The original-model path needs no native proof script. It captures positive-zero residual surrogates for o/down; the exporter emits the final plain programs, and the qualifier executes those final programs on original47.
+
+Run attention_export.py with the capture receipt and its checksum, the selected model root, and its documented export arguments. Run tools/tiny_full/d1-v2-qualify.py --assets ASSETS --out "$TINY_WORK_ROOT/d1-v2-qualification/full" --workers 16. Without --reuse-records, all final programs execute on original47. --resume audits saved receipts before reuse. The stream drivers and workers live beside the Merlin capture driver and retain their command-line interfaces for optional concurrent backfill.
+
+Aggregate qualification receipts encode path pins with @atlas/, @merlin/, @model/, and @data/ roots. build_attention.py takes --model-root and --receipt-data-root to resolve these roots, derives the atlas root from its checkout, and derives the Merlin root from --merlin (the comparisons directory). SHA-256 checks and HEAD blob authentication run after resolution. Legacy receipts can be read with repeatable --receipt-relocate OLD=NEW arguments; relocation never substitutes a digest. Preserve historical source bytes when relocating historical pins.
+
+No storage reuse wrapper is needed. Captures may require substantial disk space without storage reuse.
+
+The qualifier admits projection reuse only for the original capture and stream schemas with exact=True and full_arena_exact=True. It also runs one additional original47 execution per unique program. Every byte in the output extent starts as the complement of the expected byte, declared spans must become the expected bytes, holes must retain their second pre-fill, and all other arena bytes must remain unchanged. Coverage reports are included in the aggregate receipt and are audited by --audit-only.

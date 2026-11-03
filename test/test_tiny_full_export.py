@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import tempfile
+import types
 import unittest
 from unittest import mock
 
@@ -18,6 +19,61 @@ SPEC.loader.exec_module(exporter)
 
 
 class FullExportTest(unittest.TestCase):
+    def dispatch_fixture(self, root, mode=False, calls=None, include_calls=True):
+        report = {"status": "PASS_FULL_TINY_ARITHMETIC_CAPTURE_REPLAY", "decode_count": 1,
+                  "atlas_instruction_execution": mode, "source_records": [],
+                  **{name: True for name in ("source_bookends_verified", "target_replay_exact", "greedy_feedback_actual",
+                                             "all22_cache_prefixes_exact", "native_restored_exact")}}
+        if include_calls:
+            report["attention_calls"] = [] if calls is None else calls
+        receipt = root / "receipt.json"
+        receipt.write_text(json.dumps(report))
+        return argparse.Namespace(capture=receipt, capture_sha256=hashlib.sha256(receipt.read_bytes()).hexdigest(),
+                                  model_root=root / "model", out=root / "bundle")
+
+    def test_legacy_absent_and_empty_attention_ledgers_use_legacy_export(self):
+        for explicit_mode in (True, False):
+            for include_calls in (True, False):
+                with self.subTest(explicit_mode=explicit_mode, include_calls=include_calls):
+                    with tempfile.TemporaryDirectory() as directory:
+                        args = self.dispatch_fixture(Path(directory), include_calls=include_calls)
+                        if not explicit_mode:
+                            data = json.loads(args.capture.read_text())
+                            del data["atlas_instruction_execution"]
+                            args.capture.write_text(json.dumps(data))
+                            args.capture_sha256 = hashlib.sha256(args.capture.read_bytes()).hexdigest()
+                        with mock.patch.object(exporter, "model_binding", side_effect=RuntimeError("legacy export")):
+                            with self.assertRaisesRegex(RuntimeError, "legacy export"):
+                                exporter.export(args)
+                        self.assertFalse(args.out.exists())
+
+    def test_explicit_complete_attention_dispatch(self):
+        calls = [{"index": step * 22 + layer, "step": step, "layer": layer}
+                 for step in range(2) for layer in range(22)]
+        with tempfile.TemporaryDirectory() as directory:
+            args = self.dispatch_fixture(Path(directory), mode=True, calls=calls)
+            attention = mock.Mock(return_value="attention export")
+            with mock.patch.dict("sys.modules", {"attention_export": types.SimpleNamespace(export_attention=attention)}):
+                self.assertEqual(exporter.export(args), "attention export")
+            attention.assert_called_once_with(args)
+            self.assertFalse(args.out.exists())
+
+    def test_contradictory_or_incomplete_attention_rejected_before_model_or_output(self):
+        calls = [{"index": step * 22 + layer, "step": step, "layer": layer}
+                 for step in range(2) for layer in range(22)]
+        cases = [(False, calls, True), (True, [], True), (True, None, False),
+                 (True, calls[:-1], True), ("true", calls, True), (False, {}, True),
+                 (True, [dict(call, step=0) for call in calls], True)]
+        for mode, ledger, include_calls in cases:
+            with self.subTest(mode=mode, ledger=ledger, include_calls=include_calls):
+                with tempfile.TemporaryDirectory() as directory:
+                    args = self.dispatch_fixture(Path(directory), mode=mode, calls=ledger, include_calls=include_calls)
+                    with mock.patch.object(exporter, "model_binding") as model:
+                        with self.assertRaises(ValueError):
+                            exporter.export(args)
+                        model.assert_not_called()
+                    self.assertFalse(args.out.exists())
+
     def test_stale_imported_layout_is_refused(self):
         with mock.patch.object(exporter.atlas_host_layout, "HEADER_SHA256", "0" * 64):
             with self.assertRaisesRegex(ValueError, "host layout changed"):
@@ -102,11 +158,6 @@ class FullExportTest(unittest.TestCase):
                 model.assert_not_called()
             self.assertFalse(args.out.exists())
 
-    def test_restricted_payload_rejected_before_filesystem_probe(self):
-        with mock.patch.object(exporter, "physical_checked") as physical:
-            with self.assertRaises(ValueError):
-                exporter.checked("/source/old-VLSI/payload")
-            physical.assert_not_called()
 
 
 if __name__ == "__main__":

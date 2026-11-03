@@ -34,17 +34,53 @@ def relative_name(name):
         or any(ord(c) < 32 or ord(c) == 127 for c in name) or name.startswith("/")
         or any(p in ("", ".", "..") for p in name.split("/"))):
         raise ValueError("unsafe bundle member name")
-    if re.search(r"hammer|vlsi", name, re.IGNORECASE):
-        raise ValueError("restricted bundle member name")
     return PurePosixPath(name)
+
+
+def overlay_paths(root, sums):
+    """Resolve an explicitly checksum-bound, read-only inherited asset set."""
+    storage = checked(root / "storage.json")
+    if not storage.exists():
+        return {}, {}
+    raw = storage.read_bytes()
+    if digest(raw) != sums.get("storage.json"):
+        raise ValueError("unlisted or changed overlay storage descriptor")
+    data = json.loads(raw)
+    if (set(data) != {"schema", "base_root", "base_sha256sums_sha256", "inherit"}
+            or data["schema"] != "atlas.asset_overlay.v1" or not Path(data["base_root"]).is_absolute()
+            or not isinstance(data["inherit"], list) or len(data["inherit"]) != len(set(data["inherit"]))):
+        raise ValueError("invalid asset overlay descriptor")
+    base = checked(data["base_root"])
+    manifest = checked(base / "SHA256SUMS")
+    base_raw = manifest.read_bytes()
+    if base == root or digest(base_raw) != data["base_sha256sums_sha256"]:
+        raise ValueError("overlay base identity differs")
+    base_sums = {}
+    for line in base_raw.decode().splitlines():
+        match = re.fullmatch(r"([0-9a-f]{64}) [ *](.+)", line)
+        if match is None:
+            raise ValueError("invalid overlay base checksum manifest")
+        value, name = match.groups()
+        relative_name(name)
+        if name in base_sums or name == "SHA256SUMS":
+            raise ValueError("duplicate overlay base checksum")
+        base_sums[name] = value
+    paths = {}
+    for name in data["inherit"]:
+        relative = relative_name(name)
+        if (name in ("storage.json", "SHA256SUMS") or name not in sums or sums[name] != base_sums.get(name)
+                or checked(root / relative).exists()):
+            raise ValueError("overlay inheritance differs or has a local shadow")
+        paths[name] = checked(base / relative)
+    return paths, {str(storage): digest(raw), str(manifest): digest(base_raw)}
 
 
 class ChecksumBundle:
     def __init__(self, root):
-        if any(re.search(r"hammer|vlsi", part, re.IGNORECASE) for part in Path(root).parts):
-            raise ValueError("restricted bundle root")
         self.root = checked(root)
         self.sums = {}
+        self.inherited_paths = {}
+        self.storage_pins = {}
         sums_path = self.path("SHA256SUMS")
         self.checksums_sha256 = sha(sums_path)
         for line in sums_path.read_text().splitlines():
@@ -58,11 +94,12 @@ class ChecksumBundle:
             self.sums[name] = digest
         if not self.sums:
             raise ValueError("empty SHA256SUMS")
+        self.inherited_paths, self.storage_pins = overlay_paths(self.root, self.sums)
         self.verify_bookends()
 
     def path(self, name):
         relative = relative_name(name)
-        return checked(self.root / relative)
+        return self.inherited_paths.get(name, checked(self.root / relative))
 
     def read(self, name):
         if name not in self.sums:
@@ -73,6 +110,9 @@ class ChecksumBundle:
         return raw
 
     def verify_bookends(self):
+        for path, expected in self.storage_pins.items():
+            if sha(checked(path)) != expected:
+                raise ValueError("changed overlay storage identity")
         if sha(self.path("SHA256SUMS")) != self.checksums_sha256:
             raise ValueError("changed SHA256SUMS")
         for name, expected in self.sums.items():

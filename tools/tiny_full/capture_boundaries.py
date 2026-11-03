@@ -24,7 +24,9 @@ from atlas_path_guard import checked
 class Parameters(ct.Structure):
     _fields_ = [("embedding", ct.c_void_p), ("input_norm", ct.c_void_p * 22),
                 ("post_norm", ct.c_void_p * 22), ("final_norm", ct.c_void_p),
-                ("cosine", ct.c_void_p), ("sine", ct.c_void_p), ("epsilon", ct.c_float)]
+                ("cosine", ct.c_void_p), ("sine", ct.c_void_p), ("epsilon", ct.c_float),
+                ("attention", ct.c_void_p), ("fused_project", ct.c_void_p),
+                ("normalize", ct.c_void_p), ("capabilities", ct.c_uint64)]
 
 
 class State(ct.Structure):
@@ -188,7 +190,7 @@ class Runner:
             (ct.c_void_p * 22)(*[host[f"model.layers.{i}.input_layernorm.weight"].ctypes.data for i in range(22)]),
             (ct.c_void_p * 22)(*[host[f"model.layers.{i}.post_attention_layernorm.weight"].ctypes.data for i in range(22)]),
             host["model.norm.weight"].ctypes.data, host["rotary_cosine"].ctypes.data,
-            host["rotary_sine"].ctypes.data, 1e-5)
+            host["rotary_sine"].ctypes.data, 1e-5, None)
         self.keys = [np.zeros((22, 4 * 160 * 64), np.uint16) for _ in range(2)]
         self.values = [np.zeros_like(item) for item in self.keys]
         self.state = State((ct.c_void_p * 2)(*[v.ctypes.data for v in self.keys]),
@@ -322,10 +324,13 @@ def prepare(args):
         capture_sha256=args.capture_sha256, original_gate_sha256=args.gate_sha256)
     try:
         source = checked(Path(__file__).with_name("tiny_full_model.c"))
+        runtime = checked(Path(__file__).absolute().parents[2] / "runtime")
+        attention = runtime / "tiny_attention.c"
         provider = checked(args.merlin)
         compiler = checked(args.cc)
         for path in (Path(__file__).absolute(), Path(sys.modules[checked.__module__].__file__),
-                     source, source.with_suffix(".h"), compiler,
+                     source, source.with_suffix(".h"), attention, runtime / "tiny_attention.h",
+                     runtime / "atlas_numeric.h", compiler,
                      *(provider / name for name in PROVIDER + HEADERS)):
             capture.pin(path)
         for name in PROVIDER + HEADERS:
@@ -333,11 +338,11 @@ def prepare(args):
             if len(prior) != 1 or pins[str(provider / name)] not in prior:
                 raise ValueError("host provider differs from original C gate: " + name)
         command = [str(compiler), "-std=c11", "-O2", "-Wall", "-Wextra", "-Werror", "-pedantic",
-            "-ffp-contract=off", "-fno-fast-math", "-shared", "-fPIC", "-I", str(provider),
-            str(source), *(str(provider / name) for name in PROVIDER), "-lm", "-o", str(out / "native.so")]
+            "-ffp-contract=off", "-fno-fast-math", "-shared", "-fPIC", "-I", str(provider), "-I", str(runtime),
+            str(source), str(attention), *(str(provider / name) for name in PROVIDER), "-lm", "-o", str(out / "native.so")]
         report["dependency_commands"] = []
-        for unit in (source, *(provider / name for name in PROVIDER)):
-            dependencies = [str(compiler), "-std=c11", "-I", str(provider), "-M", str(unit)]
+        for unit in (source, attention, *(provider / name for name in PROVIDER)):
+            dependencies = [str(compiler), "-std=c11", "-I", str(provider), "-I", str(runtime), "-M", str(unit)]
             result = subprocess.run(dependencies, capture_output=True, text=True, timeout=30, check=True)
             report["dependency_commands"].append(dependencies)
             for path in result.stdout.replace("\\\n", " ").split(":", 1)[1].split():

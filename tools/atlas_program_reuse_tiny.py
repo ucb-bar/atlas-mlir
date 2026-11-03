@@ -7,14 +7,19 @@ All spacing is the conservative established atlas_program schedule: load /
 store / pop 34, transpose / BF16 arithmetic 66, weight push 32, compute 96.
 """
 
+from atlas_program_checks import checked_assembly
 from atlas_program_reuse_common import load_b_column, store_output
 
 
 SHAPES = ((128, 2048, 2048), (128, 2048, 256), (128, 2048, 1280), (128, 2048, 1536))
+TINY_SCRATCH = (10, 11)
 
-def assembly(m, k, n, output_offset, rescale_exponent=None):
+@checked_assembly(scratch_registers=TINY_SCRATCH)
+def assembly(m, k, n, output_offset, rescale_exponent=None, *, epilogue=None, weight_source=None):
     if any(type(v) is not int for v in (m, k, n)) or (m, k, n) not in SHAPES:
         raise ValueError("Tiny reuse requires a captured physical shape")
+    if weight_source is not None:
+        weight_source.validate(k, n)
     if type(output_offset) is not int or output_offset != m * k + k * n + 256:
         raise ValueError("output must preserve the original input and guard layout")
     if rescale_exponent is not None and (type(rescale_exponent) is not int or not -126 <= rescale_exponent <= 127):
@@ -27,8 +32,10 @@ def assembly(m, k, n, output_offset, rescale_exponent=None):
         "dma.load x19, x20, x5, ch0", "dma.wait ch0",
         "addi x19, x19, 256", "addi x20, x20, 1024", "addi x21, x21, -1",
         "beq x21, x0, resident_a_done", "nop", "jal x0, resident_a_loop", "nop",
-        "resident_a_done:", "columns_loop:", "li x19, 0", "li x21, 64",
-        *load_b_column("column_load_loop"), "add x23, x12, x0",
+        "resident_a_done:",
+        *(weight_source.setup(20) + [f"li x20, {weight_source.low}"] if weight_source else []),
+        "columns_loop:", "li x19, 0", "li x21, 64",
+        *load_b_column("column_load_loop", (2, 3) if weight_source else (0, 1)), "add x23, x12, x0",
     ]
     # One static VLI preserves the existing single-word host rescale patch.
     # m4 remains live until all four outputs in the column are scaled.
@@ -45,7 +52,7 @@ def assembly(m, k, n, output_offset, rescale_exponent=None):
                 "addi x4, x4, 256", "addi x7, x7, 256", "addi x6, x6, 256",
             ]
         for acc in range(2):
-            lines += store_output(acc, 23, rescale_exponent) + ["add x23, x23, x22"]
+            lines += store_output(acc, 23, rescale_exponent, epilogue) + ["add x23, x23, x22"]
     lines += ["add x12, x12, x8", "addi x14, x14, -1", "beq x14, x0, finished", "nop",
               "jal x0, columns_loop", "nop", "finished:", "nop", "ecall"]
     return "\n".join(lines) + "\n"

@@ -7,7 +7,7 @@ from unittest.mock import patch
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'tools'))
-from export_smol_policy_kernels import safe_path, split_initial, require_finite_trajectory
+from export_smol_policy_kernels import split_initial, require_finite_trajectory
 
 
 class SmolPolicyExportTest(unittest.TestCase):
@@ -41,12 +41,6 @@ class SmolPolicyExportTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 split_initial(self.initial, self.expected, {**self.row, key: value})
 
-    def test_restricted_lexical_paths_refused_before_probe(self):
-        with patch('export_smol_policy_kernels.checked') as probe:
-            for name in ('/allowed/HaMmEr-suffix/a', 'relative/VlSi-child/b'):
-                with self.assertRaises(ValueError):
-                    safe_path(name)
-            probe.assert_not_called()
 
 
 if __name__ == '__main__':

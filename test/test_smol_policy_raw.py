@@ -41,11 +41,14 @@ class Context(ct.Structure):
     _fields_ += [(name, ct.c_void_p) for name in ('dram', 'activation_copy', 'input_copy')]
     _fields_ += [(name, ct.c_size_t) for name in ('dram_capacity', 'activation_capacity', 'input_capacity', 'max_polls')]
     _fields_ += [('cycle_delta', ct.c_void_p), ('active_buffer', Buffer), ('image', ct.c_uint), ('failed', ct.c_uint), ('result', ct.c_int)]
+    _fields_ += [('attention_panels', ct.c_void_p), ('attention_count', ct.c_size_t), ('attention_cursor', ct.c_size_t)]
 
 
 MOCK = r'''
-#include "atlas_host.h"
+#include "smol_policy_raw.h"
 #include <string.h>
+size_t unit_context_bytes(void) { return sizeof(smol_policy_raw_context); }
+size_t unit_attention_offset(void) { return offsetof(smol_policy_raw_context,attention_panels); }
 static atlas_host host;
 static unsigned char *dram;
 static const unsigned char **initials, **outputs, **programs;
@@ -96,6 +99,11 @@ class PolicyRawTest(unittest.TestCase):
                         '-I'+str(runtime), '-I'+str(here), str(ROOT / 'runtime/smol_policy_raw.c'),
                         str(here / 'host_matrix_fp8pack.c'), str(mock), '-lm', '-o', str(library)], check=True)
         cls.owner = ct.CDLL(str(library))
+        cls.owner.unit_context_bytes.restype = ct.c_size_t
+        cls.owner.unit_attention_offset.restype = ct.c_size_t
+        if (ct.sizeof(Context) != cls.owner.unit_context_bytes()
+            or Context.attention_panels.offset != cls.owner.unit_attention_offset()):
+            raise ValueError('ctypes raw context differs from compiled C ABI')
         cls.owner.unit_config.restype = ct.c_void_p
         cls.owner.unit_config.argtypes = [ct.c_void_p]*7 + [ct.c_size_t]
         cls.owner.unit_completed.restype = ct.c_size_t

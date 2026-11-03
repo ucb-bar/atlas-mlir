@@ -175,7 +175,7 @@ def emit_assets(bundle, data, host, segment=False):
     norms = lambda suffix: '{'+','.join(word(f'model.layers.{i}.{suffix}.weight') for i in range(22))+'}'
     parameter_init = '{'+','.join((word('model.embed_tokens.weight'), norms('input_layernorm'),
         norms('post_attention_layernorm'), word('model.norm.weight'),word('rotary_cosine'),word('rotary_sine'),
-        '0x1.4f8b588e368f1p-17f'))+'}'
+        '0x1.4f8b588e368f1p-17f', '0', '0', '0', '0'))+'}'
     header = '''#ifndef TINY_FULL_ASSETS_H
 #define TINY_FULL_ASSETS_H
 #include "tiny_full_model.h"
@@ -304,11 +304,11 @@ def build(args):
         'llama_rotary_table.h','llama_host_bmm.c','llama_host_bmm.h','smol_host_softmax.c',
         'smol_host_softmax.h','smol_host_sleef_LICENSE.txt','tiny_block.h','host_matrix_fp8pack.c','host_matrix_fp8pack.h')
     sources = {name:provider/name for name in names}
-    for name in ('tiny_full_model.c','tiny_full_model.h','tiny_full_projection.c','tiny_full_projection.h',
+    for name in ('tiny_full_model.c','tiny_full_model.h','tiny_full_tiles.h','tiny_full_projection.c','tiny_full_projection.h',
                  'tiny_full_target.c','tiny_full_start.S','tiny_full_link.ld'):
         sources[name]=Path(__file__).with_name(name)
     for name in ('tiny_projection.h','atlas_host.c','atlas_host.h','atlas_host_layout.h','atlas_result.h',
-                 'atlas_resnet_graph_math.c','atlas_numeric.h'):
+                 'atlas_resnet_graph_math.c','atlas_numeric.h','tiny_attention.c','tiny_attention.h'):
         sources[name]=ROOT/'runtime'/name
     support=checked(args.support)
     for name in ('rv64_support.c','expf_bf16_values.inc'):
@@ -348,7 +348,7 @@ def build(args):
     flags=['--target=riscv64-unknown-elf','-march=rv64gc','-mabi=lp64d','-mcmodel=medany','-std=c11',
         '-O2','-Wall','-Wextra','-Werror','-ffp-contract=off','-fno-fast-math','-ffreestanding',
         '-nostdinc','-isystem',str(resource),'-I','include','-I','.']
-    units=['tiny_full_model.c','tiny_full_projection.c','tiny_full_target.c','tiny_full_assets.c',
+    units=['tiny_full_model.c','tiny_full_projection.c','tiny_full_target.c','tiny_full_assets.c','tiny_attention.c',
         'llama_host_attention.c','llama_host_layout.c','llama_rotary_table.c','llama_host_bmm.c',
         'host_matrix_fp8pack.c','smol_host_ops.c','smol_host_softmax.c','rv64_support.c','atlas_host.c',
         'images.S','tiny_full_start.S']

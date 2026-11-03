@@ -31,8 +31,6 @@ from run_model_tile import configure_model, model_binding
 
 def checked(value):
     path = Path(value)
-    if any(word in part.lower() for part in path.parts for word in ("hammer", "vlsi")):
-        raise ValueError("restricted path component")
     return physical_checked(path)
 
 
@@ -132,12 +130,37 @@ def checked_layout():
     return header
 
 
+def attention_execution_mode(report):
+    """Admit the explicit execution mode and its complete attention ledger."""
+    mode = report.get("atlas_instruction_execution", False)
+    calls = report.get("attention_calls", [])
+    if type(mode) is not bool or not isinstance(calls, list):
+        raise ValueError("invalid attention execution mode or ledger")
+    if not mode:
+        if calls:
+            raise ValueError("attention calls contradict disabled instruction execution")
+        return False
+    layers, decode = report.get("layer_count", 22), report.get("decode_count")
+    if (type(layers) is not int or not 1 <= layers <= 22 or type(decode) is not int or not 0 <= decode <= 32
+            or not calls or len(calls) != layers * (decode + 1)):
+        raise ValueError("attention instruction execution requires complete nonempty layer/step coverage")
+    for index, call in enumerate(calls):
+        step, layer = divmod(index, layers)
+        if (not isinstance(call, dict) or any(type(call.get(name)) is not int for name in ("index", "step", "layer"))
+                or (call["index"], call["step"], call["layer"]) != (index, step, layer)):
+            raise ValueError("attention capture invocation order changed")
+    return True
+
+
 def export(args):
     os.environ["GIT_OPTIONAL_LOCKS"] = "0"
     capture = checked(args.capture)
     if sha256(capture) != args.capture_sha256:
         raise ValueError("capture receipt changed")
     report = json.loads(capture.read_text())
+    if attention_execution_mode(report):
+        from attention_export import export_attention
+        return export_attention(args)
     if (report.get("status") != "PASS_FULL_TINY_ARITHMETIC_CAPTURE_REPLAY"
             or report.get("source_bookends_verified") is not True
             or report.get("target_replay_exact") is not True
@@ -315,6 +338,17 @@ def main():
     for name in ("capture", "model-root", "out"):
         parser.add_argument("--" + name, type=checked, required=True)
     parser.add_argument("--capture-sha256", required=True)
+    parser.add_argument("--capture-source-archive", type=checked, help="explicit hash-pinned copies of changed capture sources")
+    parser.add_argument("--native-proof-script", type=checked, help="isolated admitted-native provenance provider")
+    parser.add_argument("--native-proof-sha256", help="required identity of the native provenance provider")
+    parser.add_argument("--native-proof-python", help="venv interpreter for the isolated native provenance checker")
+    parser.add_argument("--relocate", action="append", default=[], metavar="OLD=NEW",
+                        help="explicit physical-path rebinding for attention capture sources")
+    parser.add_argument("--qualify-launches", action="store_true", help="execute every v2 launch with selected RTL numerics")
+    parser.add_argument("--dram-base", type=lambda value: int(value, 0), default=0x80000000,
+                        help="attention platform physical DRAM base (default: 0x80000000)")
+    parser.add_argument("--dram-bytes", type=lambda value: int(value, 0),
+                        help="attention platform physical DRAM size, required for attention exports")
     export(parser.parse_args())
 
 

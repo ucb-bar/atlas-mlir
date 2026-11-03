@@ -15,9 +15,20 @@ from atlas_path_guard import checked
 from atlas_tooling import sha256, write_json
 from full_bundle import FullBundle
 from elf_image import Image
-from run_model_tile import configure_model, model_binding
+from smol_model_binding import configure_model, model_binding
 import smol_full_contract
 from atlas_program import code_sources
+
+
+def fusion_source_pins(provenance):
+    """Pin opt-in recipe code before FullBundle executes its fused validators."""
+    fused = (provenance.get('fusion_set', 'none') != 'none'
+             or any(isinstance(row, dict) and row.get('fusion') for row in provenance.get('kernels', ()))
+             or bool(provenance.get('call_views')))
+    if not fused:
+        return {}
+    return {str(checked(ROOT / 'tools' / name)): sha256(ROOT / 'tools' / name)
+            for name in ('smol_fusion_assets.py', 'smol_fusion_program.py', 'smol_fusion_fp8.py')}
 
 
 def main():
@@ -34,13 +45,16 @@ def main():
                    command=[sys.executable, *sys.argv], python=sys.version,
                    host_elf_executed=False, model_core_executed=False, hardware_execution=False)
     try:
+        # This preliminary read chooses only the conservative source closure.
+        # FullBundle independently authenticates and validates the metadata.
+        pins = fusion_source_pins(json.loads(checked(args.bundle / 'provenance.json').read_bytes()))
         bundle = FullBundle(args.bundle, 'smol-full')
         files = [Path(__file__).absolute(), ROOT / 'tools/smol_full_plan.py']
         for name in ('atlas_path_guard', 'atlas_tooling', 'full_bundle', 'block_bundle', 'bundle', 'placement',
-                     'elf_image', 'run_model_tile', 'smol_full_contract', 'chipyard.arena'):
+                     'elf_image', 'run_model_tile', 'smol_model_binding', 'smol_attention_assets', 'atlas_attention_v2_program', 'smol_full_contract', 'chipyard.arena'):
             files.append(checked(importlib.import_module(name).__file__))
         files.extend(ROOT / 'tools' / name for name in code_sources(traffic_reuse=True))
-        pins = {str(checked(path)): sha256(path) for path in files}
+        pins.update({str(checked(path)): sha256(path) for path in files})
         _, _, assemble, _ = configure_model(args.model_root)
         before = model_binding(args.model_root)
         elf_raw = bundle.read('host/host.elf')

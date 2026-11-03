@@ -9,6 +9,7 @@ import numpy as np
 
 from bundle import EPILOGUE, verify_kernel_receipt
 from smol_full_plan import calls, reference_geometry, validate_reference
+from smol_full_phases import execution_profile
 from atlas_program import assembly, dma_load_bytes
 from chipyard.arena import DEFAULT_ARENA, relocate, relocate_assembly
 from placement import placement, arena_extent
@@ -68,7 +69,7 @@ def blob(image, name, raw, *, actual=False):
     return address
 
 
-def audit_image(image, sections, dram_bytes, physical=None):
+def audit_image(image, sections, dram_bytes, physical=None, *, fusion=False):
     physical = placement({}) if physical is None else placement(dict(placement=physical))
     arena = physical['arena_base']
     arena_extent(dict(placement=physical), dram_bytes)
@@ -103,6 +104,12 @@ def audit_image(image, sections, dram_bytes, physical=None):
     require(zero_begin <= bss_begin <= bss_end <= stack[0]
             and stack[0]+stack[1] <= writable['address']+writable['memory_bytes']
             and bss_begin%8 == bss_end%8 == 0, 'loader/startup BSS and stack zero fill')
+    if fusion:
+        state=image.symbols['state']
+        require(state['size']==104 and zero_begin<=bss_begin<=state['address']<state['address']+104<=bss_end
+                and writable['address']<=state['address'] and state['address']+104<=writable['address']+writable['memory_bytes']
+                and disjoint((state['address'],104),(arena,dram_bytes)),
+                'actual fusion registry is zero-initialized BSS control storage outside the arena')
     stop_sites(image)
     return dict(host_begin=0x80000000, host_end=max(s['address']+s['memory_bytes'] for s in host_segments),
         host_file_bytes=sum(s['file_bytes'] for s in host_segments),
@@ -134,6 +141,22 @@ def selected_kernels(bundle, data, captured, assemble=None):
         signature = (before['source'], before['original'], after['source'], after['original'],
                      after['dram_base'], choice)
         m, k, n = before['physical_mkn']
+        if after.get('fusion'):
+            from smol_fusion_assets import validate_program
+            require(choice=='traffic-reuse-v1' and policy=='qualified-reuse-v1' and after['dram_base']==0x90000000,
+                    'explicit qualified low-arena fusion recipe')
+            staged=validate_program(after,bundle.read)
+            original=bundle.read(after['original'])
+            binding=(digest(staged.source.encode()),digest(original))
+            if assemble is None:
+                require(binding in verified,'fused binary requires pinned assembly admission')
+            else:
+                words=list(assemble(io.StringIO(staged.source)).assemble())
+                require(original==struct.pack('<'+'I'*len(words),*words),'exact regenerated producer-plus-fusion binary')
+                verified.add(binding)
+            require(after['requested_dma']==staged.metadata['requested_dma'],'fused producer exact DMA accounting')
+            cache.add(signature)
+            continue
         if choice == 'traffic-reuse-v1':
             loads = dma_load_bytes(m, k, n, traffic_reuse=True)
             if signature not in cache:
@@ -193,9 +216,12 @@ def contract(bundle, assemble=None):
     require(digest(raw) == p['contract_sha256'], 'contract identity')
     data = json.loads(raw)
     require(data['schema'] == 'atlas.smol_full_contract.v1' and data['cycle_cap'] == CYCLE_CAP
-            and type(data['kernel_count']) is int and data['kernel_count'] == bundle.kernel_count == 2715
+            and type(data['kernel_count']) is int and data['kernel_count'] == bundle.projection_kernel_count == 2715
             and type(data['projection_calls']) is int and data['projection_calls'] == 1421
             and data['kernels'] == p['kernels'], 'complete policy launch inventory')
+    profile = execution_profile(data)
+    require(execution_profile(p) == profile and bundle.kernel_count == profile.launch_count,
+            'contract/provenance execution profile')
     reference = bundle.read(data['source_reference'])
     require(digest(reference) == data['source_reference_sha256'], 'arithmetic source receipt')
     replay = json.loads(reference)
@@ -210,8 +236,27 @@ def contract(bundle, assemble=None):
             and manifest['program_policy'] == data['program_policy']
             and captured['replay_receipt']['sha256'] == digest(reference),
             'source kernel/reference binding')
+    require(execution_profile(manifest) == execution_profile(captured) == profile, 'captured execution profile')
+    from smol_fusion_assets import profile as fusion_profile
+    mode=fusion_profile(data)
+    require(all(fusion_profile(item)==mode for item in (p,manifest,captured)),'explicit matching fusion profile')
+    if mode!='none':
+        from smol_fusion_assets import validate_views
+        require(data.get('fusion_symbol')==p.get('fusion_symbol')=='smol_full_fusion_panels'
+                and data.get('call_views')==p.get('call_views')==manifest.get('call_views')==captured.get('call_views'),
+                'unchanged actual typed-call inventory')
+        validate_views(data,bundle.read)
     selected_kernels(bundle, data, captured['kernels'], assemble)
-    require(data['dram_bytes'] == max(item['total_dram_bytes'] for item in data['kernels']) == 12706304,
+    attention = data.get('attention_kernels', [])
+    if attention:
+        from smol_attention_assets import event_plan, validate_attention
+        require(len(attention) == 200 and data.get('attention_count') == 200
+                and data.get('device_event_count') == bundle.kernel_count == 2915
+                and data.get('device_events') == bundle.device_events == event_plan()
+                and captured.get('attention_kernels') == attention
+                and manifest.get('attention_kernels') == attention, 'complete typed attention inventory')
+        for item in attention: validate_attention(item, bundle.read, assemble)
+    require(data['dram_bytes'] == max(item['total_dram_bytes'] for item in [*data['kernels'], *attention]) == 12706304,
             'maximum actual staging extent')
     refs, expected = data['reference_buffers'], reference_geometry()
     require(len(refs) == len(expected) and {item['name'] for item in refs} == set(expected),
@@ -253,14 +298,32 @@ def validate_bundle(bundle, image, *, assemble=None):
             and build['contract_sha256'] == bundle.provenance['contract_sha256']
             and bool(build['source_sha256']), 'build identity and source bookends')
     require(placement(build) == placement(bundle.provenance), 'build/contract placement')
-    audit_image(image, None, data['dram_bytes'], placement(bundle.provenance))
+    from smol_fusion_assets import profile as fusion_profile
+    mode=fusion_profile(data)
+    require(fusion_profile(build)==mode,'explicit build fusion profile')
+    if mode!='none':
+        commands=[command for command in build['commands'] if '-c' in command]
+        require(commands and all('-DSMOL_FUSION_RUNTIME=1' in command for command in commands)
+                and any(any(str(argument).endswith('/smol_fusion.c') for argument in command) for command in commands),
+                'fusion runtime source and compile definitions')
+    audit_image(image, None, data['dram_bytes'], placement(bundle.provenance),fusion=mode!='none')
+    return validate_payloads(bundle, image, data, replay, assemble=assemble)
+
+
+def validate_payloads(bundle, image, data, replay, *, assemble=None):
+    """Admit exact descriptors, immutable operands, and writable results at their real addresses."""
+    profile = execution_profile(data)
     immutable,actual = [],[]
-    for name,size in (('tohost',8),('fromhost',8),('atlas_workload_mailbox',128),('smol_full_raw',160),
-        ('smol_full_host',112),('smol_full_graph_state',16),('smol_full_vision_states',32),('smol_full_cycles',10860),
+    for name,size in (('tohost',8),('fromhost',8),('atlas_workload_mailbox',128),('smol_full_raw',184),
+        ('smol_full_host',112),('smol_full_graph_state',16),('smol_full_vision_states',32),('smol_full_cycles',profile.cycle_bytes),
         ('smol_full_activation_copy',786432),('smol_full_input_copy',6291456)):
         address = blob(image,name,bytes(size),actual=True)
         require(all(disjoint((address,size), span) for span in immutable), 'control/input storage alias')
         immutable.append((address,size))
+    if data.get('fusion_set','none')!='none':
+        address=blob(image,'state',bytes(104),actual=True)
+        require(all(disjoint((address,104),other) for other in immutable),'fusion registry/control storage alias')
+        immutable.append((address,104))
     require(disjoint(immutable[0],immutable[1]), 'distinct HTIF words')
     for name in ('tohost','fromhost'):
         address = image.symbols[name]['address']
@@ -282,7 +345,7 @@ def validate_bundle(bundle, image, *, assemble=None):
         readonly_span(image, values[0], len(original))
         readonly_span(image, values[1], len(weights))
         words = np.frombuffer(original,'<u4')
-        positions = np.flatnonzero((words&0x7fffff) == 0x25f)
+        positions = np.flatnonzero(words == (((item['output_rescale_exponent']+127)<<23)|0x25f)) if item.get('fusion') else np.flatnonzero((words&0x7fffff) == 0x25f)
         require(positions.size == 1 and int(words[positions[0]]) == ((item['output_rescale_exponent']+127)<<23)|0x25f,
                 'actual original rescale instruction')
         m,k,n = item['physical_mkn']
@@ -294,6 +357,48 @@ def validate_bundle(bundle, image, *, assemble=None):
         require(image.bytes_at(values[0],len(original)) == original and image.bytes_at(values[1],len(weights)) == weights,
                 'embedded actual program and packed weights')
         immutable.extend(((values[0],len(original)),(values[1],len(weights))))
+    if data.get('fusion_set','none')!='none':
+        from smol_fusion_assets import runtime_fields, read_record
+        address=image.symbols['smol_full_fusion_panels']['address']
+        require(image.symbols['smol_full_fusion_panels']['size']==32*2715,'fusion descriptor ABI')
+        readonly_span(image,address,32*2715);immutable.append((address,32*2715))
+        for index,item in enumerate(data['kernels']):
+            flags,offset,count,scale=runtime_fields(item)
+            values=struct.unpack('<3QIi',image.bytes_at(address+32*index,32))
+            require(values[1:]==(offset,count,flags,scale),'embedded typed fusion descriptor')
+            if count:
+                raw=read_record(item['fusion']['extra'],bundle.read)
+                readonly_span(image,values[0],count)
+                require(len(raw)==count and image.bytes_at(values[0],count)==raw,'embedded actual fusion extras')
+                immutable.append((values[0],count))
+                parameter=data['host_parameters']['bias.'+item['module']]
+                require(parameter['dtype']=='uint16' and bundle.read(parameter['file'])==read_record(item['fusion']['bias'],bundle.read),
+                        'device bias matches actual host graph parameter')
+            else:require(values[0]==0,'ordinary/connector fusion has no extra pointer')
+    attention_address = 0
+    if profile.attention_count:
+        attention_address = image.symbols['smol_full_attention_panels']['address']
+        require(image.symbols['smol_full_attention_panels']['size'] == 232*200, 'attention descriptor ABI')
+        readonly_span(image, attention_address, 232*200)
+        immutable.append((attention_address,232*200))
+        from smol_attention_assets import validate_attention
+        for index,item in enumerate(data.get('attention_kernels', [])):
+            c,o = validate_attention(item,bundle.read,assemble)
+            row = struct.unpack('<14QI4x12Q3i4x',image.bytes_at(attention_address+232*index,232))
+            program,metadata = bundle.read(item['original']),bundle.read(item['metadata'])
+            mask = np.load(io.BytesIO(bundle.read(item['logical_mask'])),allow_pickle=False).astype(np.uint8).tobytes()
+            if index<24: require(row[2]==0,'vision attention uses a null logical-mask pointer')
+            for address,raw in zip(row[:2] if index<24 else row[:3],(program,metadata) if index<24 else (program,metadata,mask)):
+                readonly_span(image,address,len(raw))
+                require(image.bytes_at(address,len(raw)) == raw,'embedded attention immutable bytes')
+                immutable.append((address,len(raw)))
+            kind = 0 if index<24 else 1 if index<40 else 2+(index-40)%2
+            expected = (len(program)//4,len(metadata),o['descriptors'],o['descriptor_bytes'],o['key_counts'],
+                o['key_count_bytes'],o['masks'],o['mask_bytes'],item['before_call'],index,index,kind,
+                c.query_rows,c.keys,c.query_heads,c.kv_heads,o['q'],o['k'],o['v'],o['output'],o['output_bytes'],
+                item['total_dram_bytes'],item['requested_dma']['load_bytes'],item['requested_dma']['store_bytes'],
+                c.q_exponent,c.k_exponent,c.v_exponent)
+            require(row[3:] == expected,'embedded attention typed descriptor')
     parameters = data['host_parameters']
     for call in calls():
         indices = [item['index'] for item in data['kernels'] if item['call'] == call['index']]
@@ -303,13 +408,14 @@ def validate_bundle(bundle, image, *, assemble=None):
         require(row == (call['rows'],call['input_width'],call['output_width'],indices[0],len(indices),bias_address,
             call['site'],call['layer'],call['role'],call['image'],call['input_dtype'],call['output_dtype'],
             call['output_dtype'],data['kernels'][indices[0]]['a_scale']), 'embedded actual call order/bias/dtype')
-    context = struct.unpack('<15Q24sIIi4s',image.bytes_at(image.symbols['smol_full_raw']['address'],160))
+    context = struct.unpack('<15Q24sIIi4s3Q',image.bytes_at(image.symbols['smol_full_raw']['address'],184))
     require(context[:8] == (image.symbols['smol_full_host']['address'],panels_address,call_address,2715,1421,0,0,
                            placement(bundle.provenance)['arena_base'])
             and context[8:15] == (image.symbols['smol_full_activation_copy']['address'],
                 image.symbols['smol_full_input_copy']['address'],
                 data['dram_bytes'],786432,3145728,100000000,image.symbols['smol_full_cycles']['address'])
-            and context[15:] == (bytes(24),0,0,0,bytes(4)), 'selected staging and raw host context')
+            and context[15:20] == (bytes(24),0,0,0,bytes(4))
+            and context[20:] == (attention_address,profile.attention_count,0), 'selected staging and raw host context')
     for item in parameters.values():
         raw = bundle.read(item['file'])
         require(len(raw) == item['bytes'] and digest(raw) == item['sha256'] and finite(raw,item['dtype']),
@@ -341,8 +447,10 @@ def validate_bundle(bundle, image, *, assemble=None):
 
 def verify_completion(remote, image, device, bundle, out):
     data,_ = contract(bundle)
-    require(len(device.completed) == 2715, 'all2715 fresh model starts')
-    for index, (summary, item) in enumerate(zip(device.completed, data['kernels'])):
+    profile = execution_profile(data)
+    count = profile.launch_count
+    require(len(device.completed) == count, 'all fresh model starts')
+    for index, (summary, item) in enumerate(zip(device.completed, [bundle.kernel_paths(i) for i in range(count)])):
         verify_kernel_receipt(summary, dict(item, program=bundle.read(item['original']),
             expected_sha256=digest(bundle.read(item['expected']))), index, CYCLE_CAP)
     require(remote.reg(32) in stop_sites(image), 'normal startup WFI completion')
@@ -352,22 +460,22 @@ def verify_completion(remote, image, device, bundle, out):
         return raw
     mailbox = actual('atlas_workload_mailbox',128)
     words = struct.unpack('<16Q',mailbox)
-    require(words == (MAGIC,2,2715,1421,1,10,1,0,0,2715,1421,2715,0,0,0,0), 'full policy self-check completion')
+    require(words == (MAGIC,2,count,1421,1,10,1,0,0,2715,1421,count,0,0,0,0), 'full policy self-check completion')
     require(actual('tohost',8) == struct.pack('<Q',1) and actual('fromhost',8) == bytes(8), 'HTIF completion')
     require(struct.unpack('<4I',actual('smol_full_graph_state',16)) == (1,10,1273,0), 'actual policy graph state')
     require(struct.unpack('<8I',actual('smol_full_vision_states',32)) == (1,74,1,0)*2, 'both actual vision graph states')
-    raw_context = actual('smol_full_raw',160)
-    current = struct.unpack('<15Q24sIIi4s',raw_context)
-    initial = struct.unpack('<15Q24sIIi4s',image.bytes_at(image.symbols['smol_full_raw']['address'],160))
+    raw_context = actual('smol_full_raw',184)
+    current = struct.unpack('<15Q24sIIi4s3Q',raw_context)
+    initial = struct.unpack('<15Q24sIIi4s3Q',image.bytes_at(image.symbols['smol_full_raw']['address'],184))
     require(current[5:7] == (2715,1421) and all(current[i] == initial[i] for i in tuple(range(5))+tuple(range(7,15)))
             and current[15] == struct.pack('<QQI4s',placement(bundle.provenance)['arena_base'],
                                            data['kernels'][-1]['total_dram_bytes'],2,bytes(4))
-            and current[16:] == (1,0,0,bytes(4)), 'actual raw traversal/context ownership')
+            and current[16:20] == (1,0,0,bytes(4)) and current[20:22] == initial[20:22] and current[22] == profile.attention_count, 'actual raw traversal/context ownership')
     host = actual('smol_full_host',112)
     require(struct.unpack_from('<QQ',host,72) == (0,0) and struct.unpack_from('<6I',host,88)[1:3] == (0,0)
-            and struct.unpack_from('<I',host,108)[0] == 2715, 'drained final host ownership')
-    cycles_raw = actual('smol_full_cycles',10860)
-    require(all(struct.unpack('<2715I',cycles_raw)), 'all actual guest cycle observations nonzero')
+            and struct.unpack_from('<I',host,108)[0] == count, 'drained final host ownership')
+    cycles_raw = actual('smol_full_cycles',profile.cycle_bytes)
+    require(all(struct.unpack('<'+str(count)+'I',cycles_raw)), 'all actual guest cycle observations nonzero')
     results = []
     for item in data['reference_buffers']:
         raw = actual(item['actual_symbol'],item['bytes'])
@@ -376,6 +484,6 @@ def verify_completion(remote, image, device, bundle, out):
         results.append(dict(name=item['name'],bytes=len(raw),sha256=digest(raw),exact=True))
     for name,raw in (('mailbox.bin',mailbox),('raw-context.bin',raw_context),('cycles.bin',cycles_raw)):
         (out/name).write_bytes(raw)
-    return dict(tohost=1,fromhost=0,mailbox_words=words,expected_starts=2715,actual_projection_calls=1421,
+    return dict(tohost=1,fromhost=0,mailbox_words=words,expected_starts=count,actual_projection_calls=1421,
         fresh_vision_images=2,all16_prefix_KV_exact=True,denoising_steps=10,
         all_state_velocity_actions_exact=True,all_final_guest_buffers_exact=True,final_guest_buffers=results)

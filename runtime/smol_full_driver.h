@@ -2,6 +2,15 @@
 #define SMOL_FULL_DRIVER_H
 #include "smol_policy_raw.h"
 #include "smol_full_phase.h"
+#ifndef SMOL_FULL_LAUNCH_COUNT
+#define SMOL_FULL_LAUNCH_COUNT 2915
+#endif
+#ifndef SMOL_FULL_ATTENTION
+#define SMOL_FULL_ATTENTION 1
+#endif
+#if (SMOL_FULL_ATTENTION != 0 && SMOL_FULL_ATTENTION != 1) || SMOL_FULL_LAUNCH_COUNT != 2715 + 200 * SMOL_FULL_ATTENTION
+#error "inconsistent Smol execution profile"
+#endif
 typedef struct {
     uint32_t kind, ordinal, layer, launch_start, launch_end, call_start, call_end, reserved;
 } smol_full_phase_descriptor;
@@ -18,7 +27,7 @@ extern const unsigned char *const smol_full_phase_expected[201][56];
 extern const smol_full_driver_inputs smol_full_driver_observation;
 extern smol_full_phase_cursor smol_full_phase_state;
 extern volatile uint64_t smol_full_segment_request;
-extern uint32_t smol_full_segment_observations[2715];
+extern uint32_t smol_full_segment_observations[SMOL_FULL_LAUNCH_COUNT];
 extern const uint64_t smol_full_compiled_phase_layout[12];
 extern const char *smol_full_segment_error_region;
 static inline int smol_full_driver_differ(const void *a,const void *b,size_t size) {

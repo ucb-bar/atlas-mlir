@@ -8,22 +8,27 @@
 #include "llama_host_attention.h"
 #include <string.h>
 
+unsigned tiny_test_rms_calls, tiny_test_residual_calls, tiny_test_silu_calls;
+
 int smol_host_rmsnorm_bf16(const uint16_t *input, const uint16_t *weight,
                           float epsilon, uint16_t *output, size_t rows, size_t width) {
     (void)weight;
     (void)epsilon;
+    ++tiny_test_rms_calls;
     memcpy(output, input, rows * width * sizeof(*output));
     return 0;
 }
 
 int smol_host_residual_bf16(const uint16_t *left, const uint16_t *right, uint16_t *output, size_t count) {
     (void)right;
+    ++tiny_test_residual_calls;
     memcpy(output, left, count * sizeof(*output));
     return 0;
 }
 
 int smol_host_silu_mul_bf16(const uint16_t *gate, const uint16_t *up, uint16_t *output, size_t count) {
     (void)up;
+    ++tiny_test_silu_calls;
     memcpy(output, gate, count * sizeof(*output));
     return 0;
 }
