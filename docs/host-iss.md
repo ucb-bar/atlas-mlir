@@ -10,7 +10,10 @@
 | `tiny` | `atlas.block_bundle.v1` | 24 |
 | `smol` | `atlas.block_bundle.v1` | 7 |
 | `tiny-full` | `atlas.full_bundle.v1` | 840 |
-| `smol-full` | `atlas.full_bundle.v1` | 2,715 |
+| `smol-full`, projection-only profile | `atlas.full_bundle.v1` | 2,715 |
+| `smol-full`, attention-inclusive full policy | `atlas.full_bundle.v1` | 2,915 |
+
+The Smol projection-only profile launches only the 2,715 projection panels. The attention-inclusive full policy adds 200 attention launches, for 2,915 Atlas launches.
 
 Supply the matching `host/host.elf`, `SHA256SUMS`, provenance, workload contract, programs, weights, initial images, and expected outputs. Inputs are external fixed-capture fixtures. The [ResNet route](resnet-full-host.md) includes bundle preparation; [Smol inputs](smol-full-host.md) include the required phase archive. Checksums bind content, so retain an independently trusted archive or checksum digest. The reader checks listed members, safe physical paths, source hashes, geometry, ELF mappings, and embedded payloads before starting QEMU.
 

@@ -24,7 +24,8 @@ side.
 ## Build
 
 Use MLIR and LLVM from one installation (tested with LLVM/MLIR 23.0.0git,
-`a47bddccec30255619bb8c37fa59700e661d4e66`).
+`a47bddccec30255619bb8c37fa59700e661d4e66`). The build also needs CMake, Ninja
+(or `-G "Unix Makefiles"` in place of `-G Ninja`), and a C/C++ compiler.
 
 Kernel generators come from the pinned `third_party/atlas-kernels` submodule
 ([ucb-bar/atlas-kernels](https://github.com/ucb-bar/atlas-kernels/tree/feat/kernel-library)); clone with
@@ -37,8 +38,32 @@ cmake -S . -B build -G Ninja \
   -DMLIR_DIR=/path/to/llvm-install/lib/cmake/mlir -DCMAKE_BUILD_TYPE=Release \
   -DPython3_EXECUTABLE="$(command -v python)"
 cmake --build build --parallel 2
+mkdir -p out/tmp
+export TMPDIR="$PWD/out/tmp"
 ctest --test-dir build --output-on-failure
 ```
+
+`atlas-opt` and `atlas-emit` must run with the C++ runtime of the compiler that
+built them. With a compiler newer than the system's, they otherwise fail at
+startup with ``version `GLIBCXX_3.4.30' not found``. Put that compiler's
+`libstdc++` directory on `LD_LIBRARY_PATH` (for example
+`export LD_LIBRARY_PATH=/path/to/compiler/lib:$LD_LIBRARY_PATH`) and keep it set
+for CTest and every later `atlas-opt` or `atlas-emit` run;
+`build/bin/atlas-opt --version` checks it.
+
+Known environment-dependent failures: with no other environment variables set,
+11 of 232 CTest tests failed at every recorded head of this branch (221 passed).
+Nine stop on `No module named 'npu_model'` because the npu-model checkout is not
+on `PYTHONPATH`: `atlas-python-test_chipyard_arena`,
+`atlas-python-test_graph_program_bounds`, the six
+`atlas-python-test_virtual_evaluator_*` modules, and
+`atlas-kernels-projection_gemm-test_program_reuse_resident`.
+`atlas-python-test_smol_fusion_assets` needs `TMPDIR`, which the lines above
+set. `atlas-python-test_host_iss_block_bundle` has two failing restricted-name
+assertions, a known source and test mismatch that opens no file.
+`atlas-python-test_host_iss_gdb_buffered` passes where local socket sends are
+allowed; in a sandbox that denies them its receiver blocks, so add
+`--timeout 60` to the `ctest` command there.
 
 CTest runs the portable tests with no hardware. Tests that run the RTL need
 `ATLAS_RTL_ROOT`, `ATLAS_MODEL_ROOT`, `ATLAS_ASSEMBLER_ROOT`, `ATLAS_ARC_MODEL`,

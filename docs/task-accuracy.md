@@ -6,9 +6,11 @@ Because the arithmetic is coarser than PyTorch's, task outputs drift. On one inp
 
 | Model | PyTorch | Atlas |
 | --- | --- | --- |
-| TinyLlama, 128-token prompt | Tokens [278, 3711, 5652] | Tokens [278, 14263, 658] |
+| TinyLlama, 128-token prompt, 840-launch projection-only host (v1) | Tokens [278, 3711, 5652] | Tokens [278, 14263, 658] |
 | SmolVLA policy | Reference actions | 20.4% action relative L2 error |
 | ResNet50, church image | Class 497 | Class 562 |
+
+The TinyLlama Atlas tokens come from the earlier 840-launch host, which ran only the projection panels on Atlas; its recorded captured-reply replay of ELF SHA-256 `43761da497abf0442c15b60731b984c1f009d18c33731ec25d0c276743f81402` printed [278, 14263, 658]. The current 1,038-launch kit also runs attention and RMSNorm on Atlas; its recorded replay of default ELF `3b75125b5f552eeb93cdab158bd09349170e7b23894dc8f3a717040a732eb081` printed [278, 3711, 5652] ([TinyLlama attention build](tiny-attention-build.md)), the same tokens as PyTorch on this prompt. Equal tokens do not establish equal logits.
 
 ResNet50 matches PyTorch's top-1 on the three other images checked. An independent CPU emulation of the Atlas arithmetic reproduces all three results, so the gap comes from the number format rather than the compiler or host code. BF16 accumulation over long K dominates for TinyLlama; FP8 weight precision dominates for ResNet50; SmolVLA has both.
 

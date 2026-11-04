@@ -1,6 +1,6 @@
 # Full Smol policy host admission
 
-The full policy executes two vision images, 16 VLM prefix layers, and ten 16-layer expert/Euler updates: 1,421 ordered projection calls and 2,715 physical Atlas launches. `tools/smol_full_plan.py` fixes their geometry, dtype, scale scope, and ordering. Its 47 trajectory references cover prefix embeddings/masks/KV, step inputs/velocities/outputs/timesteps, and final state/actions.
+The full policy executes two vision images, 16 VLM prefix layers, and ten 16-layer expert/Euler updates: 1,421 ordered projection calls in 2,715 physical projection panels. The projection-only profile launches those 2,715 panels; the attention-inclusive full policy adds 200 attention launches, for 2,915 Atlas launches. `tools/smol_full_plan.py` fixes their geometry, dtype, scale scope, and ordering. Its 47 trajectory references cover prefix embeddings/masks/KV, step inputs/velocities/outputs/timesteps, and final state/actions.
 
 The builder preserves the captured `atlas.full_kernel_assets.v1` manifest as `host/captured-kernels.json`, bound by digest with the unchanged replay and trajectory. Selected `kernels.json`, provenance, and contract agree on the launch programs. Captured fields stay identical except source/program paths, requested DMA, and selected arena.
 
