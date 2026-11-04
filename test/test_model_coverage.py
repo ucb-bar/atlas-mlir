@@ -1,4 +1,4 @@
-"""The hand-written SmolVLA and TinyLlama device plans equal the device ops torch.export derives from the models.
+"""The test checks ordered projection tuples, Smol input dtypes, Tiny cache/logit geometry, and Smol attention positions against pinned export fixtures. Tiny projection shapes are compared as flattened input rows, input widths, and output widths. Attention row/key/head counts are compared with test-local expectations; production attention geometry and head dimensions are not checked.
 
 The fixtures are atlas-kernels coverage/fixture/{smolvla,tinyllama}.json: aggregated op rows that
 coverage/export_ops.py writes from the captured checkpoints and inputs. Regenerate them with that tool, never by hand.

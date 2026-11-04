@@ -21,6 +21,8 @@ The repository also ships a Python package (`atlas-mlir-native-support`) that
 plugs Atlas into Merlin's native compiler, and a small C runtime for the host
 side.
 
+The TinyLlama and SmolVLA bringup uses hand-written host graphs and kernel schedules. Its opt-in compiler wrapper is an enforcing word-comparison gate around the npu_model assembler path; see [Bringing up a model](docs/bringing-up-a-model.md).
+
 ## Build
 
 Use MLIR and LLVM from one installation (tested with LLVM/MLIR 23.0.0git,
@@ -85,6 +87,8 @@ ctest --test-dir build --output-on-failure
 `NPU_MODEL_DIR` defaults to Atlas's sibling `npu-model` directory and must
 match its gitlink. A selected but missing tool or dependency fails the test.
 These assembler revisions are separate from the recorded RTL/model evidence.
+
+For required export and capture joins, run `cmake --build build --target atlas-faithfulness` with the inputs in [Required source joins](test/FAITHFULNESS.md). Missing required inputs, dependencies, or skipped checks fail this target.
 
 ## Quick start
 

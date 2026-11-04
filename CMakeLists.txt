@@ -22,6 +22,12 @@ add_subdirectory(runtime)
 enable_testing()
 add_subdirectory(test)
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
+# Explicit source-join gate. Required capture inputs and dependencies must be
+# supplied by the caller; the runner turns any required skip into a failure.
+add_custom_target(atlas-faithfulness
+  COMMAND ${Python3_EXECUTABLE} -B ${PROJECT_SOURCE_DIR}/tools/check_faithfulness.py
+  WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+  USES_TERMINAL)
 # One test per Python test module, run from test/ as discovery would, with the
 # native binding package importable. Modules of plain test functions use
 # pytest; the rest are unittest suites.
