@@ -159,6 +159,48 @@ void memoryHazards(MLIRContext &context) {
   }
 }
 
+void commandRing(MLIRContext &context) {
+  for (bool drain : {false, true}) {
+    Program p(context); p.prefix(); p.constant(9, 32); p.launch();
+    p.constant(4, 512);
+    for (unsigned n = 0; n < 8; ++n) {
+      if (drain && n == 7) p.wait();
+      p.launch(1); p.wait(1);
+    }
+    p.wait(); p.halt();
+    p.expect(drain ? "full drain permits the ninth command" : "ninth command cannot overwrite pending slot zero",
+             drain, drain ? ArrayRef<StringRef>{} : ArrayRef<StringRef>{"pending DMA command ring slot"});
+  }
+  // Slot zero can be reused while slot one is still pending. A blanket limit
+  // of eight launches since the last full drain would reject this safe case.
+  for (unsigned count : {7u, 8u}) {
+    Program p(context); p.prefix(); p.constant(9, 32); p.launch();
+    p.constant(4, 512); p.launch(1); p.wait(); p.constant(4, 768);
+    Operation *jump = p.jump(); p.nop();
+    size_t target = p.ops.size();
+    for (unsigned n = 0; n < count; ++n) { p.launch(2); p.wait(2); }
+    p.wait(1); p.halt(); p.aim(jump, target);
+    p.expect(count == 7 ? "retired slot zero is reusable across a CFG edge while slot one stays live"
+                       : "ring index survives CFG edges and protects pending slot one",
+             count == 7, count == 7 ? ArrayRef<StringRef>{} : ArrayRef<StringRef>{"pending DMA command ring slot"});
+  }
+  {
+    Program p(context); p.prefix(); p.constant(9, 32); p.launch();
+    p.constant(4, 512); p.constant(10, 0);
+    size_t loop = p.ops.size();
+    p.launch(1); p.wait(1); p.addi(10, 10, 1);
+    Operation *back = p.jump(); p.nop(); p.aim(back, loop); p.halt();
+    p.expectDMA("widening cannot forget a live ring slot when launch count becomes unknown", false, 2);
+  }
+  {
+    Program p(context); p.prefix(); p.constant(9, 32); p.launch();
+    p.constant(10, 4); size_t loop = p.ops.size(); p.addi(10, 10, -1);
+    Operation *back = p.branch(10); p.nop(); p.aim(back, loop);
+    p.constant(4, 512); p.launch(1); p.wait(1); p.wait(); p.halt();
+    p.expectDMA("widening unrelated registers preserves a known free ring slot", true, 2);
+  }
+}
+
 void dmaSizes(MLIRContext &context) {
   for (StringRef direction : {StringRef("load"), StringRef("store")}) {
     for (uint32_t size : {0u, 1u, 31u, 33u, 8191u, 8192u, 8224u, 16384u, uint32_t(-32)}) {
@@ -167,10 +209,17 @@ void dmaSizes(MLIRContext &context) {
       p.expect("DMA " + direction.str() + " rejects size " + std::to_string(size), false,
                {"DMA size must be nonzero, a multiple of 32 bytes, and less than 8192 bytes"});
     }
-    for (uint32_t size : {32u, 4096u, 8160u}) {
+    for (uint32_t size : {32u, 4064u, 4096u}) {
       Program p(context); p.prefix(); p.constant(9, size);
       p.launch(0, direction); p.wait(); p.halt();
       p.expect("DMA " + direction.str() + " accepts size " + std::to_string(size), true);
+    }
+    for (uint32_t size : {4128u, 8160u}) {
+      Program p(context); p.prefix(); p.constant(9, size);
+      p.launch(0, direction); p.wait(); p.halt();
+      bool load = direction == "load";
+      p.expect("DMA " + direction.str() + (load ? " accepts size " : " rejects size ") + std::to_string(size), load,
+               load ? ArrayRef<StringRef>{} : ArrayRef<StringRef>{"DMA store size must not exceed 4096 bytes"});
     }
     {
       Program p(context); p.prefix(); p.launch(0, direction, 27);
@@ -254,7 +303,7 @@ int main() {
   captured(context, false); captured(context, true);
   delayedBranch(context, true); delayedBranch(context, false);
   conditions(context); widening(context);
-  memoryHazards(context); dmaSizes(context); channelReuse(context); failureCases(context);
+  memoryHazards(context); commandRing(context); dmaSizes(context); channelReuse(context); failureCases(context);
   llvm::outs() << checks << " CFG DMA timing checks, " << failures << " failures\n";
   return failures != 0;
 }

@@ -64,6 +64,25 @@ class CFGDMATimingTest(unittest.TestCase):
             + vwork(5) + [HALT],
             "DMA size must be nonzero, a multiple of 32 bytes, and less than 8192 bytes")
 
+    def test_command_ring_overwrite_two_pending(self) -> None:
+        other = ("dma", 'direction = "load", channel = 1 : i32, reg = 6 : i32, '
+                        'dram = 7 : i32, size = 9 : i32')
+        wait_other = ("dma_wait", "channel = 1 : i32")
+        ops = [addi(4, 0, 256), addi(6, 0, 512), addi(9, 0, 32), upper(7, 0x90000), dma()]
+        self.assert_timing_rejects(ops + [other, wait_other] * 8 + [WAIT, HALT],
+                                   "pending DMA command ring slot")
+        # Drain the old slot before the ninth launch wraps the enqueue index.
+        source = program(ops + [other, wait_other] * 7 + [WAIT, other, wait_other, HALT])
+        result = run(OPT, source, "--verify-atlas-machine-stream", "--verify-atlas-timing")
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_dma_store_size_8160_overflows_queue(self) -> None:
+        store = ("dma", 'direction = "store", channel = 0 : i32, reg = 4 : i32, '
+                        'dram = 7 : i32, size = 9 : i32')
+        self.assert_timing_rejects(
+            [addi(4, 0, 256), upper(7, 0x90000), upper(9, 2), addi(9, 9, -32), store, WAIT, HALT],
+            "DMA store size must not exceed 4096 bytes")
+
     def test_real_kit_prefetch_loop(self) -> None:
         source = (ROOT / "test/lit/cfg_dma_kit_prefetch.mlir").read_text()
         result = run(OPT, source, "--verify-atlas-machine-stream", "--verify-atlas-timing")

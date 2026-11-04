@@ -648,6 +648,12 @@ Footprint mlir::atlas::timing::footprintOf(const Instr &in,
       b.f.error = "DMA size must be nonzero, a multiple of 32 bytes, and less than 8192 bytes";
       break;
     }
+    // Store VMEM reads do not observe the 128-beat queue's enqueue readiness;
+    // TileLink backpressure can fill it before a larger command finishes.
+    if (!load && bytes && *bytes > 4096) {
+      b.f.error = "DMA store size must not exceed 4096 bytes";
+      break;
+    }
     b.x(in.rd, false, 0);
     b.x(in.rs1, false, 0);
     b.x(in.rs2, false, 0);

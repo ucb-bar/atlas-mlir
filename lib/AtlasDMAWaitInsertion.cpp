@@ -4,8 +4,8 @@
 // instruction that needs it complete:
 //   - a VLOAD or VSTORE touching its staging window (its own staging read, or
 //     a later transfer reusing the window);
-//   - a launch on its channel, or one whose DRAM bytes overlap where either
-//     side writes;
+//   - a launch on its channel or command-ring slot, or one whose DRAM bytes
+//     overlap where either side writes;
 //   - a helper DMA (boundary tile or mailbox), or any instruction the
 //     generated interval policy does not admit beside a pending transfer
 //     (canOverlapAtlasGeneratedDMA): scalar memory outside an analyzed
@@ -46,6 +46,7 @@ struct Span {
 struct Transfer {
   int32_t id = -1;
   unsigned channel = 0;
+  unsigned ringSlot = 0;
   Span staging, dram;
   bool store = false;
   // Its DMA.WAIT in the tile contract and that command's source owner.
@@ -187,6 +188,7 @@ LogicalResult mlir::atlas::insertAtlasDMAWaits(ModuleOp module) {
   // Transfers to complete immediately before each instruction, in order.
   std::vector<SmallVector<int32_t, 2>> waitsBefore(n);
   SmallVector<int32_t, 8> pending;
+  unsigned nextSlot = 0;
   auto complete = [&](size_t pc, auto &&needed) {
     for (auto it = pending.begin(); it != pending.end();) {
       if (needed(transfers->find(*it)->second)) {
@@ -196,6 +198,10 @@ LogicalResult mlir::atlas::insertAtlasDMAWaits(ModuleOp module) {
         ++it;
       }
     }
+    // Once every explicit transfer is complete, the next enqueue can be
+    // coordinate zero. Helper DMAs also complete before explicit work resumes.
+    if (pending.empty())
+      nextSlot = 0;
   };
   auto all = [](const Transfer &) { return true; };
   for (size_t pc = 0; pc < n; ++pc) {
@@ -218,12 +224,17 @@ LogicalResult mlir::atlas::insertAtlasDMAWaits(ModuleOp module) {
       auto found = transfers->find(*id);
       if (found == transfers->end())
         return op->emitOpError("explicit DMA launch has no DMA contract record");
-      const Transfer &launch = found->second;
+      Transfer &launch = found->second;
       complete(pc, [&](const Transfer &t) {
-        return t.channel == launch.channel || t.staging.overlaps(launch.staging) ||
+        // DMA.scala enqueues without checking slot ownership. Free channels
+        // and staging windows do not imply that the next ring slot is free.
+        return t.ringSlot == nextSlot || t.channel == launch.channel ||
+               t.staging.overlaps(launch.staging) ||
                ((t.store || launch.store) && t.dram.overlaps(launch.dram));
       });
+      launch.ringSlot = nextSlot;
       pending.push_back(*id);
+      nextSlot = (nextSlot + 1) % kAtlasDMAChannels;
     } else if (isa<VLoadOp, VStoreOp>(op)) {
       auto command = contractTag(op, kAtlasTagTileCommand);
       auto record = command ? tiles->find(*command) : tiles->end();
@@ -236,6 +247,8 @@ LogicalResult mlir::atlas::insertAtlasDMAWaits(ModuleOp module) {
     } else if (isa<DMAWaitOp>(op)) {
       if (auto id = contractTag(op, kAtlasTagDMATransfer))
         llvm::erase(pending, *id);
+      if (pending.empty())
+        nextSlot = 0;
     } else if (!canOverlapAtlasGeneratedDMA(ops, loops, pc)) {
       complete(pc, all);
     }

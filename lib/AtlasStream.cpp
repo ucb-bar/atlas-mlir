@@ -453,6 +453,10 @@ namespace {
 struct DMAState {
   RegValues regs = unknownRegs();
   std::map<size_t, RegValues> pending;
+  // Slot masks contain channel owners. The enqueue index advances even when
+  // earlier slots retire, so a bound on live channels alone is insufficient.
+  std::optional<unsigned> nextSlot = 0;
+  std::array<unsigned, kAtlasDMAChannels> slotOwners{};
 };
 
 bool joinDMA(DMAState &a, const DMAState &b) {
@@ -460,6 +464,15 @@ bool joinDMA(DMAState &a, const DMAState &b) {
   for (const auto &[i, regs] : b.pending) {
     auto [it, inserted] = a.pending.try_emplace(i, regs);
     changed |= inserted || mergeInto(it->second, regs);
+  }
+  if (a.nextSlot && a.nextSlot != b.nextSlot) {
+    a.nextSlot.reset();
+    changed = true;
+  }
+  for (unsigned slot = 0; slot < kAtlasDMAChannels; ++slot) {
+    unsigned owners = a.slotOwners[slot] | b.slotOwners[slot];
+    changed |= owners != a.slotOwners[slot];
+    a.slotOwners[slot] = owners;
   }
   return changed;
 }
@@ -497,7 +510,8 @@ LogicalResult mlir::atlas::checkAtlasDMACFG(
   // lattice: each register becomes unknown at most once, each launch is added
   // at most once. A bound never causes an unchecked path to be accepted.
   auto lessState = [](const DMAState &a, const DMAState &b) {
-    return std::tie(a.regs, a.pending) < std::tie(b.regs, b.pending);
+    return std::tie(a.regs, a.pending, a.nextSlot, a.slotOwners) <
+           std::tie(b.regs, b.pending, b.nextSlot, b.slotOwners);
   };
   struct Entry {
     std::set<DMAState, decltype(lessState)> states;
@@ -568,6 +582,16 @@ LogicalResult mlir::atlas::checkAtlasDMACFG(
                    << s.ops[k]->getName()
                    << " may still be in flight; add atlas.dma_wait first, "
                       "which a delay cannot replace";
+      if (command) {
+        // DMA.scala writes commandQueue(enqueueIdx) without checking active
+        // ownership. An unknown index may target any occupied slot.
+        bool occupied = state.nextSlot
+                            ? state.slotOwners[*state.nextSlot] != 0
+                            : llvm::any_of(state.slotOwners, [](unsigned owners) { return owners != 0; });
+        if (occupied)
+          return s.ops[i]->emitOpError(
+              "may overwrite a pending DMA command ring slot; add atlas.dma_wait for its owner first");
+      }
       for (const auto &[k, captured] : state.pending) {
         Footprint dma = provider.footprint(s.instrs[k], captured);
         if (!dma.error.empty())
@@ -593,9 +617,23 @@ LogicalResult mlir::atlas::checkAtlasDMACFG(
           else
             ++it;
         }
+        for (unsigned &owners : state.slotOwners)
+          owners &= ~(1u << op.channel);
+        // With no live slots, rotate the coordinate system to the next slot.
+        // This is not a hardware index reset; only relative indices matter.
+        if (state.pending.empty())
+          state.nextSlot = 0;
       }
-      if (command)
+      if (command) {
         state.pending.emplace(i, state.regs);
+        if (state.nextSlot) {
+          state.slotOwners[*state.nextSlot] = 1u << op.channel;
+          state.nextSlot = (*state.nextSlot + 1) % kAtlasDMAChannels;
+        } else {
+          for (unsigned &owners : state.slotOwners)
+            owners |= 1u << op.channel;
+        }
+      }
       // The redirect reads its operands before its delay slot executes.
       if (op.opClass == OpClass::Branch)
         taken = branchTaken(in, state.regs);
