@@ -10,6 +10,7 @@
 #include <deque>
 #include <limits>
 #include <map>
+#include <memory>
 #include <tuple>
 #include <set>
 
@@ -447,12 +448,63 @@ bool mlir::atlas::atlasBlockExits(const AtlasStream &s, size_t block) {
 }
 
 namespace {
+using KnownWords = std::map<uint32_t, uint32_t>;
+
+// These are explicit invocation assumptions, never facts inferred from a kit
+// identity or an observed execution. Only the built-in provider has the memory
+// address semantics used by the transfer below.
+FailureOr<KnownWords> dramContract(const AtlasStream &s,
+                                  const TimingProvider &provider) {
+  ModuleOp module = s.ops.front()->getParentOfType<ModuleOp>();
+  Attribute raw = module->getAttr("atlas.dram_contract");
+  if (!raw)
+    return KnownWords{};
+  if (provider.id != kNpuModelTimingProviderId)
+    return module.emitOpError("DRAM contracts require the built-in timing provider");
+  auto contract = dyn_cast<DictionaryAttr>(raw);
+  auto name = contract ? contract.getAs<StringAttr>("name") : StringAttr{};
+  auto words = contract ? contract.getAs<ArrayAttr>("words") : ArrayAttr{};
+  if (!name || name.getValue().empty() || !words || words.empty() ||
+      contract.size() != 2)
+    return module.emitOpError("atlas.dram_contract requires a nonempty name and words array");
+  KnownWords result;
+  for (Attribute entry : words) {
+    auto word = dyn_cast<DictionaryAttr>(entry);
+    auto address = word ? word.getAs<IntegerAttr>("address") : IntegerAttr{};
+    auto value = word ? word.getAs<IntegerAttr>("value") : IntegerAttr{};
+    auto u32 = [](IntegerAttr a) {
+      return a && a.getType().isInteger(64) && a.getInt() >= 0 &&
+             uint64_t(a.getInt()) <= UINT32_MAX;
+    };
+    if (!word || word.size() != 2 || !u32(address) || !u32(value) ||
+        (address.getInt() & 3) ||
+        !result.emplace(uint32_t(address.getInt()), uint32_t(value.getInt())).second)
+      return module.emitOpError("DRAM contract words require unique aligned uint32 addresses and uint32 values, encoded as i64");
+  }
+  return result;
+}
+
+struct PendingDMA {
+  RegValues regs;
+  std::optional<uint32_t> upper;
+  bool operator<(const PendingDMA &b) const {
+    return std::tie(regs, upper) <
+           std::tie(b.regs, b.upper);
+  }
+};
+
 // A disjunction of singleton intervals retains correlations such as the two
 // ping-pong buffer bases. Unknown is the full RV32 interval, including on a
 // restarted core. DMA snapshots describe operands at launch, never at use.
 struct DMAState {
   RegValues regs = unknownRegs();
-  std::map<size_t, RegValues> pending;
+  std::map<size_t, PendingDMA> pending;
+  std::optional<uint32_t> upper;
+  // Missing words are unknown, including every word at invocation entry.
+  std::shared_ptr<const KnownWords> memory = std::make_shared<KnownWords>();
+  // A widened pending key need not have executed on every represented path.
+  // Never use a may-pending transfer to establish a must-known memory word.
+  bool widened = false;
   // Slot masks contain channel owners. The enqueue index advances even when
   // earlier slots retire, so a bound on live channels alone is insufficient.
   std::optional<unsigned> nextSlot = 0;
@@ -461,9 +513,25 @@ struct DMAState {
 
 bool joinDMA(DMAState &a, const DMAState &b) {
   bool changed = mergeInto(a.regs, b.regs);
-  for (const auto &[i, regs] : b.pending) {
-    auto [it, inserted] = a.pending.try_emplace(i, regs);
-    changed |= inserted || mergeInto(it->second, regs);
+  if (b.widened && !a.widened) {
+    a.widened = true;
+    changed = true;
+  }
+  if (a.upper && a.upper != b.upper) {
+    a.upper.reset();
+    changed = true;
+  }
+  if (a.memory != b.memory) {
+    KnownWords common;
+    for (const auto &[address, value] : *a.memory) {
+      auto it = b.memory->find(address);
+      if (it != b.memory->end() && it->second == value)
+        common.emplace(address, value);
+    }
+    if (common != *a.memory) {
+      a.memory = std::make_shared<KnownWords>(std::move(common));
+      changed = true;
+    }
   }
   if (a.nextSlot && a.nextSlot != b.nextSlot) {
     a.nextSlot.reset();
@@ -474,7 +542,80 @@ bool joinDMA(DMAState &a, const DMAState &b) {
     changed |= owners != a.slotOwners[slot];
     a.slotOwners[slot] = owners;
   }
+  for (const auto &[i, captured] : b.pending) {
+    auto [it, inserted] = a.pending.try_emplace(i, captured);
+    if (inserted) {
+      changed = true;
+    } else {
+      changed |= mergeInto(it->second.regs, captured.regs);
+      if (it->second.upper && it->second.upper != captured.upper) {
+        it->second.upper.reset();
+        changed = true;
+      }
+    }
+  }
   return changed;
+}
+
+void forgetWrittenWords(DMAState &state, const Footprint &f) {
+  std::shared_ptr<KnownWords> updated;
+  for (const Access &a : f.accesses) {
+    if (a.res != Res::Vmem || !a.write)
+      continue;
+    const KnownWords &words = updated ? *updated : *state.memory;
+    bool overlaps = llvm::any_of(words, [&](const auto &word) {
+      int line = word.first / kLineBytes;
+      return a.anywhere || (line >= a.first && line - a.first < a.count);
+    });
+    if (!overlaps)
+      continue;
+    if (!updated)
+      updated = std::make_shared<KnownWords>(*state.memory);
+    for (auto it = updated->begin(); it != updated->end();) {
+      int line = it->first / kLineBytes;
+      if (a.anywhere || (line >= a.first && line - a.first < a.count))
+        it = updated->erase(it);
+      else
+        ++it;
+    }
+  }
+  if (updated)
+    state.memory = std::move(updated);
+}
+
+// A matching wait establishes the copy, not the launch. Unknown operands,
+// upper words, and unaligned sources supply no constant-memory facts.
+void completeKnownLoad(DMAState &state, const Instr &in,
+                       const PendingDMA &captured, const KnownWords &dram) {
+  const RegValues &r = captured.regs;
+  if (state.widened || in.op->opClass != OpClass::DmaLoad || captured.upper != 0 ||
+      !r[in.rs1] || !r[in.rd] || !r[in.rs2])
+    return;
+  uint64_t source = *r[in.rs1], bytes = *r[in.rs2];
+  uint64_t dest = uint64_t(*r[in.rd]) * 4;
+  if ((source | dest | bytes) & 31 || bytes == 0 || bytes >= 8192 ||
+      source + bytes > (uint64_t(1) << 32) || dest + bytes > kAtlasVmemBytes)
+    return;
+  auto first = dram.lower_bound(uint32_t(source));
+  if (first == dram.end() || first->first >= source + bytes)
+    return;
+  auto memory = std::make_shared<KnownWords>(*state.memory);
+  for (auto it = first; it != dram.end() && it->first < source + bytes; ++it)
+    (*memory)[uint32_t(dest + it->first - source)] = it->second;
+  state.memory = std::move(memory);
+}
+
+bool storeMayChangeContract(const Instr &in, const DMAState &state,
+                            const KnownWords &dram) {
+  if (in.op->opClass != OpClass::DmaStore || dram.empty())
+    return false;
+  if (state.upper != 0 || !state.regs[in.rd] || !state.regs[in.rs2])
+    return true;
+  // Conservatively include the entire first and last DRAM beat.
+  uint64_t first = uint64_t(*state.regs[in.rd]) & ~uint64_t(31);
+  uint64_t end = (uint64_t(*state.regs[in.rd]) + *state.regs[in.rs2] + 31) & ~uint64_t(31);
+  auto it = dram.lower_bound(uint32_t(first));
+  return it != dram.end() && it->first < end;
 }
 
 std::optional<bool> branchTaken(const Instr &in, const RegValues &regs) {
@@ -504,14 +645,19 @@ LogicalResult mlir::atlas::checkAtlasDMACFG(
   std::string scope = provider.validateScope(s);
   if (!scope.empty())
     return s.ops.front()->emitOpError(scope);
+  auto assumed = dramContract(s, provider);
+  if (failed(assumed))
+    return failure();
+  const KnownWords &dram = *assumed;
 
   // At the bound, replace the entire disjunction by its interval hull and
   // union of pending launches. Subsequent updates only ascend this finite
   // lattice: each register becomes unknown at most once, each launch is added
-  // at most once. A bound never causes an unchecked path to be accepted.
+  // at most once, and each ring-slot owner mask gains at most eight bits.
+  // A bound never causes an unchecked path to be accepted.
   auto lessState = [](const DMAState &a, const DMAState &b) {
-    return std::tie(a.regs, a.pending, a.nextSlot, a.slotOwners) <
-           std::tie(b.regs, b.pending, b.nextSlot, b.slotOwners);
+    return std::tie(a.regs, a.pending, a.nextSlot, a.slotOwners, a.upper, a.widened, *a.memory) <
+           std::tie(b.regs, b.pending, b.nextSlot, b.slotOwners, b.upper, b.widened, *b.memory);
   };
   struct Entry {
     std::set<DMAState, decltype(lessState)> states;
@@ -540,6 +686,7 @@ LogicalResult mlir::atlas::checkAtlasDMACFG(
       return;
     }
     DMAState hull = state;
+    hull.widened = true;
     for (const DMAState &old : e.states)
       joinDMA(hull, old);
     e.states.clear();
@@ -572,6 +719,8 @@ LogicalResult mlir::atlas::checkAtlasDMACFG(
         return s.ops[i]->emitOpError("completion publication requires DMA.WAIT for pending channel ")
                << s.instrs[state.pending.begin()->first].op->channel;
       bool command = op.opClass == OpClass::DmaLoad || op.opClass == OpClass::DmaStore;
+      if (storeMayChangeContract(in, state, dram))
+        return s.ops[i]->emitOpError("DMA store may violate the immutable DRAM contract");
       if (command)
         for (const auto &[k, captured] : state.pending)
           if (s.instrs[k].op->channel == op.channel)
@@ -593,7 +742,7 @@ LogicalResult mlir::atlas::checkAtlasDMACFG(
               "may overwrite a pending DMA command ring slot; add atlas.dma_wait for its owner first");
       }
       for (const auto &[k, captured] : state.pending) {
-        Footprint dma = provider.footprint(s.instrs[k], captured);
+        Footprint dma = provider.footprint(s.instrs[k], captured.regs);
         if (!dma.error.empty())
           return s.ops[k]->emitOpError(dma.error);
         auto conflict = provider.dmaConflict(dma, f);
@@ -610,11 +759,13 @@ LogicalResult mlir::atlas::checkAtlasDMACFG(
         return s.ops[i]->emitOpError("halts while DMA channel ")
                << s.instrs[state.pending.begin()->first].op->channel
                << " may still be in flight; add atlas.dma_wait first";
+      forgetWrittenWords(state, f);
       if (op.opClass == OpClass::DmaWait) {
         for (auto it = state.pending.begin(); it != state.pending.end();) {
-          if (s.instrs[it->first].op->channel == op.channel)
+          if (s.instrs[it->first].op->channel == op.channel) {
+            completeKnownLoad(state, s.instrs[it->first], it->second, dram);
             it = state.pending.erase(it);
-          else
+          } else
             ++it;
         }
         for (unsigned &owners : state.slotOwners)
@@ -625,7 +776,7 @@ LogicalResult mlir::atlas::checkAtlasDMACFG(
           state.nextSlot = 0;
       }
       if (command) {
-        state.pending.emplace(i, state.regs);
+        state.pending.emplace(i, PendingDMA{state.regs, state.upper});
         if (state.nextSlot) {
           state.slotOwners[*state.nextSlot] = 1u << op.channel;
           state.nextSlot = (*state.nextSlot + 1) % kAtlasDMAChannels;
@@ -637,7 +788,20 @@ LogicalResult mlir::atlas::checkAtlasDMACFG(
       // The redirect reads its operands before its delay slot executes.
       if (op.opClass == OpClass::Branch)
         taken = branchTaken(in, state.regs);
+      std::optional<uint32_t> loaded;
+      if (!dram.empty() && op.opClass == OpClass::ScalarLoad && op.name == "lw") {
+        ScalarAccess access = scalarAccess(in, state.regs);
+        if (access.first) {
+          auto it = state.memory->find(uint32_t(*access.first));
+          if (it != state.memory->end())
+            loaded = it->second;
+        }
+      }
+      if (!dram.empty() && op.opClass == OpClass::DmaConfig)
+        state.upper = state.regs[in.rs1];
       applyScalar(in, state.regs);
+      if (op.opClass == OpClass::ScalarLoad && in.rd != 0 && loaded)
+        state.regs[in.rd] = loaded;
     }
     auto edge = [&](Operation *target) -> LogicalResult {
       if (target) {
@@ -1055,6 +1219,11 @@ struct VerifyAtlasTimingPass
     Builder builder(module.getContext());
     module->setAttr(kAtlasTimingState, builder.getStringAttr("timed"));
     module->setAttr(kAtlasTimingProvider, builder.getStringAttr(selected->id));
+    if (auto contract = module->getAttrOfType<DictionaryAttr>("atlas.dram_contract"))
+      module->setAttr("atlas.timing_assumptions", builder.getArrayAttr({
+          builder.getStringAttr("immutable-dram:" + contract.getAs<StringAttr>("name").getValue().str())}));
+    else
+      module->removeAttr("atlas.timing_assumptions");
   }
 };
 }

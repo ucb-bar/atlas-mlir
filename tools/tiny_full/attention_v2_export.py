@@ -9,6 +9,7 @@ import numpy as np
 import kernel_library  # noqa: E402,F401
 from atlas_attention_v2_program import AttentionV2Config, assembly_v2, stage_v2, unpack_output_v2, unpack_tiles
 from atlas_program_checks import check_matrix_registers
+from attention_timing_contract import metadata_contract, validate_contract
 from fusion_export import original_sources
 
 SCHEMA = 'atlas.tiny.attention_launch.v2'
@@ -95,6 +96,9 @@ def attention_kernel_v2(capture, record, assets, assemble, arena_base):
             or record['arena_bytes'] != len(initial) or record['output_offset'] != offset
             or record['output_bytes'] != extent):
         raise ValueError('attention-v2 exact staging differs')
+    timing_contract = metadata_contract(config, offsets, initial, arena_base)
+    if 'timing_dram_contract' in record:
+        validate_contract(config, offsets, initial, arena_base, record['timing_dram_contract'])
     for name, start, end in (('q', offsets['q'], offsets['k']), ('k', offsets['k'], offsets['v']),
                             ('v', offsets['v'], offsets['descriptors'])):
         if capture.raw(record['staged_'+name]) != initial[start:end]:
@@ -160,7 +164,8 @@ def attention_kernel_v2(capture, record, assets, assemble, arena_base):
         initial=assets.put('arenas', initial), expected=assets.put('expected', output),
         expected_arena=assets.put('arenas', final), initial_sha256=digest(initial), program_sha256=digest(program),
         expected_sha256=digest(output), output_offset=offset, total_dram_bytes=len(initial), dram_base=arena_base,
-        requested_dma=requested, model_commit=record['model_commit'], numerics='rtl', capture_execution=execution)
+        requested_dma=requested, model_commit=record['model_commit'], numerics='rtl', capture_execution=execution,
+        timing_dram_contract=timing_contract)
     if record.get('output_quantization') is not None:
         item['output_quantization'] = record['output_quantization']
     return item, logical.transpose(1, 0, 2).reshape(config.query_rows, -1)

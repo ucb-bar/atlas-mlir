@@ -585,9 +585,14 @@ def main():
             str(manifest['kernels'][indices[0]]['a_scale'])]
         call_rows.append('{'+','.join(values)+'}')
     from smol_attention_assets import validate_attention
+    from attention_timing_contract import metadata_contract, validate_contract
     attention_rows = []
     for item in manifest.get('attention_kernels', []):
         config, offsets = validate_attention(item, payload, args.assemble)
+        initial = payload(item['initial'])
+        metadata_contract(config, offsets, initial, item['dram_base'])
+        if 'timing_dram_contract' in item:
+            validate_contract(config, offsets, initial, item['dram_base'], item['timing_dram_contract'])
         names = {}
         for field in (('original', 'metadata') if item['phase']<24 else ('original', 'metadata', 'logical_mask')):
             raw = payload(item[field])

@@ -19,6 +19,25 @@ struct Program : IssuedStream {
     emit("atlas.dma", {text("direction", direction), i("channel", channel), i("reg", 4), i("dram", 7), i("size", size)});
   }
   void wait(int channel = 0) { emit("atlas.dma_wait", {i("channel", channel)}); }
+  void contract(uint32_t value) {
+    auto word = b.getDictionaryAttr({b.getNamedAttr("address", b.getI64IntegerAttr(0x90001000)),
+                                     b.getNamedAttr("value", b.getI64IntegerAttr(value))});
+    (*module)->setAttr("atlas.dram_contract", b.getDictionaryAttr({
+        b.getNamedAttr("name", b.getStringAttr("test-metadata-v1")),
+        b.getNamedAttr("words", b.getArrayAttr({word}))}));
+  }
+  void metadata(bool completed = true, int upper = 0) {
+    constant(19, upper);
+    emit("atlas.dma_config", {i("channel", 0), i("base_reg", 19)});
+    constant(14, 0x2000); constant(15, 0x90001000); constant(16, 32); constant(17, 0x8000);
+    emit("atlas.dma", {text("direction", "load"), i("channel", 2), i("reg", 14), i("dram", 15), i("size", 16)});
+    if (completed) wait(2);
+  }
+  void scalarLoad(int dst) {
+    emit("atlas.scalar_load", {text("kind", "lw"), i("dst", dst), i("base", 17), i("offset", 0)});
+    emit("atlas.delay", {i("cycles", 4)});
+    nop();
+  }
   void load(int base = 5) {
     emit("atlas.vload", {i("dst", 0), i("base", base), i("offset", 0), text("format", "raw")});
     emit("atlas.delay", {i("cycles", 66)});
@@ -126,6 +145,65 @@ void widening(MLIRContext &context) {
   }
 }
 
+void metadataContracts(MLIRContext &context) {
+  for (int variant = 0; variant != 10; ++variant) {
+    Program p(context); p.prefix();
+    if (variant != 1) p.contract(variant == 2 ? 256 : 0);
+    p.metadata(variant != 3, variant == 4 ? 1 : 0);
+    if (variant >= 5 && variant <= 7) {
+      StringRef kind = variant == 5 ? "sb" : variant == 6 ? "sh" : "sw";
+      p.emit("atlas.scalar_store", {p.text("kind", kind), p.i("src", 0), p.i("base", 17), p.i("offset", 0)});
+    }
+    if (variant == 8) {
+      p.emit("atlas.vstore", {p.i("src", 0), p.i("base", 14), p.i("offset", 0), p.text("format", "raw")});
+      p.emit("atlas.delay", {p.i("cycles", 66)}); p.nop();
+    }
+    if (variant == 9) {
+      p.constant(15, 0x90002000);
+      p.emit("atlas.dma", {p.text("direction", "load"), p.i("channel", 2), p.i("reg", 14), p.i("dram", 15), p.i("size", 16)});
+      p.wait(2);
+    }
+    p.scalarLoad(5); p.launch(); p.load(); p.wait(); p.halt();
+    p.expect("exact metadata input " + std::to_string(variant), variant == 0,
+             variant == 0 ? ArrayRef<StringRef>{} : ArrayRef<StringRef>{"RAW conflict"});
+  }
+  for (uint32_t bound : {1u, 2u}) {
+    Program p(context); p.prefix(); p.contract(bound); p.metadata(); p.scalarLoad(10);
+    p.constant(5, (kAtlasVmemBytes - 1024) / 4);
+    size_t loop = p.ops.size(); p.load(); p.addi(5, 5, 256); p.addi(10, 10, -1);
+    Operation *back = p.branch(10); p.nop(); p.halt(); p.aim(back, loop);
+    p.expect("loaded loop bound " + std::to_string(bound), bound == 1,
+             bound == 1 ? ArrayRef<StringRef>{} : ArrayRef<StringRef>{"past the end of VMEM"});
+  }
+  {
+    Program p(context); p.prefix(); p.contract(0); p.metadata();
+    p.constant(7, 0x90001000); p.launch(0, "store"); p.wait(); p.halt();
+    p.expect("device store cannot overwrite contracted DRAM", false, {"immutable DRAM contract"});
+  }
+  {
+    Program p(context); p.prefix(); p.contract(0); p.metadata();
+    p.scalarLoad(5); p.launch(); p.load(); p.wait();
+    p.emit("atlas.delay", {p.i("cycles", 128)}); p.halt();
+    p.expect("a data contract cannot suppress DELAY-before-halt", false, {"halt does not wait for a preceding DELAY"});
+  }
+  {
+    Program p(context); p.prefix(); p.contract(0);
+    p.emit("atlas.dma_config", {p.i("channel", 0), p.i("base_reg", 0)});
+    p.constant(14, 0x2000); p.constant(15, 0x90001000); p.constant(16, 32); p.constant(17, 0x8000);
+    // Launch path queues the safe singleton first. The equally deep no-launch
+    // path forces a hull before the merge runs, without queuing its singleton.
+    Operation *chooseLaunch = p.branch(27); p.nop();
+    Operation *noLaunchToMerge = p.jump(); p.nop();
+    size_t launchPath = p.ops.size();
+    p.emit("atlas.dma", {p.text("direction", "load"), p.i("channel", 2), p.i("reg", 14), p.i("dram", 15), p.i("size", 16)});
+    Operation *launchToMerge = p.jump(); p.nop();
+    size_t merge = p.ops.size(); p.wait(2); p.scalarLoad(5);
+    p.launch(); p.load(); p.wait(); p.halt(); p.aim(chooseLaunch, launchPath);
+    p.aim(noLaunchToMerge, merge); p.aim(launchToMerge, merge);
+    p.expectDMA("widened may-pending metadata never becomes a definite constant", false, 1);
+  }
+}
+
 void memoryHazards(MLIRContext &context) {
   for (StringRef direction : {StringRef("load"), StringRef("store")}) {
     for (StringRef access : {StringRef("vstore"), StringRef("scalar_store")}) {
@@ -183,6 +261,15 @@ void commandRing(MLIRContext &context) {
     p.expect(count == 7 ? "retired slot zero is reusable across a CFG edge while slot one stays live"
                        : "ring index survives CFG edges and protects pending slot one",
              count == 7, count == 7 ? ArrayRef<StringRef>{} : ArrayRef<StringRef>{"pending DMA command ring slot"});
+  }
+  {
+    Program p(context); p.prefix(); p.launch(); p.constant(4, 512); p.launch(1);
+    for (int i = 0; i < 16; ++i) {
+      int channel = i % 2;
+      p.wait(channel); p.constant(4, channel == 0 ? 256 : 512); p.launch(channel);
+    }
+    p.wait(); p.wait(1); p.halt();
+    p.expect("retired command slots permit eighteen launches without a complete drain", true);
   }
   {
     Program p(context); p.prefix(); p.constant(9, 32); p.launch();
@@ -303,6 +390,7 @@ int main() {
   captured(context, false); captured(context, true);
   delayedBranch(context, true); delayedBranch(context, false);
   conditions(context); widening(context);
+  metadataContracts(context);
   memoryHazards(context); commandRing(context); dmaSizes(context); channelReuse(context); failureCases(context);
   llvm::outs() << checks << " CFG DMA timing checks, " << failures << " failures\n";
   return failures != 0;

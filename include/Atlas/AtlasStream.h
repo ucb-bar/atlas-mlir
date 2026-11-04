@@ -66,7 +66,9 @@ LogicalResult checkAtlasStream(
     const AtlasStream &stream, const timing::TimingProvider &provider);
 // Proves DMA ownership on every feasible CFG path using correlated singleton
 // register intervals and conservative widening after maxDisjuncts per block.
-// Unknown entry/load values cover all RV32 values. The provider rules are kept.
+// Unknown entry/load values cover all RV32 values. Explicit atlas.dram_contract
+// inputs can supply immutable DRAM words through completed DMA loads and LW;
+// such proofs retain named invocation assumptions. The provider rules are kept.
 // Only the built-in provider admits interval widening; others fail at the bound.
 LogicalResult checkAtlasDMACFG(
     const AtlasStream &stream, const timing::TimingProvider &provider,
