@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import re
 
+import kernel_library  # noqa: E402,F401
 from atlas_path_guard import checked
 from bundle import relative_name
 

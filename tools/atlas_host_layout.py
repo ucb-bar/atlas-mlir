@@ -3,6 +3,7 @@
 from pathlib import Path
 import re
 
+import kernel_library  # noqa: E402,F401
 from atlas_path_guard import checked
 from atlas_tooling import sha, sha256
 

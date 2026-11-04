@@ -10,6 +10,7 @@ import sys
 
 ROOT = Path(__file__).absolute().parents[2]
 sys.path[:0] = [str(ROOT / 'tools'), str(ROOT / 'tools/host_iss')]
+import kernel_library  # noqa: E402,F401
 from atlas_attention_v2_program import AttentionV2Config, assembly_v2
 from atlas_execution import Executor
 from atlas_path_guard import checked

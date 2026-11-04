@@ -1,5 +1,6 @@
 """Portable, checksum-preserving receipt path encoding with explicit caller roots."""
 from pathlib import Path
+import kernel_library  # noqa: E402,F401
 from atlas_path_guard import checked
 
 

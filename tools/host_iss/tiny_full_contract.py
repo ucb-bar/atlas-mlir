@@ -96,6 +96,7 @@ def validate_plan(data, provenance):
     require(policy in ('original','traffic-reuse-v1') and data.get('program_policy','original') == policy,
             'Tiny full program policy binding')
     if policy == 'traffic-reuse-v1':
+        import kernel_library  # noqa: E402,F401
         from atlas_program import dma_load_bytes
         require(isinstance(provenance.get('reuse'),dict) and data.get('reuse') == provenance['reuse']
                 and provenance['reuse'].get('captured_data_unchanged') is True

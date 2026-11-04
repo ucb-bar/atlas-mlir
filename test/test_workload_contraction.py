@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import tempfile
 import unittest
 from unittest import mock
+import zipfile
 
 try:
     import numpy as np
@@ -13,6 +14,7 @@ except ImportError:
 
 if np is not None:
     import run_workload_contraction as workload
+    import kernel_library  # noqa: E402,F401
     from atlas_tile_arithmetic import output_halves
     from run_model_tile import validate_arrays
 
@@ -88,8 +90,27 @@ class WorkloadAdmissionTest(unittest.TestCase):
         self.assertEqual(set(sources),
             {"run_workload_contraction.py", "atlas_program.py", "run_model_tile.py", "atlas_tile_arithmetic.py",
             "atlas_vector_arithmetic.py"})
+        paths = {name: kernel_library.source_path(name) for name in sources}
+        self.assertEqual(paths["run_workload_contraction.py"], Path(workload.__file__).absolute())
+        self.assertEqual(paths["run_model_tile.py"], Path(workload.__file__).absolute().with_name("run_model_tile.py"))
+        for name in ("atlas_program.py", "atlas_tile_arithmetic.py", "atlas_vector_arithmetic.py"):
+            self.assertEqual(paths[name], kernel_library.module_path(name))
         for name, digest in sources.items():
-            self.assertEqual(digest, workload.sha256(Path(workload.__file__).with_name(name)))
+            self.assertEqual(digest, workload.sha256(paths[name]))
+
+    def test_archive_admission_before_digest(self):
+        args = SimpleNamespace(smoke=False, input="/tmp/source.npz", manifest="/tmp/source.json")
+        required = [zipfile.ZipInfo(name) for name in ("A.npy", "B.npy", "native_C.npy")]
+        archive = mock.MagicMock()
+        archive.__enter__.return_value.infolist.return_value = required
+        with mock.patch.object(workload.zipfile, "ZipFile", return_value=archive), mock.patch.object(workload, "sha256",
+            side_effect=AssertionError("digest before admission")):
+            workload.preflight_bundle(args)
+            # Prohibited/traversal members exist only as in-memory metadata.
+            for name in ("../A.npy",):
+                archive.__enter__.return_value.infolist.return_value = required + [zipfile.ZipInfo(name)]
+                with self.assertRaises(ValueError):
+                    workload.preflight_bundle(args)
 
     def test_requested_dma_counts_tile_reuse(self):
         from atlas_program import dma_load_bytes

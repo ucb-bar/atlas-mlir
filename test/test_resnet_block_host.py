@@ -6,6 +6,7 @@ import tempfile
 import unittest
 
 import atlas_host_build as build
+import kernel_library  # noqa: E402,F401
 from atlas_tooling import Admission, sha
 
 

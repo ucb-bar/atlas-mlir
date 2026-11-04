@@ -45,3 +45,17 @@ foreach(test_file IN LISTS atlas_python_tests)
     ENVIRONMENT_MODIFICATION
       "${atlas_python_paths}")
 endforeach()
+# Kernel generators live in the atlas-kernels submodule; run each of its test
+# modules from its own tests directory, one test per module as above.
+file(GLOB atlas_kernel_tests
+  ${PROJECT_SOURCE_DIR}/third_party/atlas-kernels/kernels/*/tests/test_*.py
+  ${PROJECT_SOURCE_DIR}/third_party/atlas-kernels/lib/tests/test_*.py)
+foreach(test_file IN LISTS atlas_kernel_tests)
+  get_filename_component(module ${test_file} NAME_WE)
+  get_filename_component(suite_dir ${test_file} DIRECTORY)
+  get_filename_component(suite ${suite_dir} DIRECTORY)
+  get_filename_component(suite ${suite} NAME)
+  add_test(NAME atlas-kernels-${suite}-${module}
+    COMMAND ${Python3_EXECUTABLE} -m unittest -v ${module}
+    WORKING_DIRECTORY ${suite_dir})
+endforeach()

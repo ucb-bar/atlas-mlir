@@ -12,6 +12,7 @@ from unittest.mock import patch
 TOOLS = Path(__file__).absolute().parents[1] / "tools"
 sys.path[:0] = [str(TOOLS), str(TOOLS / "host_iss")]
 import smol_full_contract as contract
+import kernel_library  # noqa: E402,F401
 from atlas_program import assembly, dma_load_bytes
 from chipyard.arena import relocate, relocate_assembly
 from smol_full_phases import V1, V2

@@ -10,6 +10,7 @@ import subprocess
 import sys
 import time
 
+import kernel_library  # noqa: E402,F401
 from atlas_path_guard import checked
 from atlas_tooling import sha256
 from atlas_program import code_sources
@@ -101,7 +102,7 @@ class SegmentRunner:
             path = checked(Path(module.__file__).absolute())
             self.pins[str(path)] = sha256(path)
         for name, expected in code_sources(traffic_reuse=True).items():
-            path = checked(tools / name)
+            path = checked(kernel_library.source_path(name))
             if self.workload.VERIFY_PROGRAM_PINS:
                 assert sha256(path) == expected, "changed public program generator"
             self.pins[str(path)] = expected

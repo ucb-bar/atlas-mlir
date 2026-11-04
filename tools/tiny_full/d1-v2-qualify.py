@@ -18,6 +18,7 @@ spec = importlib.util.spec_from_file_location('d1_v2_support', ATLAS_HELPERS / '
 s = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(s)
 q = s.load('d1-qualify')
+import kernel_library  # noqa: E402  (d1-qualify put tools/ on sys.path)
 legacy_from_capture = q.from_capture
 legacy_harness = q.harness
 legacy_current_report = q.current_report
@@ -64,7 +65,7 @@ def from_capture(mapping, bundle, item, model, model_sources, harness_sources):
         raise ValueError('attention-v2 is not an actual tracked original47 functional execution')
     attention_model_inventory(record, model_sources)
     closure = record.get('harness_sources_before')
-    required = [ATLAS_ROOT / 'tools'/name for name in
+    required = [ATLAS_ROOT / kernel_library.relative_path(name) for name in
                 ('tiny_full/attention_v2_worker.py', 'atlas_execution.py', 'atlas_path_guard.py',
                  'atlas_attention_v2_program.py', 'atlas_program_checks.py')]
     if (not isinstance(closure, dict) or not closure or closure != record.get('harness_sources_after')

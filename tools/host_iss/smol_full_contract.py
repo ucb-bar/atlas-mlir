@@ -10,6 +10,7 @@ import numpy as np
 from bundle import EPILOGUE, verify_kernel_receipt
 from smol_full_plan import calls, reference_geometry, validate_reference
 from smol_full_phases import execution_profile
+import kernel_library  # noqa: E402,F401
 from atlas_program import assembly, dma_load_bytes
 from chipyard.arena import DEFAULT_ARENA, relocate, relocate_assembly
 from placement import placement, arena_extent

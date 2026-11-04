@@ -22,6 +22,7 @@ sys.path.insert(0, str(TOOLS / "chipyard"))
 import resnet_kernels as kernels
 import run_sim
 from atlas_host_build import elf_sections
+import kernel_library  # noqa: E402,F401
 from atlas_tooling import sha
 
 

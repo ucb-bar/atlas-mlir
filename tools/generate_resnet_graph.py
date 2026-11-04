@@ -11,6 +11,7 @@ import struct
 try:
     from .atlas_path_guard import checked
 except ImportError:
+    import kernel_library  # noqa: E402,F401
     from atlas_path_guard import checked
 from atlas_tooling import write_json, sha
 

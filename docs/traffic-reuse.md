@@ -50,9 +50,10 @@ Shared symbolic tests check tile origins and output halves; encoded tests guard 
 
 ## Running
 
-Put `tools` on `PYTHONPATH` and use the same physical dimensions and exponent as the captured contraction.
+Put `tools` on `PYTHONPATH` and use the same physical dimensions and exponent as the captured contraction. `import kernel_library` puts the generators in the `third_party/atlas-kernels` submodule on `sys.path`.
 
 ```python
+import kernel_library
 from atlas_program import assembly, code_sources, dma_load_bytes
 
 m, k, n = 128, 3072, 768

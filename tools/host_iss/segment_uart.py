@@ -1,6 +1,7 @@
 """Optional functional UART transport during normal segment guest startup."""
 from pathlib import Path
 
+import kernel_library  # noqa: E402,F401
 from atlas_path_guard import checked
 from atlas_tooling import sha256
 from run import select_uart_bridge

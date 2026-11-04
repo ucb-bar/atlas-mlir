@@ -13,6 +13,7 @@ from unittest import mock
 ROOT = Path(__file__).absolute().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
 sys.path.insert(0, str(ROOT / "tools/chipyard"))
+import kernel_library  # noqa: E402,F401
 import atlas_program
 from atlas_host_build import GRAPH_PROGRAM_WORDS, validate_graph_program, wrap
 from atlas_host_layout import ATLAS_IMEM_BYTES

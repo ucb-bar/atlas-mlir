@@ -1,6 +1,7 @@
 """Explicit source binding for the unchanged original M1/M2 attention model."""
 import subprocess
 import sys
+import kernel_library  # noqa: E402,F401
 from atlas_path_guard import checked
 from atlas_tooling import sha256
 from run_model_tile import model_sources

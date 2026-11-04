@@ -8,6 +8,7 @@ import sys
 import time
 import numpy as np
 from build_smol_full_host import relocation_pairs, relocation_mapper
+import kernel_library  # noqa: E402,F401
 from atlas_path_guard import checked, map_metadata_paths
 
 
@@ -35,7 +36,7 @@ def main():
         return checked(path).read_bytes()
     pin(__file__)
     pin(Path(__file__).with_name('build_smol_full_host.py'))
-    pin(Path(__file__).with_name('atlas_path_guard.py'))
+    pin(kernel_library.source_path('atlas_path_guard.py'))
     raw = read(args.replay)
     replay = map_metadata_paths(json.loads(raw), relocation_mapper(relocation_pairs(args.relocate)))
     if replay['status'] != 'PASS_ATLAS_ARITHMETIC_FULL_POLICY_REPLAY':

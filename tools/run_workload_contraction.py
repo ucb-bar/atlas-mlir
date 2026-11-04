@@ -15,13 +15,15 @@ import struct
 import sys
 import time
 import traceback
+import zipfile
 import numpy as np
+import kernel_library  # noqa: E402,F401
 from atlas_vector_arithmetic import ordered_matmul, rescale_bf16_array
-from atlas_program import assembly, dma_load_bytes, preflight_bundle
+from atlas_program import assembly, dma_load_bytes
 from atlas_path_guard import checked as safe_path
 from atlas_tooling import sha256, write_json
 from run_model_tile import (load_bundle, configure_model, encode_operands, execute_tile, input_sources, model_binding,
-    metrics)
+    metrics, validate_archive_members)
 
 
 def resource_plan(m, k, n):
@@ -69,16 +71,29 @@ def admit_program(words):
         raise ValueError("Require <=8192 instruction words and exactly one terminal ECALL")
 
 
+def preflight_bundle(args):
+    """Admit the NPZ central directory before any input digest or content read."""
+    if args.smoke:
+        if args.input or args.manifest:
+            raise ValueError("--smoke excludes --input/--manifest")
+        return
+    if not args.input or not args.manifest:
+        raise ValueError("require --input and --manifest, or --smoke")
+    with zipfile.ZipFile(safe_path(args.input)) as archive:
+        validate_archive_members(archive.infolist())
+
+
 def code_sources():
     names = ("run_workload_contraction.py", "atlas_program.py", "run_model_tile.py", "atlas_tile_arithmetic.py",
         "atlas_vector_arithmetic.py")
-    expected = Path(__file__).absolute().parent
-    for name in names:
+    # This script and run_model_tile.py are in tools/; the other three are atlas-kernels modules.
+    paths = {name: safe_path(kernel_library.source_path(name)) for name in names}
+    for name, expected in paths.items():
         module = sys.modules.get(Path(name).stem)
         filename = __file__ if name == "run_workload_contraction.py" else getattr(module, "__file__", None)
-        if filename is None or safe_path(filename) != safe_path(expected / name):
+        if filename is None or safe_path(filename) != expected:
             raise ValueError("Workload helper imported outside bound producer source: " + name)
-    return {name: sha256(expected / name) for name in names}
+    return {name: sha256(path) for name, path in paths.items()}
 
 
 def run(args, out, receipt):
@@ -89,7 +104,7 @@ def run(args, out, receipt):
     snapshot = out / "producer-sources"
     snapshot.mkdir()
     for name, digest in before.items():
-        (snapshot / name).write_bytes(safe_path(Path(__file__).with_name(name)).read_bytes())
+        (snapshot / name).write_bytes(safe_path(kernel_library.source_path(name)).read_bytes())
         if sha256(snapshot / name) != digest:
             raise ValueError("Producer changed while snapshotting")
     model, torch, assemble, pin = configure_model(root)

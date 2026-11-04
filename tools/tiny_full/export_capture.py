@@ -18,6 +18,7 @@ import sys
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).absolute().parents[1]))
+import kernel_library  # noqa: E402,F401
 from atlas_path_guard import checked as physical_checked
 from atlas_tooling import sha256
 from compile_workload_inputs import pack_activation, pack_weights, pack_output
@@ -197,7 +198,7 @@ def export(args):
     for name in ("compile_workload_inputs.py", "run_model_tile.py", "run_workload_contraction.py",
                  "atlas_program.py", "atlas_path_guard.py", "atlas_tooling.py", "atlas_tile_arithmetic.py",
                  "atlas_vector_arithmetic.py", "atlas_host_layout.py"):
-        path = checked(Path(__file__).absolute().parents[1] / name)
+        path = checked(kernel_library.source_path(name))
         module = sys.modules.get(Path(name).stem)
         if module is None or checked(module.__file__) != path:
             raise ValueError("export helper imported from another source")

@@ -8,6 +8,7 @@ from concurrent.futures import ThreadPoolExecutor
 import numpy as np
 
 from atlas_host_layout import fp8_output_offset
+import kernel_library  # noqa: E402,F401
 from atlas_program import assembly, dma_load_bytes
 from atlas_vector_arithmetic import ordered_matmul, rescale_bf16_array
 

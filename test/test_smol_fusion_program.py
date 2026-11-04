@@ -8,6 +8,7 @@ import unittest
 
 sys.path[:0] = [str(Path(__file__).absolute().parents[1]/"tools"),
                 str(Path(__file__).absolute().parents[1]/"tools/host_iss")]
+import kernel_library  # noqa: E402,F401
 from atlas_program import assembly, dma_load_bytes
 from chipyard.arena import relocate_assembly
 from smol_fusion_program import stage_panel, channel_tiles

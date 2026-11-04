@@ -14,6 +14,7 @@ import sys
 
 import numpy as np
 
+import kernel_library  # noqa: E402,F401
 from atlas_path_guard import checked
 from atlas_program import assembly, dma_load_bytes
 sys.path.insert(0, str(Path(__file__).absolute().parent/'host_iss'))
@@ -241,12 +242,12 @@ def main():
             return content
         attention_kernels = export_attention(capture['attention_reference']['kernels'], load_capture, asset, assemble)
     for name in ('smol_attention_assets.py', 'atlas_attention_v2_program.py', 'smol_model_binding.py'):
-        path = safe_path(__file__).with_name(name)
+        path = safe_path(kernel_library.source_path(name))
         merge_pin(path, sha(path.read_bytes()))
     if mode != 'none':
         from atlas_program import code_sources
         for name in [*code_sources(traffic_reuse=True),'smol_fusion_assets.py','smol_fusion_program.py','smol_fusion_fp8.py']:
-            path=safe_path(__file__).with_name(name);merge_pin(path,sha(path.read_bytes()))
+            path=safe_path(kernel_library.source_path(name));merge_pin(path,sha(path.read_bytes()))
     model_after = model_binding(args.model_root)
     if model_before != model_after:
         raise ValueError('Assembler model binding changed during export')

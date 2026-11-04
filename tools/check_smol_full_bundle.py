@@ -11,6 +11,7 @@ import sys
 
 ROOT = Path(__file__).absolute().parents[1]
 sys.path[:0] = [str(ROOT / 'tools'), str(ROOT / 'tools/host_iss')]
+import kernel_library  # noqa: E402,F401
 from atlas_path_guard import checked
 from atlas_tooling import sha256, write_json
 from full_bundle import FullBundle
@@ -27,8 +28,9 @@ def fusion_source_pins(provenance):
              or bool(provenance.get('call_views')))
     if not fused:
         return {}
-    return {str(checked(ROOT / 'tools' / name)): sha256(ROOT / 'tools' / name)
-            for name in ('smol_fusion_assets.py', 'smol_fusion_program.py', 'smol_fusion_fp8.py')}
+    paths = [ROOT / kernel_library.relative_path(name)
+             for name in ('smol_fusion_assets.py', 'smol_fusion_program.py', 'smol_fusion_fp8.py')]
+    return {str(checked(path)): sha256(path) for path in paths}
 
 
 def main():
@@ -53,7 +55,7 @@ def main():
         for name in ('atlas_path_guard', 'atlas_tooling', 'full_bundle', 'block_bundle', 'bundle', 'placement',
                      'elf_image', 'run_model_tile', 'smol_model_binding', 'smol_attention_assets', 'atlas_attention_v2_program', 'smol_full_contract', 'chipyard.arena'):
             files.append(checked(importlib.import_module(name).__file__))
-        files.extend(ROOT / 'tools' / name for name in code_sources(traffic_reuse=True))
+        files.extend(ROOT / kernel_library.relative_path(name) for name in code_sources(traffic_reuse=True))
         pins.update({str(checked(path)): sha256(path) for path in files})
         _, _, assemble, _ = configure_model(args.model_root)
         before = model_binding(args.model_root)

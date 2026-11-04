@@ -13,6 +13,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).absolute().parents[1] / 'tools/chipyard'))
 import block_kernels as kernels
+import kernel_library  # noqa: E402,F401
 from atlas_tooling import Admission, sha
 from full_bundle_fixture import full_bundle_fixture
 

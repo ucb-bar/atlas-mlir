@@ -9,17 +9,18 @@ from unittest.mock import patch
 ROOT = Path(__file__).absolute().parents[1]
 sys.path[:0] = [str(ROOT / 'tools'), str(ROOT / 'tools/host_iss')]
 import check_smol_full_bundle as audit
+import kernel_library
 
 
 class AuditSourcesTest(unittest.TestCase):
     def run_audit(self, mode, drift):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            tools = root / 'tools'
-            tools.mkdir()
             names = ('smol_fusion_assets.py', 'smol_fusion_program.py', 'smol_fusion_fp8.py')
             for name in (*names, 'smol_full_plan.py'):
-                (tools / name).write_text('# initial\n')
+                path = root / kernel_library.relative_path(name)
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text('# initial\n')
             bundle_path = root / 'bundle'
             bundle_path.mkdir()
             (bundle_path / 'provenance.json').write_text(json.dumps(dict(fusion_set=mode)))
@@ -34,7 +35,7 @@ class AuditSourcesTest(unittest.TestCase):
 
                 def __init__(self, *args):
                     if drift:
-                        (tools / drift).write_text('# changed during bundle validation\n')
+                        (root / kernel_library.relative_path(drift)).write_text('# changed during bundle validation\n')
 
                 def read(self, name): return b'elf'
                 def verify_bookends(self): pass
@@ -49,7 +50,7 @@ class AuditSourcesTest(unittest.TestCase):
                  patch.object(sys, 'argv', ['audit', '--bundle', str(bundle_path), '--model-root', str(root),
                                           '--out', str(root / 'receipt.json')]):
                 status = audit.main()
-            return status, receipt, {str(tools / name) for name in names}
+            return status, receipt, {str(root / kernel_library.relative_path(name)) for name in names}
 
     def test_all_fused_recipes_are_entry_and_end_pinned(self):
         status, receipt, names = self.run_audit('fc1-bias-gelu-fp8', None)

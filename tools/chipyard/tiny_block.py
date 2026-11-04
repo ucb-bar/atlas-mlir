@@ -15,6 +15,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path[:0] = [str(ROOT / 'tools'), str(ROOT / 'tools/host_iss')]
+import kernel_library  # noqa: E402,F401
 from atlas_path_guard import checked
 from atlas_program import assembly, dma_load_bytes, code_sources
 from atlas_tooling import sha, write_json as write
@@ -76,7 +77,7 @@ def build(a):
         for module in ('arena', 'elf_image', 'atlas_tooling', 'atlas_path_guard'):
             read(Path(sys.modules[module].__file__))
         for n, d in code_sources(traffic_reuse=True).items():
-            if sha(read(ROOT / 'tools' / n)) != d:
+            if sha(read(ROOT / kernel_library.relative_path(n))) != d:
                 raise ValueError(f'program source hash mismatch: {n}')
         retained = checked(a.retained)
         retained_raw = read(retained / 'build.json')

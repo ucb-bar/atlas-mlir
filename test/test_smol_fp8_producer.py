@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import numpy as np
 
 sys.path[:0] = [str(Path(__file__).absolute().parents[1]/'tools')]
+import kernel_library  # noqa: E402,F401
 from atlas_epilogue import Epilogue
 from atlas_program import dma_load_bytes
 from smol_fusion_fp8 import stage_fc1_fp8

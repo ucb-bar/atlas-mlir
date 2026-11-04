@@ -20,6 +20,7 @@ ATLAS_HELPERS = ATLAS_ROOT/'tools/tiny_full'
 MERLIN_HELPERS = MERLIN_ROOT/'examples/atlas/comparisons'
 MODEL_ROOT = Path(os.environ['ATLAS_NPU_MODEL_ROOT']).absolute()
 sys.path.insert(0, str(ATLAS_ROOT / 'tools'))
+import kernel_library  # noqa: E402,F401
 from atlas_path_guard import checked
 
 MODEL_PIN = "47b8599d8ffbe5ddd96059ffe2b5be2427a410f5"

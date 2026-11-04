@@ -12,6 +12,7 @@ import sys
 sys.dont_write_bytecode = True
 PACKAGE = Path(__file__).absolute().parent
 sys.path.insert(0,str(PACKAGE.parent))
+import kernel_library  # noqa: E402,F401
 from atlas_path_guard import checked
 from smol_full_phases import execution_profile
 

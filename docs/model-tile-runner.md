@@ -60,7 +60,7 @@ failure. Source and input hashes are rechecked before success.
 
 ## Workload contractions
 
-`tools/atlas_program.py` supplies assembly and input checks to
+`third_party/atlas-kernels/kernels/projection_gemm/atlas_program.py` supplies assembly and input checks to
 `tools/compile_workload_inputs.py` and `tools/run_workload_contraction.py`. The
 latter accepts finite FP32 physical operands with positive M/N/K multiples of
 32, K<=8192, at most 1,048,576 output cells, at most 64 MiB guarded DRAM, and at
@@ -77,7 +77,7 @@ and hashed before and after execution. For complete host integration, use the
 ## Arithmetic providers and checks
 
 The default scalar oracle uses exact rational arithmetic with bounded caches.
-The opt-in NumPy module `tools/atlas_vector_arithmetic.py` exposes
+The opt-in NumPy module `third_party/atlas-kernels/lib/golden/atlas_vector_arithmetic.py` exposes
 `ordered_matmul(uint8[M,K], uint8[K,N]) -> uint16[M,N]`, `round_bf16(float64) ->
 uint16`, and `rescale_bf16_array(uint16, exponent) -> uint16`. Callers
 explicitly select and hash that provider. Both implementations visit K in order
@@ -86,7 +86,8 @@ Binary64 intermediates are exact for the finite FP8 grid and bounded BF16
 accumulator; the module docstring gives the proof.
 
 ```sh
-PYTHONPATH=tools:test python -m unittest test_tile_arithmetic test_vector_arithmetic
+PYTHONPATH=tools:test python -m unittest test_tile_arithmetic
+python -m unittest discover -s third_party/atlas-kernels/lib/tests -p test_vector_arithmetic.py
 ```
 
 These tests compare finite FP8 products, all finite BF16 decodes, ordered

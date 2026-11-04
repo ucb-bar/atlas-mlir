@@ -26,7 +26,12 @@ side.
 Use MLIR and LLVM from one installation (tested with LLVM/MLIR 23.0.0git,
 `a47bddccec30255619bb8c37fa59700e661d4e66`).
 
+Kernel generators come from the pinned `third_party/atlas-kernels` submodule
+([ucb-bar/atlas-kernels](https://github.com/ucb-bar/atlas-kernels)); clone with
+`--recurse-submodules` or run `git submodule update --init` first.
+
 ```sh
+git submodule update --init third_party/atlas-kernels
 python -m pip install -e '.[test]'
 cmake -S . -B build -G Ninja \
   -DMLIR_DIR=/path/to/llvm-install/lib/cmake/mlir -DCMAKE_BUILD_TYPE=Release \

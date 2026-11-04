@@ -6,6 +6,7 @@ import struct
 
 import numpy as np
 from atlas_host_layout import ATLAS_IMEM_BYTES
+import kernel_library  # noqa: E402,F401
 from atlas_attention_v2_program import AttentionV2Config, assembly_v2, stage_v2, unpack_tiles, pack_output_v2, unpack_output_v2
 
 

@@ -5,6 +5,7 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).absolute().parents[1] / "host_iss"))
 
+import kernel_library  # noqa: E402,F401
 from atlas_epilogue import Epilogue, Step, TileInput
 from atlas_program import assembly, dma_load_bytes
 from atlas_program_checks import check_matrix_registers

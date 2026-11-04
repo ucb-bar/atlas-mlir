@@ -2,6 +2,7 @@
 import hashlib
 import numpy as np
 from smol_full_plan import calls
+import kernel_library  # noqa: E402,F401
 from atlas_program import dma_load_bytes
 
 SETS = ('none', 'vision-bias', 'vision-bias-gelu', 'fc1-bias-gelu', 'connector',

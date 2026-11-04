@@ -13,6 +13,7 @@ import numpy as np
 
 ROOT = Path(__file__).absolute().parents[1]
 sys.path.insert(0, str(ROOT / 'tools'))
+import kernel_library  # noqa: E402,F401
 from atlas_path_guard import checked as safe
 from test_smol_policy_raw import Panel, Call, Context, Buffer
 

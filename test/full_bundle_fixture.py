@@ -2,6 +2,7 @@
 import json
 import struct
 
+import kernel_library  # noqa: E402,F401
 from atlas_tooling import sha
 
 

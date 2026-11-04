@@ -16,6 +16,7 @@ import numpy as np
 
 ROOT = Path(__file__).absolute().parents[2]
 sys.path[:0] = [str(ROOT / "tools"), str(ROOT / "tools/host_iss")]
+import kernel_library  # noqa: E402,F401
 from atlas_attention_program import AttentionConfig, assembly as attention_assembly, pack_tiles, stage, unpack_tiles
 from atlas_tooling import sha256
 from atlas_path_guard import lexical_absolute_path
@@ -115,7 +116,8 @@ class Capture:
         original = lexical_absolute_path(path)
         matches = [(old, new) for old, new in self.relocations if original == old or old in original.parents]
         old, new = max(matches, key=lambda pair: len(pair[0].parts)) if matches else (original, original)
-        path = checked(new / original.relative_to(old))
+        # Records made before the kernel move name tools/<module>.py; follow it into atlas-kernels.
+        path = checked(kernel_library.moved_path(new / original.relative_to(old)))
         try:
             actual = sha256(path)
         except FileNotFoundError:
@@ -766,16 +768,16 @@ def _export_attention(args, native_checker=None, proof_source=None):
         data["qualification"] = {"all_launches_exact": False, "attention_capture_executed": True,
             "projection_expected_source": "capture arithmetic; execution qualification required"}
     for path in (Path(__file__), Path(__file__).with_name("export_capture.py"),
-                 ROOT / "tools/atlas_attention_program.py", ROOT / "tools/chipyard/arena.py"):
+                 kernel_library.source_path("atlas_attention_program.py"), ROOT / "tools/chipyard/arena.py"):
         capture.pin(path)
     if attention_version == 2:
-        for path in (ROOT / "tools/atlas_attention_v2_program.py", Path(__file__).with_name("attention_v2_export.py"),
-                     ROOT / "tools/atlas_program_checks.py"):
+        for path in (kernel_library.source_path("atlas_attention_v2_program.py"), Path(__file__).with_name("attention_v2_export.py"),
+                     kernel_library.source_path("atlas_program_checks.py")):
             capture.pin(path)
     if fused:
         from atlas_program import code_sources
         for name in code_sources(traffic_reuse=True):
-            capture.pin(ROOT / "tools" / name)
+            capture.pin(kernel_library.source_path(name))
         for name in ("fusion.py", "fusion_export.py"):
             capture.pin(Path(__file__).with_name(name))
     if post_o_norm:
@@ -783,7 +785,7 @@ def _export_attention(args, native_checker=None, proof_source=None):
             capture.pin(Path(__file__).with_name(name))
         for name in ("atlas_norm_postpass.py", "atlas_rmsnorm_postpass.py", "atlas_resident_output.py",
                      "atlas_rope_postpass.py"):
-            capture.pin(ROOT / "tools" / name)
+            capture.pin(kernel_library.source_path(name))
     data["model"] = binding()
     if any(data["model"]["imported_source_sha256"].get(name) != value
            for name, value in model_before["imported_source_sha256"].items()):

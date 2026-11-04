@@ -6,6 +6,7 @@ Keep HTIF and require the owner to match the selected physical DRAM contract.
 import json
 import struct
 
+import kernel_library  # noqa: E402,F401
 from atlas_tooling import sha
 from elf_image import Image
 

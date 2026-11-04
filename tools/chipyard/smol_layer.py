@@ -16,6 +16,7 @@ import time
 ROOT = Path(__file__).absolute().parents[2]
 sys.path.insert(0, str(ROOT / 'tools'))
 sys.path.insert(0, str(ROOT / 'tools/host_iss'))
+import kernel_library  # noqa: E402,F401
 from atlas_path_guard import checked
 from atlas_program import assembly, code_sources, dma_load_bytes
 from elf_image import Image, mmio_sites
@@ -69,9 +70,9 @@ def build(args):
         window(arena_base, 3625472)
         if args.target == 'firesim': read(Path(__file__).with_name('firesim_target.py'))
         for name, digest in code_sources(traffic_reuse=True).items():
-            read(ROOT/'tools'/name, digest)
+            read(ROOT/kernel_library.relative_path(name), digest)
         for name in ('atlas_path_guard.py','atlas_tooling.py','host_iss/elf_image.py','host_iss/bundle.py'):
-            read(ROOT/'tools'/name)
+            read(ROOT/kernel_library.relative_path(name))
         git = subprocess.run(['git', '-C', str(ROOT), 'status', '--porcelain'],
                              check=True, capture_output=True, text=True)
         if git.stdout: raise ValueError('commit all source changes before build')

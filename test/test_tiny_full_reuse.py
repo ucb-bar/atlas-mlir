@@ -6,6 +6,7 @@ import unittest
 
 TOOLS = Path(__file__).absolute().parents[1]/'tools'
 sys.path[:0] = [str(TOOLS),str(TOOLS/'host_iss')]
+import kernel_library  # noqa: E402,F401
 from atlas_program import dma_load_bytes
 from tiny_full_contract import (CYCLE_CAP,parameter_geometry,plan,reference_geometry,validate_plan)
 

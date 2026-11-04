@@ -21,6 +21,7 @@ import sys
 sys.dont_write_bytecode = True
 PACKAGE = Path(__file__).absolute().parent
 sys.path.insert(0, str(PACKAGE.parent))
+import kernel_library  # noqa: E402,F401
 from atlas_epilogue import Epilogue, Step, TileInput
 from atlas_path_guard import checked
 from atlas_program import assembly, legacy_epilogue_assembly

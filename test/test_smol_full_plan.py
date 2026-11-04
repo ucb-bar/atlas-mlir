@@ -7,6 +7,7 @@ import unittest
 
 sys.path.insert(0, str(Path(__file__).absolute().parents[1] / 'tools'))
 from smol_full_plan import calls, panels, validate_reference
+import kernel_library  # noqa: E402,F401
 from atlas_path_guard import checked
 
 

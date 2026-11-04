@@ -10,6 +10,7 @@ import tempfile
 import unittest
 import generate_resnet_graph as generate
 from atlas_host_build import GRAPH_PROGRAM_WORDS
+import kernel_library  # noqa: E402,F401
 from atlas_tile_arithmetic import f32_to_bf16_bits, pack_bf16, tensor_scale_exponent
 
 

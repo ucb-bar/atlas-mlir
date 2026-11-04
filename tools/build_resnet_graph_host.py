@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Link a bound 54-kernel host graph ELF; linking does not execute the ELF."""
 
+import kernel_library  # noqa: E402,F401
 from atlas_tooling import Admission, sha, write_json, run_command
 
 import argparse

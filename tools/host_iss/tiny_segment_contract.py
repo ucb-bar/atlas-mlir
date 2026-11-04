@@ -6,6 +6,7 @@ import struct
 from bundle import runtime_program, verify_kernel_receipt
 from placement import placement
 from segment_boundary import SegmentChain
+import kernel_library  # noqa: E402,F401
 from atlas_program import assembly
 from chipyard.arena import DEFAULT_ARENA, relocate_assembly
 import tiny_full_contract as full

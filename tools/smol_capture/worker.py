@@ -15,6 +15,7 @@ import traceback
 sys.dont_write_bytecode=True
 ROOT=Path(__file__).absolute().parent
 sys.path.insert(0,str(ROOT.parent))
+import kernel_library  # noqa: E402,F401
 from atlas_path_guard import checked
 parser=argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--backend',choices=('attention','projection'),required=True)

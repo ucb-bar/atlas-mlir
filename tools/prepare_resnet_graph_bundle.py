@@ -10,6 +10,7 @@ import sys
 
 from atlas_host_build import validate_graph_program
 from atlas_host_layout import ATLAS_DRAM_BASE
+import kernel_library  # noqa: E402,F401
 from atlas_path_guard import checked
 from atlas_program import assembly, code_sources, dma_load_bytes
 from atlas_tooling import Admission, sha, write_json
@@ -52,12 +53,12 @@ def main():
     source_pins = {str(args.templates): sha(template_bytes), str(reference_path): sha(reference_bytes),
         str(build_path): sha(build_bytes)}
     for name, digest in code_sources(traffic_reuse=True).items():
-        path = own / name
+        path = kernel_library.source_path(name)
         admission.read(path, digest)
         source_pins[str(path)] = digest
     for path in (Path(__file__).absolute(), own / "build_resnet_graph_host.py", own / "atlas_host_build.py",
             own / "chipyard/arena.py", own / "host_iss/bundle.py", own / "host_iss/placement.py",
-            own / "atlas_tooling.py", own / "atlas_path_guard.py"):
+            kernel_library.source_path("atlas_tooling.py"), kernel_library.source_path("atlas_path_guard.py")):
         source_pins[str(path)] = sha(admission.read(path))
     for path, digest in templates["source_bindings"].items():
         admission.read(path, digest)

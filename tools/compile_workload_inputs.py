@@ -13,6 +13,7 @@ import struct
 
 import numpy as np
 
+import kernel_library  # noqa: E402,F401
 from atlas_program import assembly, dma_load_bytes
 from run_model_tile import encode_operands
 from run_workload_contraction import admit_program, physical_payload, resource_plan, validate_workload_arrays

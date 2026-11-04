@@ -11,6 +11,7 @@ from unittest.mock import patch
 from fractions import Fraction
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "tools"))
+import kernel_library  # noqa: E402,F401
 from atlas_tile_arithmetic import (bf16_round, f32_to_bf16_bits, mxu0_dot, output_halves, pack_bf16_unit, pack_bf16,
     rescale_bf16, tensor_scale_exponent)
 

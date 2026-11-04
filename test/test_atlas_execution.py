@@ -13,6 +13,7 @@ import numpy as np
 
 TOOLS = Path(__file__).absolute().parents[1] / 'tools'
 sys.path.insert(0, str(TOOLS))
+import kernel_library  # noqa: E402,F401
 from atlas_execution import Executor, MODEL_PIN
 
 

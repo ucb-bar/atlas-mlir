@@ -38,6 +38,7 @@ class BuilderTest(unittest.TestCase):
             builder.full_link(template, 128, 0xffffffc0)
 
     def test_explicit_metadata_mapping_rejects_aliases_and_preserves_original(self):
+        import kernel_library  # noqa: E402,F401
         from atlas_path_guard import map_metadata_paths
         original = {'path':'/old/a', 'inputs':{'/old/b':'digest'}}
         pairs = builder.relocation_pairs(['/old=/scratch2/reednicolas/oct27-fm/smol'])

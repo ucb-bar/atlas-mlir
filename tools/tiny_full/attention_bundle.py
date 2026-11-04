@@ -14,6 +14,7 @@ import subprocess
 
 import numpy as np
 
+import kernel_library  # noqa: E402,F401
 from atlas_path_guard import checked
 from bundle import ChecksumBundle
 

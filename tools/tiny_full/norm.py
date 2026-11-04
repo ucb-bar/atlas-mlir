@@ -5,6 +5,7 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).absolute().parents[1] / 'host_iss'))
 import numpy as np
+import kernel_library  # noqa: E402,F401
 from atlas_norm_postpass import ResidentNormEpilogue, postpass, H_WORD
 from atlas_program_checks import check_matrix_registers
 from chipyard.arena import DEFAULT_ARENA, relocate_assembly, window

@@ -16,6 +16,7 @@ from run_sim import add_simulator_arguments, positive, run_simulator, safe_path
 sys.path.insert(0, str(Path(__file__).absolute().parents[1]))
 from atlas_host_build import wrap
 from atlas_host_layout import ATLAS_DRAM_BASE
+import kernel_library  # noqa: E402,F401
 from atlas_tooling import Admission, sha, write_json
 
 ROOT = Path(__file__).absolute().parents[2]

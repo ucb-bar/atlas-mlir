@@ -8,6 +8,7 @@ import struct
 import subprocess
 import sys
 
+import kernel_library  # noqa: E402,F401
 from atlas_path_guard import checked
 from smol_capture.capture import interpreter
 

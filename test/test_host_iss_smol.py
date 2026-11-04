@@ -13,6 +13,7 @@ from unittest.mock import patch
 
 TOOLS = Path(__file__).absolute().parents[1] / "tools"
 sys.path[:0] = [str(TOOLS), str(TOOLS / "host_iss")]
+import kernel_library  # noqa: E402,F401
 from atlas_path_guard import checked
 from block_bundle import BlockBundle
 from elf_image import Image as ELFImage

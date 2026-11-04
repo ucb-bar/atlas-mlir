@@ -25,6 +25,7 @@ if MODEL_ROOT and MERLIN_ROOT:
     from tiny_full.fusion import prepare_projection
     from tiny_full.fusion_export import NATIVE_MODEL, ORIGINAL_MODEL, projection_kernel
     from attention_export import Capture as FileCapture, projection_activation
+    import kernel_library  # noqa: E402,F401
     from atlas_execution import Executor
     import tiny_fp8_pack
 

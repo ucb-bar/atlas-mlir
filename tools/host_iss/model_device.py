@@ -4,6 +4,7 @@ Runs checksum-bound workload launch sequences with one persistent device.
 No TileLink or SoC timing claim.
 """
 
+import kernel_library  # noqa: E402,F401
 from atlas_tooling import write_json, sha as digest
 from collections import Counter
 from dataclasses import replace

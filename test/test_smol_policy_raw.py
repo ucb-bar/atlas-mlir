@@ -15,6 +15,7 @@ import numpy as np
 import sys
 ROOT = Path(__file__).absolute().parents[1]
 sys.path.insert(0, str(ROOT/'tools'))
+import kernel_library  # noqa: E402,F401
 from atlas_path_guard import checked as safe
 
 

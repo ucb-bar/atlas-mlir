@@ -1,6 +1,7 @@
 """Explicit producer metadata and typed FP8 views for serialized Merlin capture."""
 import ctypes as ct
 
+import kernel_library  # noqa: E402,F401
 from smol_fusion_program import stage_panel
 from smol_fusion_fp8 import stage_fc1_fp8
 import numpy as np

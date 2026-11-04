@@ -10,6 +10,7 @@ import sys
 
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).absolute().parent / 'host_iss'))
+import kernel_library  # noqa: E402,F401
 from atlas_path_guard import checked
 from atlas_program import assembly, _reuse_module
 from atlas_weight_source import WeightSource

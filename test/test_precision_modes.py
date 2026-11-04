@@ -19,6 +19,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
+import kernel_library  # noqa: E402,F401
 import atlas_tile_arithmetic as oracle  # noqa: E402
 
 HAS_TORCH = importlib.util.find_spec("torch") is not None

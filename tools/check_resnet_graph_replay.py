@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Run the whole native C graph with strictly bound arithmetic-reference replies."""
+import kernel_library  # noqa: E402,F401
 from atlas_tooling import Admission, write_json, sha, run_command
 
 import argparse

@@ -141,6 +141,7 @@ def validate_reference(replay, manifest):
                     or previous.get('output_decode_exponent') != actual['input_decode_exponent']
                     or actual.get('a_scale') != actual['input_decode_exponent']):
                     raise ValueError('Full-policy FP8 producer/consumer bytes or fixed scale differ')
+    import kernel_library  # noqa: E402,F401
     from atlas_program import dma_load_bytes
     scales = {}
     for expected, actual in zip(expected_panels, actual_panels):

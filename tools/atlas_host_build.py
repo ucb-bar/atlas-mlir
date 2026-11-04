@@ -3,6 +3,7 @@
 import re
 import struct
 from pathlib import Path
+import kernel_library  # noqa: E402,F401
 from atlas_path_guard import checked
 from atlas_host_layout import ATLAS_DRAM_BASE, ATLAS_IMEM_BYTES
 

@@ -10,6 +10,7 @@ import re
 import struct
 import subprocess
 
+import kernel_library  # noqa: E402,F401
 from atlas_path_guard import checked
 
 ORIGINAL_PIN = '47b8599d8ffbe5ddd96059ffe2b5be2427a410f5'
@@ -133,7 +134,11 @@ class AdmissionRegistry:
                           'tools/atlas_program_reuse_common.py', 'tools/smol_fusion_program.py'}
         _require(required_tools <= set(self.catalog['atlas_sources']), 'incomplete generator source closure')
         for name,record in self.catalog['atlas_sources'].items():
-            _require(checked(self.atlas_root/self._relative(name)).read_bytes()==self._blob(record),
+            # Catalogs name generators by their tools/ path; kernels now live in atlas-kernels.
+            path = self.atlas_root/self._relative(name)
+            if path.parent == self.atlas_root/'tools' and not path.exists():
+                path = self.atlas_root/kernel_library.relative_path(path.name)
+            _require(checked(path).read_bytes()==self._blob(record),
                      'current generator/harness source differs from producer admission')
         expected = self._json(self.catalog['native_backend'])
         for field in ('backend','base_commit','sources','library_sha256','compiler_version','qualification'):

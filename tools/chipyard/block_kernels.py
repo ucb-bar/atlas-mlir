@@ -17,6 +17,7 @@ from run_sim import add_simulator_arguments, positive, run_simulator, safe_path
 sys.path.insert(0, str(Path(__file__).absolute().parents[1]))
 sys.path.insert(0, str(Path(__file__).absolute().parents[1] / 'host_iss'))
 from atlas_host_build import elf_sections, wrap
+import kernel_library  # noqa: E402,F401
 from atlas_tooling import Admission, sha, write_json
 from firesim_target import package as package_firesim
 from arena import add_arguments, audit as audit_dram, relocate, window
@@ -44,7 +45,7 @@ def full_bundle(root, workload):
     """Use the existing checksum/image provider without importing a model."""
     directory = safe_path(ROOT / "tools/host_iss")
     sys.path.insert(0, str(directory))
-    modules = {name: ROOT / "tools" / (name + ".py") for name in
+    modules = {name: ROOT / kernel_library.relative_path(name + ".py") for name in
                ("atlas_host_layout", "atlas_path_guard", "atlas_tooling")}
     modules.update({name: directory / (name + ".py") for name in
                     ("full_bundle", "bundle", "block_bundle")})
@@ -76,7 +77,7 @@ def prepare_full(bundle_root, workload, out):
         raise ValueError("fresh preparation directory required")
     sources = [Path(__file__), *(ROOT / "tools/host_iss" / filename for filename in
                ("full_bundle.py", "bundle.py", "block_bundle.py")),
-               *(ROOT / "tools" / filename for filename in
+               *(ROOT / kernel_library.relative_path(filename) for filename in
                  ("atlas_path_guard.py", "atlas_tooling.py", "atlas_host_layout.py")),
                ROOT / "tools/chipyard/run_sim.py", ROOT / "runtime/atlas_host_layout.h"]
     pins = {str(safe_path(path)): sha(safe_path(path).read_bytes()) for path in sources}

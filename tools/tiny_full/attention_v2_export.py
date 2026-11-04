@@ -6,6 +6,7 @@ import struct
 
 import numpy as np
 
+import kernel_library  # noqa: E402,F401
 from atlas_attention_v2_program import AttentionV2Config, assembly_v2, stage_v2, unpack_output_v2, unpack_tiles
 from atlas_program_checks import check_matrix_registers
 from fusion_export import original_sources
@@ -125,8 +126,7 @@ def attention_kernel_v2(capture, record, assets, assemble, arena_base):
     before, after = record['harness_sources_before'], record['harness_sources_after']
     if not before or before != after:
         raise ValueError('attention-v2 harness source bookends differ')
-    tools = Path(__file__).absolute().parents[1]
-    required = {str(tools/name) for name in ('tiny_full/attention_v2_worker.py', 'atlas_execution.py',
+    required = {str(kernel_library.source_path(name)) for name in ('tiny_full/attention_v2_worker.py', 'atlas_execution.py',
                 'atlas_path_guard.py', 'atlas_attention_v2_program.py', 'atlas_program_checks.py')}
     normalized = {}
     for path, sha in before.items():

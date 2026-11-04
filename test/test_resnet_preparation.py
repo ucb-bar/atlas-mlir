@@ -9,6 +9,7 @@ import unittest
 ROOT = Path(__file__).absolute().parents[1]
 for directory in (ROOT / "tools", ROOT / "tools/host_iss"):
     sys.path.insert(0, str(directory))
+import kernel_library  # noqa: E402,F401
 from atlas_tooling import sha
 from model_device import Device
 

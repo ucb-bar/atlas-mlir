@@ -1,5 +1,6 @@
 """Read a relocated, checksum-bound ResNet bundle with explicit input paths."""
 
+import kernel_library  # noqa: E402,F401
 from atlas_tooling import sha256 as sha
 
 import io

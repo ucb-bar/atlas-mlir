@@ -16,6 +16,7 @@ import threading
 
 from smol_capture import model as original
 from .fast_ipt import development_only_math_override, BACKEND_NAME, BASELINE_NPU_MODEL_COMMIT
+import kernel_library  # noqa: E402,F401
 from atlas_attention_v2_program import AttentionV2Config, assembly_v2
 
 _EXECUTION_LOCK = threading.Lock()

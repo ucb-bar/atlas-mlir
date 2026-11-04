@@ -11,6 +11,7 @@ sys.dont_write_bytecode = True
 PACKAGE = Path(__file__).absolute().parent
 RUNTIME = PACKAGE.parents[1]/'runtime'
 sys.path.insert(0, str(PACKAGE.parent))
+import kernel_library  # noqa: E402,F401
 from atlas_path_guard import checked
 
 DTYPES={'fp8_nhwc':'M2_FP8_NHWC','f32_vector':'M2_F32_VECTOR','bf16_tiles':'M2_BF16_TILES','f32_nchw':'M2_F32_NCHW'}

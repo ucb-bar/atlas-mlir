@@ -7,6 +7,7 @@ from pathlib import Path
 import re
 
 from atlas_host_embed import _cover_span, _mapped_regions, check_host_elf
+import kernel_library  # noqa: E402,F401
 from atlas_path_guard import checked
 from atlas_tooling import sha as digest
 from atlas_host_layout import (ATLAS_IMEM_BASE as IMEM_BASE, ATLAS_IMEM_BYTES as IMEM_BYTES,

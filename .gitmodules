@@ -1,0 +1,3 @@
+[submodule "third_party/atlas-kernels"]
+	path = third_party/atlas-kernels
+	url = https://github.com/ucb-bar/atlas-kernels.git

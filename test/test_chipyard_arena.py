@@ -99,6 +99,7 @@ class ArenaTest(unittest.TestCase):
                     replace_once(source, old, 'new')
 
     def test_raw_relocation_matches_generated_assembly_with_branches(self):
+        import kernel_library  # noqa: E402,F401
         from atlas_program import assembly
         source = assembly(32, 2048, 256, 32 * 2048 + 2048 * 256 + 256, 0, traffic_reuse=True)
         raw = assemble(source)

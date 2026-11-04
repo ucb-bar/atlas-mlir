@@ -7,6 +7,7 @@ from unittest.mock import patch
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
+import kernel_library  # noqa: E402,F401
 from atlas_tile_arithmetic import mxu0_dot, rescale_bf16
 from smol_policy_kernel import prepare
 

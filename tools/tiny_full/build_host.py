@@ -12,6 +12,7 @@ from types import SimpleNamespace
 
 ROOT = Path(__file__).absolute().parents[2]
 sys.path[:0] = [str(ROOT / "tools"), str(ROOT / "tools/host_iss")]
+import kernel_library  # noqa: E402,F401
 from atlas_path_guard import checked, lexical_absolute_path, map_metadata_paths
 from atlas_tooling import sha256
 from full_bundle import KernelAssets, FullBundle
@@ -37,7 +38,7 @@ def helper_pins(pins):
                  'atlas_path_guard','atlas_tooling','atlas_host_layout'):
         relative = 'tools/host_iss/' if name in ('full_bundle','bundle','block_bundle',
                     'tiny_full_contract','tiny_contract','elf_image') else 'tools/'
-        expected = ROOT / relative / (name+'.py')
+        expected = ROOT / relative / (name+'.py') if relative != 'tools/' else ROOT / kernel_library.relative_path(name+'.py')
         module = sys.modules.get(name)
         if module is None or checked(module.__file__) != expected:
             raise ValueError('build helper imported from another source: '+name)

@@ -4,6 +4,7 @@ Protocol: https://sourceware.org/gdb/current/onlinedocs/gdb.html/Overview.html
 Packets: https://sourceware.org/gdb/current/onlinedocs/gdb.html/Packets.html
 """
 
+import kernel_library  # noqa: E402,F401
 from atlas_tooling import sha
 import json
 import re

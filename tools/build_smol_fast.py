@@ -14,6 +14,7 @@ import shlex
 import subprocess
 import time
 
+import kernel_library  # noqa: E402,F401
 from atlas_path_guard import checked
 
 

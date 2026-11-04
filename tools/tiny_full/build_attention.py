@@ -12,6 +12,7 @@ from types import SimpleNamespace
 
 ROOT = Path(__file__).absolute().parents[2]
 sys.path[:0] = [str(ROOT / 'tools'), str(ROOT / 'tools/host_iss')]
+import kernel_library  # noqa: E402,F401
 from atlas_path_guard import checked
 from atlas_tooling import sha256
 from attention_bundle import AttentionBundle, require

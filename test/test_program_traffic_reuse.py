@@ -10,6 +10,7 @@ import unittest
 
 TOOLS = Path(__file__).resolve().parents[1] / "tools"
 sys.path.insert(0, str(TOOLS))
+import kernel_library  # noqa: E402,F401
 import atlas_program as program
 
 # Captured from the unmodified generator before introducing the opt-in path.
@@ -129,7 +130,7 @@ class TrafficReuseTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="atlas-reuse-sources-") as tmp:
             directory = Path(tmp)
             for name in expanded:
-                shutil.copyfile(TOOLS / name, directory / name)
+                shutil.copyfile(kernel_library.source_path(name), directory / name)
             spec = importlib.util.spec_from_file_location("copied_atlas_program", directory/"atlas_program.py")
             copied = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(copied)

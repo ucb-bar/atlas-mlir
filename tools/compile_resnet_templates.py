@@ -8,6 +8,7 @@ import json
 from pathlib import Path
 import struct
 
+import kernel_library  # noqa: E402,F401
 from atlas_program import assembly, code_sources, dma_load_bytes
 from atlas_host_build import GRAPH_PROGRAM_WORDS, validate_graph_program
 from atlas_path_guard import checked as safe_path
@@ -29,9 +30,10 @@ def main():
     if plan.get("status") != "exported_compile_plan_only" or plan.get("contraction_count") != 54:
         raise ValueError("complete 54-contraction host plan required")
     own = safe_path(Path(__file__).absolute().parent)
-    bindings = {str(path): sha256(path) for path in (Path(__file__).absolute(), own / "atlas_program.py",
-        own / "run_model_tile.py", own / "atlas_tile_arithmetic.py")}
-    bindings.update({str(own / name): digest for name, digest in code_sources(traffic_reuse=args.traffic_reuse).items()})
+    bindings = {str(path): sha256(path) for path in (Path(__file__).absolute(), kernel_library.source_path("atlas_program.py"),
+        own / "run_model_tile.py", kernel_library.source_path("atlas_tile_arithmetic.py"))}
+    bindings.update({str(kernel_library.source_path(name)): digest
+                     for name, digest in code_sources(traffic_reuse=args.traffic_reuse).items()})
     bindings[str(own / "atlas_host_build.py")] = sha256(own / "atlas_host_build.py")
     root = safe_path(args.model_root)
     _, _, assemble, _ = configure_model(root)

@@ -8,6 +8,7 @@ import unittest
 ROOT = Path(__file__).absolute().parents[1]
 sys.path[:0] = [str(ROOT/'tools'), str(ROOT/'tools/tiny_full'), str(ROOT/'tools/host_iss')]
 import numpy as np
+import kernel_library  # noqa: E402,F401
 from atlas_attention_v2_program import AttentionV2Config, stage_v2
 from attention_bundle import validate_attention_v2
 from attention_v2_export import SCHEMA, attention_kernel_v2, config_from_dict, companion_c, output_spans

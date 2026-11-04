@@ -22,6 +22,7 @@ sys.dont_write_bytecode = True
 import numpy as np
 from smol_full_plan import calls, reference_geometry, validate_reference
 from smol_full_phases import execution_profile
+import kernel_library  # noqa: E402,F401
 from atlas_path_guard import checked as safe, lexical_absolute_path, map_metadata_paths
 sys.path.insert(0, str(Path(__file__).absolute().parent / 'host_iss'))
 from chipyard.arena import DEFAULT_ARENA, add_arguments as arena_arguments, audit, relocate_assembly, window
@@ -177,16 +178,16 @@ def progress_launches(manifest):
 
 def select_programs(args, captured, bundle, out, products, read):
     """Admit captured bytes before generating any selected or relocated stream."""
-    from atlas_program import assembly, code_sources, dma_load_bytes, _TRAFFIC_REUSE_MODULES
+    from atlas_program import assembly, dma_load_bytes, source_paths, _TRAFFIC_REUSE_MODULES
     from smol_model_binding import configure_model, model_binding
     _, _, assemble, _ = configure_model(args.model_root)
     args.assemble = assemble
-    for name in code_sources(traffic_reuse=args.traffic_reuse):
-        read(Path(__file__).absolute().parent / name)
+    for path in source_paths(traffic_reuse=args.traffic_reuse).values():
+        read(path)
     read(Path(__file__).with_name('run_model_tile.py'))
     read(Path(__file__).with_name('smol_model_binding.py'))
     read(Path(__file__).with_name('smol_attention_assets.py'))
-    read(Path(__file__).with_name('atlas_attention_v2_program.py'))
+    read(kernel_library.source_path('atlas_attention_v2_program.py'))
     selected = copy.deepcopy(captured)
     from smol_fusion_assets import profile, validate_program
     read(Path(__file__).with_name('smol_fusion_assets.py'))
@@ -197,7 +198,7 @@ def select_programs(args, captured, bundle, out, products, read):
         if not args.traffic_reuse or args.arena_base != 0x90000000:
             raise ValueError('Fusion requires qualified traffic reuse in the captured low arena')
         for name in ('smol_fusion_assets.py','smol_fusion_program.py','smol_fusion_fp8.py'):
-            read(Path(__file__).with_name(name))
+            read(kernel_library.source_path(name))
     selected['placement'] = args.physical
     selected['program_policy'] = 'qualified-reuse-v1' if args.traffic_reuse else 'captured-baseline-v1'
     assembled = {}

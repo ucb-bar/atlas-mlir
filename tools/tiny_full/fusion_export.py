@@ -18,7 +18,8 @@ def digest(data):
 
 def original_sources(capture, record):
     """Authenticate recorded execution dependencies against original HEAD47."""
-    capture.pin(Path(__file__).absolute().parents[1] / "atlas_execution.py")
+    import kernel_library  # noqa: E402,F401
+    capture.pin(kernel_library.module_path("atlas_execution.py"))
     from atlas_execution import Executor
     import npu_model
     if any(key in record for key in ("native_backend", "native_kind", "native_kind_sha256", "native_admission",

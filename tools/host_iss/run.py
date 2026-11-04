@@ -18,6 +18,7 @@ import time
 
 sys.path.insert(0, str(Path(__file__).absolute().parent.parent))
 
+import kernel_library  # noqa: E402,F401
 from atlas_tooling import write_json, sha as digest
 from atlas_host_layout import HEADER as LAYOUT_HEADER, HEADER_SHA256
 from elf_image import Image, mmio_sites
@@ -109,7 +110,7 @@ def pin_sources(pins, contract, workload, elf, qemu):
         from atlas_program import code_sources
         tools = Path(__file__).absolute().parents[1]
         for name, expected_hash in code_sources(traffic_reuse=True).items():
-            path = checked(tools / name)
+            path = checked(kernel_library.source_path(name))
             assert sha(path) == expected_hash, "changed full Smol generator helper"
             pins[str(path)] = expected_hash
         path = checked(tools / "smol_full_plan.py")

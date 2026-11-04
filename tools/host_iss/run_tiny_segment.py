@@ -5,6 +5,7 @@ import struct
 import sys
 
 sys.path.insert(0, str(Path(__file__).absolute().parents[1]))
+import kernel_library  # noqa: E402,F401
 from atlas_path_guard import checked
 from segment_runner import SegmentRunner
 import tiny_segment_contract as contract

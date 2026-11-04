@@ -20,6 +20,7 @@ sys.dont_write_bytecode = True
 TOOLS = Path(__file__).absolute().parents[1]
 sys.path.insert(0, str(TOOLS))
 import numpy as np
+import kernel_library  # noqa: E402,F401
 import atlas_attention_v2_program as generator
 from atlas_execution import Execution, Executor, MODEL_PIN
 from atlas_path_guard import checked
@@ -173,7 +174,7 @@ class Worker:
                 'attention v2 requires original47 with native execution disabled')
         require(os.environ.get('ATLAS_NPU_MODEL_PIN', MODEL_PIN) == MODEL_PIN, 'foreign model pin selected')
         path = checked(generator.__file__)
-        require(path == TOOLS/'atlas_attention_v2_program.py' and digest(path.read_bytes()) == GENERATOR_SHA,
+        require(path == kernel_library.module_path('atlas_attention_v2_program.py') and digest(path.read_bytes()) == GENERATOR_SHA,
                 'attention-v2 generator differs from exact upstream source')
         model_root = checked(model_root)
         require(Path(subprocess.check_output(['git', '-C', str(model_root), 'rev-parse', '--show-toplevel'],

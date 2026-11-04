@@ -11,6 +11,7 @@ import traceback
 
 sys.path.insert(0, str(Path(__file__).absolute().parents[1]))
 import numpy as np
+import kernel_library  # noqa: E402,F401
 from atlas_attention_program import AttentionConfig, assembly, pack_tiles, stage, unpack_tiles
 from atlas_execution import Executor, checked, sha
 
@@ -30,8 +31,8 @@ class Worker:
         self.executor = Executor(model_root)
         tools = Path(__file__).absolute().parents[1]
         self.sources = []
-        for path in (Path(__file__), tools / 'atlas_execution.py', tools / 'atlas_path_guard.py',
-                     tools / 'atlas_attention_program.py'):
+        for path in (Path(__file__), *(kernel_library.module_path(name) for name in
+                     ('atlas_execution.py', 'atlas_path_guard.py', 'atlas_attention_program.py'))):
             path = checked(path)
             raw = path.read_bytes()
             self.sources.append(dict(path=str(path), sha256=sha(raw), bytes=len(raw)))

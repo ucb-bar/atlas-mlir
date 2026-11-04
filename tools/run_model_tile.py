@@ -3,6 +3,7 @@
 
 from atlas_host_layout import ATLAS_DRAM_BASE
 # preflight_archive is intentionally re-exported for tools/rtl_core/probe.py's support loader.
+import kernel_library  # noqa: E402,F401
 from atlas_tooling import preflight_archive, run_command
 
 
@@ -450,11 +451,11 @@ def main():
         "started_utc": datetime.now(timezone.utc).isoformat(), "cpu_affinity": sorted(os.sched_getaffinity(0)),
         "environment": {key: os.environ.get(key) for key in ("PYTHONPATH", "OMP_NUM_THREADS", "MKL_NUM_THREADS",
         "OPENBLAS_NUM_THREADS")}, "python_version": platform.python_version(), "recipe": RECIPES[args.recipe],
-        "runner_sha256": sha256(__file__), "oracle_sha256": sha256(Path(__file__).with_name("atlas_tile_arithmetic.py"))}
+        "runner_sha256": sha256(__file__), "oracle_sha256": sha256(kernel_library.source_path("atlas_tile_arithmetic.py"))}
     try:
         run(args, out, receipt)
         receipt["code_after"] = {"runner_sha256": sha256(__file__),
-            "oracle_sha256": sha256(Path(__file__).with_name("atlas_tile_arithmetic.py"))}
+            "oracle_sha256": sha256(kernel_library.source_path("atlas_tile_arithmetic.py"))}
         if any(receipt[key] != value for key, value in receipt["code_after"].items()):
             receipt["status"] = "failed"
             raise AssertionError("runner/oracle changed during execution")

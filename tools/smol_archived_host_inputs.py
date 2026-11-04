@@ -8,6 +8,7 @@ import json
 import struct
 
 import numpy as np
+import kernel_library  # noqa: E402,F401
 from atlas_path_guard import checked
 
 

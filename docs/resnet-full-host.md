@@ -31,8 +31,8 @@ arithmetic reference:
 MERLIN=../merlin
 REFRESH="$MERLIN/examples/atlas/comparisons/refresh"
 PACKING_SHA=$(sha256sum tools/compile_workload_inputs.py | cut -d ' ' -f1)
-VECTOR_SHA=$(sha256sum tools/atlas_vector_arithmetic.py | cut -d ' ' -f1)
-SCALAR_SHA=$(sha256sum tools/atlas_tile_arithmetic.py | cut -d ' ' -f1)
+VECTOR_SHA=$(sha256sum third_party/atlas-kernels/lib/golden/atlas_vector_arithmetic.py | cut -d ' ' -f1)
+SCALAR_SHA=$(sha256sum third_party/atlas-kernels/lib/golden/atlas_tile_arithmetic.py | cut -d ' ' -f1)
 SOURCE_SHA=$(sha256sum "$SOURCE_MANIFEST" | cut -d ' ' -f1)
 python "$REFRESH/partition_resnet.py" --source-manifest "$SOURCE_MANIFEST" \
   --source-manifest-sha256 "$SOURCE_SHA" --out out/resnet-inventory
@@ -40,15 +40,15 @@ INVENTORY_SHA=$(sha256sum out/resnet-inventory/partition.json | cut -d ' ' -f1)
 python "$REFRESH/export_full_host_plan.py" --source-manifest "$SOURCE_MANIFEST" \
   --source-manifest-sha256 "$SOURCE_SHA" --inventory out/resnet-inventory/partition.json \
   --inventory-sha256 "$INVENTORY_SHA" --tile-shape 32 32 32 --atlas-tools tools \
-  --packing-provider-sha256 "$PACKING_SHA" --vector tools/atlas_vector_arithmetic.py \
-  --vector-sha256 "$VECTOR_SHA" --scalar tools/atlas_tile_arithmetic.py \
+  --packing-provider-sha256 "$PACKING_SHA" --vector third_party/atlas-kernels/lib/golden/atlas_vector_arithmetic.py \
+  --vector-sha256 "$VECTOR_SHA" --scalar third_party/atlas-kernels/lib/golden/atlas_tile_arithmetic.py \
   --scalar-sha256 "$SCALAR_SHA" --out out/resnet-provider
 PLAN_SHA=$(sha256sum out/resnet-provider/host-plan.json | cut -d ' ' -f1)
 python "$REFRESH/export_full_reference.py" --source-manifest "$SOURCE_MANIFEST" \
   --source-manifest-sha256 "$SOURCE_SHA" --host-plan out/resnet-provider/host-plan.json \
   --host-plan-sha256 "$PLAN_SHA" --atlas-tools tools \
-  --packing-provider-sha256 "$PACKING_SHA" --vector tools/atlas_vector_arithmetic.py \
-  --vector-sha256 "$VECTOR_SHA" --scalar tools/atlas_tile_arithmetic.py \
+  --packing-provider-sha256 "$PACKING_SHA" --vector third_party/atlas-kernels/lib/golden/atlas_vector_arithmetic.py \
+  --vector-sha256 "$VECTOR_SHA" --scalar third_party/atlas-kernels/lib/golden/atlas_tile_arithmetic.py \
   --scalar-sha256 "$SCALAR_SHA" --out out/resnet-provider/reference
 PROVIDER=out/resnet-provider
 ```

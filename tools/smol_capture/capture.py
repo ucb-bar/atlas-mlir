@@ -29,6 +29,7 @@ ATLAS = PACKAGE.parents[1]
 sys.path[:0] = [str(ATLAS/'tools'),str(ATLAS/'tools/host_iss')]
 import numpy as np
 import smol_capture
+import kernel_library  # noqa: E402,F401
 from atlas_program import assembly, code_sources
 from smol_full_plan import calls as graph_calls, reference_geometry
 from smol_full_phases import segments, V2
@@ -360,8 +361,8 @@ def capture_source_paths():
     require(safe(smol_capture.__file__)==safe(PACKAGE/'__init__.py'),'capture package imported outside selected source')
     sources=[PACKAGE/name for name in ('__init__.py','capture.py','worker.py','model.py','wrapper.c','fusion.py','stats.py','admission.py','fast_attention.py','fast_ipt.py')]
     sources += [ATLAS/'tools/smol_full_plan.py',ATLAS/'tools/smol_full_phases.py']
-    sources += [ATLAS/'tools'/name for name in code_sources(traffic_reuse=True)]
-    return sources+[ATLAS/'tools/smol_fusion_program.py',ATLAS/'tools/smol_fusion_fp8.py']
+    sources += [ATLAS/kernel_library.relative_path(name) for name in code_sources(traffic_reuse=True)]
+    return sources+[ATLAS/kernel_library.relative_path(name) for name in ('smol_fusion_program.py','smol_fusion_fp8.py')]
 
 
 def run(out, limit=None, resume=False):
