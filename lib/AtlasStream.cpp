@@ -557,6 +557,17 @@ LogicalResult mlir::atlas::checkAtlasDMACFG(
       if (in.release && !state.pending.empty())
         return s.ops[i]->emitOpError("completion publication requires DMA.WAIT for pending channel ")
                << s.instrs[state.pending.begin()->first].op->channel;
+      bool command = op.opClass == OpClass::DmaLoad || op.opClass == OpClass::DmaStore;
+      if (command)
+        for (const auto &[k, captured] : state.pending)
+          if (s.instrs[k].op->channel == op.channel)
+            // RTL clears the channel's busy bit when any slot retires, so a
+            // single wait cannot cover multiple outstanding launches on it.
+            return s.ops[i]->emitOpError()
+                   << "reuses DMA channel " << op.channel << " while "
+                   << s.ops[k]->getName()
+                   << " may still be in flight; add atlas.dma_wait first, "
+                      "which a delay cannot replace";
       for (const auto &[k, captured] : state.pending) {
         Footprint dma = provider.footprint(s.instrs[k], captured);
         if (!dma.error.empty())
@@ -583,12 +594,8 @@ LogicalResult mlir::atlas::checkAtlasDMACFG(
             ++it;
         }
       }
-      if (op.opClass == OpClass::DmaLoad || op.opClass == OpClass::DmaStore) {
-        auto [it, inserted] = state.pending.try_emplace(i, state.regs);
-        if (!inserted && mergeInto(it->second, state.regs) &&
-            provider.id != kNpuModelTimingProviderId)
-          return s.ops[i]->emitOpError("repeated DMA launch requires conservative interval footprints");
-      }
+      if (command)
+        state.pending.emplace(i, state.regs);
       // The redirect reads its operands before its delay slot executes.
       if (op.opClass == OpClass::Branch)
         taken = branchTaken(in, state.regs);

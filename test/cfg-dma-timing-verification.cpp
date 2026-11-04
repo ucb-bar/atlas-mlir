@@ -15,8 +15,8 @@ struct Program : IssuedStream {
     emit("atlas.alu_imm", {text("kind", "xori"), i("dst", reg), i("src", reg), i("immediate", 256)});
   }
   void prefix() { constant(4, 256); constant(5, 0); constant(7, 0x90000000); constant(9, 1024); }
-  void launch(int channel = 0) {
-    emit("atlas.dma", {text("direction", "load"), i("channel", channel), i("reg", 4), i("dram", 7), i("size", 9)});
+  void launch(int channel = 0, StringRef direction = "load", int size = 9) {
+    emit("atlas.dma", {text("direction", direction), i("channel", channel), i("reg", 4), i("dram", 7), i("size", size)});
   }
   void wait(int channel = 0) { emit("atlas.dma_wait", {i("channel", channel)}); }
   void load(int base = 5) {
@@ -155,7 +155,57 @@ void memoryHazards(MLIRContext &context) {
     size_t loop = p.ops.size(); p.launch(); p.addi(4, 4, 256); p.addi(10, 10, -1);
     Operation *back = p.branch(10); p.nop(); p.aim(back, loop);
     p.constant(5, 256); p.load(); p.wait(); p.halt();
-    p.expect("repeated launch cannot overwrite an older pending window", false, {"conflict"});
+    p.expect("repeated launch cannot overwrite an older pending window", false, {"reuses DMA channel 0", "atlas.dma_wait"});
+  }
+}
+
+void dmaSizes(MLIRContext &context) {
+  for (StringRef direction : {StringRef("load"), StringRef("store")}) {
+    for (uint32_t size : {0u, 1u, 31u, 33u, 8191u, 8192u, 8224u, 16384u, uint32_t(-32)}) {
+      Program p(context); p.prefix(); p.constant(9, size);
+      p.launch(0, direction); p.wait(); p.halt();
+      p.expect("DMA " + direction.str() + " rejects size " + std::to_string(size), false,
+               {"DMA size must be nonzero, a multiple of 32 bytes, and less than 8192 bytes"});
+    }
+    for (uint32_t size : {32u, 4096u, 8160u}) {
+      Program p(context); p.prefix(); p.constant(9, size);
+      p.launch(0, direction); p.wait(); p.halt();
+      p.expect("DMA " + direction.str() + " accepts size " + std::to_string(size), true);
+    }
+    {
+      Program p(context); p.prefix(); p.launch(0, direction, 27);
+      // Even an access below the known base may alias an unknown-sized DMA.
+      p.emit("atlas.vstore", {p.i("src", 0), p.i("base", 5), p.i("offset", 0), p.text("format", "raw")});
+      p.wait(); p.halt();
+      p.expect("unknown DMA " + direction.str() + " size remains conservative", false, {"conflict"});
+    }
+    {
+      Program p(context); p.prefix(); p.launch(0, direction, 27); p.wait(); p.halt();
+      p.expect("unknown DMA " + direction.str() + " size permits an explicit wait", true);
+    }
+  }
+}
+
+void channelReuse(MLIRContext &context) {
+  for (StringRef first : {StringRef("load"), StringRef("store")}) {
+    for (StringRef second : {StringRef("load"), StringRef("store")}) {
+      {
+        Program p(context); p.prefix(); p.launch(3, first); p.constant(4, 512); p.launch(3, second);
+        p.wait(3); p.halt();
+        p.expect("pending " + first.str() + " rejects same-channel " + second.str(), false,
+                 {"reuses DMA channel 3", "atlas.dma_wait"});
+      }
+      {
+        Program p(context); p.prefix(); p.launch(3, first); p.constant(4, 512); p.launch(4, second);
+        p.wait(3); p.wait(4); p.halt();
+        p.expect("disjoint " + first.str() + " and " + second.str() + " permit different channels", true);
+      }
+      {
+        Program p(context); p.prefix(); p.launch(3, first); p.wait(3); p.launch(3, second);
+        p.wait(3); p.halt();
+        p.expect("waited " + first.str() + " permits same-channel " + second.str(), true);
+      }
+    }
   }
 }
 
@@ -204,7 +254,7 @@ int main() {
   captured(context, false); captured(context, true);
   delayedBranch(context, true); delayedBranch(context, false);
   conditions(context); widening(context);
-  memoryHazards(context); failureCases(context);
+  memoryHazards(context); dmaSizes(context); channelReuse(context); failureCases(context);
   llvm::outs() << checks << " CFG DMA timing checks, " << failures << " failures\n";
   return failures != 0;
 }
