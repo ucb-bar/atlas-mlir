@@ -35,10 +35,11 @@ Kernel generators come from the pinned `third_party/atlas-kernels` submodule
 
 ```sh
 git submodule update --init third_party/atlas-kernels
-python -m pip install -e '.[test]'
+python -m pip install -e '.[test]' -r tools/requirements-virtual-evaluator.txt
 cmake -S . -B build -G Ninja \
   -DMLIR_DIR=/path/to/llvm-install/lib/cmake/mlir -DCMAKE_BUILD_TYPE=Release \
-  -DPython3_EXECUTABLE="$(command -v python)"
+  -DPython3_EXECUTABLE="$(command -v python)" \
+  -DATLAS_NPU_MODEL_ROOT=/path/to/npu-model
 cmake --build build --parallel 2
 mkdir -p out/tmp
 export TMPDIR="$PWD/out/tmp"
@@ -53,16 +54,9 @@ startup with ``version `GLIBCXX_3.4.30' not found``. Put that compiler's
 for CTest and every later `atlas-opt` or `atlas-emit` run;
 `build/bin/atlas-opt --version` checks it.
 
-Known environment-dependent failures: with no other environment variables set,
-9 of 232 CTest tests fail (223 pass). All nine stop on
-`No module named 'npu_model'` because the npu-model checkout is not on
-`PYTHONPATH`: `atlas-python-test_chipyard_arena`,
-`atlas-python-test_graph_program_bounds`, the six
-`atlas-python-test_virtual_evaluator_*` modules, and
-`atlas-kernels-projection_gemm-test_program_reuse_resident`.
-`atlas-python-test_host_iss_gdb_buffered` passes where local socket sends are
-allowed; in a sandbox that denies them its receiver blocks, so add
-`--timeout 60` to the `ctest` command there.
+`ATLAS_NPU_MODEL_ROOT` is a required CMake cache path to the checkout containing `npu_model` (tested with revision `47b8599`). Configure checks that the selected `Python3_EXECUTABLE` can import its assembler and RTL numerics, including their dependencies, and fails if the path is unset, invalid, or unusable. Install the model's dependencies in that interpreter before configuring; the recorded model environment uses Python 3.14. CTest prepends this path to `PYTHONPATH` for both the compiler and pinned kernel Python suites, so no ambient model import path is needed. This cache setting configures imports; it does not enable optional hardware or capture tests through environment variables of the same name.
+
+`atlas-python-test_host_iss_gdb_buffered` requires socket-pair sends. In a sandbox that denies `send`/`sendall` with `EPERM`, its writer records the error, but the receiver can block without a deadline. Add `--timeout 300` to the `ctest` command to bound that environmental failure while allowing the longer evaluator suites to complete; a timeout remains a failed test.
 
 CTest runs the portable tests with no hardware. Tests that run the RTL need
 `ATLAS_RTL_ROOT`, `ATLAS_MODEL_ROOT`, `ATLAS_ASSEMBLER_ROOT`, `ATLAS_ARC_MODEL`,
