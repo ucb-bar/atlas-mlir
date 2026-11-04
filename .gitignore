@@ -13,3 +13,6 @@
 __pycache__/
 *.pyc
 *.egg-info/
+
+# Generated Qwen results stay local; checked-in reports are Markdown.
+/examples/qwen/results/

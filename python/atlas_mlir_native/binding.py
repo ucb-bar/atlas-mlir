@@ -427,7 +427,8 @@ def _mxu_bf16_dag_request(request: KernelRequest) -> bool:
            for output in request.outputs):
         return False
     if any(
-        node.op != "mul_bf16" or node.attrs != BF16_MUL_ATTRS
+        node.op not in {"mul_bf16", "add_bf16"}
+        or node.attrs != BF16_BINARY_ATTRS[node.op]
         for constant in request.nodes if constant.op == "constant"
         for node in request.nodes if constant.id in node.inputs
     ):

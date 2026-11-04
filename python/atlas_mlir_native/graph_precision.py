@@ -367,6 +367,41 @@ def lower_diagnostic_graph(source: str, *, entry: str, policy: dict[str, object]
             ))
             replacements.append((node.id, "f32 division -> BF16 reciprocal LUT and multiply"))
         elif node.op == "source_f32_composite_unqualified":
+            if dict(node.attrs) == {
+                "numeric_semantics": "source-f32-composite-unqualified-v1",
+                "operation": "sigmoid_f32", "literal_bits": "0x3f800000",
+            }:
+                _require(node.type.shape == _TILE and len(node.inputs) == 1
+                         and node.index_maps == pointwise_identity_maps(2, 1),
+                         "unsupported sigmoid shape or indexing")
+                source = mapped(node.inputs[0])
+                _require(next(n.type for n in target_nodes if n.id == source) in {_BF16, _MXU},
+                         "sigmoid needs an admitted BF16 producer")
+                # This is a declared precision change. In particular VRECIP
+                # still requires a denominator in [1, 32]; the execution plan
+                # records that obligation, and no general sigmoid domain is claimed.
+                literals = []
+                for suffix, bits in (("minus_one", 0xbf80), ("one", 0x3f80)):
+                    name = f"{node.id}__{suffix}"
+                    literals.append(append(SemanticNode(
+                        name, "constant", (), _BF16,
+                        attrs=((BF16_MUL_ATTRS if suffix == "minus_one" else BF16_ADD_ATTRS)[0],),
+                        effect="constant")))
+                    target_constants.append(ConstantBinding(name, "bf16-le-raw", struct.pack("<H", bits).hex() * 1024))
+                negative = append(SemanticNode(
+                    f"{node.id}__negative", "mul_bf16", (source, literals[0]), _BF16,
+                    attrs=BF16_MUL_ATTRS, index_maps=pointwise_identity_maps(2, 2)))
+                exponential = append(SemanticNode(
+                    f"{node.id}__exp", "exp_bf16", (negative,), _BF16,
+                    attrs=BF16_EXP_ATTRS, index_maps=pointwise_identity_maps(2, 1)))
+                denominator = append(SemanticNode(
+                    f"{node.id}__denominator", "add_bf16", (literals[1], exponential), _BF16,
+                    attrs=BF16_ADD_ATTRS, index_maps=pointwise_identity_maps(2, 2)))
+                mapping[node.id] = append(SemanticNode(
+                    node.id, "recip_bf16", (denominator,), _BF16,
+                    attrs=BF16_RECIP_ATTRS, index_maps=pointwise_identity_maps(2, 1)))
+                replacements.append((node.id, "f32 sigmoid -> BF16 negate, exp LUT, add one, reciprocal LUT; denominator domain [1,32]"))
+                continue
             _require(node.type.shape == _TILE and node.index_maps == pointwise_identity_maps(2, 1)
                      and dict(node.attrs).get("operation") == "clamp_lower_literal"
                      and dict(node.attrs).get("literal_bits") == "0x00000000"

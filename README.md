@@ -75,6 +75,12 @@ For full end-to-end runs, see the [examples](examples/handoff/README.md): LLVM
 and ELF stages for small tiles, a captured attention + MLP block from Linalg
 to a device program and host ELF, and tiled matmuls launched from a host.
 
+## Qwen kernel experiments
+
+See the [measured results and compiler recommendations](docs/qwen-results.md)
+and the [reproduction instructions](examples/qwen/README.md). The workloads
+are plain PyTorch subgraphs of DeepSeek-R1-Distill-Qwen-1.5B.
+
 ## Read next
 
 | Doc | Covers |

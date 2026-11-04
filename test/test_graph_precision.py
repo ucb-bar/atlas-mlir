@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import dataclasses
 import json
 import os
 import subprocess
@@ -75,6 +76,28 @@ class GraphPrecisionTest(unittest.TestCase):
             {name for name, _ in result.source_to_target},
             {node.id for node in parsed.request.nodes},
         )
+
+    def test_swiglu_sigmoid_keeps_literal_and_domain_contracts(self) -> None:
+        from atlas_mlir_native.binding import BF16_ADD_ATTRS, BF16_MUL_ATTRS, _mxu_bf16_dag_request
+        from merlin.semantic_compiler.linalg_bridge import LinalgBridgeError
+
+        source = (ROOT / "test/examples/captured_qwen_swiglu32_linalg.mlir").read_text()
+        result = self.lower(source, entry="forward", policy=self.policy)
+        self.assertTrue(_mxu_bf16_dag_request(result.request))
+        self.assertEqual({c.data_hex for c in result.request.constants},
+                         {"80bf" * 1024, "803f" * 1024})
+        reciprocal = next(n for n in result.request.nodes if n.op == "recip_bf16")
+        denominator = next(n for n in result.request.nodes if n.id == reciprocal.inputs[0])
+        self.assertEqual(denominator.op, "add_bf16")
+        literal = next(n for n in result.request.nodes if n.id == denominator.inputs[0])
+        self.assertEqual(literal.attrs, (BF16_ADD_ATTRS[0],))
+        # A constant admitted for multiplication must not bypass add's domain.
+        bad_nodes = tuple(dataclasses.replace(n, attrs=(BF16_MUL_ATTRS[0],))
+                          if n.id == literal.id else n for n in result.request.nodes)
+        self.assertFalse(_mxu_bf16_dag_request(dataclasses.replace(result.request, nodes=bad_nodes)))
+        with self.assertRaises(LinalgBridgeError):
+            self.lower(source.replace("1.000000e+00", "2.000000e+00"),
+                       entry="forward", policy=self.policy)
 
     def test_node_ids_and_provenance_do_not_choose_the_rewrite(self) -> None:
         extra = "    %91 = arith.constant 0.000000e+00 : f32\n"

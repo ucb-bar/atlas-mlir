@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -54,6 +55,8 @@ def load(source: Path) -> tuple[Any, tuple[Any, ...]]:
         raise CaptureError(f"{source}: expected a loader .py or a .pt2 file")
     spec = importlib.util.spec_from_file_location(f"atlas_model_{source.stem}", source)
     module = importlib.util.module_from_spec(spec)
+    # Dataclasses consult the defining module while resolving annotations.
+    sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     loader = getattr(module, "get_model_and_inputs", None)
     if loader is None:
@@ -100,7 +103,11 @@ def capture(model: Any, inputs: tuple[Any, ...], out: Path) -> Capture:
     out.mkdir(parents=True)
     result = Capture(out / "linalg.mlir", out / "arguments.json",
                      out / "weights.safetensors", out / "inputs.safetensors")
-    result.linalg.write_text(str(module))
+    from .normalize import normalize_linalg
+    # Preserve the raw capture for diagnosing frontend changes. Generic syntax
+    # avoids an xDSL 0.65 parser limitation for multi-result linalg.generic.
+    (out / "raw-linalg.mlir").write_text(str(module))
+    result.linalg.write_text(normalize_linalg(module.operation.get_asm(print_generic_op_form=True)))
     result.arguments.write_text(json.dumps(arguments, indent=2) + "\n")
     save_file(weights, str(result.weights))
     save_file({name: tensor.detach().to(torch.float32).contiguous().numpy()
