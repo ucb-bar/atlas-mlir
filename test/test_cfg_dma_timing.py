@@ -9,13 +9,13 @@ from test_delay_insertion import OPT, ROOT, run
 
 class CFGDMATimingTest(unittest.TestCase):
     def test_real_kit_prefetch_loop(self) -> None:
-        source = (ROOT / "test/examples/cfg_dma_kit_prefetch.mlir").read_text()
+        source = (ROOT / "test/lit/cfg_dma_kit_prefetch.mlir").read_text()
         result = run(OPT, source, "--verify-atlas-machine-stream", "--verify-atlas-timing")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertNotIn("warning:", result.stderr)
 
     def test_injected_real_kit_overlap(self) -> None:
-        source = (ROOT / "test/examples/cfg_dma_kit_overlap.mlir").read_text()
+        source = (ROOT / "test/lit/cfg_dma_kit_overlap.mlir").read_text()
         # First establish that the injected program remains valid machine IR.
         stream = run(OPT, source, "--verify-atlas-machine-stream")
         self.assertEqual(stream.returncode, 0, stream.stderr)

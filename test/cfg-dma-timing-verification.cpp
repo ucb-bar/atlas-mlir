@@ -126,6 +126,39 @@ void widening(MLIRContext &context) {
   }
 }
 
+void memoryHazards(MLIRContext &context) {
+  for (StringRef direction : {StringRef("load"), StringRef("store")}) {
+    for (StringRef access : {StringRef("vstore"), StringRef("scalar_store")}) {
+      Program p(context); p.prefix();
+      p.emit("atlas.dma", {p.text("direction", direction), p.i("channel", 0), p.i("reg", 4), p.i("dram", 7), p.i("size", 9)});
+      if (access == "vstore")
+        p.emit("atlas.vstore", {p.i("src", 0), p.i("base", 4), p.i("offset", 0), p.text("format", "raw")});
+      else {
+        p.constant(6, 1024); // Scalar addresses count bytes, DMA bases count words.
+        p.emit("atlas.scalar_store", {p.text("kind", "sw"), p.i("src", 0), p.i("base", 6), p.i("offset", 0)});
+      }
+      p.wait(); p.halt();
+      p.expect("pending DMA " + direction.str() + " rejects overlapping " + access.str(), false, {"conflict"});
+    }
+  }
+  {
+    Program p(context); p.prefix(); p.launch(); p.constant(6, 1024);
+    p.emit("atlas.scalar_load", {p.text("kind", "lw"), p.i("dst", 10), p.i("base", 6), p.i("offset", 0)});
+    p.wait(); p.halt(); p.expect("scalar load cannot read a pending DMA destination", false, {"RAW conflict"});
+  }
+  {
+    Program p(context); p.prefix(); p.launch(); p.launch(1); p.wait(); p.wait(1); p.halt();
+    p.expect("cross-channel DMA overlap remains invalid", false, {"conflict"});
+  }
+  {
+    Program p(context); p.prefix(); p.constant(10, 2);
+    size_t loop = p.ops.size(); p.launch(); p.addi(4, 4, 256); p.addi(10, 10, -1);
+    Operation *back = p.branch(10); p.nop(); p.aim(back, loop);
+    p.constant(5, 256); p.load(); p.wait(); p.halt();
+    p.expect("repeated launch cannot overwrite an older pending window", false, {"conflict"});
+  }
+}
+
 void failureCases(MLIRContext &context) {
   {
     Program p(context); p.prefix(); p.launch(); p.load(27); p.wait(); p.halt();
@@ -171,7 +204,7 @@ int main() {
   captured(context, false); captured(context, true);
   delayedBranch(context, true); delayedBranch(context, false);
   conditions(context); widening(context);
-  failureCases(context);
+  memoryHazards(context); failureCases(context);
   llvm::outs() << checks << " CFG DMA timing checks, " << failures << " failures\n";
   return failures != 0;
 }
