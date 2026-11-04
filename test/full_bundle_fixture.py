@@ -4,6 +4,7 @@ import struct
 
 import kernel_library  # noqa: E402,F401
 from atlas_tooling import sha
+from bundle_payload_fixture import write_bundle_payloads
 
 
 def full_bundle_fixture(root, mutate=None, *, kernel_only=False):
@@ -26,10 +27,5 @@ def full_bundle_fixture(root, mutate=None, *, kernel_only=False):
              "assets/a.bin": activation, "assets/w.bin": weights, "assets/out.bin": expected}
     if not kernel_only:
         files.update({"host/host.elf": b"bound elf", "host/build.json": b"{}", "contract.json": b"{}"})
-    for name, raw in files.items():
-        path = root / name
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(raw)
-    (root / "SHA256SUMS").write_text("".join(sha(raw) + "  " + name + "\n"
-                                                for name, raw in files.items()))
+    write_bundle_payloads(root, files)
     return root, initial

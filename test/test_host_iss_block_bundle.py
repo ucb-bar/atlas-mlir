@@ -1,6 +1,5 @@
 """CPU-only admission checks for checksum-bound block launch manifests."""
 
-import hashlib
 import json
 from pathlib import Path
 import struct
@@ -16,6 +15,7 @@ sys.path[:0] = [str(TOOLS), str(TOOLS / "host_iss")]
 from block_bundle import BlockBundle
 from bundle import ChecksumBundle
 from model_device import Device, launch_bounds
+from bundle_payload_fixture import write_bundle_payloads
 
 
 class BlockBundleTest(unittest.TestCase):
@@ -33,12 +33,7 @@ class BlockBundleTest(unittest.TestCase):
             "kernel/initial.bin": bytes(64), "kernel/expected.bin": bytes(32)}
         mutate(manifest, files)
         files["provenance.json"] = json.dumps(manifest).encode()
-        for name, raw in files.items():
-            path = root / name
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_bytes(raw)
-        (root / "SHA256SUMS").write_text("".join(
-            hashlib.sha256(raw).hexdigest() + "  " + name + "\n" for name, raw in files.items()))
+        write_bundle_payloads(root, files)
         return root
 
     def test_valid_and_descriptor_copy(self):

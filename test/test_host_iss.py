@@ -18,6 +18,7 @@ from bundle import Bundle, EPILOGUE, relative_name, runtime_program, verify_comp
 from elf_image import memory_instruction, mmio_sites
 from gdb_remote import Remote, decode_response, frame
 from model_device import Device
+from bundle_payload_fixture import write_bundle_payloads
 
 
 class BundleTest(unittest.TestCase):
@@ -32,12 +33,7 @@ class BundleTest(unittest.TestCase):
         for index in range(54):
             for name in ("receipt.json", "program.S", "program.bin", "initial-dram.bin", "expected-bf16-tiles.bin"):
                 files[f"kernels/{index:02d}/model/{name}"] = b"test payload"
-        for name, raw in files.items():
-            path = root / name
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_bytes(raw)
-        (root / "SHA256SUMS").write_text("".join(hashlib.sha256(raw).hexdigest() + "  " + name + "\n" for name,
-            raw in files.items()))
+        write_bundle_payloads(root, files)
         return root
 
     def test_relocation_and_changed_payload(self):

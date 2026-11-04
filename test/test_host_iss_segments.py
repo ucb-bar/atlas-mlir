@@ -12,6 +12,7 @@ TOOLS = Path(__file__).absolute().parents[1] / "tools"
 sys.path[:0] = [str(TOOLS), str(TOOLS / "host_iss")]
 from placement import arena_extent, placement
 from segment_boundary import SegmentChain
+from bundle_payload_fixture import write_bundle_payloads
 
 
 def digest(raw):
@@ -38,9 +39,7 @@ class SegmentTest(unittest.TestCase):
         if mutate:
             mutate(data)
         files["segments.json"] = json.dumps(data).encode()
-        for name, raw in files.items():
-            (root / name).write_bytes(raw)
-        (root / "SHA256SUMS").write_text("".join(digest(raw) + "  " + name + "\n" for name, raw in files.items()))
+        write_bundle_payloads(root, files)
         return root, data
 
     def chain(self):
