@@ -21,7 +21,8 @@ include(AddMLIR)
 include(HandleLLVMOptions)
 include_directories(${LLVM_INCLUDE_DIRS} ${MLIR_INCLUDE_DIRS})
 include_directories(${PROJECT_SOURCE_DIR}/include ${PROJECT_BINARY_DIR}/include)
-add_definitions(${LLVM_DEFINITIONS})
+separate_arguments(ATLAS_LLVM_DEFINITIONS NATIVE_COMMAND "${LLVM_DEFINITIONS}")
+add_definitions(${ATLAS_LLVM_DEFINITIONS})
 add_subdirectory(include)
 add_subdirectory(lib)
 add_subdirectory(tools)
@@ -38,8 +39,23 @@ if(SKBUILD)
   # toolchain's RPATH, so this finds the C++ runtime they were linked against
   # rather than an older system one.
   install(CODE "set(atlas_llvm_library_dir \"${LLVM_LIBRARY_DIR}\")
-                set(atlas_strip \"${CMAKE_STRIP}\")" ${wheel})
+                set(atlas_strip \"${CMAKE_STRIP}\")
+                set(atlas_smoke_source \"${PROJECT_SOURCE_DIR}/test/examples/virtual_fp8_two_layer_mlp.mlir\")" ${wheel})
   install(CODE [[
+    # A tool can print --help yet crash when an incompatible compiler/LLVM ABI
+    # first parses MLIR. Refuse to publish such a wheel.
+    execute_process(COMMAND "$<TARGET_FILE:atlas-opt>" --atlas-compile
+      "${atlas_smoke_source}" -o "${CMAKE_INSTALL_PREFIX}/atlas-smoke.mlir"
+      RESULT_VARIABLE smoke_status ERROR_VARIABLE smoke_error)
+    if(NOT smoke_status EQUAL 0)
+      message(FATAL_ERROR "Atlas compiler smoke test failed (${smoke_status}). Use the C/C++ compiler belonging to the LLVM installation (activate its conda environment). ${smoke_error}")
+    endif()
+    execute_process(COMMAND "$<TARGET_FILE:atlas-emit>" "${CMAKE_INSTALL_PREFIX}/atlas-smoke.mlir"
+      RESULT_VARIABLE smoke_status OUTPUT_QUIET ERROR_VARIABLE smoke_error)
+    file(REMOVE "${CMAKE_INSTALL_PREFIX}/atlas-smoke.mlir")
+    if(NOT smoke_status EQUAL 0)
+      message(FATAL_ERROR "Atlas emitter smoke test failed: ${smoke_error}")
+    endif()
     file(GET_RUNTIME_DEPENDENCIES
       EXECUTABLES "$<TARGET_FILE:atlas-opt>" "$<TARGET_FILE:atlas-emit>"
       DIRECTORIES "${atlas_llvm_library_dir}"
@@ -73,6 +89,10 @@ if(SKBUILD)
   install(FILES examples/handoff/captured_attention_mlp/start.S
     examples/handoff/captured_attention_mlp/link.ld
     DESTINATION ${share}/examples/handoff/captured_attention_mlp ${wheel})
+  install(FILES test/examples/captured_mlp32_linalg.mlir
+    test/examples/captured_mlp32_arguments.json
+    test/examples/captured_mlp32_weights.safetensors
+    DESTINATION ${share}/test/examples ${wheel})
 endif()
 
 if(NOT ATLAS_ENABLE_TESTS)
