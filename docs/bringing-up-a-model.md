@@ -157,14 +157,9 @@ The fast builder consumes the admitted default CMake recipes and generated asset
 
 ### 8. Replay real host code in QEMU and test corruption controls
 
-For the 1,038-launch TinyLlama kit, the actual QEMU route uses the external captured-reply runner with the attention assets, not a FullBundle. In an authenticated retained `T` artifact tree, the archived default command is:
+For the 1,038-launch TinyLlama kit, use the complete [archived default replay command](../tools/tiny_full/REPRODUCING.md#current-1038-launch-kit) with the attention assets in an authenticated retained `T` artifact tree. This external captured-reply route does not consume a FullBundle.
 
-```sh
-"$MODEL_PYTHON" -B "$TINY_KIT_ROOT/f3h0/replay/replay_v2_complete.py" \
-  --elf "$TINY_DEFAULT/build/atlas-tinyllama.elf" --bundle-root "$TINY_ASSETS" \
-  --qemu "$QEMU_RISCV64" --out "$TINY_REPLAY" --wall-seconds 7200 \
-  --console-write-symbol _write --exit-symbol _exit --icount --gdb-stdio
-```
+Map `KIT_PYTHON=$MODEL_PYTHON`, `--elf "$TINY_DEFAULT/build/atlas-tinyllama.elf"`, `--bundle-root "$TINY_ASSETS"`, and `REPLAY_OUT=$TINY_REPLAY` onto that command, keeping its 7,200-second bound and other runner flags.
 
 `TINY_KIT_ROOT` names the authenticated external `T` tree, which is retained outside the repositories; ask Nicolas for its location, and see [the kit variables](../tools/tiny_full/REPRODUCING.md#current-1038-launch-kit) for `QEMU_RISCV64` and the rest. Its saved command instead names the byte-identical archived default ELF at `T/bulk/f3h0/default/atlas-tinyllama.elf` and assets at `T/bulk/f3h0-assets`. Before substituting a rebuilt default, verify both SHA-256 and full byte identity against that admitted ELF. The runner and its admission remain artifact-specific; the fast replay uses a separate external `T/f3h0/replay/run_fast.py` with bound admission, so do not substitute a fast ELF into the default command. The saved default receipt reports `PASS_CAPTURED_REPLY_REPLAY`, `host_elf_executed=true`, `numerical_device_execution=false`, 1,038 exact launches, and 137 exact final buffers. This executes real host instructions with captured device replies; original47 numerical qualification is the separate prior gate, with 88 fresh original47 runs and 950 historical exact joins.
 
