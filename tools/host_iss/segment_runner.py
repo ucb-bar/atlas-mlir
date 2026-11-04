@@ -13,7 +13,7 @@ import time
 import kernel_library  # noqa: E402,F401
 from atlas_path_guard import checked
 from atlas_tooling import sha256
-from atlas_program import code_sources
+from kernel_library import code_sources
 import atlas_host_layout as hal
 from elf_image import Image, mmio_sites
 from full_bundle import FullBundle

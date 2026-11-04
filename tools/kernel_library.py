@@ -19,6 +19,16 @@ if str(LIBRARY) not in sys.path:
 from atlas_kernels_path import DIRECTORIES, module_path  # noqa: E402,F401
 
 ROOT = LIBRARY.parents[1]
+# smol_fusion_program imports chipyard.arena, which imports elf_image from tools/host_iss; the generator
+# put that directory on sys.path itself when it lived in tools/.
+if str(ROOT / "tools" / "host_iss") not in sys.path:
+    sys.path.append(str(ROOT / "tools" / "host_iss"))
+
+# The file names atlas_program.code_sources hashes, in its order. That function hashes siblings of
+# atlas_program.py, which only works in a flat copy; code_sources below resolves each name in this checkout.
+PROGRAM_SOURCES = ("atlas_program.py", "atlas_program_checks.py", "atlas_epilogue.py", "atlas_rne_add.py",
+                   "atlas_resnet_input.py", "atlas_program_reuse_common.py", "run_model_tile.py",
+                   "atlas_tile_arithmetic.py", "atlas_weight_source.py")
 
 
 def relative_path(name):
@@ -43,3 +53,18 @@ def moved_path(path):
         except ValueError:
             pass
     return path
+
+
+def source_paths(*, traffic_reuse=False):
+    """The files atlas_program.code_sources names, as paths in this checkout."""
+    import atlas_program
+    names = PROGRAM_SOURCES
+    if atlas_program._reuse_enabled(traffic_reuse):
+        names += tuple(module + ".py" for module in dict.fromkeys(atlas_program._TRAFFIC_REUSE_MODULES.values()))
+    return {name: source_path(name) for name in names}
+
+
+def code_sources(*, traffic_reuse=False):
+    """atlas_program.code_sources for this checkout: file name to SHA-256 of the file in use."""
+    from atlas_tooling import sha256
+    return {name: sha256(path) for name, path in source_paths(traffic_reuse=traffic_reuse).items()}

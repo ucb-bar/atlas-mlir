@@ -178,7 +178,8 @@ def progress_launches(manifest):
 
 def select_programs(args, captured, bundle, out, products, read):
     """Admit captured bytes before generating any selected or relocated stream."""
-    from atlas_program import assembly, dma_load_bytes, source_paths, _TRAFFIC_REUSE_MODULES
+    from atlas_program import assembly, dma_load_bytes, _TRAFFIC_REUSE_MODULES
+    from kernel_library import source_paths
     from smol_model_binding import configure_model, model_binding
     _, _, assemble, _ = configure_model(args.model_root)
     args.assemble = assemble

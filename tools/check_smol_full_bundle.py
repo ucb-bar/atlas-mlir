@@ -18,7 +18,7 @@ from full_bundle import FullBundle
 from elf_image import Image
 from smol_model_binding import configure_model, model_binding
 import smol_full_contract
-from atlas_program import code_sources
+from kernel_library import code_sources
 
 
 def fusion_source_pins(provenance):

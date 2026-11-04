@@ -30,7 +30,8 @@ sys.path[:0] = [str(ATLAS/'tools'),str(ATLAS/'tools/host_iss')]
 import numpy as np
 import smol_capture
 import kernel_library  # noqa: E402,F401
-from atlas_program import assembly, code_sources
+from atlas_program import assembly
+from kernel_library import code_sources
 from smol_full_plan import calls as graph_calls, reference_geometry
 from smol_full_phases import segments, V2
 from atlas_path_guard import checked as safe, lexical_absolute_path, map_metadata_paths

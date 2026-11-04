@@ -15,15 +15,14 @@ import struct
 import sys
 import time
 import traceback
-import zipfile
 import numpy as np
 import kernel_library  # noqa: E402,F401
 from atlas_vector_arithmetic import ordered_matmul, rescale_bf16_array
-from atlas_program import assembly, dma_load_bytes
+from atlas_program import assembly, dma_load_bytes, preflight_bundle
 from atlas_path_guard import checked as safe_path
 from atlas_tooling import sha256, write_json
 from run_model_tile import (load_bundle, configure_model, encode_operands, execute_tile, input_sources, model_binding,
-    metrics, validate_archive_members)
+    metrics)
 
 
 def resource_plan(m, k, n):
@@ -69,18 +68,6 @@ def physical_payload(bits):
 def admit_program(words):
     if not words or len(words) > 8192 or words[-1] != 115 or (115 in words[:-1]) or (1048691 in words):
         raise ValueError("Require <=8192 instruction words and exactly one terminal ECALL")
-
-
-def preflight_bundle(args):
-    """Admit the NPZ central directory before any input digest or content read."""
-    if args.smoke:
-        if args.input or args.manifest:
-            raise ValueError("--smoke excludes --input/--manifest")
-        return
-    if not args.input or not args.manifest:
-        raise ValueError("require --input and --manifest, or --smoke")
-    with zipfile.ZipFile(safe_path(args.input)) as archive:
-        validate_archive_members(archive.infolist())
 
 
 def code_sources():

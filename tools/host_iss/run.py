@@ -107,7 +107,7 @@ def pin_sources(pins, contract, workload, elf, qemu):
         path = checked(Path(__file__).absolute().parent / name)
         pins[str(path)] = sha(path)
     if workload == "smol-full":
-        from atlas_program import code_sources
+        from kernel_library import code_sources
         tools = Path(__file__).absolute().parents[1]
         for name, expected_hash in code_sources(traffic_reuse=True).items():
             path = checked(kernel_library.source_path(name))

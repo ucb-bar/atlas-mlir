@@ -12,7 +12,8 @@ from atlas_host_build import validate_graph_program
 from atlas_host_layout import ATLAS_DRAM_BASE
 import kernel_library  # noqa: E402,F401
 from atlas_path_guard import checked
-from atlas_program import assembly, code_sources, dma_load_bytes
+from atlas_program import assembly, dma_load_bytes
+from kernel_library import code_sources
 from atlas_tooling import Admission, sha, write_json
 from build_resnet_graph_host import arena, relocate_program
 from run_model_tile import configure_model, model_binding

@@ -124,9 +124,9 @@ class TrafficReuseTests(unittest.TestCase):
                   "atlas_resnet_input.py", "atlas_program_checks.py", "atlas_program_reuse_common.py", "atlas_weight_source.py"}
         helpers = {name+".py" for name in program._TRAFFIC_REUSE_MODULES.values()}
         expanded = legacy | helpers
-        self.assertEqual(set(program.code_sources()), legacy)
-        self.assertEqual(set(program.code_sources(traffic_reuse=False)), legacy)
-        self.assertEqual(set(program.code_sources(traffic_reuse=True)), expanded)
+        self.assertEqual(set(kernel_library.code_sources()), legacy)
+        self.assertEqual(set(kernel_library.code_sources(traffic_reuse=False)), legacy)
+        self.assertEqual(set(kernel_library.code_sources(traffic_reuse=True)), expanded)
         with tempfile.TemporaryDirectory(prefix="atlas-reuse-sources-") as tmp:
             directory = Path(tmp)
             for name in expanded:
@@ -143,7 +143,7 @@ class TrafficReuseTests(unittest.TestCase):
                 path.write_bytes(original+b"\n# source closure probe\n")
                 after = copied.code_sources(traffic_reuse=True)
                 self.assertEqual({key for key in before if before[key] != after[key]}, {name})
-                self.assertEqual(copied.code_sources(), program.code_sources())
+                self.assertEqual(copied.code_sources(), kernel_library.code_sources())
                 path.write_bytes(original)
 
 

@@ -245,7 +245,7 @@ def main():
         path = safe_path(kernel_library.source_path(name))
         merge_pin(path, sha(path.read_bytes()))
     if mode != 'none':
-        from atlas_program import code_sources
+        from kernel_library import code_sources
         for name in [*code_sources(traffic_reuse=True),'smol_fusion_assets.py','smol_fusion_program.py','smol_fusion_fp8.py']:
             path=safe_path(kernel_library.source_path(name));merge_pin(path,sha(path.read_bytes()))
     model_after = model_binding(args.model_root)

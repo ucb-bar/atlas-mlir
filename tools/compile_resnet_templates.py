@@ -9,7 +9,8 @@ from pathlib import Path
 import struct
 
 import kernel_library  # noqa: E402,F401
-from atlas_program import assembly, code_sources, dma_load_bytes
+from atlas_program import assembly, dma_load_bytes
+from kernel_library import code_sources
 from atlas_host_build import GRAPH_PROGRAM_WORDS, validate_graph_program
 from atlas_path_guard import checked as safe_path
 from atlas_tooling import sha256, write_json

@@ -291,9 +291,9 @@ def build(args):
     bundle = KernelAssets(args.assets,'tiny-full')
     data = staged_contract(bundle)
     if bundle.provenance.get('program_policy','original') == 'traffic-reuse-v1':
-        from atlas_program import code_sources
+        from kernel_library import code_sources
         for name,digest in code_sources(traffic_reuse=True).items():
-            pin(pins,ROOT/'tools'/name,digest)
+            pin(pins,ROOT/kernel_library.relative_path(name),digest)
         for path,digest in bundle.provenance['reuse']['generator_source_sha256'].items():
             pin(pins,path,digest)
     if (bundle.provenance['capture']['sha256'] != gate['capture_sha256']

@@ -775,7 +775,7 @@ def _export_attention(args, native_checker=None, proof_source=None):
                      kernel_library.source_path("atlas_program_checks.py")):
             capture.pin(path)
     if fused:
-        from atlas_program import code_sources
+        from kernel_library import code_sources
         for name in code_sources(traffic_reuse=True):
             capture.pin(kernel_library.source_path(name))
         for name in ("fusion.py", "fusion_export.py"):

@@ -17,7 +17,8 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path[:0] = [str(ROOT / 'tools'), str(ROOT / 'tools/host_iss')]
 import kernel_library  # noqa: E402,F401
 from atlas_path_guard import checked
-from atlas_program import assembly, dma_load_bytes, code_sources
+from atlas_program import assembly, dma_load_bytes
+from kernel_library import code_sources
 from atlas_tooling import sha, write_json as write
 from elf_image import Image, mmio_sites
 from arena import add_arguments, audit, relocate_assembly, window, DEFAULT_ARENA

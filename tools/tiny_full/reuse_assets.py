@@ -16,7 +16,8 @@ sys.path[:0] = [str(ROOT/'tools'), str(ROOT/'tools/host_iss')]
 import kernel_library  # noqa: E402,F401
 from atlas_path_guard import checked
 from atlas_tooling import sha256
-from atlas_program import assembly, code_sources, dma_load_bytes
+from atlas_program import assembly, dma_load_bytes
+from kernel_library import code_sources
 from full_bundle import KernelAssets
 from run_model_tile import configure_model, model_binding
 from run_workload_contraction import admit_program
@@ -50,7 +51,7 @@ def prepare(args):
     _,_,assemble,_ = configure_model(model_root)
     list(assemble(io.StringIO('ecall\n')).assemble())
     before = model_binding(model_root)
-    pins = {str(ROOT/'tools'/name):digest for name,digest in code_sources(traffic_reuse=True).items()}
+    pins = {str(ROOT/kernel_library.relative_path(name)):digest for name,digest in code_sources(traffic_reuse=True).items()}
     for path in (Path(__file__),ROOT/'tools/host_iss/full_bundle.py',ROOT/'tools/host_iss/bundle.py',
                  ROOT/'tools/host_iss/tiny_full_contract.py',ROOT/'tools/host_iss/placement.py',
                  ROOT/'tools/chipyard/arena.py',ROOT/'runtime/atlas_host_layout.h'):

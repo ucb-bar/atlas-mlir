@@ -18,7 +18,8 @@ sys.path.insert(0, str(ROOT / 'tools'))
 sys.path.insert(0, str(ROOT / 'tools/host_iss'))
 import kernel_library  # noqa: E402,F401
 from atlas_path_guard import checked
-from atlas_program import assembly, code_sources, dma_load_bytes
+from atlas_program import assembly, dma_load_bytes
+from kernel_library import code_sources
 from elf_image import Image, mmio_sites
 from bundle import ChecksumBundle
 from firesim_target import package as package_firesim
