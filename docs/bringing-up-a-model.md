@@ -8,11 +8,51 @@ Agustin's compiler route on `feat/atlas-model-compilation` takes PyTorch through
 
 The model route in PR #26 and Merlin PR #55 uses PyTorch `torch.export` for the op and shape inventory, Merlin captures for real values, atlas-kernels Python generators for real device shapes, per-launch npu_model exactness, a hand-written host graph, a host ELF, and QEMU execution. FireSim packaging is a subsequent static step. The generators emit hand-scheduled assembly; translating that assembly to machine IR does not make their schedules or the host graph compiler-generated.
 
-Track A's probe translated every kit device program to machine IR, ran `atlas-opt --verify-atlas-machine-stream`, encoded through `atlas-emit`, and compared the words with npu_model's assembler: 1,589 of 1,589 programs and 1,487,694 words matched. TODO(track-a): replace this probe-only statement with the final backend wrapper command, required tool configuration, receipt location, and integrated build/check status from DONE-A.md. The checked-out bringup builders still call the assembler directly until that integration lands.
+The integrated kit check at atlas-mlir `47bdc63` with atlas-kernels `e4a589b` compared 1,589 distinct programs and 1,487,694 words against both npu_model's assembler and the binaries embedded in the 16 ELFs: all matched. The builders still default to the assembler; the explicit wrapper below selects the compiler backend for generation and checking. The integrated identity receipts establish 16 byte-identical ELFs, and tests show no regressions against `8259b83`, with the same 11 environment-dependent CTest failures, rather than an all-green compiler suite. These are recorded integration results, not executions performed by this documentation update.
 
 The intended connection is to select these library kernels behind the compiler's provider adapter, by op, shape, and arithmetic policy. On Agustin's branch the seam is `AtlasApplicationAdapter.plan`, `compile_region`, and `export_region` in `python/atlas_mlir_native/application.py`. Region matching, a named precision policy, weight-window handling, and a merged host runtime remain integration work. His resident window is at most 1 MiB; a TinyLlama 2048×5632 FP8 weight matrix contains 11,534,336 bytes before metadata.
 
 This follows the Radiance separation: RTL in radiance, kernels and references in radiance-kernels, compiler in radiance-mlir, and experiments in Merlin. Merlin's [Radiance materializer](https://github.com/ucb-bar/Merlin/blob/sota/bringup-docs/examples/radiance/phase1/kernel_library/materialize.py) exports a pinned kernel commit with `git archive`; its adjacent `selection.yaml` maps op, dtype, and shape rules. Atlas currently uses an atlas-mlir submodule instead. The coverage mapping records where the qualified builds put work; it is not that compiler selector. The bringup tooling stays in atlas-mlir, and `examples/atlas/comparisons` keeps its current path.
+
+## Inputs and environments
+
+A clean checkout supplies code and aggregated coverage fixtures, not authenticated model capture providers. The routes below are blocked until their external inputs are available. Do not treat a public checkpoint download as a replacement for a historical receipt chain. Keep physical absolute paths, fresh output directories, independent trusted checksums, and the original package/source versions. The following is the complete input manifest for these examples.
+
+| Input and consumer | Obtain or regenerate; required content |
+| --- | --- |
+| TinyLlama checkpoint, inventory and native capture | Download the public Hugging Face snapshot `TinyLlama/TinyLlama-1.1B-Chat-v1.0` at `fe8a4ea1ffedaf415f4da2f062534de366a451e6` (for example with `huggingface_hub.snapshot_download(repo_id=..., revision=..., local_dir=...)`). Use Python 3.10.14, torch 2.10.0, Transformers 5.4.0, BF16, and eager attention, as recorded in atlas-kernels `coverage/COVERAGE.md`. Native capture also checks the exact Transformers source hash. |
+| TinyLlama corpus and tokens | Supply the pinned development corpus whose SHA-256 is `573e1d244efc95bd7bb4ee3df0735bfdd688d3abf7f70a849ac2061c6de8a4d9`; the first 160 token ids must match the digest in Merlin `capture_tinyllama_native.py`. The kit retains a WikiText-derived `session.txt`, but the repositories do not provide a public byte-exact regeneration recipe. This corpus is an unmet prerequisite without an authenticated copy. Export adds two greedy decode steps. |
+| SmolVLA checkpoints, inventory | Download `lerobot/smolvla_base` at `c83c3163b8ca9b7e67c509fffd9121e66cb96205` and `HuggingFaceTB/SmolVLM2-500M-Video-Instruct`; the coverage sources pin no immutable backbone revision, so authenticate the retained snapshot and configuration against the capture chain (config SHA-256 `ea6bc1237e96247f6258de3e202e2e62b93d6f386dc47e7b36b5588bf3a15e17`). Use Python 3.12.12, torch 2.10.0, Transformers 4.57.1, and LeRobot 0.5.1. A current unpinned backbone is insufficient. |
+| SmolVLA observation | The public dataset is `lerobot/svla_so100_pickplace` at `3d6d687a25cdf1565cdf24550814f72d999a861d`, train episode 0, frame 0, noise seed 0. Supply compiled `observation.npz` with SHA-256 `167d7bbec48362a3dbb177b9afc97ec6ebfe50855e07f3858e40369de87f36e9`, authenticated by the capture chain. Dataset access alone does not regenerate that exact archive through a documented public command today. |
+| TinyLlama full/native and C capture chain | Merlin `capture_tinyllama_full.py` needs its fixed historical session receipt and archived provider; `d1-capture-c-v2.py` additionally needs an admitted arithmetic capture with 155 parameter and 49 host-parameter records, projection scale contract, attention scale contract, layout/provider identities, and their hashes. See [reproduction](../tools/tiny_full/REPRODUCING.md). These authenticated artifacts are external, not generated by the introductory layer-zero Q capture. Without them full capture bootstrap is unmet. |
+| SmolVLA native capture chain | `capture_smolvla_policy.py` authenticates a successful dynamic-block parent receipt, its native full-query manifest, original archive, historical source closure, exact Python/package versions, and observation bytes. The historical chain is not reproducible from public checkpoints alone today. An authenticated retained chain is an unmet prerequisite. |
+| SmolVLA C capture chain | [Smol capture inputs](smol_attention_capture.md#inputs) specify the immutable compiled-observation FullBundle, its `SHA256SUMS`, parameters and references, and baseline `host-baseline-v4-build`, `host-baseline-v4`, and `phase-canonical-v4` compilation/asset providers. The raw archive cannot replace them. They are external unmet prerequisites until supplied and authenticated. Recapture regenerates current graph math and boundaries from these providers. |
+| Scale policy and staged operands | Retain scale exponents, quantization/rounding policy, positive-zero padding, packed layouts, complete initial and expected arenas, parameters, and ordered call ledgers from the admitted captures. No generic checkpoint-to-scale-contract command is supplied. Changing a scale or layout requires recapture and qualification. |
+| Original47 arithmetic and encoding | Obtain the public `ucb-bar/atlas-npu` model sources at npu_model `47b8599d8ffbe5ddd96059ffe2b5be2427a410f5` in a clean independent checkout. Use Python 3.14 with that revision's dependencies, NumPy, and compatible CPU Torch. The receipt must identify the model commit and unchanged imported source. `MODEL_PYTHON` and `MODEL47` below select this environment; install the revision's locked dependencies separately from capture packages. |
+| QEMU model and replay | Use a separate clean npu_model checkout at `9e6313bddecb8ba936206eb347f5cd4e5335282c`, its Python 3.14 environment, and `qemu-system-riscv64`. `REPLAY_PYTHON` and `MODEL9` select it. [Host ISS](host-iss.md) documents the `curve` backend and its receipt-bound parameters/digest. This pin does not replace original47 qualification. |
+| MLIR compiler and backend wrapper | Initialize the pinned atlas-kernels submodule. Build `atlas-opt` and `atlas-emit` using the [README build](../README.md#build), with LLVM/MLIR `a47bddccec30255619bb8c37fa59700e661d4e66` (23.0.0git) and matching MLIR/LLVM CMake packages. Set `ATLAS_MLIR_BIN` to the resulting `bin`. The build interpreter needs atlas-mlir test dependencies; coverage table generation separately needs PyYAML. |
+| Host compilers and RISC-V tools | Native C11 GCC, Git, CMake, Ninja, and the exact RISC-V compiler, linker, libm, headers, and table-generation interpreter recorded by the chosen build are required. `RISCV_BIN` is the tool directory; standalone Smol uses explicit `CLANG`, `LLD`, `SUPPORT` (`rv64_support.c` and `include/`), and `TABLE_PYTHON`. Tool identities are receipt inputs, not interchangeable version labels. Public toolchain installation alone does not establish identity with the kit build. |
+| Board-support platform, default/fast SIMS build | `PLATFORM_ROOT` must provide startup code, linker script, UART definitions, scalar math, and CMake toolchain files matching the selected target and toolchain. No public accessible revision or regeneration recipe is supplied. This is an unmet prerequisite; obtain an authenticated compatible platform from its maintainer before building. Do not substitute a machine-specific directory from an old receipt. |
+| Current TinyLlama kit overlay | The archived 1,038-launch route additionally needs the external `T/f3h0/` preparation, qualification, packaging, build, and captured-reply replay scripts, immutable F3-h0 assets and original qualification, inherited `storage.json` asset authority, archived compile recipes, and all pinned historical source bytes. [Reproduction](../tools/tiny_full/REPRODUCING.md) names the retained providers. These are unmet public prerequisites; the repos do not regenerate this archive from a checkpoint. |
+| Replay bundles and boundaries | Retain the matching ELF, program/weight blobs, checksums, source closure, admission gates, and live-in/live-out boundary manifests described below and in [full-model contracts](full-model-contracts.md). Restore paths only through supported explicit relocation/root arguments. Old hashes do not authenticate changed source bytes. |
+
+From atlas-mlir, export the roots before any help or capture command, because some support modules read them during import. Paths below are placeholders to replace with physical absolute paths to the inputs above.
+
+```sh
+export ATLAS="$PWD" MERLIN_ROOT=/absolute/path/to/Merlin
+export MERLIN="$MERLIN_ROOT" KERNELS="$ATLAS/third_party/atlas-kernels"
+export MODEL47=/absolute/path/to/original47 MODEL9=/absolute/path/to/model9
+export ATLAS_NPU_MODEL_ROOT="$MODEL47" ATLAS_ROOT="$ATLAS"
+export MODEL_PYTHON=/absolute/path/to/original47-venv/bin/python
+export REPLAY_PYTHON=/absolute/path/to/model9-venv/bin/python
+export ATLAS_MLIR_BIN="$ATLAS/build/bin"
+export TINY_WORK_ROOT=/absolute/path/to/fresh-tiny-work
+export MERLIN_OUT_ROOT=/absolute/path/to/merlin-output
+export PYTHONDONTWRITEBYTECODE=1 OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1
+export PYTHONPATH="$MODEL47:$ATLAS/tools:$MERLIN/src"
+```
+
+Native output paths must be fresh descendants of `$MERLIN_OUT_ROOT/artifacts`, as enforced by Merlin. Set `TINY_PYTHON`, `TINY_PACKAGES`, `TINY_CHECKPOINT`, `TINY_CORPUS`, `SMOL_PYTHON`, `SMOL_POLICY`, `SMOL_BACKBONE`, and `SMOL_OBSERVATION` to the capture environments and inputs in the table. Set `PLATFORM_ROOT`, `RISCV_BIN`, and the named output paths in each step. Run native capture with its native interpreter, not the original47 interpreter. The wrapper runs scripts in its own interpreter; it does not change Python versions.
 
 ## Worked sequence
 
@@ -20,7 +60,7 @@ Commands below run from atlas-mlir unless a different repository is named. Varia
 
 ### 1. Inventory the executed ops and shapes
 
-In atlas-kernels, follow [coverage regeneration](https://github.com/ucb-bar/atlas-kernels/blob/track-c/coverage/coverage/COVERAGE.md#regenerate) with the exact checkpoint and input used by the capture:
+In atlas-kernels, follow [coverage regeneration](https://github.com/ucb-bar/atlas-kernels/blob/feat/kernel-library/coverage/COVERAGE.md#regenerate) with the exact checkpoint and input used by the capture:
 
 ```sh
 PYTHONPATH="$TINY_PACKAGES" "$TINY_PYTHON" coverage/export_ops.py tinyllama --checkpoint "$TINY_CHECKPOINT" \
@@ -37,10 +77,10 @@ python3 coverage/build_table.py
 From Merlin, the existing native capture commands are:
 
 ```sh
-python examples/atlas/comparisons/capture_tinyllama_native.py \
-  --checkpoint "$CHECKPOINT" --corpus "$CORPUS" --full-query --out "$TINY_NATIVE"
-python examples/atlas/comparisons/capture_smolvla_policy.py \
-  --source-receipt "$DYNAMIC_RECEIPT" --observation-input "$OBSERVATIONS" --out "$SMOL_NATIVE"
+PYTHONPATH="$MERLIN/src:$TINY_PACKAGES" "$TINY_PYTHON" examples/atlas/comparisons/capture_tinyllama_native.py \
+  --checkpoint "$TINY_CHECKPOINT" --corpus "$TINY_CORPUS" --full-query --out "$TINY_NATIVE"
+PYTHONPATH="$MERLIN/src" "$SMOL_PYTHON" examples/atlas/comparisons/capture_smolvla_policy.py \
+  --source-receipt "$DYNAMIC_RECEIPT" --observation-input "$SMOL_OBSERVATION" --out "$SMOL_NATIVE"
 ```
 
 The [Merlin capture README](https://github.com/ucb-bar/Merlin/blob/sota/bringup-docs/examples/atlas/comparisons/README.md) distinguishes TinyLlama's first-layer Q capture from `capture_tinyllama_full.py`, which covers all decoder layers and greedy feedback. Use Merlin `d1-capture-c-v2.py` with its projection worker and atlas-mlir `tools/tiny_full/attention_v2_worker.py` for the current C-graph route, following [TinyLlama reproduction](../tools/tiny_full/REPRODUCING.md). Inspect `python "$MERLIN/examples/atlas/comparisons/d1-capture-c-v2.py" --help` for its external parameter and scale inputs. Preserve the full staged operands, references, ordered invocation ledger, and source hashes.
@@ -53,40 +93,52 @@ Use atlas-kernels `coverage/mapping.yaml` and `coverage/build_table.py` for both
 
 TinyLlama maps 465 logical projection calls, 66 attention launches, and 132 RMSNorm launches. SmolVLA maps 1,421 logical projection calls, 200 attention launches, and 24 fused fc1 calls. Logical calls and physical panels differ: SmolVLA has 2,715 projection panels. TinyLlama's current kit has 1,038 launches; earlier projection-plus-attention documentation describes 906 before the 132 norm launches. Read [TinyLlama program checking](tiny-fast-build.md) and [Smol placement and admission](smol-full-host.md) for the device plan details.
 
-The plans remain hand-written: `tools/smol_full_plan.py`, `tools/smol_attention_assets.py`, and `tools/tiny_full/capture_boundaries.py` encode model geometry and ordering. Track C's `test/test_model_coverage.py` checks their logical geometry and ordering against the export fixtures, including mutation controls. That test is on Track C's atlas-mlir branch pending integration into this checkout; the proof does not generate C graphs or prove their arithmetic.
+The plans remain hand-written: `tools/smol_full_plan.py`, `tools/smol_attention_assets.py`, and `tools/tiny_full/capture_boundaries.py` encode model geometry and ordering. The separate coverage-plan `test/test_model_coverage.py` checks their logical geometry and ordering against the export fixtures, including mutation controls. That test is not present at `47bdc63` and remains pending integration; the proof does not generate C graphs or prove their arithmetic.
 
 ### 4. Check kernels at the actual shapes
 
 In atlas-kernels run `make test PYTHON="$MODEL_PYTHON" NPU_MODEL="$MODEL47"`. The library's [family documentation](https://github.com/ucb-bar/atlas-kernels/tree/feat/kernel-library/kernels) identifies each generator, tests, and golden references. TinyLlama's launch executor is described in [attention execution](../tools/tiny_full/ATTENTION_EXECUTION.md); SmolVLA's small real-model check is `tools/smol_capture_smoke.py`, with the full command in [Smol capture](smol_attention_capture.md#capture-and-small-original-model-check).
 
-Compare complete output bytes and preservation regions with npu_model RTL numerics, using the real padded shapes, scales, and DMA layout. Separately measure error against PyTorch or an FP32 reference. Track C's per-family standalone numeric references and benchmark results are still in progress in the inspected handoff; do not treat the coverage FLOP share as a latency result. Functional `ArchState` execution in `atlas_execution.py` does not measure Core cycles.
+Compare complete output bytes and preservation regions with npu_model RTL numerics, using the real padded shapes, scales, and DMA layout. Separately measure error against PyTorch or an FP32 reference. The standalone bench has 13 seeded synthetic cases across seven families: six have independent arithmetic goldens and are bit-exact, seven have no independent golden, and all 13 timed outputs equal their functional outputs. See atlas-kernels `coverage/RESULTS.md` and each family's `reference.py` and `RESULTS.md`. These representative shapes do not qualify every captured launch or every staging path. Coverage FLOP share is not latency. Functional `ArchState` execution in `atlas_execution.py` does not measure Core cycles.
+
+Every generation/check command below that assembles in process is explicitly wrapped. Inspect its backend receipt as well as its normal result: backend, verification mode, command and exit code, library/translator SHA-256, tool paths/versions/binary hashes, model commit, compiler source identity, per-program source/word hashes, tier, and diagnostics. Missing tools or unequal words fail. The wrapper hooks imports in the current process only; fresh Python subprocesses require their own wrapper. At `e4a589b`, successful exit can still mean zero programs or encode-only, so require a nonzero expected inventory and at least `stream-verified` for every program. Do not use `--no-verify` for qualification. The exhaustive integrated kit check covers 1,589 distinct programs; do not expect that count from every smaller command. Recorded switch runs cover 210 Tiny check programs, 850 for each Tiny fast variant, and 537 for Smol fast assets, with deduplication scoped to each run. A changed profile must define and check its own expected inventory.
+
+The later atlas-kernels `9f63c532d4aad8e1f6a178109edba042528ca33c` adds `run --expect-min-programs N` (default 1, distinct program texts) and `--min-tier stream-verified` (default), and the same minimum-tier option to `compile`. Add both options before `--` when using that revision, using the expected count for the particular run. `--no-verify` then requires explicit `--min-tier encode-only`. These flags are absent from this guide's consumed `e4a589b` pin, so the copyable commands below retain manual receipt acceptance. Integrating that later library and rerunning the 16-ELF and 1,589-program gates is separate work. Its bench rejects golden/timed mismatches and empty selections; its mandatory-category coverage checks and bias accounting correct SmolVLA's reported Atlas FLOP share to 99.9158% (TinyLlama remains 99.9995%). The earlier 99.9320% SmolVLA share omits bias additions.
 
 ### 5. Export programs and qualify every launch
 
 TinyLlama's [export runbook](tiny-attention-export.md) gives this complete template, with the actual platform DRAM range substituted:
 
 ```sh
-python tools/tiny_full/export_capture.py \
+PYTHONPATH="$MODEL47:$ATLAS/tools" "$MODEL_PYTHON" "$KERNELS/lib/atlas_backend.py" run --backend atlas-mlir \
+  --atlas-mlir-bin "$ATLAS_MLIR_BIN" --receipt "$ATLAS/out/tiny-export-backend.json" -- \
+  tools/tiny_full/export_capture.py \
   --capture "$TINY_CAPTURE" --capture-sha256 "$TINY_CAPTURE_SHA256" \
   --model-root "$MODEL47" --out "$TINY_ASSETS" \
   --dram-base 0x80000000 --dram-bytes 0x80000000 --qualify-launches
-python tools/tiny_full/check_programs.py --assets "$TINY_ASSETS" \
+PYTHONPATH="$MODEL47:$ATLAS/tools" "$MODEL_PYTHON" "$KERNELS/lib/atlas_backend.py" run --backend atlas-mlir \
+  --atlas-mlir-bin "$ATLAS_MLIR_BIN" --receipt "$ATLAS/out/tiny-program-check-backend.json" -- \
+  tools/tiny_full/check_programs.py --assets "$TINY_ASSETS" \
   --contract-sha256 "$TINY_CONTRACT_SHA256" --model-root "$MODEL47"
 ```
 
-The illustrated DRAM range is 2 GiB beginning at `0x80000000`; the arena and complete ELF must fit the selected target. The [current TinyLlama reproduction runbook](../tools/tiny_full/REPRODUCING.md) also uses `tools/tiny_full/d1-v2-qualify.py` for final-program qualification. Keep its output under the runbook's required qualification root, and audit saved records before reuse. `check_programs.py` regenerates sources and checks encoded words; it does not rerun numerical execution.
+The illustrated DRAM range is 2 GiB beginning at `0x80000000`; the arena and complete ELF must fit the selected target. `export_capture.py --qualify-launches` dispatches to `attention_export.py`, which writes `$TINY_ASSETS/qualification.json` and executes exported launches with original47. Pass that file and its SHA-256 to the attention builder below. `check_programs.py` regenerates sources and checks encoded words, but does not rerun numerical execution. The older `d1-v2-qualify.py` inherits a 906-launch admission check and is historical; it rejects the current norm-bearing 1,038-launch kit.
+
+The kit's actual 1,038-launch qualification used the external T-on-F3-h0 overlay route, not that historical qualifier. Its `T/f3h0/prepare.py` transforms the authenticated F3-h0 assets; `T/f3h0/qualify.py` produces `atlas.d1.all_launch_original.v1`, joining 950 exact prior F3-h0 records and executing 88 changed decode q/k launches on original47. `T/f3h0/package_qualification.py` losslessly archives the worker records and compresses the aggregate to `T/f3h0/qual/receipt.json.gz`. It records `new_device_timing=false`. See [current and historical reproduction](../tools/tiny_full/REPRODUCING.md) for exact archived commands and providers. These scripts, F3-h0 source assets, and historical receipts are external prerequisites, not delivered public bootstrap tools. Fresh `export_capture.py --qualify-launches` qualification and archived qualification reuse must be reported separately.
 
 For SmolVLA, follow [export and original-model backfill](smol_attention_capture.md):
 
 ```sh
-python tools/export_smol_policy_kernels.py --native-capture \
+PYTHONPATH="$MODEL47:$ATLAS/tools" "$MODEL_PYTHON" "$KERNELS/lib/atlas_backend.py" run --backend atlas-mlir \
+  --atlas-mlir-bin "$ATLAS_MLIR_BIN" --receipt "$ATLAS/out/smol-export-backend.json" -- \
+  tools/export_smol_policy_kernels.py --native-capture \
   --replay "$SMOL_CAPTURE/run/replay.json" --attention-capture "$SMOL_CAPTURE/run/manifest.json" \
   --model-root "$MODEL47" --out "$SMOL_ASSETS"
-python tools/smol_capture_backfill.py --python "$MODEL_PYTHON" --model-root "$MODEL47" \
+"$MODEL_PYTHON" tools/smol_capture_backfill.py --python "$MODEL_PYTHON" --model-root "$MODEL47" \
   --ledger "$SMOL_CAPTURE/run/device-events.jsonl" --out "$SMOL_AUDIT" --workers 16
 ```
 
-A full Smol gate covers 2,915 events, including 2,715 projections and 200 attention launches. It binds original-model execution, source and program identity, staged inputs, complete final arenas, preservation, and DMA. Reply reuse must retain its narrower declared scope. TODO(track-a): insert the final explicit backend wrapper around these encode/check commands so the emitted words come from `atlas-emit`, retain the assembler cross-check, and record the actual verifier tier for every distinct program.
+A full Smol gate covers 2,915 events, including 2,715 projections and 200 attention launches. It binds original-model execution, source and program identity, staged inputs, complete final arenas, preservation, and DMA. Reply reuse retains its narrower declared scope. The backfill driver launches fresh worker interpreters, so wrapping the parent does not instrument their encodes. Require worker-level backend receipts or an independent exhaustive word check in addition to this numerical gate; a parent receipt with zero programs is no backend qualification.
 
 ### 6. Adapt the host graph and boundaries
 
@@ -96,18 +148,51 @@ For SmolVLA, adapt Merlin `smol_vision_graph.c`, `smol_policy_graph.c`, and the 
 
 ### 7. Build default and fast ELFs
 
-For TinyLlama, use `tools/tiny_full/build_attention.py` with assets, the qualified receipt and its hash, Merlin comparisons, platform support, and the RISC-V toolchain. The [default build](tiny-attention-build.md) gives the complete command; `python tools/tiny_full/build_attention.py --help` lists the arguments. Then follow the [fast build](tiny-fast-build.md):
+For TinyLlama, the qualification JSON from step 5 feeds the default attention host builder. Compute `$TINY_QUALIFICATION_SHA256` from the trusted uncompressed receipt; for a compressed historical receipt first verify its archived digest and decompress to a separate JSON. Supply the receipt's data root explicitly:
 
 ```sh
-python tools/tiny_full/build_fast.py --assets "$TINY_ASSETS" --model-root "$MODEL47" \
+"$MODEL_PYTHON" tools/tiny_full/build_attention.py \
+  --assets "$TINY_ASSETS" --qualification "$TINY_QUALIFICATION" \
+  --qualification-sha256 "$TINY_QUALIFICATION_SHA256" \
+  --model-root "$MODEL47" --receipt-data-root "$TINY_WORK_ROOT" \
+  --merlin "$MERLIN/examples/atlas/comparisons" --platform-root "$PLATFORM_ROOT" \
+  --toolchain-bin "$RISCV_BIN" --variant sims --jobs 2 --cmake cmake --out "$TINY_DEFAULT"
+PYTHONPATH="$MODEL47:$ATLAS/tools" "$MODEL_PYTHON" "$KERNELS/lib/atlas_backend.py" run --backend atlas-mlir \
+  --atlas-mlir-bin "$ATLAS_MLIR_BIN" --receipt "$ATLAS/out/tiny-fast-backend.json" -- \
+  tools/tiny_full/build_fast.py --assets "$TINY_ASSETS" --model-root "$MODEL47" \
   --default "$TINY_DEFAULT" --platform-root "$PLATFORM_ROOT" \
-  --toolchain-bin "$RISCV_BIN" --out "$TINY_FAST"
+  --toolchain-bin "$RISCV_BIN" --host-level 0 --out "$TINY_FAST"
 ```
 
-For SmolVLA, `tools/build_smol_full_host.py` creates the standalone bundle, `tools/check_smol_full_bundle.py` audits it, and `tools/smol_sims/package.py` plus `tools/smol_sims/build-smolvla.sh` create SIMS builds. Use the complete commands and explicit toolchain/provider inputs in [Smol capture and packaging](smol_attention_capture.md#export-and-standalone-build). For the fusion-capable fast route, use [Smol fast builds](smol-fast-build.md):
+The default output is `$TINY_DEFAULT/build/atlas-tinyllama.elf` plus `build.json`, and fast output is `$TINY_FAST/build/atlas-tinyllama.elf`. Host levels 0, 1, and 2 select KIT3 and the two later fast milestones; the default level is 2. These attention-host artifacts are not `atlas.full_bundle.v1`, so do not pass them to `tools/host_iss/run.py --workload tiny-full`. The [default build](tiny-attention-build.md) distinguishes historical 906-launch receipts from the 1,038-launch kit and describes root-token resolution.
+
+For SmolVLA, `tools/build_smol_full_host.py` creates the standalone bundle, `tools/check_smol_full_bundle.py` audits it, and `tools/smol_sims/package.py` plus `tools/smol_sims/build-smolvla.sh` create SIMS builds. Use the complete commands and explicit toolchain/provider inputs in [Smol capture and packaging](smol_attention_capture.md#export-and-standalone-build). The export above produces `$SMOL_ASSETS`; use the same `$SMOL_CAPTURE` replay and phase reference in this standalone build:
 
 ```sh
-python tools/generate_smol_fast_assets.py --bundle "$SMOL_BUNDLE" \
+PYTHONPATH="$MODEL47:$ATLAS/tools" "$MODEL_PYTHON" "$KERNELS/lib/atlas_backend.py" run --backend atlas-mlir \
+  --atlas-mlir-bin "$ATLAS_MLIR_BIN" --receipt "$ATLAS/out/smol-host-backend.json" -- \
+  tools/build_smol_full_host.py \
+  --assets "$SMOL_ASSETS" --replay "$SMOL_CAPTURE/run/replay.json" \
+  --merlin "$MERLIN/examples/atlas/comparisons" --attention "$MERLIN/examples/atlas/comparisons" \
+  --runtime "$ATLAS" --bundle-tools "$ATLAS/tools/host_iss" \
+  --support "$SUPPORT" --compiler "$CLANG" --linker "$LLD" --table-python "$TABLE_PYTHON" \
+  --model-root "$MODEL47" --host-input-bundle "$INPUT_BUNDLE" \
+  --uart-kind sifive --uart-base 0x10020000 --uart-divisor 134 --target sim \
+  --dram-base 0x80000000 --dram-bytes 0x80000000 --arena-base 0x90000000 \
+  --traffic-reuse --rodata-after-arena --phase-reference "$SMOL_CAPTURE/run/phase-reference.json" \
+  --out "$SMOL_BUNDLE"
+PYTHONPATH="$MODEL47:$ATLAS/tools" "$MODEL_PYTHON" "$KERNELS/lib/atlas_backend.py" run --backend atlas-mlir \
+  --atlas-mlir-bin "$ATLAS_MLIR_BIN" --receipt "$ATLAS/out/smol-bundle-check-backend.json" -- \
+  tools/check_smol_full_bundle.py --bundle "$SMOL_BUNDLE" \
+  --model-root "$MODEL47" --out "$SMOL_BUNDLE_AUDIT"
+```
+
+This emits the `atlas.full_bundle.v1` directory consumed by the Smol QEMU command below, including `host/host.elf`; `$INPUT_BUNDLE` is the admitted external input provider, while `$SMOL_BUNDLE` is the fresh output. A fusion profile requires the same `--fusion-set` on capture, export, and build. For the fusion-capable fast route, use [Smol fast builds](smol-fast-build.md):
+
+```sh
+PYTHONPATH="$MODEL47:$ATLAS/tools" "$MODEL_PYTHON" "$KERNELS/lib/atlas_backend.py" run --backend atlas-mlir \
+  --atlas-mlir-bin "$ATLAS_MLIR_BIN" --receipt "$ATLAS/out/smol-fast-backend.json" -- \
+  tools/generate_smol_fast_assets.py --bundle "$SMOL_BUNDLE" \
   --elf "$SMOL_DEFAULT_ELF" --out "$SMOL_FAST_ASSETS"
 python tools/build_smol_fast.py --help
 ```
@@ -116,18 +201,29 @@ The fast builder consumes the admitted default CMake recipes and generated asset
 
 ### 8. Replay real host code in QEMU and test corruption controls
 
-Follow [host ISS](host-iss.md) with the separate `MODEL9` environment and the bundle matching the exact ELF:
+For the 1,038-launch TinyLlama kit, the actual QEMU route uses the external captured-reply runner with the attention assets, not a FullBundle. In an authenticated retained `T` artifact tree, the archived default command is:
 
 ```sh
-"$REPLAY_PYTHON" -B tools/host_iss/run.py --workload tiny-full \
-  --elf "$TINY_BUNDLE/host/host.elf" --bundle-root "$TINY_BUNDLE" \
-  --model-root "$MODEL9" --qemu "$QEMU_RISCV64" --out "$TINY_ISS" --wall-seconds "$TINY_WALL_SECONDS"
-"$REPLAY_PYTHON" -B tools/host_iss/run.py --workload smol-full \
-  --elf "$SMOL_BUNDLE/host/host.elf" --bundle-root "$SMOL_BUNDLE" \
-  --model-root "$MODEL9" --qemu "$QEMU_RISCV64" --out "$SMOL_ISS" --wall-seconds "$SMOL_WALL_SECONDS"
+"$MODEL_PYTHON" -B "$TINY_KIT_ROOT/f3h0/replay/replay_v2_complete.py" \
+  --elf "$TINY_DEFAULT/build/atlas-tinyllama.elf" --bundle-root "$TINY_ASSETS" \
+  --qemu "$QEMU_RISCV64" --out "$TINY_REPLAY" --wall-seconds 7200 \
+  --console-write-symbol _write --exit-symbol _exit --icount --gdb-stdio
 ```
 
-A successful continuous replay records `PASS_RV64_HOST_WITH_MODEL_DEVICE`; runner support alone is not a completed replay. [Full-model contracts](full-model-contracts.md) explain the alternative segment routes, `tools/host_iss/run_tiny_segment.py` and `tools/host_iss/run_smol_segment.py`. Each restores an admitted boundary into a fresh guest/device and compares live-out bytes. Every ordered link is required before claiming complete segmented qualification.
+`TINY_KIT_ROOT` names the authenticated external `T` tree. Its saved command instead names the byte-identical archived default ELF at `T/bulk/f3h0/default/atlas-tinyllama.elf` and assets at `T/bulk/f3h0-assets`. Before substituting a rebuilt default, verify both SHA-256 and full byte identity against that admitted ELF. The runner and its admission remain artifact-specific; the fast replay uses a separate external `T/f3h0/replay/run_fast.py` with bound admission, so do not substitute a fast ELF into the default command. The saved default receipt reports `PASS_CAPTURED_REPLY_REPLAY`, `host_elf_executed=true`, `numerical_device_execution=false`, 1,038 exact launches, and 137 exact final buffers. This executes real host instructions with captured device replies; original47 numerical qualification is the separate prior gate.
+
+The maintained [host ISS](host-iss.md) `tiny-full` route instead consumes a projection-only `atlas.full_bundle.v1` with `host/build.json` and `host/host.elf`, built by `tools/tiny_full/build_host.py` with its separate C gate and kernel inputs. It is not the replay path used by the 1,038-launch kit, and no conversion from attention assets is supplied here. Its second model pin is `MODEL9`. [Full-model contracts](full-model-contracts.md) describe that separate route and segment schemas.
+
+For SmolVLA, the standalone bundle built above is the matching FullBundle. Follow [host ISS](host-iss.md) with the separate `MODEL9` environment:
+
+```sh
+"$REPLAY_PYTHON" -B tools/host_iss/run.py --workload smol-full \
+  --elf "$SMOL_BUNDLE/host/host.elf" --bundle-root "$SMOL_BUNDLE" \
+  --model-root "$MODEL9" --qemu "$QEMU_RISCV64" --out "$SMOL_ISS" --wall-seconds "$SMOL_WALL_SECONDS" \
+  --sifive-uart-bridge
+```
+
+A successful model-device continuous replay records `PASS_RV64_HOST_WITH_MODEL_DEVICE`; runner support alone is not a completed replay. [Full-model contracts](full-model-contracts.md) explain the alternative segment routes, `tools/host_iss/run_tiny_segment.py` and `tools/host_iss/run_smol_segment.py`. Each restores an admitted boundary into a fresh guest/device and compares live-out bytes. Every ordered link is required before claiming complete segmented qualification.
 
 For both models, inspect the segment runner's `--help`, run a valid segment, and repeat into a fresh output with `--corrupt-region REGION --corrupt-offset BYTE` using a region declared by that bundle. Tiny admits `hidden_0` or `hidden_1`; Smol validates its chain's region names. Require the corrupted run to fail. Retain the first failing boundary, launch ledger, actual readbacks, UART, and source hashes. Match the ELF's UART profile; a SiFive image needs the explicit `--sifive-uart-bridge` described in the runbook.
 
@@ -137,6 +233,28 @@ Use `tools/tiny_full/build_host.py --help` for TinyLlama's full-host packaging r
 
 Both builders call `tools/chipyard/firesim_target.py` to emit `firesim-contract.json` and `marshal.json`. The packager records `PASS_STATIC_ONLY` and `PROPOSED_NOT_ELABORATED_OR_BUILT`. It supplies no hardware configuration, bitstream, or FireSim execution result. Check the platform memory and console contract before running the exact packaged ELF on an available target.
 
+## New-model adapter contract
+
+Gemma2 and pi0 require implementation and qualification. A loader alone does not produce a host deployment. Deliver the following artifacts as a versioned adapter, preserving source/input hashes, rather than extending a fixture by hand.
+
+| Interface | Required output and existing implementation |
+| --- | --- |
+| Loader | Exact model id/revision and weight digests, tokenizer or processor, precision, eval mode, attention implementation, sequence/cache geometry, deterministic input and seed, and iteration count. `coverage/export_ops.py` functions `tinyllama` and `smolvla` build the current model/input pairs. At atlas-kernels `9f63c53`, `--loader PATH` accepts `get_model_and_inputs()` returning `(torch.nn.Module, tuple_of_positional_inputs)`. |
+| Inventory and unsupported operations | Export every executed ATen op with module/source, phase, input/output shapes and dtypes, count, and FLOPs. Assign every row an implemented device family, host operation, or build constant with citations. Leave unsupported rows visible and fail qualification. At `9f63c53`, `build_table.py --inventory MODEL=JSON --allow-unmapped` writes an explicitly INCOMPLETE unsupported-op report; without that flag unmapped rows fail. |
+| Real-value capture | Hook actual eager model execution and serialize real operands, parameter bytes, reference outputs, phase boundaries, and invocation identity. Merlin `capture_tinyllama_full.py`, `d1-capture-c-v2.py`, and `capture_smolvla_policy.py` illustrate hooks and receipts. The introductory `capture_tinyllama_native.py` only captures layer-zero Q. Fake-tensor export cannot satisfy this interface. |
+| Ordered invocation ledger | Stable call index, module, inference/decode/denoise step, shape, dtype, parameter/scale references, staged initial arena, actual program hash, output ranges and hashes, preservation regions, and DMA observations. Tiny `attention_export.py` writes physical launch records; Smol `tools/smol_capture/` writes `run/device-events.jsonl`. Logical calls can expand into several physical panels, which must all appear. |
+| Parameters, scales, and arithmetic | Serialize immutable weights and host parameters with hashes, scale exponents, rounding and accumulation order, activation packing, padding, RoPE/mask/cache semantics, and the reference policy. Tiny `d1-capture-c-v2.py`, `tools/tiny_full/attention_export.py`, and Smol capture/export provide model-specific examples. For each new policy regenerate real-value references, then independently qualify every launch against original47. |
+| Kernel selection and layout | Match `kernel.yaml` by op, dtype, geometry, scale policy, padding, alignment, DMA extent, mask, and arithmetic order. Use `coverage/mapping.yaml` for recorded placement, `tools/tiny_full/attention_bundle.py` and `capture_boundaries.py` for Tiny admission, and `tools/smol_full_plan.py` and `smol_attention_assets.py` for Smol ordering. Reject unsupported layouts before emitting words. Add a real-shape independent golden where possible, compare full arenas and preservation, and use a mutated output to demonstrate a failing check. The coverage table is not an executable compiler selector. |
+| Host graph and semantic boundaries | Implement nondevice work, parameter ownership, dispatch order, cache lifetime, interlaunch staging, host/device reads and writes, stop conditions, and result transport. Tiny `tiny_full_model.c`, `tiny_full_projection.c`, and Merlin `tiny_block.c` are separate graph/provider examples. Smol uses Merlin `smol_vision_graph.c`, `smol_policy_graph.c`, and `smol_host_*.c`. Regenerate reference live-ins/live-outs with `capture_boundaries.py` or Smol capture; build and replay the exact matching ELF, including corrupt-boundary controls. These interfaces are hand-written. |
+
+For a small inventory-only example, atlas-kernels [causal_decoder/REPORT.md at `9f63c53`](https://github.com/ucb-bar/atlas-kernels/blob/9f63c532d4aad8e1f6a178109edba042528ca33c/coverage/examples/causal_decoder/REPORT.md) documents Merlin's deterministic 8-token decoder loader, six projection invocations, one attention core, and 28 unmapped rows totaling 208,896 estimated FLOPs. Once that library revision is integrated, regenerate from atlas-kernels with:
+
+```sh
+MERLIN_ROOT="$MERLIN" TORCH_PYTHON="$TINY_PYTHON" python3 -B   coverage/examples/causal_decoder/regenerate.py --out "$ADAPTER_OUT"
+```
+
+The report deliberately remains INCOMPLETE. It demonstrates loader and unsupported-op reporting without a checkpoint download; it supplies neither real-value capture nor Atlas execution. For Gemma2, check soft-capping, masking, normalization, scaling, and cache semantics; for pi0, check vision/text/action joins and denoising control independently. Their adapters must supply the remaining interfaces above before any deployment claim.
+
 ## What the evidence proves
 
 | Check | Claim and limit |
@@ -144,7 +262,7 @@ Both builders call `tools/chipyard/firesim_target.py` to emit `firesim-contract.
 | Export and coverage | Every recorded op/shape is placed; exported structure agrees with the hand-written device plans. No numerical proof. |
 | Per-launch original47 qualification | Bit-exact against unmodified npu_model `47b8599` with RTL numerics at the captured shapes, scales, inputs, and program words, including full-arena preservation and requested DMA. No claim for arbitrary inputs or shapes. |
 | Machine stream verifier and encoding | Valid instruction fields, state chain, delay slots, and branch targets; backend words match the assembler. No inference that timing or whole-model compilation passed. |
-| Timing verifier | TODO(track-a): insert final tier counts, all diagnosed rules, and the limitations of fail-fast timing verification from DONE-A.md. The probe's timing acceptance is narrower than its stream acceptance. |
+| Timing verifier | 13 verified, 1,576 stream-verified, and 0 encode-only of 1,589. Release timing verification is fail-fast; rejection does not prove later rules ran. See the diagnostic scope below. |
 | Guest replay | Actual RV64 host instructions and device starts produce the admitted buffers for the identified ELF and input; segmented evidence must say segmented. No SoC interconnect or FPGA timing proof. |
 | PyTorch comparison | The end-to-end outputs were checked against PyTorch for the fixed examples; they differ because the Atlas arithmetic policy differs. See [task accuracy](task-accuracy.md). |
 | ELF identity and packaging | Hash and byte identity preserve an artifact; static packaging checks placement and metadata. Neither executes the artifact. |
@@ -157,9 +275,11 @@ The fixed-input PyTorch comparison gives TinyLlama tokens `[278, 3711, 5652]` ve
 
 Core cycle counts are npu_model model cycles. QEMU host cycles, model device cycles, standalone RTL cycles, and FireSim target cycles measure different systems and must be reported separately. In particular, functional executor instruction counts and coverage FLOPs are not device latency. The compiler route's small-kernel standalone RTL evidence does not establish full-model RTL or FireSim timing.
 
-The host graphs and device plan files are still hand-written, although Track C checks the plan geometry against the real export. New observations and inputs need regenerated authenticated capture and boundary providers. Source-hash checks can reject historical receipts after source movement or edits; explicit relocation preserves hashes and does not authorize changed bytes. The compiler branch's `atlas_host` API has `ensure_loaded`, `invalidate_program`, `reset_completed`, and `set_clock`, while this bringup runtime has raw loading and launch ranges. That divergence must be reconciled before combining the routes.
+The host graphs and device plan files are still hand-written, although a separate coverage-plan test checks the plan geometry against the real export. New observations and inputs need regenerated authenticated capture and boundary providers. Source-hash checks can reject historical receipts after source movement or edits; explicit relocation preserves hashes and does not authorize changed bytes. The compiler branch's `atlas_host` API has `ensure_loaded`, `invalidate_program`, `reset_completed`, and `set_clock`, while this bringup runtime has raw loading and launch ranges. That divergence must be reconciled before combining the routes.
 
-TODO(track-a): confirm final integration gates, ELF identities, backend selection without silent fallback, timing-tier evidence, and any attention halt/DELAY follow-up in DONE-A.md. Do not promote a probe result to an integrated build claim.
+The 1,576 timing-rejected programs were checked against all pending DMA ranges on every channel on original47: 0 hazards, 202,033,593 instructions, and 6,092,213 DMAs. This experiment used one input per program, 1,531 fast-mode and 45 full-mode executions, excluded host accesses, and did not model real RTL completion timing. Controls injected hazards and compared fast with full execution. It supports those executions, not a universal race proof.
+
+The release timing verifier stops at its first violation. An uncommitted diagnostic-only build continued through all violations and found no issue-spacing, reservation, or fixed-latency violation. Its DMA diagnostics reflect per-block register reasoning that cannot prove loop-buffer disjointness and the restriction against DMA crossing block boundaries. Separately, the halt-after-DELAY rule is a genuine finding in 45 attention programs (25 TinyLlama, 20 SmolVLA): `delay 128; ecall` does not wait for the pad on RTL. Experiments found no outstanding work at halt, so results were unaffected. Dropping the pad or inserting a scalar guard changes words and is deferred pending requalification. Neither the diagnostic build nor this experiment upgrades these programs to timing-verified.
 
 For Gemma2, begin by checking whether projection, RMSNorm, RoPE, gated epilogues, and attention families fit the exported layouts and arithmetic. Check attention masking, scaling, soft-capping, cache geometry, and normalization explicitly; the TinyLlama example does not prove them. For pi0, inventory vision, text, action, attention, and denoising/control work independently before borrowing SmolVLA families. A new op or incompatible layout belongs in the coverage work list until a kernel or explicit host implementation and its checks exist.
 

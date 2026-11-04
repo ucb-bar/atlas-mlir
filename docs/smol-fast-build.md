@@ -2,10 +2,12 @@
 
 The verified build remains the default. Fast builds use immutable weights already linked into the admitted default ELF, skip the weight copy and weight preservation scan, and retain activation, guard, fusion-extra, finite-output, and padded-output validation.
 
-Generate bound programs from the complete full-model bundle and its default full SIMS ELF. Set `PYTHONPATH` to the admitted npu-model checkout so its assembler is available. Every baseline assembly and binary must match the bundle, and every linked weight range must match the bundle member before the tool emits a bound program. Fusion metadata, including its FP8 scale, participates in the variant key.
+Use the exported model, interpreter, and tool variables in [Inputs and environments](bringing-up-a-model.md#inputs-and-environments). Inspect a nonempty stream-accepted backend receipt as described there. Generate bound programs from the complete full-model bundle and its default full SIMS ELF. Set `PYTHONPATH` to the admitted npu-model checkout so its assembler is available. Every baseline assembly and binary must match the bundle, and every linked weight range must match the bundle member before the tool emits a bound program. Fusion metadata, including its FP8 scale, participates in the variant key.
 
 ```sh
-python tools/generate_smol_fast_assets.py --bundle /absolute/path/to/bundle --elf /absolute/path/to/default-full.elf --out /absolute/path/to/generated
+PYTHONPATH="$MODEL47:$ATLAS/tools" "$MODEL_PYTHON" "$ATLAS/third_party/atlas-kernels/lib/atlas_backend.py" run --backend atlas-mlir \
+  --atlas-mlir-bin "$ATLAS_MLIR_BIN" --receipt "$ATLAS/out/smol-fast-backend.json" -- \
+  "$ATLAS/tools/generate_smol_fast_assets.py" --bundle "$SMOL_BUNDLE" --elf "$SMOL_DEFAULT_ELF" --out "$SMOL_FAST_ASSETS"
 ```
 
 The builder consumes explicit CMake compile and link recipes without invoking the build system. It compiles the maintained raw runtime and context header against the generated package's other host and platform inputs. Large immutable asset objects use a transient memory file, and the builder removes intermediate objects after recording its receipt. Generated package inputs must be the admitted source inputs for the default ELF used during generation.
