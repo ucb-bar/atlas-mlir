@@ -10,6 +10,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from model_provenance import require_model_revision
+
 from test_mxu_spilling import (
     mxu_diamond,
     mxu_diamond_inputs,
@@ -75,9 +77,7 @@ class SpillModelExecutionTest(unittest.TestCase):
 
         from tools.check_program_decode import decode_binary
 
-        origin = json.loads(importlib.metadata.distribution('npu-model').read_text('direct_url.json') or '{}')
-        self.assertTrue(MODEL_REVISION in origin.get('url', '') or
-                        origin.get('vcs_info', {}).get('commit_id') == MODEL_REVISION)
+        require_model_revision(importlib.metadata.distribution('npu-model'), isa.__file__, MODEL_REVISION)
         inventory = json.loads((ROOT / 'docs/selected-variant-inventory.json').read_text())
         torch.set_num_threads(1)
         with tempfile.TemporaryDirectory(prefix='atlas-mxu-spill-model-') as directory:
@@ -139,10 +139,7 @@ class SpillModelExecutionTest(unittest.TestCase):
         finally:
             sys.path.pop(0)
 
-        origin = json.loads(importlib.metadata.distribution('npu-model').read_text('direct_url.json') or '{}')
-        self.assertTrue(MODEL_REVISION in origin.get('url', '') or
-                        origin.get('vcs_info', {}).get('commit_id') == MODEL_REVISION,
-                        'install the documented npu_model revision')
+        require_model_revision(importlib.metadata.distribution('npu-model'), isa.__file__, MODEL_REVISION)
         inventory = json.loads((ROOT / 'docs/selected-variant-inventory.json').read_text())
         cases = [('bf16', pressure(), 32), ('block-loop', block_pressure(True), 16),
                  ('scalar', scalar_pressure(), 2), ('scalar-loop', scalar_pressure(True), 2),

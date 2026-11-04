@@ -107,4 +107,4 @@ jobs:
           ATLAS_RUN_NPU_MODEL: "1"
         run: |
           export ATLAS_OOT_BIN_DIR="$(python -c 'from atlas_mlir.toolchain import bin_dir; print(bin_dir())')"
-          python -m pytest test/test_virtual_evaluator*.py test/test_spill_model_execution.py -q
+          python -m pytest test/test_model_provenance.py test/test_virtual_evaluator*.py test/test_spill_model_execution.py -q
