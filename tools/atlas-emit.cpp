@@ -16,6 +16,11 @@ using namespace mlir;
 using namespace mlir::atlas;
 
 int main(int argc, char **argv) {
+  if (argc == 2 && (llvm::StringRef(argv[1]) == "--help" ||
+                    llvm::StringRef(argv[1]) == "-h")) {
+    llvm::outs() << "usage: atlas-emit [--allow-untimed] [--map-json|--program-json] <flat-mlir-module>\n";
+    return 0;
+  }
   bool mapJson = false, programJson = false, allowUntimed = false, invalid = false;
   const char *input = nullptr;
   for (int i = 1; i < argc; ++i) {

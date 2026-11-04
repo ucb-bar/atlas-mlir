@@ -18,6 +18,8 @@ from safetensors.numpy import save_file
 
 from atlas_mlir import toolchain
 from atlas_mlir.cli import main
+from atlas_mlir.capture import Capture
+from atlas_mlir.driver import build
 
 ROOT = Path(__file__).resolve().parents[1]
 EXAMPLES = ROOT / "test/examples"
@@ -105,6 +107,17 @@ class AtlascBuildTest(unittest.TestCase):
         self.assertEqual(atlasc("build", *CAPTURED, "--no-host-elf", "--force",
                                 "-o", str(foreign)), 1)
         self.assertTrue((foreign / "keep.txt").is_file())
+
+    def test_capture_inputs_are_used_by_python_api(self) -> None:
+        result = build(out=self.root / "api", captured=Capture(
+            Path(CAPTURED[1]), Path(CAPTURED[3]), Path(CAPTURED[5]), self.inputs),
+            host_elf=False)
+        self.assertTrue((result.out / "host/atlas_run_inputs.h").is_file())
+
+    def test_bundled_demo_and_missing_file_diagnostic(self) -> None:
+        self.assertEqual(atlasc("demo", "-o", str(self.root / "demo")), 0)
+        self.assertEqual(atlasc("build", "--linalg", str(self.root / "missing.mlir"),
+                                *CAPTURED[2:], "-o", str(self.root / "missing")), 1)
 
     @unittest.skipUnless(importlib.util.find_spec("torch") and importlib.util.find_spec("torch_mlir"),
                          "capturing a PyTorch model needs torch and torch-mlir")

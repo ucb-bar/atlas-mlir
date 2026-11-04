@@ -1,0 +1,110 @@
+name: Package
+
+on:
+  push:
+  pull_request:
+  merge_group:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: package-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        shell: bash -el {0}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mamba-org/setup-micromamba@v2
+        with:
+          environment-file: ci/environment.yml
+          cache-environment: true
+      - name: Build sdist and wheel from sdist
+        env:
+          CMAKE_BUILD_PARALLEL_LEVEL: "2"
+        run: |
+          export CMAKE_ARGS="-DMLIR_DIR=$CONDA_PREFIX/lib/cmake/mlir -DLLVM_DIR=$CONDA_PREFIX/lib/cmake/llvm"
+          python -m pip install build
+          python -m build
+      - name: Build and test compiler
+        run: |
+          python -m pip install dist/*.whl pytest
+          cmake -S . -B build -G Ninja -DMLIR_DIR="$CONDA_PREFIX/lib/cmake/mlir" -DPython3_EXECUTABLE="$(command -v python)"
+          cmake --build build --parallel 2
+          ctest --test-dir build --output-on-failure --parallel 2 -E 'atlas-python-test_virtual_evaluator'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: atlas-mlir-linux-x86_64
+          path: dist/*
+          if-no-files-found: error
+
+  installed-wheel:
+    needs: build
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - python: "3.10"
+            xdsl: "0.65.0"
+          - python: "3.12"
+            xdsl: "0.68.0"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: atlas-mlir-linux-x86_64
+          path: dist
+      - name: Install and exercise wheel without LLVM or source-tree imports
+        run: |
+          python -m pip install dist/*.whl xdsl==${{ matrix.xdsl }}
+          cd "$RUNNER_TEMP"
+          python "$GITHUB_WORKSPACE/ci/smoke_wheel.py"
+      - name: Install tested CPU capture stack
+        run: |
+          python -m pip install torch==2.10.0 --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install torch-mlir==20261001 -f https://github.com/llvm/torch-mlir/releases/expanded_assets/v20261001
+      - name: Install host linker and test runner
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang lld
+          python -m pip install pytest
+      - name: Compile PyTorch and exported program with installed wheel
+        run: |
+          cd "$RUNNER_TEMP"
+          python "$GITHUB_WORKSPACE/ci/smoke_wheel.py" --capture --require-host-elf
+          python -m pytest "$GITHUB_WORKSPACE/test/test_atlasc.py" -q
+
+  numerical-evaluator:
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - uses: actions/download-artifact@v4
+        with:
+          name: atlas-mlir-linux-x86_64
+          path: dist
+      - name: Install pinned numerical model
+        run: |
+          python -m pip install dist/*.whl pytest tabulate
+          python -m pip install torch==2.11.0 --index-url https://download.pytorch.org/whl/cpu
+          # The arithmetic corpus lives beside the source and is absent from its wheel.
+          python -m pip install --no-deps --editable 'git+https://github.com/ucb-ee194-tapeout/npu_model@337e9f249f938a1dff007ddf8a763e5cd4b3aa2b#egg=npu-model'
+      - name: Run numerical evaluator and emitted-program execution
+        env:
+          ATLAS_RUN_NPU_MODEL: "1"
+        run: |
+          export ATLAS_OOT_BIN_DIR="$(python -c 'from atlas_mlir.toolchain import bin_dir; print(bin_dir())')"
+          python -m pytest test/test_virtual_evaluator*.py test/test_spill_model_execution.py -q

@@ -1,0 +1,12 @@
+name: atlas-build
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12
+  - pip
+  - cmake>=3.22
+  - ninja
+  - cxx-compiler
+  - mlir=23.1.2
+  - llvmdev=23.1.2
+  - scikit-build-core

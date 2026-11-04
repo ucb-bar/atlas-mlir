@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -25,7 +26,7 @@ class Capture:
     linalg: Path
     arguments: Path
     weights: Path
-    inputs: Path  # Example inputs by graph input name, for the host program.
+    inputs: Path | None  # Example inputs by graph input name, for the host program.
 
 
 def _torch() -> tuple[Any, Any]:
@@ -35,7 +36,7 @@ def _torch() -> tuple[Any, Any]:
     except ImportError as error:
         raise CaptureError(
             f"capturing a PyTorch model needs torch and torch-mlir ({error}); "
-            "torch-mlir publishes wheels for Python 3.10-3.12"
+            "install atlas-mlir[capture] in a supported Python environment"
         ) from error
     return torch, fx
 
@@ -43,6 +44,8 @@ def _torch() -> tuple[Any, Any]:
 def load(source: Path) -> tuple[Any, tuple[Any, ...]]:
     """A model and its example inputs from a loader .py or a torch.export .pt2 file."""
     torch, _ = _torch()
+    if not source.is_file():
+        raise CaptureError(f"model source does not exist: {source}")
     if source.suffix == ".pt2":
         program = torch.export.load(str(source))
         example = program.example_inputs
@@ -54,6 +57,8 @@ def load(source: Path) -> tuple[Any, tuple[Any, ...]]:
         raise CaptureError(f"{source}: expected a loader .py or a .pt2 file")
     spec = importlib.util.spec_from_file_location(f"atlas_model_{source.stem}", source)
     module = importlib.util.module_from_spec(spec)
+    # Dataclasses and other runtime annotation helpers consult sys.modules.
+    sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     loader = getattr(module, "get_model_and_inputs", None)
     if loader is None:

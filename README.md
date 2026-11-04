@@ -17,14 +17,87 @@ the program can go through LLVM (`mlir-translate`, `llc`) as one inline-assembly
 block in a RISC-V object. A RISC-V CPU cannot run those words; a host loads them
 into Atlas and starts it ([host launch](docs/host-launch.md)).
 
-The repository also ships a Python package (`atlas-mlir-native-support`) that
-plugs Atlas into Merlin's native compiler, and a small C runtime for the host
-side.
+The `atlas-mlir` pip package provides the `atlasc` command, the native
+`atlas-opt` and `atlas-emit` tools, and the Atlas plugin for Merlin. Wheels
+include the compiler libraries and host runtime sources; LLVM is only needed
+when building the package from source.
 
-## Build
+## Install and compile
 
-Use MLIR and LLVM from one installation (tested with LLVM/MLIR 23.0.0git,
-`a47bddccec30255619bb8c37fa59700e661d4e66`).
+Download the Linux x86-64 wheel from the **Package** GitHub Actions artifact,
+unzip the artifact, and run these two commands in a Python environment:
+
+```sh
+python -m pip install ./atlas_mlir-*.whl
+atlasc demo
+```
+
+The bundled two-layer MLP needs no PyTorch, external LLVM installation, or
+hardware. `atlas-out/demo` contains the device binary, decoded instructions,
+virtual and machine MLIR, host headers, memory layout and `report.json`.
+This compiles a program; executing it requires an Atlas model or device.
+
+For your own PyTorch model, install capture support and compile a loader:
+
+```sh
+python -m pip install './atlas_mlir-0.1.0-py3-none-linux_x86_64.whl[capture]'
+atlasc build model.py
+```
+
+A loader is an ordinary Python module defining `get_model_and_inputs()`:
+
+```python
+import torch
+
+
+def get_model_and_inputs():
+    model = torch.nn.Sequential(torch.nn.Linear(32, 32), torch.nn.ReLU(),
+                                torch.nn.Linear(32, 32)).eval()
+    return model, (torch.ones(32, 32),)
+```
+
+`atlasc build model.pt2` also accepts `torch.export.save` files. Output defaults
+to `atlas-out/<model-name>`; use `-o DIR` to choose it, and `--force` to replace
+an earlier `atlasc` build. A RISC-V compiler on PATH adds a bare-metal host ELF;
+`--host-cc clang` selects Clang with LLD, and `--no-host-elf` skips the link.
+`atlasc doctor --capture` checks the installed compiler and capture imports.
+`atlasc doctor` checks only the base package.
+
+The capture extra pins PyTorch 2.10.0 and torch-mlir 20261001; CI covers
+Python 3.10/3.12. For CPU-only PyTorch (or if your index lacks torch-mlir):
+
+```sh
+python -m pip install torch==2.10.0 --index-url https://download.pytorch.org/whl/cpu
+python -m pip install torch-mlir==20261001 -f https://github.com/llvm/torch-mlir/releases/expanded_assets/v20261001
+```
+
+From Python: `from atlas_mlir import compile; result = compile(model, inputs,
+"atlas-out/model")`. Already captured graphs use `atlasc build --linalg FILE
+--arguments MANIFEST --weights WEIGHTS [--inputs INPUTS]`.
+The default `fp8` policy is diagnostic FP8/BF16 arithmetic, not f32 equivalence.
+Use `--policy policy.json` for an explicit numerical policy. See the supported
+operations and shape restrictions in the [binding guide](docs/native-merlin-binding.md).
+
+Every push, pull request and merge queue run builds an sdist, builds its wheel,
+runs the portable compiler tests, then installs the wheel on separate runners
+for base-package and PyTorch smoke tests. Artifacts are downloadable after the
+build. Configure the **Package** workflow's checks as required in branch
+protection to enforce the gate; the workflow itself cannot change repository
+branch-protection settings. No PyPI credentials are needed.
+
+## Build from source
+
+Use MLIR and LLVM from one installation. The wheel CI uses conda-forge
+LLVM/MLIR 23.1.2; [ci/environment.yml](ci/environment.yml) specifies its build
+environment. The original source build also used LLVM/MLIR 23.0.0git,
+`a47bddccec30255619bb8c37fa59700e661d4e66`.
+
+Activate the C/C++ compiler environment that supplied LLVM before building
+(for conda, activate the environment in `ci/environment.yml`). A mismatched
+compiler may link successfully but crash on MLIR input; wheel installation
+now refuses that build. With MLIR installed, `CMAKE_ARGS="-DMLIR_DIR=/path/to/lib/cmake/mlir"
+python -m pip install .` builds and installs everything in one command.
+For compiler development, use the separate editable Python/CMake workflow:
 
 ```sh
 python -m pip install -e '.[test]'
@@ -59,7 +132,7 @@ ctest --test-dir build --output-on-failure
 match its gitlink. A selected but missing tool or dependency fails the test.
 These assembler revisions are separate from the recorded RTL/model evidence.
 
-## Quick start
+## Low-level MLIR tools
 
 ```sh
 mkdir -p out/quick
