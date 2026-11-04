@@ -6,19 +6,21 @@ build-backend = "scikit_build_core.build"
 name = "atlas-mlir"
 version = "0.1.0"
 description = "Atlas NPU compiler: PyTorch model to Atlas program and host ELF, and the Merlin native binding"
+readme = "README.md"
+license = {file = "LICENSE"}
 # 3.10 is the Python in Chipyard's conda environment; torch-mlir publishes
 # wheels for 3.10-3.12.
 requires-python = ">=3.10"
 dependencies = [
   "numpy",
   "safetensors",
-  "xdsl==0.65.0",
-  "torch",
-  "torch-mlir; python_version < '3.13'",
+  "xdsl>=0.65.0,<0.69",
 ]
 
 [project.optional-dependencies]
 test = ["pytest", "numpy", "safetensors"]
+# Captured Linalg and the native tools do not need a PyTorch installation.
+capture = ["torch==2.10.0", "torch-mlir==20261001"]
 
 [project.scripts]
 atlasc = "atlas_mlir.cli:main"

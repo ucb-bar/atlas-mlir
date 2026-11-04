@@ -66,6 +66,8 @@ def build(source: Path | None = None, *, out: Path, model: Any = None,
             model, inputs = load(Path(source))
         captured = capture(model, tuple(inputs), out / "capture")
         example_inputs = captured.inputs
+    elif example_inputs is None:
+        example_inputs = captured.inputs
 
     linalg = captured.linalg.read_text()
     policy_path = out / "policy.json"

@@ -13,6 +13,19 @@ from .capture import Capture, CaptureError
 from .driver import build
 
 
+def _demo(args: argparse.Namespace) -> int:
+    examples = toolchain.data_root() / "test/examples"
+    args.source = None
+    args.linalg = examples / "captured_mlp32_linalg.mlir"
+    args.arguments = examples / "captured_mlp32_arguments.json"
+    args.weights = examples / "captured_mlp32_weights.safetensors"
+    args.inputs = None
+    args.policy = "fp8"
+    args.host_cc = None
+    args.no_host_elf = True
+    return _build(args)
+
+
 def _build(args: argparse.Namespace) -> int:
     captured = None
     if args.linalg:
@@ -29,7 +42,7 @@ def _build(args: argparse.Namespace) -> int:
         result = build(args.source, out=out, captured=captured, example_inputs=args.inputs,
                        policy=args.policy, force=args.force, host_cc=args.host_cc,
                        host_elf=not args.no_host_elf)
-    except (CaptureError, FileExistsError, ValueError,
+    except (CaptureError, OSError, ValueError,
             toolchain.ToolchainError, toolchain.ToolFailure) as error:
         print(f"atlasc: {error}", file=sys.stderr)
         return 1
@@ -50,24 +63,36 @@ def _version(distribution: str) -> str | None:
         return None
 
 
-def _doctor(_: argparse.Namespace) -> int:
+def _doctor(args: argparse.Namespace) -> int:
     """Report each piece atlasc uses; fail only on what compilation needs."""
     rows: list[tuple[str, str, bool]] = []
     try:
         bins = toolchain.bin_dir()
-        probe = subprocess.run([str(bins / "atlas-opt"), "--version"],
-                               capture_output=True, text=True, check=False)
-        rows.append(("atlas-opt, atlas-emit", str(bins), probe.returncode == 0))
-    except toolchain.ToolchainError as error:
+        for name in ("atlas-opt", "atlas-emit"):
+            probe = subprocess.run([str(bins / name), "--help"],
+                                   capture_output=True, text=True, check=False)
+            rows.append((name, str(bins / name) if probe.returncode == 0 else
+                         probe.stderr.strip(), probe.returncode == 0))
+    except (OSError, toolchain.ToolchainError) as error:
         rows.append(("atlas-opt, atlas-emit", str(error), False))
     try:
         rows.append(("support files", str(toolchain.data_root()), True))
         rows.append(("RTL revision", toolchain.rtl_revision(), True))
     except toolchain.ToolchainError as error:
         rows.append(("support files", str(error), False))
-    for distribution in ("xdsl", "numpy", "safetensors", "torch", "torch-mlir"):
+    distributions = ["xdsl", "numpy", "safetensors"]
+    if args.capture:
+        distributions.extend(["torch", "torch-mlir"])
+    for distribution in distributions:
         version = _version(distribution)
         rows.append((distribution, version or "missing", version is not None))
+    if args.capture:
+        try:
+            from .capture import _torch
+            _torch()
+            rows.append(("PyTorch capture imports", "loaded", True))
+        except (CaptureError, OSError) as error:
+            rows.append(("PyTorch capture imports", str(error), False))
     cc = toolchain.host_cc()
     rows.append(("RISC-V host compiler", cc or f"missing ({toolchain.HOST_CC}, from "
                  "Chipyard's riscv-tools); program.bin still builds", True))
@@ -103,7 +128,13 @@ def main(argv: list[str] | None = None) -> int:
     compile_parser.set_defaults(run=_build)
 
     doctor = commands.add_parser("doctor", help="check the tools atlasc uses")
+    doctor.add_argument("--capture", action="store_true", help="also check PyTorch capture")
     doctor.set_defaults(run=_doctor)
+
+    demo = commands.add_parser("demo", help="compile the bundled two-layer MLP")
+    demo.add_argument("-o", "--output", type=Path, default=Path("atlas-out/demo"))
+    demo.add_argument("--force", action="store_true")
+    demo.set_defaults(run=_demo)
 
     args = parser.parse_args(argv)
     return args.run(args)
