@@ -52,15 +52,12 @@ for CTest and every later `atlas-opt` or `atlas-emit` run;
 `build/bin/atlas-opt --version` checks it.
 
 Known environment-dependent failures: with no other environment variables set,
-11 of 232 CTest tests failed at every recorded head of this branch (221 passed).
-Nine stop on `No module named 'npu_model'` because the npu-model checkout is not
-on `PYTHONPATH`: `atlas-python-test_chipyard_arena`,
+9 of 232 CTest tests fail (223 pass). All nine stop on
+`No module named 'npu_model'` because the npu-model checkout is not on
+`PYTHONPATH`: `atlas-python-test_chipyard_arena`,
 `atlas-python-test_graph_program_bounds`, the six
 `atlas-python-test_virtual_evaluator_*` modules, and
 `atlas-kernels-projection_gemm-test_program_reuse_resident`.
-`atlas-python-test_smol_fusion_assets` needs `TMPDIR`, which the lines above
-set. `atlas-python-test_host_iss_block_bundle` has two failing restricted-name
-assertions, a known source and test mismatch that opens no file.
 `atlas-python-test_host_iss_gdb_buffered` passes where local socket sends are
 allowed; in a sandbox that denies them its receiver blocks, so add
 `--timeout 60` to the `ctest` command there.

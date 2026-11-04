@@ -2,7 +2,6 @@
 import copy
 import hashlib
 import json
-import os
 from pathlib import Path
 import struct
 import sys
@@ -113,7 +112,7 @@ class FusionAssetTest(unittest.TestCase):
 
     def test_kernel_assets_reconstruct_compact_arenas_and_extras(self):
         data=self.fp8_bundle()
-        temporary=tempfile.TemporaryDirectory(prefix='fusion-assets-',dir=os.environ['TMPDIR']);self.addCleanup(temporary.cleanup)
+        temporary=tempfile.TemporaryDirectory(prefix='fusion-assets-');self.addCleanup(temporary.cleanup)
         root=Path(temporary.name)
         files=dict(self.payloads);files['kernels.json']=(json.dumps(data,indent=2)+'\n').encode()
         for name,raw in files.items():

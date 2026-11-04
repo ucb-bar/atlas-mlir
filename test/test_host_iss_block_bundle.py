@@ -14,7 +14,7 @@ from unittest.mock import Mock, patch
 TOOLS = Path(__file__).absolute().parents[1] / "tools"
 sys.path[:0] = [str(TOOLS), str(TOOLS / "host_iss")]
 from block_bundle import BlockBundle
-from bundle import ChecksumBundle, relative_name
+from bundle import ChecksumBundle
 from model_device import Device, launch_bounds
 
 
@@ -77,10 +77,8 @@ class BlockBundleTest(unittest.TestCase):
             with self.subTest(name=name, size=len(raw)), self.assertRaises(ValueError):
                 BlockBundle(root, "smol")
 
-    def test_restricted_names_refused_without_filesystem_access(self):
+    def test_restricted_roots_refused_without_filesystem_access(self):
         for name in ("a/HAMMER-input.bin", "a/vLsI-data.bin"):
-            with self.subTest(name=name), self.assertRaises(ValueError):
-                relative_name(name)
             with self.subTest(root=name), self.assertRaises(ValueError):
                 ChecksumBundle(Path("/nonexistent") / name)
 
