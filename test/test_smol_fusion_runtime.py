@@ -137,6 +137,22 @@ class FusionRuntimeTest(unittest.TestCase):
     def tearDown(self):
         self.lib.smol_fusion_configure(None, None, 0)
 
+    def _transport(self, f, calls, call_count, initials, outputs, programs, activation, conversion):
+        count = len(f.panels)
+        f.dram=np.full(max(p.dram_bytes for p in f.panels),0x93,np.uint8)
+        f.activation=np.zeros(activation,np.uint8);f.conversion=np.zeros(conversion,np.uint16)
+        f.cycles=np.zeros(count,np.uint32)
+        pointer=lambda xs:(ct.c_void_p*len(xs))(*[x.ctypes.data for x in xs])
+        ip,op,pp=pointer(initials),pointer(outputs),pointer(programs)
+        arrays=[(ct.c_size_t*count)(*[getattr(p,name) for p in f.panels])
+            for name in ('dram_bytes','output_offset','store_bytes')]
+        sizes=(ct.c_size_t*count)(*[program.nbytes for program in programs])
+        f.keep.extend([ip,op,pp,*arrays,sizes])
+        host=self.lib.unit_config(f.dram.ctypes.data,ip,op,pp,*arrays,sizes,count)
+        f.context=Context(host,ct.addressof(f.panels),ct.addressof(calls),count,call_count,0,0,f.dram.ctypes.data,
+            f.activation.ctypes.data,f.conversion.ctypes.data,f.dram.size,f.activation.size,f.conversion.size,1000,
+            f.cycles.ctypes.data,Buffer(),f.image,0,0)
+
     def fixture(self, operations=3, role=5, rows=256, k=32, n=32):
         if operations == 4: role, rows, k, n = 7, 64, 12288, 960
         f = SimpleNamespace(rows=rows, k=k, n=n, role=role, layer=12 if role==7 else 2, image=1, keep=[])
@@ -168,18 +184,8 @@ class FusionRuntimeTest(unittest.TestCase):
                 offset,size,f.weights.size,m*pk+f.weights.size+f.extra.size,2*m*pn,scale.value,0)
             f.metadata[index]=FusionPanel(f.extra.ctypes.data if f.extra.size else None,old_end if f.extra.size else 0,f.extra.size,operations)
             initials.append(initial);outputs.append(out);programs.append(f.program);f.keep.extend([activation,initial,out])
-        f.dram=np.full(max(x.dram_bytes for x in f.panels),0x93,np.uint8)
-        f.activation=np.zeros(128*pk,np.uint8);f.conversion=np.zeros(rows*k,np.uint16);f.cycles=np.zeros(count,np.uint32)
-        pointer=lambda a:(ct.c_void_p*len(a))(*[x.ctypes.data for x in a])
-        ip,op,pp=pointer(initials),pointer(outputs),pointer(programs)
-        arrays=[(ct.c_size_t*count)(*[getattr(p,name) for p in f.panels]) for name in ('dram_bytes','output_offset','store_bytes')]
-        program_sizes=(ct.c_size_t*count)(*[f.program.nbytes]*count)
-        f.keep.extend([ip,op,pp,*arrays,program_sizes])
-        host=self.lib.unit_config(f.dram.ctypes.data,ip,op,pp,*arrays,program_sizes,count)
         f.call=Call(rows,k,n,0,count,f.bias.ctypes.data if role!=7 else None,7,f.layer,role,f.image,0,0,0,scale.value)
-        f.context=Context(host,ct.addressof(f.panels),ct.addressof(f.call),count,1,0,0,f.dram.ctypes.data,
-            f.activation.ctypes.data,f.conversion.ctypes.data,f.dram.size,f.activation.size,f.conversion.size,1000,
-            f.cycles.ctypes.data,Buffer(),f.image,0,0)
+        self._transport(f,f.call,1,initials,outputs,programs,128*pk,rows*k)
         f.initials,f.outputs,f.programs=initials,outputs,programs
         return f
 
@@ -220,20 +226,9 @@ class FusionRuntimeTest(unittest.TestCase):
         f.panels=(Panel*(len(a.panels)+len(b.panels)))(*a.panels,*b.panels)
         f.metadata=(FusionPanel*len(f.panels))(*a.metadata,*b.metadata)
         f.calls=(Call*2)(a.call,b.call)
-        f.dram=np.full(max(p.dram_bytes for p in f.panels),0x93,np.uint8)
-        f.activation=np.zeros(128*hidden,np.uint8);f.conversion=np.zeros(rows*max(k,hidden),np.uint16)
-        f.cycles=np.zeros(len(f.panels),np.uint32)
         initials=a.initials+b.initials;outputs=a.outputs+b.outputs;programs=a.programs+b.programs
-        pointer=lambda xs:(ct.c_void_p*len(xs))(*[x.ctypes.data for x in xs])
-        ip,op,pp=pointer(initials),pointer(outputs),pointer(programs)
-        arrays=[(ct.c_size_t*len(f.panels))(*[getattr(p,name) for p in f.panels])
-            for name in ('dram_bytes','output_offset','store_bytes')]
-        sizes=(ct.c_size_t*len(f.panels))(*[program.nbytes for program in programs])
-        f.keep.extend([initials,outputs,programs,ip,op,pp,*arrays,sizes])
-        host=self.lib.unit_config(f.dram.ctypes.data,ip,op,pp,*arrays,sizes,len(f.panels))
-        f.context=Context(host,ct.addressof(f.panels),ct.addressof(f.calls),len(f.panels),2,0,0,f.dram.ctypes.data,
-            f.activation.ctypes.data,f.conversion.ctypes.data,f.dram.size,f.activation.size,f.conversion.size,1000,
-            f.cycles.ctypes.data,Buffer(),f.image,0,0)
+        f.keep.extend([initials,outputs,programs])
+        self._transport(f,f.calls,2,initials,outputs,programs,128*hidden,rows*max(k,hidden))
         return f
 
     def input_view(self, f, **changes):
