@@ -77,6 +77,10 @@ to a device program and host ELF, and tiled matmuls launched from a host.
 
 ## Qwen kernel experiments
 
+The [pretrained model bringup](docs/qwen-model-bringup.md) exports the real
+Qwen session, extracts validated PyTorch regions, and benchmarks model-derived
+kernel launches. Start with its [reproduction commands](examples/qwen/full_model/README.md).
+
 See the [measured results and compiler recommendations](docs/qwen-results.md)
 and the [reproduction instructions](examples/qwen/README.md). The workloads
 are plain PyTorch subgraphs of DeepSeek-R1-Distill-Qwen-1.5B.
