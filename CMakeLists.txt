@@ -58,4 +58,7 @@ foreach(test_file IN LISTS atlas_kernel_tests)
   add_test(NAME atlas-kernels-${suite}-${module}
     COMMAND ${Python3_EXECUTABLE} -m unittest -v ${module}
     WORKING_DIRECTORY ${suite_dir})
+  # lib/atlas_backend.py encodes kernels with the atlas-opt and atlas-emit built here.
+  set_tests_properties(atlas-kernels-${suite}-${module} PROPERTIES
+    ENVIRONMENT ATLAS_OOT_BIN_DIR=$<TARGET_FILE_DIR:atlas-opt>)
 endforeach()
