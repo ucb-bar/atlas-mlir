@@ -9,34 +9,11 @@ from unittest import mock
 ROOT = Path(__file__).absolute().parents[1]
 sys.path[:0] = [str(ROOT / "tools"), str(ROOT / "tools/host_iss")]
 import tiny_full_contract as tiny
+from tiny_contract_fixture import tiny_contract_fixture
 
 
 def fixture():
-    geometry = tiny.plan(2)
-    kernels = []
-    for index, item in enumerate(geometry):
-        m, k, n = item["physical_mkn"]
-        load = (m*k*(n//32)+k*n if k*n <= 262144 else
-                m*k+k*n*(m//32) if m*k <= 262144 else (m//32)*(n//32)*(2*k//32*1024))
-        kernels.append({**item, "index": index, "dram_base": 0x100000000,
-            "output_offset": m*k+k*n+256, "total_dram_bytes": m*k+k*n+512+2*m*n,
-            "requested_dma": {"load_bytes": load, "store_bytes": 2*m*n},
-            "A_scale": -7, "B_scale": -8, "rescale": -15})
-    references = []
-    for name, (shape, dtype) in tiny.reference_geometry(2).items():
-        size = 2 if dtype == "uint16" else 4
-        for extent in shape:
-            size *= extent
-        references.append({"actual_symbol": name, "expected_symbol": name + "_expected",
-                           "shape": shape, "dtype": dtype, "bytes": size})
-    parameters = {name: {"shape": shape, "dtype": dtype, "symbol": f"tiny_full_param_{index:03d}"}
-                  for index, (name, (shape, dtype)) in enumerate(sorted(tiny.parameter_geometry().items()))}
-    data = {"schema": "atlas.tiny_full_contract.v1", "cycle_cap": tiny.CYCLE_CAP,
-        "decode_count": 2, "kernel_count": 840, "projection_calls": 465, "kernels": kernels,
-        "host_parameters": parameters, "reference_buffers": references, "greedy_tokens": [17, 18, 19],
-        "mailbox_symbol": "tiny_full_mailbox", "panel_symbol": "tiny_full_panels",
-        "state_symbol": "tiny_full_state_global", "context_symbol": "tiny_full_projection_state"}
-    return data, {"kernel_count": 840, "kernels": copy.deepcopy(kernels)}
+    return tiny_contract_fixture(2, (-7, -8, -15), [17, 18, 19], 465)
 
 
 class TinyFullContractTest(unittest.TestCase):
