@@ -14,6 +14,18 @@ from attention_bundle import (MODEL_PIN, MODEL_SOURCE_MEMBERS, validate_fused_ou
                               validate_model_sources, validate_scope)
 
 
+def _bind_members(data, item, row, sums, index):
+    for key, member in (('initial_sha256', 'initial'), ('output_sha256', 'expected'),
+                        ('final_arena_sha256', 'expected_arena'), ('program_source_sha256', 'source')):
+        item[member] = f'{index}/{member}'
+        sums[item[member]], row[key] = 'f'*64, 'f'*64
+    item['original'] = f'{index}/program'
+    sums[item['original']] = '0'*64
+    item['requested_dma'] = dict(load_bytes=32, store_bytes=32)
+    data[item['kind'] + '_kernels'][item['table_index']].update(
+        {key: value for key, value in item.items() if key not in ('index', 'table_index')})
+
+
 def fixture():
     projections, attentions, launches, plan = [], [], [], []
     for step in range(3):
@@ -54,18 +66,9 @@ def fixture():
         row = dict(index=index, kind=item['kind'], status='PASS', exact=True, full_arena_exact=True,
                    accelerated=False, native_dispatch_enabled=False, model=dict(commit=MODEL_PIN, numerics='rtl'),
                    source_sha256={str(i): 'd'*64 for i in range(45)}, harness_source_sha256={'harness': 'e'*64})
-        for key, member in (('initial_sha256', 'initial'), ('output_sha256', 'expected'),
-                            ('final_arena_sha256', 'expected_arena'), ('program_source_sha256', 'source')):
-            item[member] = f'{index}/{member}'
-            sums[item[member]] = 'f'*64
-            row[key] = 'f'*64
-        item['original'] = f'{index}/program'
-        sums[item['original']] = '0'*64
-        item['requested_dma'] = dict(load_bytes=32, store_bytes=32)
+        _bind_members(data, item, row, sums, index)
         row['execution'] = dict(program_sha256='0'*64, observed=item['requested_dma'])
         rows.append(row)
-        table = data[item['kind'] + '_kernels'][item['table_index']]
-        table.update({k: v for k, v in item.items() if k not in ('index', 'table_index')})
     gate = dict(status='PASS', model_pin=MODEL_PIN, numerics='rtl', native_not_used=True,
                 all_launches_original_npu_model_rtl_exact=True, attention_native_allowed=False, launch_count=906,
                 verified_indices=list(range(906)), assets_replay_sha256='1'*64, launches=rows)
@@ -161,18 +164,10 @@ def block_fixture():
                    model_sources_after=copy.deepcopy(sources), harness_sources_before=dict(harness),
                    harness_sources_after=dict(harness), output_offset=256, output_bytes=32,
                    method='executed_original_model')
-        for key, member in (('initial_sha256', 'initial'), ('output_sha256', 'expected'),
-                            ('final_arena_sha256', 'expected_arena'), ('program_source_sha256', 'source')):
-            item[member] = f'{index}/{member}'
-            sums[item[member]], row[key] = 'f'*64, 'f'*64
-        item['original'] = f'{index}/program'
-        sums[item['original']] = '0'*64
-        item['requested_dma'] = dict(load_bytes=32, store_bytes=32)
+        _bind_members(data, item, row, sums, index)
         row.update(program_sha256='0'*64, requested_dma=dict(item['requested_dma']),
                    execution=dict(program_sha256='0'*64, observed=dict(item['requested_dma'])))
         rows.append(row)
-        data[item['kind'] + '_kernels'][item['table_index']].update(
-            {key: value for key, value in item.items() if key not in ('index', 'table_index')})
     gate = dict(schema='atlas.d1.all_launch_original.v1', status='PASS', model_pin=MODEL_PIN, numerics='rtl',
                 native_not_used=True, accelerated=False, smoke_scope=True, all_launches_original_npu_model_rtl_exact=True,
                 launch_count=13, verified_indices=list(range(13)), assets_replay_sha256='1'*64, launches=rows,
