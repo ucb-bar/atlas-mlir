@@ -28,6 +28,12 @@ def event_plan():
     return result
 
 
+def attention_geometry(phase):
+    """Logical row/key/head geometry used by captured-asset export and admission."""
+    return ((1024, 1024, 12, 12) if phase < 24 else (177, 177, 15, 5) if phase < 40
+            else (50, 227 if (phase - 40) % 2 == 0 else 177, 15, 5))
+
+
 def mask_tiles(config, logical):
     c = config
     value = np.asarray(logical, dtype=bool)
@@ -48,7 +54,7 @@ def validate_attention(item, read, assemble=None):
         phase = item['phase']
         if type(phase) is not int or not 0 <= phase < 200 or item.get('index') != phase:
             raise ValueError('Attention semantic phase identity differs')
-        geometry = (1024,1024,12,12) if phase<24 else (177,177,15,5) if phase<40 else (50,227 if (phase-40)%2==0 else 177,15,5)
+        geometry = attention_geometry(phase)
         planned = [event for event in event_plan() if event['kind']=='attention'][phase]
         if (c.query_rows,c.keys,c.query_heads,c.kv_heads) != geometry or item.get('before_call') != planned['before_call']:
             raise ValueError('Attention semantic geometry/order differs')
@@ -112,7 +118,7 @@ def export_attention(rows, load, asset, assemble):
             raise ValueError('Captured attention source order differs')
         config = row['config']
         phase = row['index']
-        geometry = (1024,1024,12,12) if phase<24 else (177,177,15,5) if phase<40 else (50,227 if (phase-40)%2==0 else 177,15,5)
+        geometry = attention_geometry(phase)
         if tuple(config[key] for key in ('query_rows','keys','query_heads','kv_heads')) != geometry:
             raise ValueError('Captured attention semantic geometry differs')
         payloads = {name: load(row['files'][name]) for name in

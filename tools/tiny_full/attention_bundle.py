@@ -45,6 +45,18 @@ def digest(raw):
     return hashlib.sha256(raw).hexdigest()
 
 
+def model_attention_geometry(step):
+    """Logical configuration admitted for each full-model attention step."""
+    return dict(query_rows=128 if step == 0 else 1, keys=128 + step,
+                query_heads=32, kv_heads=4, head_dim=64, mask='causal',
+                query_start=0 if step == 0 else 127 + step, scale=0.125)
+
+
+def attention_before_projection(site_index):
+    """The authored layer schedule inserts attention before its output projection."""
+    return site_index % 7 == 3
+
+
 def validate_scope(data, replay):
     require(data.get('schema') == 'atlas.tiny_attention_contract.v1'
             and data.get('workload') == 'tiny-attention', 'unsupported attention bundle')
@@ -106,10 +118,8 @@ def validate_scope(data, replay):
                 and [row['layer'] for row in attention] == list(range(layers)), 'attention step coverage differs')
         for row in attention:
             config = row['config']
-            require(config['query_rows'] == (128 if step == 0 else 1) and config['keys'] == 128 + step
-                    and config['query_heads'] == 32 and config['kv_heads'] == 4 and config['head_dim'] == 64
-                    and config['mask'] == 'causal' and config['query_start'] == (0 if step == 0 else 127 + step)
-                    and config['scale'] == 0.125 and row['numerics'] == 'rtl' and row['model_commit'] == MODEL_PIN,
+            require(all(config[key] == value for key, value in model_attention_geometry(step).items())
+                    and row['numerics'] == 'rtl' and row['model_commit'] == MODEL_PIN,
                     'attention model geometry differs')
     if block:
         expected = [('norm', None)] * pre + [('projection', role) for role in (0, 1, 2)] + [('attention', None)]
