@@ -5,6 +5,7 @@ Start with the [repository README](../README.md) for the build, and the
 
 | Doc | Read it for |
 | --- | --- |
+| [Bringing up a model](bringing-up-a-model.md) | TinyLlama and SmolVLA workflow, kernel mapping, qualification, host builds, and current gaps. |
 | [Dialect reference](dialect-reference.md) | Virtual and machine operations, verifiers, passes, tools, and how to add a pass. |
 | [Compiler pipeline](compiler-pipeline.md) | Virtual lowering, the SSA interpreter, the physical program format, atomic DMA, and the LLVM handoff. |
 | [DMA across PACK](pack-dma-overlap.md) | Why explicit DMA may stay in flight through a PACK relayout loop, how each stage proves it, and the measured effect. |

@@ -84,6 +84,7 @@ to a device program and host ELF, and tiled matmuls launched from a host.
 
 | Doc | Covers |
 | --- | --- |
+| [Bringing up a model](docs/bringing-up-a-model.md) | TinyLlama and SmolVLA workflow, kernel mapping, qualification, host builds, and current gaps. |
 | [Dialect reference](docs/dialect-reference.md) | Operations, verifiers, passes, tools, adding a pass. |
 | [Compiler pipeline](docs/compiler-pipeline.md) | Virtual lowering, interpreter, physical program, DMA, LLVM handoff. |
 | [Register spilling](docs/register-spilling.md) | FP8/BF16 pressure recovery, VMEM slots, checks and current limits. |
