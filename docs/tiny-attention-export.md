@@ -2,14 +2,16 @@
 
 The exporter dispatches on `atlas_instruction_execution`. Captures with an absent or false flag and an absent or empty `attention_calls` ledger use the projection-only exporter. Attention mode requires a true flag and a complete, nonempty ledger in step/layer order; contradictory flags and ledgers are rejected before model configuration or asset creation.
 
-Select the platform physical DRAM size explicitly for attention export. `--dram-base` defaults to `0x80000000`; `--dram-bytes` has no default. Both values accept decimal or hexadecimal numbers and must be aligned to 64 bytes. The range must contain the fixed `0x90000000` DMA arena and every launch's full arena extent. The host build also validates its ELF allocations against the selected range.
+Use the model, interpreter, and compiler variables from [Inputs and environments](bringing-up-a-model.md#inputs-and-environments), and set `$EXPECT_PROGRAMS` to the reviewed distinct-program inventory for this export profile. Keep its backend receipt separate from program checks and fast builds. Select the platform physical DRAM size explicitly for attention export. `--dram-base` defaults to `0x80000000`; `--dram-bytes` has no default. Both values accept decimal or hexadecimal numbers and must be aligned to 64 bytes. The range must contain the fixed `0x90000000` DMA arena and every launch's full arena extent. The host build also validates its ELF allocations against the selected range.
 
 ```sh
-python tools/tiny_full/export_capture.py \
-  --capture /path/to/capture.json --capture-sha256 CAPTURE_SHA256 \
-  --model-root /path/to/pinned-npu-model --out /path/to/fresh-bundle \
-  --dram-base 0x80000000 --dram-bytes 0x80000000 \
-  --qualify-launches
+PYTHONPATH="$MODEL47:$ATLAS/tools" "$MODEL_PYTHON" "$KERNELS/lib/atlas_backend.py" run --backend atlas-mlir \
+  --atlas-mlir-bin "$ATLAS_MLIR_BIN" --min-tier stream-verified --expect-min-programs "$EXPECT_PROGRAMS" \
+  --receipt "$ATLAS/out/tiny-export-backend.json" -- \
+  tools/tiny_full/export_capture.py \
+  --capture "$TINY_CAPTURE" --capture-sha256 "$TINY_CAPTURE_SHA256" \
+  --model-root "$MODEL47" --out "$TINY_ASSETS" \
+  --dram-base 0x80000000 --dram-bytes 0x80000000 --qualify-launches
 ```
 
 The example describes a platform with 2 GiB of DRAM beginning at `0x80000000`; replace the range with the platform's actual physical memory. Export checks arena placement; the host builder checks the complete image placement.

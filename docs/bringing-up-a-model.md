@@ -123,22 +123,7 @@ In the pinned atlas-kernels `59a16fb5c6495bb76fab7d821077218564942c5f`, `run --e
 
 ### 5. Export programs and qualify every launch
 
-TinyLlama's [export runbook](tiny-attention-export.md) gives this complete template, with the actual platform DRAM range substituted:
-
-```sh
-PYTHONPATH="$MODEL47:$ATLAS/tools" "$MODEL_PYTHON" "$KERNELS/lib/atlas_backend.py" run --backend atlas-mlir \
-  --atlas-mlir-bin "$ATLAS_MLIR_BIN" --min-tier stream-verified --expect-min-programs "$EXPECT_PROGRAMS" \
-  --receipt "$ATLAS/out/tiny-export-backend.json" -- \
-  tools/tiny_full/export_capture.py \
-  --capture "$TINY_CAPTURE" --capture-sha256 "$TINY_CAPTURE_SHA256" \
-  --model-root "$MODEL47" --out "$TINY_ASSETS" \
-  --dram-base 0x80000000 --dram-bytes 0x80000000 --qualify-launches
-PYTHONPATH="$MODEL47:$ATLAS/tools" "$MODEL_PYTHON" "$KERNELS/lib/atlas_backend.py" run --backend atlas-mlir \
-  --atlas-mlir-bin "$ATLAS_MLIR_BIN" --min-tier stream-verified --expect-min-programs 210 \
-  --receipt "$ATLAS/out/tiny-program-check-backend.json" -- \
-  tools/tiny_full/check_programs.py --assets "$TINY_ASSETS" \
-  --contract-sha256 "$TINY_CONTRACT_SHA256" --model-root "$MODEL47"
-```
+Use TinyLlama's wrapped [export command](tiny-attention-export.md) with `$TINY_CAPTURE`, its `$TINY_CAPTURE_SHA256`, and fresh `$TINY_ASSETS`, substituting the actual platform DRAM range. Then run the wrapped [program check](tiny-fast-build.md) on `$TINY_ASSETS` with `$TINY_CONTRACT_SHA256`; its recorded census is 210 programs. The guides use the environment above and separate export and check backend receipts.
 
 The illustrated DRAM range is 2 GiB beginning at `0x80000000`; the arena and complete ELF must fit the selected target. `export_capture.py --qualify-launches` dispatches to `attention_export.py`, which writes `$TINY_ASSETS/qualification.json` and executes exported launches with original47. Pass that file and its SHA-256 to the attention builder below. `check_programs.py` regenerates sources and checks encoded words, but does not rerun numerical execution. The older `d1-v2-qualify.py` inherits a 906-launch admission check and is historical; it rejects the current norm-bearing 1,038-launch kit.
 
@@ -158,22 +143,9 @@ For SmolVLA, adapt Merlin `smol_vision_graph.c`, `smol_policy_graph.c`, and the 
 
 ### 7. Build default and fast ELFs
 
-For TinyLlama, the qualification JSON from step 5 feeds the default attention host builder. Compute `$TINY_QUALIFICATION_SHA256` from the trusted uncompressed receipt; for a compressed historical receipt first verify its archived digest and decompress to a separate JSON. Supply the receipt's data root explicitly:
+For TinyLlama, pass step 5's `$TINY_ASSETS/qualification.json` as `$TINY_QUALIFICATION` to the complete [default build command](tiny-attention-build.md), using `$TINY_WORK_ROOT` as its receipt data root and `$TINY_DEFAULT` as fresh output. Compute `$TINY_QUALIFICATION_SHA256` from the trusted uncompressed receipt; for a compressed historical receipt first verify its archived digest and decompress to a separate JSON.
 
-```sh
-"$MODEL_PYTHON" tools/tiny_full/build_attention.py \
-  --assets "$TINY_ASSETS" --qualification "$TINY_QUALIFICATION" \
-  --qualification-sha256 "$TINY_QUALIFICATION_SHA256" \
-  --model-root "$MODEL47" --receipt-data-root "$TINY_WORK_ROOT" \
-  --merlin "$MERLIN/examples/atlas/comparisons" --platform-root "$PLATFORM_ROOT" \
-  --toolchain-bin "$RISCV_BIN" --variant sims --jobs 2 --cmake cmake --out "$TINY_DEFAULT"
-PYTHONPATH="$MODEL47:$ATLAS/tools" "$MODEL_PYTHON" "$KERNELS/lib/atlas_backend.py" run --backend atlas-mlir \
-  --atlas-mlir-bin "$ATLAS_MLIR_BIN" --min-tier stream-verified --expect-min-programs 850 \
-  --receipt "$ATLAS/out/tiny-fast-backend.json" -- \
-  tools/tiny_full/build_fast.py --assets "$TINY_ASSETS" --model-root "$MODEL47" \
-  --default "$TINY_DEFAULT" --platform-root "$PLATFORM_ROOT" \
-  --toolchain-bin "$RISCV_BIN" --host-level 0 --out "$TINY_FAST"
-```
+Then follow the wrapped [fast build command](tiny-fast-build.md), consuming the same `$TINY_ASSETS` and `$TINY_DEFAULT` and producing fresh `$TINY_FAST`. Its backend receipt requires 850 programs for each variant; select `--host-level 0`, `1`, or `2` explicitly.
 
 The default output is `$TINY_DEFAULT/build/atlas-tinyllama.elf` plus `build.json`, and fast output is `$TINY_FAST/build/atlas-tinyllama.elf`. Host levels 0, 1, and 2 select KIT3 and the two later fast milestones; the default level is 2. These attention-host artifacts are not `atlas.full_bundle.v1`, so do not pass them to `tools/host_iss/run.py --workload tiny-full`. The [default build](tiny-attention-build.md) distinguishes historical 906-launch receipts from the 1,038-launch kit and describes root-token resolution.
 

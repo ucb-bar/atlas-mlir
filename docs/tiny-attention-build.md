@@ -4,19 +4,19 @@
 
 The adapter accepts the complete 22-layer prefill and two-decode bundle, its checksum-pinned original RTL qualification receipt, a Merlin comparisons source directory, an external platform tree, and an explicit RISC-V GNU toolchain bin directory. The historical attention-only inventory has 906 launches: 840 projection panels and 66 attention panels. Post-attention norm adds 66 launches for 972 total; pre-attention norm adds another 66 for the current 1,038 total and 132 norm panels. These scopes are selected by the bundle's `post_o_norm` and `pre_attention_norm` flags, not by a builder argument. Each scope checks its interleaved launch plan, every initial/output/final arena, the receipt's original-model and DMA bindings, and all 137 final cache, logits, and token buffers. The adapter also supports an explicitly marked complete layer-0 prefill block; that scope does not qualify the full model. `--out` must name a fresh directory. The build does not execute the ELF or rerun numerical qualification.
 
-From a fresh checkout, use physical absolute paths for the exported assets, receipt, Merlin source, and toolchain. The build reads the explicitly supplied platform tree, model receipt inputs, source directories, and toolchain.
+From a fresh checkout, use physical absolute paths for the exported assets, receipt, Merlin source, and toolchain, with the variables in [Inputs and environments](bringing-up-a-model.md#inputs-and-environments). The build reads the explicitly supplied platform tree, model receipt inputs, source directories, and toolchain.
 
 ```sh
-python3 -B tools/tiny_full/build_attention.py \
-  --assets /absolute/path/to/exported-attention \
-  --qualification /absolute/path/to/qualified-receipt.json \
-  --qualification-sha256 RECEIPT_SHA256 \
-  --merlin /absolute/path/to/merlin/examples/atlas/comparisons \
-  --model-root /absolute/path/to/npu-model \
-  --receipt-data-root /absolute/path/to/tiny-work \
-  --platform-root "$PLATFORM_ROOT" --toolchain-bin /absolute/path/to/riscv-tools/bin \
+"$MODEL_PYTHON" -B tools/tiny_full/build_attention.py \
+  --assets "$TINY_ASSETS" \
+  --qualification "$TINY_QUALIFICATION" \
+  --qualification-sha256 "$TINY_QUALIFICATION_SHA256" \
+  --merlin "$MERLIN/examples/atlas/comparisons" \
+  --model-root "$MODEL47" \
+  --receipt-data-root "$TINY_WORK_ROOT" \
+  --platform-root "$PLATFORM_ROOT" --toolchain-bin "$RISCV_BIN" \
   --variant sims --jobs 2 --cmake cmake \
-  --out /absolute/path/to/new-sims-build
+  --out "$TINY_DEFAULT"
 ```
 
 Repeat with `--variant chip` and a different `--out`. The ELF is `OUT/build/atlas-tinyllama.elf`; `OUT/build.json` binds its SHA-256, all compiled source/header bookends, the toolchain libraries, the commands, the assets, the qualification receipt, and the two LOAD ranges. Configure, dependency, and build logs remain in `OUT`. Compilation needs Python with NumPy and the exporter dependencies, CMake 3.19 or later, a host Make, and the selected GNU RISC-V toolchain. Export's model execution dependencies are unnecessary during the host build.
