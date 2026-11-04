@@ -9,6 +9,8 @@
 #include <atomic>
 #include <deque>
 #include <limits>
+#include <map>
+#include <tuple>
 #include <set>
 
 using namespace mlir;
@@ -444,6 +446,185 @@ bool mlir::atlas::atlasBlockExits(const AtlasStream &s, size_t block) {
   return !s.targetOf.lookup(s.ops[redirect]) || (s.instrs[redirect].op->opClass == OpClass::Branch && s.blockEnd(block) == s.ops.size());
 }
 
+namespace {
+// A disjunction of singleton intervals retains correlations such as the two
+// ping-pong buffer bases. Unknown is the full RV32 interval, including on a
+// restarted core. DMA snapshots describe operands at launch, never at use.
+struct DMAState {
+  RegValues regs = unknownRegs();
+  std::map<size_t, RegValues> pending;
+};
+
+bool joinDMA(DMAState &a, const DMAState &b) {
+  bool changed = mergeInto(a.regs, b.regs);
+  for (const auto &[i, regs] : b.pending) {
+    auto [it, inserted] = a.pending.try_emplace(i, regs);
+    changed |= inserted || mergeInto(it->second, regs);
+  }
+  return changed;
+}
+
+std::optional<bool> branchTaken(const Instr &in, const RegValues &regs) {
+  if (!regs[in.rs1] || !regs[in.rs2])
+    return std::nullopt;
+  uint32_t a = *regs[in.rs1], b = *regs[in.rs2];
+  const std::string &n = in.op->name;
+  if (n == "beq") return a == b;
+  if (n == "bne") return a != b;
+  if (n == "blt") return int32_t(a) < int32_t(b);
+  if (n == "bge") return int32_t(a) >= int32_t(b);
+  if (n == "bltu") return a < b;
+  if (n == "bgeu") return a >= b;
+  return std::nullopt;
+}
+} // namespace
+
+LogicalResult mlir::atlas::checkAtlasDMACFG(
+    const AtlasStream &s, const TimingProvider &provider, size_t maxDisjuncts) {
+  if (maxDisjuncts == 0)
+    return failure();
+  if (s.ops.empty())
+    return failure();
+  std::string missing = validateTimingProvider(provider);
+  if (!missing.empty())
+    return s.ops.front()->emitOpError(missing);
+  std::string scope = provider.validateScope(s);
+  if (!scope.empty())
+    return s.ops.front()->emitOpError(scope);
+
+  // At the bound, replace the entire disjunction by its interval hull and
+  // union of pending launches. Subsequent updates only ascend this finite
+  // lattice: each register becomes unknown at most once, each launch is added
+  // at most once. A bound never causes an unchecked path to be accepted.
+  auto lessState = [](const DMAState &a, const DMAState &b) {
+    return std::tie(a.regs, a.pending) < std::tie(b.regs, b.pending);
+  };
+  struct Entry {
+    std::set<DMAState, decltype(lessState)> states;
+    std::optional<DMAState> hull;
+    explicit Entry(decltype(lessState) less) : states(less) {}
+  };
+  std::vector<Entry> entries(s.starts.size(), Entry(lessState));
+  bool unsupportedWidening = false;
+  std::deque<std::pair<size_t, DMAState>> work;
+  auto enqueue = [&](size_t block, const DMAState &state) {
+    Entry &e = entries[block];
+    if (e.hull) {
+      if (joinDMA(*e.hull, state))
+        work.emplace_back(block, *e.hull);
+      return;
+    }
+    if (e.states.count(state))
+      return;
+    if (e.states.size() < maxDisjuncts) {
+      e.states.insert(state);
+      work.emplace_back(block, state);
+      return;
+    }
+    if (provider.id != kNpuModelTimingProviderId) {
+      unsupportedWidening = true;
+      return;
+    }
+    DMAState hull = state;
+    for (const DMAState &old : e.states)
+      joinDMA(hull, old);
+    e.states.clear();
+    e.hull = hull;
+    work.emplace_back(block, std::move(hull));
+  };
+  enqueue(0, DMAState{});
+  llvm::DenseMap<Operation *, size_t> blockOf;
+  for (size_t b = 0; b < s.starts.size(); ++b)
+    blockOf[s.ops[s.starts[b]]] = b;
+
+  while (!work.empty()) {
+    if (unsupportedWidening)
+      return s.ops.front()->emitOpError("DMA CFG disjunction limit requires a provider with conservative interval footprints");
+    auto [b, state] = std::move(work.front());
+    work.pop_front();
+    std::optional<bool> taken;
+    for (size_t i = s.starts[b]; i < s.blockEnd(b); ++i) {
+      const Instr &in = s.instrs[i];
+      const OpInfo &op = *in.op;
+      Footprint f = provider.footprint(in, state.regs);
+      if (!f.error.empty())
+        return s.ops[i]->emitOpError(f.error);
+      if (f.doneAge < 0)
+        return s.ops[i]->emitOpError("timing provider returned a negative completion age");
+      if (s.delaySlots && i > s.starts[b] && isControlFlow(*s.instrs[i - 1].op) &&
+          (f.doneAge > 0 || op.opClass == OpClass::Halt))
+        return s.ops[i]->emitOpError("delay-slot instruction must be single-cycle scalar work");
+      if (in.release && !state.pending.empty())
+        return s.ops[i]->emitOpError("completion publication requires DMA.WAIT for pending channel ")
+               << s.instrs[state.pending.begin()->first].op->channel;
+      for (const auto &[k, captured] : state.pending) {
+        Footprint dma = provider.footprint(s.instrs[k], captured);
+        if (!dma.error.empty())
+          return s.ops[k]->emitOpError(dma.error);
+        auto conflict = provider.dmaConflict(dma, f);
+        if (!conflict.error.empty())
+          return s.ops[i]->emitOpError(conflict.error);
+        if (conflict.value.conflict)
+          return s.ops[i]->emitOpError()
+                 << edgeKindName(conflict.value.kind) << " conflict with "
+                 << s.ops[k]->getName() << " on channel " << s.instrs[k].op->channel
+                 << ", which may still be in flight; a delay cannot cover "
+                    "a DMA transfer, so add atlas.dma_wait first";
+      }
+      if (op.opClass == OpClass::Halt && !state.pending.empty())
+        return s.ops[i]->emitOpError("halts while DMA channel ")
+               << s.instrs[state.pending.begin()->first].op->channel
+               << " may still be in flight; add atlas.dma_wait first";
+      if (op.opClass == OpClass::DmaWait) {
+        for (auto it = state.pending.begin(); it != state.pending.end();) {
+          if (s.instrs[it->first].op->channel == op.channel)
+            it = state.pending.erase(it);
+          else
+            ++it;
+        }
+      }
+      if (op.opClass == OpClass::DmaLoad || op.opClass == OpClass::DmaStore) {
+        auto [it, inserted] = state.pending.try_emplace(i, state.regs);
+        if (!inserted && mergeInto(it->second, state.regs) &&
+            provider.id != kNpuModelTimingProviderId)
+          return s.ops[i]->emitOpError("repeated DMA launch requires conservative interval footprints");
+      }
+      // The redirect reads its operands before its delay slot executes.
+      if (op.opClass == OpClass::Branch)
+        taken = branchTaken(in, state.regs);
+      applyScalar(in, state.regs);
+    }
+    auto edge = [&](Operation *target) -> LogicalResult {
+      if (target) {
+        enqueue(blockOf.lookup(target), state);
+        return success();
+      }
+      if (!state.pending.empty())
+        return s.ops[state.pending.begin()->first]->emitOpError(
+            "may still be in flight at stream exit; add atlas.dma_wait first");
+      return success();
+    };
+    if (s.endsInBranch(b)) {
+      size_t redirect = s.redirectOf(b);
+      bool conditional = s.instrs[redirect].op->opClass == OpClass::Branch;
+      if ((!conditional || !taken || *taken) &&
+          failed(edge(s.targetOf.lookup(s.ops[redirect]))))
+        return failure();
+      if (conditional && (!taken || !*taken) &&
+          failed(edge(s.blockEnd(b) < s.ops.size() ? s.ops[s.blockEnd(b)] : nullptr)))
+        return failure();
+    } else if (failed(edge(s.blockEnd(b) < s.ops.size() && !s.endsInHalt(b)
+                               ? s.ops[s.blockEnd(b)] : nullptr))) {
+      return failure();
+    }
+  }
+  if (unsupportedWidening)
+    return s.ops.front()->emitOpError("DMA CFG disjunction limit requires a provider with conservative interval footprints");
+  return success();
+}
+
+// Scheduler preflight retains its one-block DMA scope. Final verification uses
+// the CFG proof above; this does not broaden the scheduler transformation.
 LogicalResult mlir::atlas::checkAtlasStream(
     const AtlasStream &s, const TimingProvider &provider) {
   if (s.ops.empty())
@@ -685,11 +866,9 @@ LogicalResult mlir::atlas::verifyAtlasTimingState(ModuleOp module, bool requireT
 
 LogicalResult mlir::atlas::verifyAtlasTimedStream(
     const AtlasStream &s, const TimingProvider &provider) {
-  if (failed(checkAtlasStream(s, provider)))
+  if (failed(checkAtlasDMACFG(s, provider)))
     return failure();
   struct Issued { size_t index; Footprint footprint; int cycle; };
-  // As in checkAtlasStream, DMA stays in flight only into and out of an analyzed loop.
-  std::array<Operation *, kAtlasDMAChannels> pendingDMA{};
   for (size_t block = 0; block < s.starts.size(); ++block) {
     RegValues regs = s.entry[block];
     auto reservations = provider.createReservations();
@@ -739,10 +918,6 @@ LogicalResult mlir::atlas::verifyAtlasTimedStream(
         reservationError = table.onWait(in, cycle);
       if (!reservationError.empty())
         return s.ops[i]->emitOpError(reservationError);
-      if (in.op->opClass == OpClass::DmaLoad || in.op->opClass == OpClass::DmaStore)
-        pendingDMA[in.op->channel] = s.ops[i];
-      else if (in.op->opClass == OpClass::DmaWait)
-        pendingDMA[in.op->channel] = nullptr;
       issued.push_back({i, f, cycle});
       drained = std::max(drained, cycle + f.doneAge + 1);
       applyScalar(in, regs);
@@ -753,10 +928,6 @@ LogicalResult mlir::atlas::verifyAtlasTimedStream(
         return s.ops[i]->emitOpError("timing provider issue gap exceeds positive cycle domain");
       cycle += gap.value;
     }
-    if (!s.dmaMayCross(block))
-      for (Operation *launch : pendingDMA)
-        if (launch)
-          return launch->emitOpError("timing verification requires DMA completion before a block boundary");
     if (!s.endsInBranch(block) && !s.endsInHalt(block)) {
       int idle = 0;
       if (s.fallsThrough(block))

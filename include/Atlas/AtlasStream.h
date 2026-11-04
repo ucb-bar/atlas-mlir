@@ -64,6 +64,13 @@ unsigned atlasStreamDecodeCount();
 // Rejects illegal delay slots and DMA hazards using complete supplied rules.
 LogicalResult checkAtlasStream(
     const AtlasStream &stream, const timing::TimingProvider &provider);
+// Proves DMA ownership on every feasible CFG path using correlated singleton
+// register intervals and conservative widening after maxDisjuncts per block.
+// Unknown entry/load values cover all RV32 values. The provider rules are kept.
+// Only the built-in provider admits interval widening; others fail at the bound.
+LogicalResult checkAtlasDMACFG(
+    const AtlasStream &stream, const timing::TimingProvider &provider,
+    size_t maxDisjuncts = 65536);
 // Checks actual issue spacing, reservations and drained CFG boundaries without
 // consulting a scheduler graph or implicitly using any model timing policy.
 LogicalResult verifyAtlasTimedStream(

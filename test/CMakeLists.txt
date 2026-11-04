@@ -55,6 +55,16 @@ foreach(thin_k IN ITEMS 1 65)
     COMMAND atlas-ordered-mn-thin-k${thin_k}-host-test)
 endforeach()
 
+add_llvm_executable(atlas-cfg-dma-timing-test
+  cfg-dma-timing-verification.cpp PARTIAL_SOURCES_INTENDED)
+llvm_update_compile_flags(atlas-cfg-dma-timing-test)
+target_link_libraries(atlas-cfg-dma-timing-test PRIVATE
+  MLIRAtlas MLIRParser MLIRPass MLIRIR MLIRArithDialect MLIRControlFlowDialect
+  MLIRFuncDialect)
+mlir_check_all_link_libraries(atlas-cfg-dma-timing-test)
+add_test(NAME atlas-cfg-dma-timing COMMAND atlas-cfg-dma-timing-test)
+set_tests_properties(atlas-cfg-dma-timing PROPERTIES TIMEOUT 30)
+
 add_executable(atlas-ordered-mn-single-host-test ordered-mn-host-test.c)
 target_compile_definitions(atlas-ordered-mn-single-host-test PRIVATE ATLAS_TEST_MN_SINGLE=1)
 target_link_libraries(atlas-ordered-mn-single-host-test PRIVATE atlas-source-mn)
