@@ -25,6 +25,7 @@ find_package(Python3 COMPONENTS Interpreter REQUIRED)
 # One test per Python test module, run from test/ as discovery would, with the
 # native binding package importable. Modules of plain test functions use
 # pytest; the rest are unittest suites.
+# Includes test_model_coverage.py, which checks plans against the pinned kernel fixtures.
 file(GLOB atlas_python_tests CONFIGURE_DEPENDS ${PROJECT_SOURCE_DIR}/test/test_*.py)
 set(atlas_python_paths
   PYTHONPATH=path_list_prepend:${PROJECT_SOURCE_DIR}/python
