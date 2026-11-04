@@ -52,27 +52,36 @@ To reduce storage during a reply regeneration, add `--shared-phase-reference /ab
 
 ## Export and standalone build
 
-Set `SUPPORT` to the RV64 support directory containing `rv64_support.c` and `include/`, `CLANG` to the RISC-V-capable compiler, `LLD` to its linker, and `TABLE_PYTHON` to an interpreter with the required table generation dependencies. These are toolchain inputs rather than repository-relative assumptions.
+Set `SUPPORT` to the RV64 support directory containing `rv64_support.c` and `include/`, `CLANG` to the RISC-V-capable compiler, `LLD` to its linker, and `TABLE_PYTHON` to an interpreter with the required table generation dependencies. These are toolchain inputs rather than repository-relative assumptions. Use the compiler and environment variables from [Inputs and environments](bringing-up-a-model.md#inputs-and-environments). When continuing the capture above, set `MODEL_PYTHON=$PY`, `MODEL47=$MODEL`, `SMOL_CAPTURE=$WORK/capture`, `SMOL_ASSETS=$WORK/kernel-assets`, `SMOL_BUNDLE=$WORK/bundle`, and `SMOL_BUNDLE_AUDIT=$WORK/audit-standalone.json`. Each wrapped command requires its own reviewed `$EXPECT_PROGRAMS` count for the selected profile and writes a separate backend receipt; inspect these as described in [the backend gate](bringing-up-a-model.md#4-check-kernels-at-the-actual-shapes).
 
 ```sh
-"$PY" -B "$ATLAS/tools/export_smol_policy_kernels.py" --native-capture \
-  --replay "$WORK/capture/run/replay.json" --attention-capture "$WORK/capture/run/manifest.json" \
-  --model-root "$MODEL" --out "$WORK/kernel-assets"
-"$PY" -B "$ATLAS/tools/build_smol_full_host.py" \
-  --assets "$WORK/kernel-assets" --replay "$WORK/capture/run/replay.json" \
+PYTHONPATH="$MODEL47:$ATLAS/tools" "$MODEL_PYTHON" -B "$ATLAS/third_party/atlas-kernels/lib/atlas_backend.py" run --backend atlas-mlir \
+  --atlas-mlir-bin "$ATLAS_MLIR_BIN" --min-tier stream-verified --expect-min-programs "$EXPECT_PROGRAMS" \
+  --receipt "$ATLAS/out/smol-export-backend.json" -- \
+  "$ATLAS/tools/export_smol_policy_kernels.py" --native-capture \
+  --replay "$SMOL_CAPTURE/run/replay.json" --attention-capture "$SMOL_CAPTURE/run/manifest.json" \
+  --model-root "$MODEL47" --out "$SMOL_ASSETS"
+PYTHONPATH="$MODEL47:$ATLAS/tools" "$MODEL_PYTHON" -B "$ATLAS/third_party/atlas-kernels/lib/atlas_backend.py" run --backend atlas-mlir \
+  --atlas-mlir-bin "$ATLAS_MLIR_BIN" --min-tier stream-verified --expect-min-programs "$EXPECT_PROGRAMS" \
+  --receipt "$ATLAS/out/smol-host-backend.json" -- \
+  "$ATLAS/tools/build_smol_full_host.py" \
+  --assets "$SMOL_ASSETS" --replay "$SMOL_CAPTURE/run/replay.json" \
   --merlin "$MERLIN/examples/atlas/comparisons" --attention "$MERLIN/examples/atlas/comparisons" \
   --runtime "$ATLAS" --bundle-tools "$ATLAS/tools/host_iss" \
   --support "$SUPPORT" --compiler "$CLANG" --linker "$LLD" --table-python "$TABLE_PYTHON" \
-  --model-root "$MODEL" --host-input-bundle "$INPUT_BUNDLE" \
+  --model-root "$MODEL47" --host-input-bundle "$INPUT_BUNDLE" \
   --uart-kind sifive --uart-base 0x10020000 --uart-divisor 134 --target sim \
   --dram-base 0x80000000 --dram-bytes 0x80000000 --arena-base 0x90000000 \
-  --traffic-reuse --rodata-after-arena --phase-reference "$WORK/capture/run/phase-reference.json" \
-  --out "$WORK/bundle"
-"$PY" -B "$ATLAS/tools/check_smol_full_bundle.py" \
-  --bundle "$WORK/bundle" --model-root "$MODEL" --out "$WORK/audit-standalone.json"
+  --traffic-reuse --rodata-after-arena --phase-reference "$SMOL_CAPTURE/run/phase-reference.json" \
+  --out "$SMOL_BUNDLE"
+PYTHONPATH="$MODEL47:$ATLAS/tools" "$MODEL_PYTHON" -B "$ATLAS/third_party/atlas-kernels/lib/atlas_backend.py" run --backend atlas-mlir \
+  --atlas-mlir-bin "$ATLAS_MLIR_BIN" --min-tier stream-verified --expect-min-programs "$EXPECT_PROGRAMS" \
+  --receipt "$ATLAS/out/smol-bundle-check-backend.json" -- \
+  "$ATLAS/tools/check_smol_full_bundle.py" \
+  --bundle "$SMOL_BUNDLE" --model-root "$MODEL47" --out "$SMOL_BUNDLE_AUDIT"
 ```
 
-The builder creates `$WORK/bundle-build` as its build-work directory. Its validated v2 manifest selects the attention registry, v2 cycle storage, and the 2,915-event execution profile. Its explicit `--host-input-bundle` avoids dependence on historical raw archives. An optional immutable `--shared-assets PROVIDER --shared-assets-sha256 SHA256SUMS_DIGEST` can share exact assets from an existing qualified bundle; it hardlinks them, so the provider must be on the same filesystem as `--out`.
+The builder creates a sibling build-work directory (`$WORK/bundle-build` for the capture-workspace mapping above); use that directory and `$SMOL_BUNDLE` as the packaging inputs below. Its validated v2 manifest selects the attention registry, v2 cycle storage, and the 2,915-event execution profile. Its explicit `--host-input-bundle` avoids dependence on historical raw archives. An optional immutable `--shared-assets PROVIDER --shared-assets-sha256 SHA256SUMS_DIGEST` can share exact assets from an existing qualified bundle; it hardlinks them, so the provider must be on the same filesystem as `--out`.
 
 An opt-in fusion profile such as `fc1-bias-gelu-fp8` needs a capture made with the same `--fusion-set`, and the same `--fusion-set` on both the exporter and the builder. The bundle provenance then carries the profile, so `package.py` and `build-smolvla.sh` need no extra option.
 

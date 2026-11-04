@@ -144,18 +144,9 @@ The illustrated DRAM range is 2 GiB beginning at `0x80000000`; the arena and com
 
 The kit's actual 1,038-launch qualification used the external T-on-F3-h0 overlay route, not that historical qualifier. Its `T/f3h0/prepare.py` transforms the authenticated F3-h0 assets; `T/f3h0/qualify.py` produces `atlas.d1.all_launch_original.v1`, joining 950 exact prior F3-h0 records and executing 88 changed decode q/k launches on original47. `T/f3h0/package_qualification.py` losslessly archives the worker records and compresses the aggregate to `T/f3h0/qual/receipt.json.gz`. It records `new_device_timing=false`. See [current and historical reproduction](../tools/tiny_full/REPRODUCING.md) for exact archived commands and providers. These scripts, F3-h0 source assets, and historical receipts are external prerequisites, not delivered public bootstrap tools. Fresh `export_capture.py --qualify-launches` qualification and archived qualification reuse must be reported separately.
 
-For SmolVLA, follow [export and original-model backfill](smol_attention_capture.md):
+For SmolVLA, use the wrapped [export command](smol_attention_capture.md#export-and-standalone-build) with `$SMOL_CAPTURE` as capture input and `$SMOL_ASSETS` as fresh output. The guide maps these names to its capture workspace and preserves a separate export backend receipt.
 
-```sh
-PYTHONPATH="$MODEL47:$ATLAS/tools" "$MODEL_PYTHON" "$KERNELS/lib/atlas_backend.py" run --backend atlas-mlir \
-  --atlas-mlir-bin "$ATLAS_MLIR_BIN" --min-tier stream-verified --expect-min-programs "$EXPECT_PROGRAMS" \
-  --receipt "$ATLAS/out/smol-export-backend.json" -- \
-  tools/export_smol_policy_kernels.py --native-capture \
-  --replay "$SMOL_CAPTURE/run/replay.json" --attention-capture "$SMOL_CAPTURE/run/manifest.json" \
-  --model-root "$MODEL47" --out "$SMOL_ASSETS"
-"$MODEL_PYTHON" tools/smol_capture_backfill.py --python "$MODEL_PYTHON" --model-root "$MODEL47" \
-  --ledger "$SMOL_CAPTURE/run/device-events.jsonl" --out "$SMOL_AUDIT" --workers 16
-```
+Then run [original-model backfill](smol_attention_capture.md#original-model-backfill-and-safe-resume), mapping `PY=$MODEL_PYTHON`, `MODEL=$MODEL47`, `$WORK/capture=$SMOL_CAPTURE`, and `$WORK/original-audit=$SMOL_AUDIT`; use `--workers 16` within this workflow's worker limit.
 
 A full Smol gate covers 2,915 events, including 2,715 projections and 200 attention launches. It binds original-model execution, source and program identity, staged inputs, complete final arenas, preservation, and DMA. Reply reuse retains its narrower declared scope. The backfill driver launches fresh worker interpreters, so wrapping the parent does not instrument their encodes. Require worker-level backend receipts or an independent exhaustive word check in addition to this numerical gate; a parent receipt with zero programs is no backend qualification.
 
@@ -186,39 +177,9 @@ PYTHONPATH="$MODEL47:$ATLAS/tools" "$MODEL_PYTHON" "$KERNELS/lib/atlas_backend.p
 
 The default output is `$TINY_DEFAULT/build/atlas-tinyllama.elf` plus `build.json`, and fast output is `$TINY_FAST/build/atlas-tinyllama.elf`. Host levels 0, 1, and 2 select KIT3 and the two later fast milestones; the default level is 2. These attention-host artifacts are not `atlas.full_bundle.v1`, so do not pass them to `tools/host_iss/run.py --workload tiny-full`. The [default build](tiny-attention-build.md) distinguishes historical 906-launch receipts from the 1,038-launch kit and describes root-token resolution.
 
-For SmolVLA, `tools/build_smol_full_host.py` creates the standalone bundle, `tools/check_smol_full_bundle.py` audits it, and `tools/smol_sims/package.py` plus `tools/smol_sims/build-smolvla.sh` create SIMS builds. Use the complete commands and explicit toolchain/provider inputs in [Smol capture and packaging](smol_attention_capture.md#export-and-standalone-build). The export above produces `$SMOL_ASSETS`; use the same `$SMOL_CAPTURE` replay and phase reference in this standalone build:
+For SmolVLA, use the wrapped [standalone build and bundle audit](smol_attention_capture.md#export-and-standalone-build), consuming `$SMOL_ASSETS` and the same `$SMOL_CAPTURE` replay and phase reference. Set `$SMOL_BUNDLE` to the fresh standalone output and `$SMOL_BUNDLE_AUDIT` to its audit output; the guide retains every toolchain/provider argument and separate host-build and audit backend receipts. `tools/smol_sims/package.py` and `tools/smol_sims/build-smolvla.sh` then create SIMS builds.
 
-```sh
-PYTHONPATH="$MODEL47:$ATLAS/tools" "$MODEL_PYTHON" "$KERNELS/lib/atlas_backend.py" run --backend atlas-mlir \
-  --atlas-mlir-bin "$ATLAS_MLIR_BIN" --min-tier stream-verified --expect-min-programs "$EXPECT_PROGRAMS" \
-  --receipt "$ATLAS/out/smol-host-backend.json" -- \
-  tools/build_smol_full_host.py \
-  --assets "$SMOL_ASSETS" --replay "$SMOL_CAPTURE/run/replay.json" \
-  --merlin "$MERLIN/examples/atlas/comparisons" --attention "$MERLIN/examples/atlas/comparisons" \
-  --runtime "$ATLAS" --bundle-tools "$ATLAS/tools/host_iss" \
-  --support "$SUPPORT" --compiler "$CLANG" --linker "$LLD" --table-python "$TABLE_PYTHON" \
-  --model-root "$MODEL47" --host-input-bundle "$INPUT_BUNDLE" \
-  --uart-kind sifive --uart-base 0x10020000 --uart-divisor 134 --target sim \
-  --dram-base 0x80000000 --dram-bytes 0x80000000 --arena-base 0x90000000 \
-  --traffic-reuse --rodata-after-arena --phase-reference "$SMOL_CAPTURE/run/phase-reference.json" \
-  --out "$SMOL_BUNDLE"
-PYTHONPATH="$MODEL47:$ATLAS/tools" "$MODEL_PYTHON" "$KERNELS/lib/atlas_backend.py" run --backend atlas-mlir \
-  --atlas-mlir-bin "$ATLAS_MLIR_BIN" --min-tier stream-verified --expect-min-programs "$EXPECT_PROGRAMS" \
-  --receipt "$ATLAS/out/smol-bundle-check-backend.json" -- \
-  tools/check_smol_full_bundle.py --bundle "$SMOL_BUNDLE" \
-  --model-root "$MODEL47" --out "$SMOL_BUNDLE_AUDIT"
-```
-
-This emits the `atlas.full_bundle.v1` directory consumed by the Smol QEMU command below, including `host/host.elf`; `$INPUT_BUNDLE` is the admitted external input provider, while `$SMOL_BUNDLE` is the fresh output. A fusion profile requires the same `--fusion-set` on capture, export, and build. For the fusion-capable fast route, use [Smol fast builds](smol-fast-build.md):
-
-```sh
-PYTHONPATH="$MODEL47:$ATLAS/tools" "$MODEL_PYTHON" "$KERNELS/lib/atlas_backend.py" run --backend atlas-mlir \
-  --atlas-mlir-bin "$ATLAS_MLIR_BIN" --min-tier stream-verified --expect-min-programs 537 \
-  --receipt "$ATLAS/out/smol-fast-backend.json" -- \
-  tools/generate_smol_fast_assets.py --bundle "$SMOL_BUNDLE" \
-  --elf "$SMOL_DEFAULT_ELF" --out "$SMOL_FAST_ASSETS"
-python tools/build_smol_fast.py --help
-```
+This emits the `atlas.full_bundle.v1` directory consumed by the Smol QEMU command below, including `host/host.elf`; `$INPUT_BUNDLE` is the admitted external input provider, while `$SMOL_BUNDLE` is the fresh output. A fusion profile requires the same `--fusion-set` on capture, export, and build. For the fusion-capable fast route, follow [Smol fast builds](smol-fast-build.md), passing `$SMOL_BUNDLE`, its `$SMOL_DEFAULT_ELF`, and fresh `$SMOL_FAST_ASSETS` to the wrapped 537-program generation command, then the explicit build recipes. The capture guide's `smol_sims/generate_fast.py` route remains default-only.
 
 The fast builder consumes the admitted default CMake recipes and generated assets. Fast programs read immutable weights in place; their addresses bind them to that ELF layout. A successful build or static audit establishes neither guest execution nor a numerical pass. Preserve the exact source, toolchain, generated files, receipts, and ELF hash together.
 
