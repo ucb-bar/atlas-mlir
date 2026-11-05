@@ -49,7 +49,6 @@ def repeated(*, typed=False, explicit=False, alias=False, partial=False,
     return function("repeat", [*lines, f"return %{state} : {S}"], attrs=ABI)
 
 
-@unittest.skipUnless((BIN / "atlas-opt").is_file(), "build atlas-opt first")
 class ImmutableWeightReuseTest(unittest.TestCase):
     def checked(self, source, *options):
         result = run("atlas-opt", source, *options)

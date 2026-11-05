@@ -32,7 +32,6 @@ def source(producer=None, scale=127, *, before="", after="", state="%t", value="
 UNKNOWN = '%x = "atlas.virtual_vpu_unary"(%input) {kind = "mov"} : (!atlas.virtual_bf16) -> !atlas.virtual_bf16'
 
 
-@unittest.skipUnless(OPT.is_file() and EMIT.is_file(), "build atlas-opt and atlas-emit")
 class GuardedPackTests(unittest.TestCase):
     def checked(self, text, *passes, tool=OPT):
         result = run(tool, text, *passes)
