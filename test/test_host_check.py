@@ -17,8 +17,7 @@ class HostCheckTest(unittest.TestCase):
 
     def _run_checker(self, source):
         cc = shutil.which("cc")
-        if cc is None:
-            self.skipTest("native C compiler unavailable")
+        self.assertIsNotNone(cc, "native C compiler unavailable")
         with tempfile.TemporaryDirectory(prefix="atlas-host-check-") as directory:
             executable = Path(directory) / "check"
             subprocess.run([cc, "-std=gnu11", "-O2", "-Wall", "-Wextra", "-Werror",
