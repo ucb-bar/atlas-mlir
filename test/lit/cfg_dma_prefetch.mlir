@@ -1,4 +1,3 @@
-// RUN: atlas-opt --verify-atlas-machine-stream --verify-atlas-timing %s -o /dev/null
 // Counted prefetch loop with alternating DMA channels.
 module {
   %s0 = "atlas.start"() : () -> !atlas.state

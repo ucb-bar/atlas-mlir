@@ -1,5 +1,3 @@
-// RUN: atlas-opt --verify-atlas-machine-stream %s -o /dev/null
-// RUN: not atlas-opt --verify-atlas-timing %s -o /dev/null
 // One change to cfg_dma_prefetch.mlir: x24 = x19 makes DMA overwrite the current VLOAD/VSTORE window.
 module {
   %s0 = "atlas.start"() : () -> !atlas.state

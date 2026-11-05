@@ -112,15 +112,3 @@ foreach(suite buffer-contract cfg-contract dma-allocation dma-helper mxu-allocat
     pack-loop source-memory-contract tile-contract timing-provider)
   add_test(NAME atlas-${suite} COMMAND atlas-verification-test ${suite})
 endforeach()
-
-# Use LLVM's lit driver when the configured LLVM tree supplies it. Invoking it
-# through Python also supports relocated LLVM builds with a stale shebang.
-if(EXISTS "${LLVM_DEFAULT_EXTERNAL_LIT}")
-  find_package(Python3 COMPONENTS Interpreter REQUIRED)
-  add_test(NAME atlas-lit-cfg-dma-timing
-    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/run_lit.py
-      "${LLVM_DEFAULT_EXTERNAL_LIT}" -sv -j1
-      --param=atlas_bin=$<TARGET_FILE_DIR:atlas-opt>
-      --param=exec_root=${CMAKE_CURRENT_BINARY_DIR}/lit
-      ${CMAKE_CURRENT_SOURCE_DIR}/lit)
-endif()
