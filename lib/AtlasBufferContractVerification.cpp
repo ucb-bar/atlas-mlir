@@ -320,12 +320,31 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedBufferContract(const AtlasVerific
     auto found = llvm::find_if(derived->packs, [&](const Pack &p) { return source == p.source; });
     return found == derived->packs.end() ? nullptr : &*found;
   };
+  auto registerRoundtrip = [&](Operation *op) -> DictionaryAttr {
+    auto source = contractTag(op, kAtlasTagCFGSource);
+    auto cfg = module->getAttrOfType<DictionaryAttr>(kAtlasCFGContract);
+    auto records = cfg ? cfg.getAs<ArrayAttr>("operations") : ArrayAttr{};
+    if (source && records) for (Attribute raw : records) {
+      auto record = dyn_cast<DictionaryAttr>(raw);
+      if (record && contractI32(record, "id") == source &&
+          contractString(record, "name") == "atlas.virtual_pack_roundtrip_bf16") return record;
+    }
+    return {};
+  };
 
   // The conversion's ERF entry must hold the source code when it issues.
   for (size_t block = 0; block < s.starts.size(); ++block) {
     RegValues scale = ctx.scaleEntry[block];
     for (size_t pc = s.starts[block]; pc < s.blockEnd(block); ++pc) {
       if (auto conversion = dyn_cast<VPUPackOp>(s.ops[pc])) {
+        // The CFG contract checks the register-only helper's fields and origins.
+        if (auto record = registerRoundtrip(conversion)) {
+          uint32_t expected = conversion.getDirection() == "bf16_to_fp8"
+              ? uint32_t(*contractI32(record, "scale_code")) : 127;
+          if (scale[conversion.getScaleReg()] != expected)
+            return conversion.emitOpError("CFG contract PACK roundtrip conversion scale differs");
+          continue;
+        }
         const Pack *p = packOf(conversion);
         if (!p || conversion.getDirection() != "bf16_to_fp8") return conversion.emitOpError("buffer contract: PACK conversion differs from its source PACK");
         if (scale[conversion.getScaleReg()] != uint32_t(p->scale)) return conversion.emitOpError("buffer contract: PACK conversion scale register does not hold its source scale code");

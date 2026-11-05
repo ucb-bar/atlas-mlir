@@ -78,7 +78,7 @@ bool isImplicitMemory(Operation *op) {
 Effects effectsOf(Operation *op) {
   Effects e;
   e.reads = bit(kBarrier);
-  if (isa<VirtualPackFP8Op>(op))
+  if (isa<VirtualPackFP8Op, VirtualPackRoundTripBF16Op>(op))
     e.writes = bit(kPack);
   else if (auto load = dyn_cast<VirtualMXULoadWeightOp>(op))
     e.reads |= bit(kUnit0 + unitOf(load.getWeight().getType()));
@@ -475,6 +475,10 @@ Cost costOf(Operation *op) {
     MachineTiming t = timingOf("vtrpose.xlu");
     return {Unit::Xlu, t.interval, t.latency};
   }
+  if (isa<VirtualPackRoundTripBF16Op>(op))
+    // Both conversions use the reserved tensor temporary and scratch ERF.
+    return blocking(Unit::Vpu,
+        timingOf("vpack.bf16.fp8").latency + timingOf("vunpack.fp8.bf16").latency + 2 * timingOf("seli").latency);
   if (isa<VirtualPackFP8Op>(op)) {
     // Pack, then relayout the FP8 tile through VMEM in a scalar loop of eight
     // words a row (lowerPack). Each store hides behind the next word's load,
@@ -726,6 +730,28 @@ public:
       cost.drains = isImplicitMemory(op);
       costs.push_back(cost);
     }
+    // The earliest output each value reaches through non-state operands, or n
+    // for none. Among equal starts, prefer it: shared operands load for their
+    // first tile, and an available tile finishes before another tile's first
+    // layer advances.
+    firstOutput.assign(n, n);
+    llvm::DenseMap<Operation *, unsigned> index;
+    for (unsigned i = 0; i < n; ++i)
+      index[g.nodes[i]] = i;
+    for (unsigned i = n; i-- > 0;) {
+      Operation *op = g.nodes[i];
+      if (isa<VirtualDMAStoreFP8Op, VirtualDMAStoreBF16Op,
+              VirtualOutputBF16Op>(op))
+        firstOutput[i] = i;
+      for (Value operand : op->getOperands()) {
+        if (isa<VirtualStateType>(operand.getType()))
+          continue;
+        auto found = index.find(operand.getDefiningOp());
+        if (found != index.end())
+          firstOutput[found->second] =
+              std::min(firstOutput[found->second], firstOutput[i]);
+      }
+    }
     // The longest path from each node to the block's end, counting its own
     // work. Edges point forward, so successors are done first.
     heights.assign(n, 0);
@@ -755,10 +781,10 @@ public:
   // Of the operations whose dependences are placed, take the one that starts
   // first, counting the spills it adds as delay: a value beyond `capacity`
   // costs VMEM saves and reloads, worth it only when the alternatives wait
-  // longer (Pressure::spillCost). Then take the one that frees the frontend
-  // first, so a blocking transfer waits for work that can run beside it;
-  // then the one with the longest path to the block's end; then the
-  // earliest in source order.
+  // longer (Pressure::spillCost). Then the one feeding the earliest output;
+  // then the one that frees the frontend first, so a blocking transfer waits
+  // for work that can run beside it; then the one with the longest path to the
+  // block's end; then the earliest in source order.
   // A load starts as soon as the frontend is free, so with `lookahead` loaded
   // tiles awaiting their first use, another load waits while anything else
   // is ready: a boundary tile must not drain transfers whose users all come
@@ -782,7 +808,7 @@ public:
       auto key = [&](unsigned node) {
         Operation *op = g.nodes[node];
         int start = machine.start(node);
-        return std::tuple(start + pressure.spillCost(op),
+        return std::tuple(start + pressure.spillCost(op), firstOutput[node],
                           machine.frontendAfter(node, start), -heights[node],
                           node);
       };
@@ -843,6 +869,7 @@ private:
   const Liveness &liveness;
   std::vector<Cost> costs;
   std::vector<int> heights;
+  std::vector<unsigned> firstOutput;
 };
 
 // Move `ops` before the terminator in order, and rethread the state chain

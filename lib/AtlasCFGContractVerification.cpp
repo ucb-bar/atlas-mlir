@@ -193,6 +193,8 @@ FailureOr<DictionaryAttr> mlir::atlas::buildAtlasCFGContract(func::FuncOp functi
         for (unsigned n = 0; n < tileCount; ++n) tileCommands.push_back(nextTile++);
         for (unsigned n = 0; n < mxuCount; ++n) mxuCommands.push_back(nextMXU++);
         SmallVector<NamedAttribute> record{field("id",i(operations.lookup(&op))),field("block",i(id)),field("name",b.getStringAttr(op.getName().getStringRef())),field("operands",b.getDenseI32ArrayAttr(operands)),field("results",b.getDenseI32ArrayAttr(results)),field("tile_commands",b.getDenseI32ArrayAttr(tileCommands)),field("mxu_commands",b.getDenseI32ArrayAttr(mxuCommands))};
+        if (auto roundtrip = dyn_cast<VirtualPackRoundTripBF16Op>(op))
+          record.push_back(field("scale_code", roundtrip.getScaleCodeAttr()));
         if (isAtlasSlotAccess(&op)) {
           auto slot = atlasAccessedSlot(&op).getDefiningOp<VirtualSlotOp>();
           record.push_back(field("slot_word", slot.getSlotWordAttr()));
@@ -300,7 +302,8 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedCFGContract(
   for (Attribute raw : opRecords) {
     auto d = dyn_cast<DictionaryAttr>(raw); if (!d) return bad();
     StringRef sourceName = contractString(d,"name");
-    unsigned fields = sourceName == "atlas.virtual_slot_copy" ? 11 :
+    unsigned fields = sourceName == "atlas.virtual_pack_roundtrip_bf16" ? 8 :
+        sourceName == "atlas.virtual_slot_copy" ? 11 :
         sourceName == "atlas.virtual_save" || sourceName == "atlas.virtual_restore" ? 10 : 7;
     if (d.size() != fields) return bad();
     auto id = contractI32(d,"id"), owner = contractI32(d,"block");
@@ -357,6 +360,7 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedCFGContract(
         else if (auto a = dyn_cast<VLIOp>(op)) destination = a.getDst();
         else if (auto a = dyn_cast<XLUTransposeOp>(op)) destination = a.getDst();
         else if (auto a = dyn_cast<MXUPopOp>(op)) destination = a.getDst();
+        else if (auto a = dyn_cast<VPUPackOp>(op)) destination = a.getDst();
         else if (auto a = dyn_cast<VLoadOp>(op)) destination = int32_t(a.getDst()) - (v.type == "bf16" ? 1 : 0);
       }
       if (destination != v.reg)
@@ -396,6 +400,36 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedCFGContract(
   if (seenOperations != expectedOperations || seenEdges.size() != edges.size()) return module.emitOpError("CFG contract requires exactly one issued operation and edge site for every source record");
   for (auto &b : blocks) if (starts[b.id] == ops.size() || (b.condition >= 0 && !seenBranches.count(b.id))) return module.emitOpError("CFG contract missing source block or branch site");
   for (auto &v : values) if ((v.def != "argument" || v.block == 0) && !seenResults.count(v.id)) return module.emitOpError("CFG contract missing source result site");
+  // This register-only helper has no buffer-contract record. Verify its exact expansion here, independently of
+  // instruction tags claiming a result; the buffer contract checks conversion-time scale values in its ERF walk.
+  for (auto [id, record] : sourceOperations) {
+    if (contractString(record,"name") != "atlas.virtual_pack_roundtrip_bf16") continue;
+    auto operands = contractI32Array(record,"operands"), results = contractI32Array(record,"results");
+    auto scale = contractI32(record,"scale_code");
+    if (!scale || *scale < 122 || *scale > 128 || operands.size() != 1 || results.size() != 1
+        || values[operands[0]].type != "bf16" || values[results[0]].type != "bf16"
+        || values[results[0]].def != "atlas.virtual_pack_roundtrip_bf16" || values[results[0]].operands != operands
+        || !contractI32Array(record,"tile_commands").empty() || !contractI32Array(record,"mxu_commands").empty())
+        return bad();
+    SmallVector<Operation *> issued;
+    for (Operation *op : ops) if (contractTag(op,kAtlasTagCFGSource) == id && !isa<DelayOp>(op)
+        && !isNop(op)) issued.push_back(op);
+    if (issued.size() != 4)
+      return module.emitOpError("CFG contract PACK roundtrip requires two scale loads and two conversions");
+    auto firstScale = dyn_cast<ScalarLoadOp>(issued[0]), unitScale = dyn_cast<ScalarLoadOp>(issued[2]);
+    auto pack = dyn_cast<VPUPackOp>(issued[1]), unpack = dyn_cast<VPUPackOp>(issued[3]);
+    auto fixed = VirtualAllocationPlan().fixed();
+    if (!firstScale || !unitScale || !pack || !unpack || firstScale.getKind() != "seli"
+        || firstScale.getDst() != fixed.scaleReg || firstScale.getBase() != 0 || firstScale.getOffset() != *scale
+        || unitScale.getKind() != "seli" || unitScale.getDst() != fixed.scaleReg || unitScale.getBase() != 0
+        || unitScale.getOffset() != 127 || pack.getDirection() != "bf16_to_fp8" || pack.getScaleReg() != fixed.scaleReg
+        || pack.getSrc() != unsigned(values[operands[0]].reg) || pack.getDst() != fixed.tensorTemporary
+        || unpack.getDirection() != "fp8_to_bf16" || unpack.getScaleReg() != fixed.scaleReg || unpack.getSrc() !=
+        fixed.tensorTemporary || unpack.getDst() != unsigned(values[results[0]].reg) || values[operands[0]].reg + 1 >=
+        int32_t(fixed.tensorTemporary) || values[results[0]].reg + 1 >= int32_t(fixed.tensorTemporary)
+        || contractTag(unpack,kAtlasTagTensorResult) != results[0] || contractTag(unpack,kAtlasTagCFGOperation) != id)
+        return module.emitOpError("CFG contract PACK roundtrip fields differ from source quantization");
+  }
   auto target = [&](Operation *op) { Operation *t = stream->targetOf.lookup(op); return t ? ctx.pcOf.lookup(t) : ops.size(); };
   // A redirect's fall-through, after its delay slot if the stream has them.
   size_t width = stream->delaySlots ? 2 : 1;
@@ -460,7 +494,10 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedCFGContract(
               !matches(before, values[operands[0]], operands[0]))
             return error("spill store read lost its source scalar origin");
         if (auto pack = dyn_cast<VPUPackOp>(op)) {
-          if (operands.empty() || results.empty() || !tensorRead(pack.getSrc(),operands[0])) return error("PACK read lost its source tensor origin");
+          bool roundtripUnpack = name == "atlas.virtual_pack_roundtrip_bf16" && pack.getDirection() == "fp8_to_bf16";
+          bool sourceMatches = roundtripUnpack ? !results.empty() && before.tensor[pack.getSrc()] == results[0]
+              : !operands.empty() && tensorRead(pack.getSrc(),operands[0]);
+          if (results.empty() || !sourceMatches) return error("PACK read lost its source tensor origin");
           // The owned relayout preserves the logical result identity; the
           // buffer contract checks its conversion scale and memory layout.
         }
@@ -517,7 +554,10 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedCFGContract(
       else if (auto pack = dyn_cast<VPUPackOp>(op)) {
         if (auto source = contractTag(op,kAtlasTagCFGSource)) {
           auto results = contractI32Array(sourceOperations[*source],"results");
-          if (!results.empty()) s.tensor[pack.getDst()] = results[0];
+          if (!results.empty()) {
+            s.tensor[pack.getDst()] = results[0];
+            if (pack.getDirection() == "fp8_to_bf16") s.tensor[pack.getDst()+1] = results[0];
+          }
         }
       }
       if (auto id = contractTag(op,kAtlasTagScalarResult)) {
@@ -554,6 +594,10 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedCFGContract(
           if (!vli || vli.getDst() != unsigned(v.reg) ||
               vli.getMode() != "all" || vli.getImmediate() != v.constant)
             return error("tensor splat fields differ");
+        } else if (v.def == "atlas.virtual_pack_roundtrip_bf16") {
+          auto unpack = dyn_cast<VPUPackOp>(op);
+          if (!unpack || unpack.getDirection() != "fp8_to_bf16" ||
+              !matches(s,v,v.id)) return error("PACK roundtrip result lacks both BF16 halves");
         } else if (v.def == "atlas.virtual_xlu_transpose") {
           auto xlu = dyn_cast<XLUTransposeOp>(op);
           if (!xlu || xlu.getDst() != unsigned(v.reg) ||

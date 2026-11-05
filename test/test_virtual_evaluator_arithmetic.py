@@ -58,6 +58,8 @@ MUL = ADD.replace('kind = "add"', 'kind = "mul"')
 EXP2 = MOV.replace('kind = "mov"', 'kind = "exp2"')
 RECIP = MOV.replace('kind = "mov"', 'kind = "recip"')
 PACK = '%packed = "atlas.virtual_pack_fp8"(%a) {scale_code = 127 : i32} : (!atlas.virtual_bf16) -> !atlas.virtual_fp8'
+ROUNDTRIP = PACK.replace("%packed", "%quantized").replace("virtual_pack_fp8",
+    "virtual_pack_roundtrip_bf16").replace("-> !atlas.virtual_fp8", "-> !atlas.virtual_bf16")
 
 FP8_INPUTS = INPUTS.replace("input_bf16", "input_fp8").replace("virtual_bf16", "virtual_fp8")
 TRANSPOSE = '%transposed = "atlas.virtual_xlu_transpose"(%a) : (!atlas.virtual_fp8) -> !atlas.virtual_fp8'
@@ -343,6 +345,31 @@ class VirtualEvaluatorVpuTest(unittest.TestCase):
         indices = tuple((row * 7 + col * 11) % len(cases) for row in range(32) for col in range(32))
         packed = evaluate_tile_operation(operation(PACK), (Tile("bf16", tuple(cases[i][0] for i in indices)),))
         self.assertEqual(packed, Tile("fp8", tuple(cases[i][1] for i in indices)))
+
+    def test_pack_roundtrip_preserves_quantization_specials_and_logical_positions(self) -> None:
+        # PACK_CASES are independent literals, including ties, NaNs, infinities,
+        # signed zeros and the VPU's rounded-480 saturation difference.
+        indices = tuple((row * 7 + col * 11) % len(PACK_CASES) for row in range(32) for col in range(32))
+        source = Tile("bf16", tuple(PACK_CASES[i][0] for i in indices))
+        def bf16(code):
+            return 0 if code == 0 else ((code >> 7) << 15) | ((((code >> 3) & 15) + 120) << 7) | ((code & 7) << 4)
+        expected = Tile("bf16", tuple(bf16(PACK_CASES[i][1]) for i in indices))
+        self.assertEqual(evaluate_tile_operation(operation(ROUNDTRIP), (source,)), expected)
+        program = parse_program("module {" + INPUTS + ROUNDTRIP + output("s2", "out", "quantized", 0) + "}")
+        result = evaluate(program, RuntimeInputs({0: source, 1: repeated((0,))}))
+        self.assertEqual(dict(result.outputs), {0: expected})
+
+    def test_pack_roundtrip_unpacks_at_unit_scale_and_rechecks_admission(self) -> None:
+        for code, expected in ((126, 0x4000), (127, 0x3F80), (128, 0x3F00)):
+            source = ROUNDTRIP.replace("127 : i32", f"{code} : i32")
+            with self.subTest(scale=code):
+                self.assertEqual(evaluate_tile_operation(operation(source), (repeated((0x3F80,)),)),
+                    repeated((expected,)))
+        for code in (121, 129):
+            op = operation(ROUNDTRIP)
+            op.attributes["scale_code"] = builtin.IntegerAttr(code, builtin.i32)
+            with self.subTest(scale=code), self.assertRaises(UnsupportedVirtualMode):
+                evaluate_tile_operation(op, (repeated((0x3F80,)),))
 
     def test_mixed_stream_publishes_independent_original_mov_add_relu_outputs(self) -> None:
         source = "module {" + INPUTS + "\n".join((MOV, ADD, RELU.replace("%m", "%r").replace("(%a)", "(%sum)"))) + "\n"

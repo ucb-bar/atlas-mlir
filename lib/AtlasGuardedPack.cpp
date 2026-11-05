@@ -115,6 +115,54 @@ struct LowerAtlasGuardedPackPass : PassWrapper<LowerAtlasGuardedPackPass, Operat
       signalPassFailure();
   }
 };
+
+// Run after virtual scheduling: eligibility depends on the actual live MXU
+// handles. Keep the bounded scalar relayout when neither unit has a free slot.
+struct LowerAtlasPackRelayoutPass : PassWrapper<LowerAtlasPackRelayoutPass, OperationPass<ModuleOp>> {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(LowerAtlasPackRelayoutPass)
+  StringRef getArgument() const final { return "lower-atlas-pack-relayout"; }
+  StringRef getDescription() const final {
+    return "Repair PACK layout with unit unpack and an available MXU accumulator";
+  }
+  void runOnOperation() override {
+    ModuleOp module = getOperation();
+    if (failed(verifyAtlasVirtualModule(module))) return signalPassFailure();
+    for (auto function : module.getOps<func::FuncOp>()) {
+      for (Block &block : function.getBody()) {
+        unsigned liveAcc[2] = {};
+        Value state = block.getNumArguments() && isa<VirtualStateType>(block.getArgument(0).getType())
+            ? block.getArgument(0) : Value();
+        for (Operation &op : llvm::make_early_inc_range(block)) {
+          if (isa<VirtualMXULoadAccFP8Op, VirtualMXULoadAccBF16Op, VirtualMXUResetOp>(op))
+              ++liveAcc[cast<VirtualMXUAccType>(op.getResult(1).getType()).getUnit()];
+          if (Value acc = virtualMXUReadoutAcc(&op)) --liveAcc[cast<VirtualMXUAccType>(acc.getType()).getUnit()];
+          if (op.getNumResults() && isa<VirtualStateType>(op.getResult(0).getType())) state = op.getResult(0);
+          auto pack = dyn_cast<VirtualPackFP8Op>(op);
+          if (!pack || !state || pack.getScaleCode() < 122 || pack.getScaleCode() > 128) continue;
+          unsigned unit = liveAcc[0] < kVirtualMXUSlots ? 0 : 1;
+          if (liveAcc[unit] >= kVirtualMXUSlots) continue;
+          OpBuilder builder(pack);
+          Location loc = pack.getLoc();
+          // PACK handles all exceptional BF16 inputs first. Its output alphabet
+          // round-trips exactly through unit UNPACK and unit MXU FP8 readout.
+          Value quantized = VirtualPackRoundTripBF16Op::create(builder, loc, VirtualBF16Type::get(module.getContext()),
+              pack.getSrc(), pack.getScaleCode()).getResult();
+          Value scale = VirtualScaleConstantOp::create(
+              builder, loc, VirtualScaleType::get(module.getContext()), 127).getValue();
+          auto load = VirtualMXULoadAccBF16Op::create(builder, loc, VirtualStateType::get(module.getContext()),
+              VirtualMXUAccType::get(module.getContext(), unit), state, quantized, unit);
+          auto pop = VirtualMXUReadoutFP8Op::create(builder, loc, VirtualStateType::get(module.getContext()),
+              pack.getResult().getType(), load.getNext(), load.getAcc(), scale);
+          state.replaceAllUsesExcept(pop.getNext(), load.getOperation());
+          state = pop.getNext();
+          pack.getResult().replaceAllUsesWith(pop.getValue());
+          pack.erase();
+        }
+      }
+    }
+    if (failed(verifyAtlasVirtualModule(module))) signalPassFailure();
+  }
+};
 } // namespace
 
 void mlir::atlas::registerLowerAtlasGuardedPackPass() {
@@ -123,4 +171,12 @@ void mlir::atlas::registerLowerAtlasGuardedPackPass() {
 
 std::unique_ptr<Pass> mlir::atlas::createLowerAtlasGuardedPackPass() {
   return std::make_unique<LowerAtlasGuardedPackPass>();
+}
+
+void mlir::atlas::registerLowerAtlasPackRelayoutPass() {
+  PassRegistration<LowerAtlasPackRelayoutPass>();
+}
+
+std::unique_ptr<Pass> mlir::atlas::createLowerAtlasPackRelayoutPass() {
+  return std::make_unique<LowerAtlasPackRelayoutPass>();
 }

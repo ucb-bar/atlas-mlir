@@ -228,6 +228,13 @@ def Atlas_VirtualPackFP8Op : Atlas_Op<"virtual_pack_fp8",
   let hasVerifier = 1;
 }
 
+def Atlas_VirtualPackRoundTripBF16Op : Atlas_Op<"virtual_pack_roundtrip_bf16", [Pure]> {
+  let summary = "Quantize with VPU PACK and unpack at unit scale into a BF16 tile";
+  let arguments = (ins Atlas_VirtualBF16Type:$src, I32Attr:$scale_code);
+  let results = (outs Atlas_VirtualBF16Type:$result);
+  let hasVerifier = 1;
+}
+
 def Atlas_VirtualVPUUnaryOp : Atlas_Op<"virtual_vpu_unary", [Pure]> {
   let summary = "BF16 VPU unary candidate with virtual register def/use";
   let arguments = (ins Atlas_VirtualBF16Type:$src, StrAttr:$kind);
