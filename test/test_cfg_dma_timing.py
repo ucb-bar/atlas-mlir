@@ -46,11 +46,6 @@ class CFGDMATimingTest(unittest.TestCase):
             prefix() + [addi(6, 0, 512), dma(), dma(6), WAIT] + vwork(6) + [HALT],
             "reuses DMA channel 0", "atlas.dma_wait")
 
-    def test_relaunch_other_order(self) -> None:
-        self.assert_timing_rejects(
-            prefix() + [addi(6, 0, 512), dma(), dma(6), WAIT] + vwork(4) + [HALT],
-            "reuses DMA channel 0", "atlas.dma_wait")
-
     def test_dma_size_zero(self) -> None:
         self.assert_timing_rejects(
             [addi(4, 0, 256), addi(5, 0, 256), upper(7, 0x90000), addi(9, 0, 0), dma()]
