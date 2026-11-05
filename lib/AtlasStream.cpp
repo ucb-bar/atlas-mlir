@@ -618,19 +618,6 @@ bool storeMayChangeContract(const Instr &in, const DMAState &state,
   return it != dram.end() && it->first < end;
 }
 
-std::optional<bool> branchTaken(const Instr &in, const RegValues &regs) {
-  if (!regs[in.rs1] || !regs[in.rs2])
-    return std::nullopt;
-  uint32_t a = *regs[in.rs1], b = *regs[in.rs2];
-  const std::string &n = in.op->name;
-  if (n == "beq") return a == b;
-  if (n == "bne") return a != b;
-  if (n == "blt") return int32_t(a) < int32_t(b);
-  if (n == "bge") return int32_t(a) >= int32_t(b);
-  if (n == "bltu") return a < b;
-  if (n == "bgeu") return a >= b;
-  return std::nullopt;
-}
 } // namespace
 
 LogicalResult mlir::atlas::checkAtlasDMACFG(
@@ -787,7 +774,7 @@ LogicalResult mlir::atlas::checkAtlasDMACFG(
       }
       // The redirect reads its operands before its delay slot executes.
       if (op.opClass == OpClass::Branch)
-        taken = branchTaken(in, state.regs);
+        taken = atlasBranchTaken(cast<BranchOp>(s.ops[i]), state.regs);
       std::optional<uint32_t> loaded;
       if (!dram.empty() && op.opClass == OpClass::ScalarLoad && op.name == "lw") {
         ScalarAccess access = scalarAccess(in, state.regs);
