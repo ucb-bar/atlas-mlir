@@ -24,7 +24,7 @@ Tests include correlated alternating buffers, cross-block waits, captured-pointe
 
 ## Explicit DRAM input contract
 
-Program words alone cannot constrain host-populated attention descriptors and key counts. An optional module attribute supplies exact immutable DRAM words for one invocation:
+Program words alone cannot constrain host-populated DRAM values. An optional module attribute supplies exact immutable DRAM words for one invocation:
 
 ```mlir
 atlas.dram_contract = {name = "synthetic-input-v1", words = [
