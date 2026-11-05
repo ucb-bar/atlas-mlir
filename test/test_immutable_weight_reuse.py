@@ -1,7 +1,7 @@
 """Automatic weight reuse preserves state, aliasing and bounded allocation."""
 import unittest
 
-from test_virtual_ssa import BIN, run
+from test_virtual_ssa import run
 from test_virtual_scheduling import (
     F, S, T, const, dma_load, dma_store, function, inp, mxu_chain, outp, start,
 )
