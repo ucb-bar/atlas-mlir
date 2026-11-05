@@ -83,14 +83,14 @@ class CFGDMATimingTest(unittest.TestCase):
             [addi(4, 0, 256), upper(7, 0x90000), upper(9, 2), addi(9, 9, -32), store, WAIT, HALT],
             "DMA store size must not exceed 4096 bytes")
 
-    def test_real_kit_prefetch_loop(self) -> None:
-        source = (ROOT / "test/lit/cfg_dma_kit_prefetch.mlir").read_text()
+    def test_counted_prefetch_loop(self) -> None:
+        source = (ROOT / "test/lit/cfg_dma_prefetch.mlir").read_text()
         result = run(OPT, source, "--verify-atlas-machine-stream", "--verify-atlas-timing")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertNotIn("warning:", result.stderr)
 
-    def test_injected_real_kit_overlap(self) -> None:
-        source = (ROOT / "test/lit/cfg_dma_kit_overlap.mlir").read_text()
+    def test_injected_prefetch_overlap(self) -> None:
+        source = (ROOT / "test/lit/cfg_dma_overlap.mlir").read_text()
         # First establish that the injected program remains valid machine IR.
         stream = run(OPT, source, "--verify-atlas-machine-stream")
         self.assertEqual(stream.returncode, 0, stream.stderr)
