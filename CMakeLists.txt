@@ -49,16 +49,9 @@ if(NOT "${atlas_model_import_result}" STREQUAL "0")
 endif()
 set(atlas_model_python_path
   "PYTHONPATH=path_list_prepend:${ATLAS_NPU_MODEL_ROOT}")
-# Explicit source-join gate. Required capture inputs and dependencies must be
-# supplied by the caller; the runner turns any required skip into a failure.
-add_custom_target(atlas-faithfulness
-  COMMAND ${Python3_EXECUTABLE} -B ${PROJECT_SOURCE_DIR}/tools/check_faithfulness.py
-  WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
-  USES_TERMINAL)
 # One test per Python test module, run from test/ as discovery would, with the
 # native binding package importable. Modules of plain test functions use
 # pytest; the rest are unittest suites.
-# Includes test_model_coverage.py, which checks plans against the pinned kernel fixtures.
 file(GLOB atlas_python_tests CONFIGURE_DEPENDS ${PROJECT_SOURCE_DIR}/test/test_*.py)
 set(atlas_python_paths
   PYTHONPATH=path_list_prepend:${PROJECT_SOURCE_DIR}/python
@@ -79,22 +72,4 @@ foreach(test_file IN LISTS atlas_python_tests)
     ENVIRONMENT ATLAS_OOT_BIN_DIR=$<TARGET_FILE_DIR:atlas-opt>
     ENVIRONMENT_MODIFICATION
       "${atlas_python_paths}")
-endforeach()
-# Kernel generators live in the atlas-kernels submodule; run each of its test
-# modules from its own tests directory, one test per module as above.
-file(GLOB atlas_kernel_tests
-  ${PROJECT_SOURCE_DIR}/third_party/atlas-kernels/kernels/*/tests/test_*.py
-  ${PROJECT_SOURCE_DIR}/third_party/atlas-kernels/lib/tests/test_*.py)
-foreach(test_file IN LISTS atlas_kernel_tests)
-  get_filename_component(module ${test_file} NAME_WE)
-  get_filename_component(suite_dir ${test_file} DIRECTORY)
-  get_filename_component(suite ${suite_dir} DIRECTORY)
-  get_filename_component(suite ${suite} NAME)
-  add_test(NAME atlas-kernels-${suite}-${module}
-    COMMAND ${Python3_EXECUTABLE} -m unittest -v ${module}
-    WORKING_DIRECTORY ${suite_dir})
-  # lib/atlas_backend.py encodes kernels with the atlas-opt and atlas-emit built here.
-  set_tests_properties(atlas-kernels-${suite}-${module} PROPERTIES
-    ENVIRONMENT ATLAS_OOT_BIN_DIR=$<TARGET_FILE_DIR:atlas-opt>
-    ENVIRONMENT_MODIFICATION "${atlas_model_python_path}")
 endforeach()

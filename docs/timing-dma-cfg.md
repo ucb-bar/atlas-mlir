@@ -20,14 +20,14 @@ Known stores additionally reject sizes above 4096 bytes: `atlas/common/DmaParams
 
 This proof is relative to the selected timing provider. It does not add DRAM alias rules, change the provider's conservative VMEM alignment and capacity restrictions, prove host accesses, or qualify the provider against hardware. The fixed-latency verifier still checks every emitted block with its existing conservative entry facts and requires fixed-latency work to drain at CFG boundaries. The removed DMA boundary checks duplicated the old one-block DMA scope; their ownership obligation is now discharged across the CFG. The DELAY-before-halt rule remains unchanged. Diagnostics remain fail-fast.
 
-Tests include correlated alternating buffers, cross-block waits, captured-pointer overwrites, known and unknown branches, signed and unsigned predicates, predicate-changing delay slots, dead exit edges, matching-channel ownership, actual and unknown overlaps, pending exits, conservative widening, unsupported provider overflow, fixed-latency drain, and DELAY-before-halt. CLI fixtures minimize the real ResNet50 first-column prefetch loop and inject a one-operand overlap into its paired negative case.
+Tests include correlated alternating buffers, cross-block waits, captured-pointer overwrites, known and unknown branches, signed and unsigned predicates, predicate-changing delay slots, dead exit edges, matching-channel ownership, actual and unknown overlaps, pending exits, conservative widening, unsupported provider overflow, fixed-latency drain, and DELAY-before-halt. CLI fixtures use a small counted prefetch loop and inject a one-operand overlap into its paired negative case.
 
 ## Explicit DRAM input contract
 
 Program words alone cannot constrain host-populated attention descriptors and key counts. An optional module attribute supplies exact immutable DRAM words for one invocation:
 
 ```mlir
-atlas.dram_contract = {name = "attention-metadata-v1", words = [
+atlas.dram_contract = {name = "synthetic-input-v1", words = [
   {address = 2415919104 : i64, value = 16384 : i64}
 ]}
 ```
@@ -37,7 +37,3 @@ Addresses are unique, word-aligned unsigned 32-bit byte addresses; values are un
 All VMEM initially remains unknown. A completed DMA load with known aligned source, destination, length, and zero upper DRAM address word copies matching contract words into sparse VMEM facts. Launches invalidate destination facts immediately; matching waits establish copies. Scalar LW can recover an exact word. Scalar stores, vector stores, and other VMEM writes invalidate every potentially overlapping fact. Unknown writes forget all facts. Device DMA stores that may overlap contracted DRAM reject, including stores with unknown address operands. Joins retain only identical VMEM facts present on every predecessor. After widening, DMA completion never establishes new constants because a unioned pending key may have executed on only some represented paths.
 
 Successful timing passes retain `atlas.timing_assumptions = ["immutable-dram:<name>"]`; JSON emission retains both the input contract and recorded assumptions. The atlas-kernels backend accepts `compile(..., dram_contract={name, segments, image})` or an explicit `ATLAS_TIMING_DRAM_CONTRACTS` manifest. Its `atlas_timing_contract` module documents the manifest schema, checks segments against the supplied image before verification, records their identity and assumptions, and reports `contract-verified`, which cannot satisfy `min_tier="verified"`. With no contract, existing tiers and unknown-load behavior remain unchanged. Images and manifests are rechecked before cache reuse.
-
-`tools/attention_timing_contract.py` validates attention metadata geometry, descriptor mask extents, count consistency, padding, and any supplied contract against the staged bytes. Tiny's v2 exporter and the Smol host builder invoke this check. Existing hosts copy those immutable templates and patch only operand spans. This validates generator inputs; the caller still owes the invocation-wide immutability assumption.
-
-Contracts cannot suppress another timing rule. The 45 remaining frozen attention programs all end with `dma.wait ch1; delay 128; ecall`. Supplying their exact descriptor/count images resolves their DMA ownership and capacity rejections, but all 45 then reject DELAY-before-halt. The explicit `atlas-kernels` halt variant at `ed70fb5` removes the dead terminal delay without changing the default generator. All 45 regenerated halt programs pass as `contract-verified` with these exact metadata contracts; their words differ from the frozen kit. Without contracts, their metadata loads remain unconstrained. The frozen streams remain `stream-verified`.

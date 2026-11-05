@@ -21,7 +21,7 @@ The repository also ships a Python package (`atlas-mlir-native-support`) that
 plugs Atlas into Merlin's native compiler, and a small C runtime for the host
 side.
 
-The TinyLlama and SmolVLA bringup uses hand-written host graphs and kernel schedules. Its opt-in compiler wrapper is an enforcing word-comparison gate around the npu_model assembler path; see [Bringing up a model](docs/bringing-up-a-model.md).
+Model captures, handwritten host graphs, and deployment tooling live in Merlin `examples/atlas/model_bringup/`, next to `examples/atlas/comparisons/`. Kernel generators live in `ucb-bar/atlas-kernels`; atlas-mlir provides the compiler and generic host ABI.
 
 ## Build
 
@@ -29,12 +29,7 @@ Use MLIR and LLVM from one installation (tested with LLVM/MLIR 23.0.0git,
 `a47bddccec30255619bb8c37fa59700e661d4e66`). The build also needs CMake, Ninja
 (or `-G "Unix Makefiles"` in place of `-G Ninja`), and a C/C++ compiler.
 
-Kernel generators come from the pinned `third_party/atlas-kernels` submodule
-([ucb-bar/atlas-kernels](https://github.com/ucb-bar/atlas-kernels/tree/feat/kernel-library)); clone with
-`--recurse-submodules` or run `git submodule update --init` first.
-
 ```sh
-git submodule update --init third_party/atlas-kernels
 python -m pip install -e '.[test]' -r tools/requirements-virtual-evaluator.txt
 cmake -S . -B build -G Ninja \
   -DMLIR_DIR=/path/to/llvm-install/lib/cmake/mlir -DCMAKE_BUILD_TYPE=Release \
@@ -54,9 +49,7 @@ startup with ``version `GLIBCXX_3.4.30' not found``. Put that compiler's
 for CTest and every later `atlas-opt` or `atlas-emit` run;
 `build/bin/atlas-opt --version` checks it.
 
-`ATLAS_NPU_MODEL_ROOT` is a required CMake cache path to the checkout containing `npu_model` (tested with revision `47b8599`). Configure checks that the selected `Python3_EXECUTABLE` can import its assembler and RTL numerics, including their dependencies, and fails if the path is unset, invalid, or unusable. Install the model's dependencies in that interpreter before configuring; the recorded model environment uses Python 3.14. CTest prepends this path to `PYTHONPATH` for both the compiler and pinned kernel Python suites, so no ambient model import path is needed. This cache setting configures imports; it does not enable optional hardware or capture tests through environment variables of the same name.
-
-`atlas-python-test_host_iss_gdb_buffered` requires socket-pair sends. In a sandbox that denies `send`/`sendall` with `EPERM`, its writer records the error, but the receiver can block without a deadline. Add `--timeout 300` to the `ctest` command to bound that environmental failure while allowing the longer evaluator suites to complete; a timeout remains a failed test.
+`ATLAS_NPU_MODEL_ROOT` is a required CMake cache path to the checkout containing `npu_model` (tested with revision `47b8599`). Configure checks that the selected `Python3_EXECUTABLE` can import its assembler and RTL numerics, including their dependencies, and fails if the path is unset, invalid, or unusable. Install the model's dependencies in that interpreter before configuring; the recorded model environment uses Python 3.14. CTest prepends this path to `PYTHONPATH` for the compiler Python suites, so no ambient model import path is needed. This cache setting configures imports; it does not enable optional hardware or capture tests through environment variables of the same name.
 
 CTest runs the portable tests with no hardware. Tests that run the RTL need
 `ATLAS_RTL_ROOT`, `ATLAS_MODEL_ROOT`, `ATLAS_ASSEMBLER_ROOT`, `ATLAS_ARC_MODEL`,
@@ -82,8 +75,6 @@ ctest --test-dir build --output-on-failure
 match its gitlink. A selected but missing tool or dependency fails the test.
 These assembler revisions are separate from the recorded RTL/model evidence.
 
-For required export and capture joins, run `cmake --build build --target atlas-faithfulness` with the inputs in [Required source joins](test/FAITHFULNESS.md). Missing required inputs, dependencies, or skipped checks fail this target.
-
 ## Quick start
 
 ```sh
@@ -104,7 +95,6 @@ to a device program and host ELF, and tiled matmuls launched from a host.
 
 | Doc | Covers |
 | --- | --- |
-| [Bringing up a model](docs/bringing-up-a-model.md) | TinyLlama and SmolVLA workflow, kernel mapping, qualification, host builds, and current gaps. |
 | [Dialect reference](docs/dialect-reference.md) | Operations, verifiers, passes, tools, adding a pass. |
 | [Compiler pipeline](docs/compiler-pipeline.md) | Virtual lowering, interpreter, physical program, DMA, LLVM handoff. |
 | [Register spilling](docs/register-spilling.md) | FP8/BF16 pressure recovery, VMEM slots, checks and current limits. |

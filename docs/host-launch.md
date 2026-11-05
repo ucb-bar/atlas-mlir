@@ -266,11 +266,3 @@ driver (`add52b0a7c96d72e0079b7938e07ca5080871e82`).
   not show which bitstream ran or that the run was fresh.
 - One synchronous caller; one program in IMEM at a time; fixed DMA addresses
   chosen at compile time.
-
-## ResNet host integration
-
-For the supported complete-graph build route, see [Complete ResNet50 host
-graph](resnet-full-host.md). The graph builder enables `mstatus.FS`, initializes
-`fcsr` to nearest-even, reserves a 64 KiB stack and checks ELF assets and load
-segments. A linked ELF does not establish host execution, DMA reachability or
-cache coherence on a selected SoC.
