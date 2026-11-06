@@ -13,6 +13,21 @@ target_link_libraries(atlas-host-launch-test PRIVATE atlas-host)
 set_target_properties(atlas-host-launch-test PROPERTIES C_STANDARD 11)
 add_test(NAME atlas-host-launch COMMAND atlas-host-launch-test)
 
+add_executable(atlas-numeric-test atlas-numeric-test.c)
+target_link_libraries(atlas-numeric-test PRIVATE m)
+set_target_properties(atlas-numeric-test PROPERTIES C_STANDARD 11)
+add_test(NAME atlas-numeric COMMAND atlas-numeric-test)
+
+add_executable(atlas-raw-host-test raw-host-test.c)
+target_link_libraries(atlas-raw-host-test PRIVATE atlas-host)
+set_target_properties(atlas-raw-host-test PROPERTIES C_STANDARD 11)
+add_test(NAME atlas-raw-host COMMAND atlas-raw-host-test)
+
+add_executable(atlas-host-runtime-merge-test host-runtime-merge-test.c)
+target_link_libraries(atlas-host-runtime-merge-test PRIVATE atlas-host)
+set_target_properties(atlas-host-runtime-merge-test PROPERTIES C_STANDARD 11)
+add_test(NAME atlas-host-runtime-merge COMMAND atlas-host-runtime-merge-test)
+
 add_executable(atlas-model-tile-test model-tile-test.c)
 target_link_libraries(atlas-model-tile-test PRIVATE atlas-model-tile)
 set_target_properties(atlas-model-tile-test PROPERTIES C_STANDARD 11)
@@ -49,6 +64,16 @@ foreach(thin_k IN ITEMS 1 65)
   add_test(NAME atlas-ordered-mn-thin-k${thin_k}-host
     COMMAND atlas-ordered-mn-thin-k${thin_k}-host-test)
 endforeach()
+
+add_llvm_executable(atlas-cfg-dma-timing-test
+  cfg-dma-timing-verification.cpp PARTIAL_SOURCES_INTENDED)
+llvm_update_compile_flags(atlas-cfg-dma-timing-test)
+target_link_libraries(atlas-cfg-dma-timing-test PRIVATE
+  MLIRAtlas MLIRParser MLIRPass MLIRIR MLIRArithDialect MLIRControlFlowDialect
+  MLIRFuncDialect)
+mlir_check_all_link_libraries(atlas-cfg-dma-timing-test)
+add_test(NAME atlas-cfg-dma-timing COMMAND atlas-cfg-dma-timing-test)
+set_tests_properties(atlas-cfg-dma-timing PROPERTIES TIMEOUT 30)
 
 add_executable(atlas-ordered-mn-single-host-test ordered-mn-host-test.c)
 target_compile_definitions(atlas-ordered-mn-single-host-test PRIVATE ATLAS_TEST_MN_SINGLE=1)

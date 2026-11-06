@@ -22,6 +22,7 @@ from .application_precision import (
     prepare_contraction,
 )
 from .binding import TARGET_IDENTITY, AtlasNativeBinding
+from .c_runtime import RUNTIME_SHARED_FILES
 from .gelu import is_source_gelu
 from .row_softmax import SOFTMAX_POLICY
 from .softmax_precision import lower_semantic_softmax
@@ -856,7 +857,7 @@ class AtlasApplicationAdapter:
                 tuple(record["input_node_ids"]),
                 tuple(record["output_node_ids"]),
                 files,
-                ("runtime/atlas_host.c", "runtime/atlas_host.h"),
+                RUNTIME_SHARED_FILES,
                 ("segments/" + name,),
                 {
                     "kind": kind,
@@ -976,7 +977,7 @@ class AtlasApplicationAdapter:
             inputs,
             region.outputs,
             files,
-            ("runtime/atlas_host.c", "runtime/atlas_host.h"),
+            RUNTIME_SHARED_FILES,
             programs,
             description,
         )

@@ -15,6 +15,22 @@
 using namespace mlir;
 using namespace mlir::atlas;
 
+static void recordTimingAssumptions(ModuleOp module, llvm::json::Object &root) {
+  if (Attribute contract = module->getAttr("atlas.dram_contract")) {
+    std::string rendered;
+    llvm::raw_string_ostream out(rendered);
+    contract.print(out);
+    root["input_dram_contract"] = out.str();
+  }
+  if (auto assumptions = module->getAttrOfType<ArrayAttr>("atlas.timing_assumptions")) {
+    llvm::json::Array recorded;
+    for (Attribute assumption : assumptions)
+      if (auto name = dyn_cast<StringAttr>(assumption))
+        recorded.push_back(name.getValue().str());
+    root["timing_assumptions"] = std::move(recorded);
+  }
+}
+
 int main(int argc, char **argv) {
   bool mapJson = false, programJson = false, allowUntimed = false, invalid = false;
   const char *input = nullptr;
@@ -56,6 +72,8 @@ int main(int argc, char **argv) {
         std::string key = named.getName().str();
         if (auto boolean = dyn_cast<BoolAttr>(value))
           fields[key] = boolean.getValue();
+        else if (isa<UnitAttr>(value))
+          fields[key] = true;
         else if (auto integer = dyn_cast<IntegerAttr>(value))
           fields[key] = integer.getValue().getSExtValue();
         else if (auto string = dyn_cast<StringAttr>(value))
@@ -135,6 +153,7 @@ int main(int argc, char **argv) {
       root["timing_state"] = state.getValue().str();
     if (auto provider = (*module)->getAttrOfType<StringAttr>(kAtlasTimingProvider))
       root["timing_provider"] = provider.getValue().str();
+    recordTimingAssumptions(*module, root);
     llvm::outs() << llvm::formatv("{0:2}\n", llvm::json::Value(std::move(root)));
     return 0;
   }
@@ -185,6 +204,7 @@ int main(int argc, char **argv) {
     llvm::json::Object root{{"schema", "atlas.machine_word_map.v1"},
                             {"word_count", static_cast<int64_t>(words.size())},
                             {"operations", std::move(operations)}};
+    recordTimingAssumptions(*module, root);
     llvm::outs() << llvm::formatv("{0:2}\n", llvm::json::Value(std::move(root)));
     return 0;
   }

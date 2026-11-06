@@ -287,6 +287,27 @@ class VirtualDMALoweringTest(unittest.TestCase):
                 self.wait_checked(queued_transfers(12, shared_output=True),
                                   f"--schedule-atlas-virtual=random-seed={seed}")
 
+    def test_ring_wrap_waits_for_the_slot_owner_after_out_of_order_completions(self) -> None:
+        _, entries = self.wait_checked(queued_transfers(9))
+        # ch1 and ch2 have already retired, but the twelfth launch wraps onto
+        # the fourth command's still-live slot. Its ch3 wait must precede it.
+        twelfth = next(i for i, entry in enumerate(entries)
+                       if entry["operation"] == "atlas.dma" and entry["fields"].get(MARKER) == 11)
+        self.assert_wait_before(entries, twelfth, 3)
+        _, randomized = self.wait_checked(queued_transfers(9), "--schedule-atlas-virtual=random-seed=3")
+        for trace in (entries, randomized):
+            next_slot, occupied = 0, {}
+            for entry in trace:
+                fields = entry["fields"]
+                if entry["operation"] == "atlas.dma":
+                    self.assertNotIn(next_slot, occupied, "launch overwrites a pending command slot")
+                    occupied[next_slot] = fields["channel"]
+                    next_slot = (next_slot + 1) % 8
+                elif entry["operation"] == "atlas.dma_wait":
+                    occupied = {slot: channel for slot, channel in occupied.items()
+                                if channel != fields["channel"]}
+            self.assertFalse(occupied)
+
     def test_pending_stream_is_rejected_by_physical_consumers(self) -> None:
         lowered = run("atlas-opt", copy(), "--lower-atlas-virtual-to-machine")
         self.assertEqual(lowered.returncode, 0, lowered.stderr)

@@ -2622,6 +2622,10 @@ class NativeBindingTest(unittest.TestCase):
             environment.get("PYTHONPATH", ""),
         ))
         executable = Path(sys.executable).with_name("merlin-targetgen")
+        if not executable.is_file():
+            selected = shutil.which("merlin-targetgen")
+            if selected:
+                executable = Path(selected)
         self.assertTrue(executable.is_file())
 
         def invoke(*args: str) -> subprocess.CompletedProcess[str]:

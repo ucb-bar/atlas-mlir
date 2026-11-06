@@ -183,11 +183,11 @@ def prepare_c_package(
         "target_inventory_sha256"
     ):
         raise ValueError("selected runtime checkout differs from the compiled target inventory")
-    public = {"atlas_host.h": (runtime / "atlas_host.h").read_text()}
     host_source = (runtime / "atlas_host.c").read_text()
-    from .c_runtime import program_array, runtime_members
+    from .c_runtime import program_array, runtime_headers, runtime_members
 
-    host_members, runtime_files, runtime_record = runtime_members(public["atlas_host.h"], host_source, runtime_linkage)
+    public = runtime_headers(runtime)
+    host_members, runtime_files, runtime_record = runtime_members(public, host_source, runtime_linkage)
     m, n, k = tiling.extents
     ab, wb, ob = device_tiling.buffer_bytes
     workspace = ab + wb + ob + 2048 + (ob if seed else 0) + (m * n * 2 if streaming else 0)
@@ -467,7 +467,7 @@ model execution plan.
         + ([{"id": seed.id, "shape": [m, n], "dtype": "bf16-le-raw", "bytes": m * n * 2}] if seed else []),
         "host_output": {"id": source.outputs[0], "shape": [m, n], "dtype": "bf16-le-raw", "bytes": m * n * 2},
         "source_members": {
-            "atlas_host.h": sha(public["atlas_host.h"].encode()),
+            **{filename: sha(text.encode()) for filename, text in public.items()},
             "atlas_host.c": sha(host_source.encode()),
             "looped_packing.c": sha(helpers.encode()),
             **{filename: sha(text.encode()) for filename, text in private_headers.items()},
