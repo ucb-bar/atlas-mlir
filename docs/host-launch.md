@@ -79,6 +79,14 @@ returns. A C fence is not a cache flush.
 
 The example hosts call this hook when built with `-DATLAS_PLATFORM_CACHE_SYNC=1`.
 
+## Numeric helper contract
+
+[`runtime/atlas_numeric.h`](../runtime/atlas_numeric.h) provides header-local conversion helpers for hosts with IEEE 754 binary32 `float` and 32-bit `uint32_t`. `f32_bf16(value, result)` requires a nonnull writable `uint16_t` result pointer, rounds to BF16 with round to nearest, ties to even, and returns 0 on success. It preserves signed zero and supports BF16 subnormal results. It returns 1 for infinities, NaNs, and finite inputs that round to BF16 infinity, leaving `*result` unchanged. For finite inputs, success requires the binary32 magnitude bits to be at most `0x7f7f7fff`; `0x7f7f8000` is the first positive rejected magnitude. Callers must check the return before using the result.
+
+`pack_bf16(bits, scale)` accepts a finite BF16 word, including signed zero and subnormals, and an unbiased integer scale exponent in the documented and tested range `[-5, 1]`. The scale divides the represented value by `2^scale`; scale 0 means unit scale. The selected VPU reference uses biased E8M0 codes `[122, 128]`, so its code is `scale + 127`, not the integer passed to this helper. The helper flushes BF16 zeros and subnormals to positive zero, rounds normal significands to nearest with ties to even, flushes results below the E4M3 normal range to positive zero after rounding, and saturates overflow to signed maximum finite E4M3 (`0x7e` or `0xfe`). These are the selected VPU pack semantics, not the separate MXU accumulator converter semantics.
+
+`pack_bf16` performs no admission checks and has no error result. Callers must reject BF16 words with `(bits & 0x7f80u) == 0x7f80u`, including all NaNs and infinities, and reject scales outside `[-5, 1]` before calling it. NaN handling and arbitrary integer scales are outside this contract; extreme integers can overflow its signed exponent arithmetic. [`test/atlas-numeric-test.c`](../test/atlas-numeric-test.c) enforces admission before exercising all 65,280 finite BF16 words at all 7 admitted scales, comparing 456,960 pairs with an independent value-space E4M3 oracle, and checks binary32 rounding, rejection, and unchanged-output boundaries. This is a host conversion test, not device execution or a claim about external callers.
+
 ## Graph mailbox
 
 `host_graph_mailbox.c` initializes the host and graph binding once, then waits
