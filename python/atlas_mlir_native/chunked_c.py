@@ -14,7 +14,7 @@ from merlin.semantic_compiler.model import KernelRequest
 from merlin.semantic_compiler.target_binding import verify_native_publication
 
 from .binding import DRAM_BASE, TILE_BYTES
-from .c_runtime import runtime_members
+from .c_runtime import runtime_headers, runtime_members
 from .chunked_tiling import check_frames, chunk_bodies
 
 
@@ -101,7 +101,8 @@ def prepare_members(
     bodies = chunk_bodies(source, plan)
     if set(roots) != {role for role, _ in bodies}:
         raise ValueError("chunk C export has missing or extra native bodies")
-    headers, sources, records, children, files = {}, {}, {}, {}, {}
+    headers = runtime_headers(target_source / "runtime")
+    sources, records, children, files = {}, {}, {}, {}
     for role, body in bodies:
         leaf = roots[role]
         if KernelRequest.from_record(json.loads((leaf / "source-request.json").read_text())) != body:
@@ -115,9 +116,8 @@ def prepare_members(
         sources[child + ".c"] = payloads[child + ".c"].decode()
         files["programs/" + role + ".bin"] = (leaf / "program.bin").read_bytes()
     runtime = target_source / "runtime"
-    header, host_source = (runtime / "atlas_host.h").read_text(), (runtime / "atlas_host.c").read_text()
-    host_members, runtime_files, runtime_record = runtime_members(header, host_source, runtime_linkage)
-    headers["atlas_host.h"] = header
+    host_source = (runtime / "atlas_host.c").read_text()
+    host_members, runtime_files, runtime_record = runtime_members(runtime_headers(runtime), host_source, runtime_linkage)
     sources.update(host_members)
     driver_bytes = streamed_k_driver_workspace_bytes(plan)
     child_bytes = max(record["workspace_bytes"] for record in records.values())

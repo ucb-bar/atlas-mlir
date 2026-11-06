@@ -6,7 +6,7 @@ from math import prod
 
 from merlin.compile.c_sources import c_source_pair
 
-from .c_runtime import program_array, runtime_members
+from .c_runtime import program_array, runtime_headers, runtime_members
 
 
 def render_tile_io_package(
@@ -25,9 +25,9 @@ def render_tile_io_package(
 ):
     addresses = execution["input_addresses"]
     output = execution["output_addresses"][0]
-    htext = (target_source / "runtime/atlas_host.h").read_text()
+    public = runtime_headers(target_source / "runtime")
     ctext = (target_source / "runtime/atlas_host.c").read_text()
-    members, files, runtime = runtime_members(htext, ctext, runtime_linkage)
+    members, files, runtime = runtime_members(public, ctext, runtime_linkage)
     sizes = tuple(packed_sizes)
     t = tile_bytes
     arity = len(sizes) - 1
@@ -167,7 +167,7 @@ int {name}_source_dispatch(void *context,const void *const *inputs,void *const *
 """
     rendered = c_source_pair(
         name,
-        public_headers={"atlas_host.h": htext},
+        public_headers=public,
         private_headers={},
         sources={**members, "tile_io.c": helpers + implementation},
         declarations=declarations,

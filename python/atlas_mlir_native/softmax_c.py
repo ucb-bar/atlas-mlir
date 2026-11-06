@@ -99,13 +99,11 @@ def _prepare_c_package(
         raise ValueError("softmax needs exactly one distinct compilation per row group")
     runtime = target_source / "runtime"
     inventory = member(target_source, "docs/selected-variant-inventory.json")
-    htext, ctext = (
-        member(runtime, "atlas_host.h").decode(),
-        member(runtime, "atlas_host.c").decode(),
-    )
-    from .c_runtime import program_array, runtime_members
+    ctext = member(runtime, "atlas_host.c").decode()
+    from .c_runtime import program_array, runtime_headers, runtime_members
 
-    host_members, runtime_files, runtime_record = runtime_members(htext, ctext, runtime_linkage)
+    public = runtime_headers(runtime)
+    host_members, runtime_files, runtime_record = runtime_members(public, ctext, runtime_linkage)
     m, n = plan.shape
     columns, groups = plan.column_tiles, len(plan.regions)
     input_tiles = columns * (2 if plan.masked else 1)
@@ -494,7 +492,7 @@ int {name}_dispatch(void *ctx, const void *const *inputs, void *const *outputs) 
             filename: payload.encode()
             for filename, payload in c_source_pair(
                 name,
-                public_headers={"atlas_host.h": htext},
+                public_headers=public,
                 private_headers={},
                 sources={
                     **host_members,
@@ -568,7 +566,7 @@ Standalone-core evidence does not qualify an integrated SoC or FPGA bitstream.
         "dispatch_function": name + "_dispatch",
         "dispatch_completion": "synchronous",
         "source_members": {
-            "atlas_host.h": digest(htext.encode()),
+            **{filename: digest(text.encode()) for filename, text in public.items()},
             "atlas_host.c": digest(ctext.encode()),
         },
         "startup_included": False,

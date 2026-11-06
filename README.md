@@ -21,19 +21,35 @@ The repository also ships a Python package (`atlas-mlir-native-support`) that
 plugs Atlas into Merlin's native compiler, and a small C runtime for the host
 side.
 
+Model captures, handwritten host graphs, and deployment tooling live in Merlin `examples/atlas/model_bringup/`, next to `examples/atlas/comparisons/`. Kernel generators live in `ucb-bar/atlas-kernels`; atlas-mlir provides the compiler and generic host ABI.
+
 ## Build
 
 Use MLIR and LLVM from one installation (tested with LLVM/MLIR 23.0.0git,
-`a47bddccec30255619bb8c37fa59700e661d4e66`).
+`a47bddccec30255619bb8c37fa59700e661d4e66`). The build also needs CMake, Ninja
+(or `-G "Unix Makefiles"` in place of `-G Ninja`), and a C/C++ compiler.
 
 ```sh
-python -m pip install -e '.[test]'
+python -m pip install -e '.[test]' -r tools/requirements-virtual-evaluator.txt
 cmake -S . -B build -G Ninja \
   -DMLIR_DIR=/path/to/llvm-install/lib/cmake/mlir -DCMAKE_BUILD_TYPE=Release \
-  -DPython3_EXECUTABLE="$(command -v python)"
+  -DPython3_EXECUTABLE="$(command -v python)" \
+  -DATLAS_NPU_MODEL_ROOT=/path/to/npu-model
 cmake --build build --parallel 2
+mkdir -p out/tmp
+export TMPDIR="$PWD/out/tmp"
 ctest --test-dir build --output-on-failure
 ```
+
+`atlas-opt` and `atlas-emit` must run with the C++ runtime of the compiler that
+built them. With a compiler newer than the system's, they otherwise fail at
+startup with ``version `GLIBCXX_3.4.30' not found``. Put that compiler's
+`libstdc++` directory on `LD_LIBRARY_PATH` (for example
+`export LD_LIBRARY_PATH=/path/to/compiler/lib:$LD_LIBRARY_PATH`) and keep it set
+for CTest and every later `atlas-opt` or `atlas-emit` run;
+`build/bin/atlas-opt --version` checks it.
+
+`ATLAS_NPU_MODEL_ROOT` is a required CMake cache path to the checkout containing `npu_model` (tested with revision `47b8599`). Configure checks that the selected `Python3_EXECUTABLE` can import its assembler and RTL numerics, including their dependencies, and fails if the path is unset, invalid, or unusable. Install the model's dependencies in that interpreter before configuring; the recorded model environment uses Python 3.14. CTest prepends this path to `PYTHONPATH` for the compiler Python suites, so no ambient model import path is needed. This cache setting configures imports; it does not enable optional hardware or capture tests through environment variables of the same name.
 
 CTest runs the portable tests with no hardware. Tests that run the RTL need
 `ATLAS_RTL_ROOT`, `ATLAS_MODEL_ROOT`, `ATLAS_ASSEMBLER_ROOT`, `ATLAS_ARC_MODEL`,
@@ -54,6 +70,10 @@ export PYTHONPATH="$MERLIN_NATIVE_ROOT/src:$MERLIN_NATIVE_ROOT:$NPU_MODEL_ROOT${
 
 These are test dependencies; ordinary compilation does not consume the model
 or its reference results. Hardware and model-execution tests remain opt-in.
+
+The full native C export tests also need Clang with RISC-V target support, both
+on `PATH` and in `ATLAS_LLVM_BIN`. The native independence test uses
+`merlin-targetgen` beside the selected Python interpreter or on `PATH`.
 
 `ATLAS_ASSEMBLER_ROOT` selects the directory containing `atlas_asm.py`.
 The shared test helper runs canonical npu_model assembly in a Python 3.14

@@ -2,7 +2,7 @@
 
 #include <stdint.h>
 
-enum { EDGE = 32, HALF_ROW_BYTES = 32, PHYSICAL_TILE_BYTES = 2048 };
+enum { EDGE = 32, HALF_ROW_BYTES = 32, PHYSICAL_TILE_BYTES = ATLAS_BF16_TILE_BYTES };
 
 static int valid_span(const void *pointer, size_t bytes) {
   return pointer && bytes && bytes <= UINTPTR_MAX - (uintptr_t)pointer;
@@ -123,7 +123,7 @@ static atlas_ordered_k_status run_grid(
           size_t destination = ((m + row) * n_rows + n + col) * 2;
           size_t source = row * HALF_ROW_BYTES + (col % 16) * 2;
           if (col >= 16)
-            source += 1024;
+            source += ATLAS_BF16_HALF_BYTES;
           staging[destination] = physical_tile[source];
           staging[destination + 1] = physical_tile[source + 1];
         }

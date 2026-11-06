@@ -17,7 +17,7 @@ else:
 
 ROOT = Path(__file__).resolve().parents[1]
 RUNTIME_FILES = (
-    "atlas_host.h", "atlas_host.c", "atlas_ordered_k.h", "atlas_ordered_k.c",
+    "atlas_host_layout.h", "atlas_host.h", "atlas_host.c", "atlas_ordered_k.h", "atlas_ordered_k.c",
     "atlas_ordered_mn.h", "atlas_ordered_mn.c", "atlas_source_mn.h",
     "atlas_source_mn.c", "atlas_model_tile.h", "atlas_source_mn_memref.h",
     "atlas_source_mn_memref.c",

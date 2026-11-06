@@ -757,6 +757,19 @@ Footprint mlir::atlas::timing::footprintOf(const Instr &in,
     if (addr)
       *addr *= 4;
     auto bytes = reg(regs, in.rs2);
+    // RTL captures only 13 size bits and requires complete 32-byte beats.
+    // Zero beats can underflow its last-beat counter, so never model them as
+    // an empty access. Unknown sizes retain the conservative anywhere access.
+    if (bytes && (*bytes == 0 || *bytes % 32 != 0 || *bytes >= 8192)) {
+      b.f.error = "DMA size must be nonzero, a multiple of 32 bytes, and less than 8192 bytes";
+      break;
+    }
+    // Store VMEM reads do not observe the 128-beat queue's enqueue readiness;
+    // TileLink backpressure can fill it before a larger command finishes.
+    if (!load && bytes && *bytes > 4096) {
+      b.f.error = "DMA store size must not exceed 4096 bytes";
+      break;
+    }
     b.x(in.rd, false, 0);
     b.x(in.rs1, false, 0);
     b.x(in.rs2, false, 0);
