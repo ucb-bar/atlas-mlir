@@ -85,7 +85,11 @@ class CFGDMATimingTest(unittest.TestCase):
         self.assertNotIn("warning:", result.stderr)
 
     def test_injected_prefetch_overlap(self) -> None:
-        source = (ROOT / "test/lit/cfg_dma_overlap.mlir").read_text()
+        source = (ROOT / "test/lit/cfg_dma_prefetch.mlir").read_text()
+        # Make the next DMA overwrite the current VLOAD/VSTORE window.
+        target = "dst = 24 : i32, src = 19 : i32, immediate = 256 : i32"
+        self.assertEqual(source.count(target), 1)
+        source = source.replace(target, target.replace("256", "0"), 1)
         # First establish that the injected program remains valid machine IR.
         stream = run(OPT, source, "--verify-atlas-machine-stream")
         self.assertEqual(stream.returncode, 0, stream.stderr)
