@@ -125,7 +125,7 @@ def main() -> None:
                        text=True, check=True, capture_output=True)
         elf = output / f"{name}.elf"
         subprocess.run([str(linker), "-m", "elf32lriscv", "--no-relax",
-                        "-Ttext=0", "-e", "atlas_program", "-o", str(elf),
+                        "--image-base=0", "-Ttext=0", "-e", "atlas_program", "-o", str(elf),
                         str(obj)], check=True, capture_output=True)
         elf_header = run([str(llvm / "llvm-readelf"), "-h", str(elf)])
         if ("Type:                              EXEC" not in elf_header

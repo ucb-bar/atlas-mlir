@@ -13,6 +13,16 @@ target_link_libraries(atlas-host-launch-test PRIVATE atlas-host)
 set_target_properties(atlas-host-launch-test PROPERTIES C_STANDARD 11)
 add_test(NAME atlas-host-launch COMMAND atlas-host-launch-test)
 
+add_executable(atlas-raw-host-test raw-host-test.c)
+target_link_libraries(atlas-raw-host-test PRIVATE atlas-host)
+set_target_properties(atlas-raw-host-test PROPERTIES C_STANDARD 11)
+add_test(NAME atlas-raw-host COMMAND atlas-raw-host-test)
+
+add_executable(atlas-host-runtime-merge-test host-runtime-merge-test.c)
+target_link_libraries(atlas-host-runtime-merge-test PRIVATE atlas-host)
+set_target_properties(atlas-host-runtime-merge-test PROPERTIES C_STANDARD 11)
+add_test(NAME atlas-host-runtime-merge COMMAND atlas-host-runtime-merge-test)
+
 add_executable(atlas-model-tile-test model-tile-test.c)
 target_link_libraries(atlas-model-tile-test PRIVATE atlas-model-tile)
 set_target_properties(atlas-model-tile-test PROPERTIES C_STANDARD 11)
