@@ -1,3 +1,4 @@
+#include "Atlas/AtlasProofWork.h"
 #include "Atlas/AtlasMXUContractVerification.h"
 #include "Atlas/AtlasContractAttr.h"
 #include "Atlas/AtlasGeneratedArtifact.h"
@@ -82,6 +83,7 @@ FailureOr<Record> parseRecord(ModuleOp module, Attribute attr) {
 
 LogicalResult checkReferences(ModuleOp module, ArrayRef<Record> records) {
   for (const Record &r : records) {
+    atlasProofRecord(AtlasProofKind::MXU);
     auto producer = [&](int32_t id) -> const Record * {
       if (id < 0 || id >= r.id || records[id].block != r.block)
         return nullptr;
@@ -121,6 +123,7 @@ LogicalResult checkOwnership(ModuleOp module, ArrayRef<Record> records) {
     if (isMatmul(r))
       ++blocks[r.block].remaining[r.weight];
   for (const Record &r : records) {
+    atlasProofRecord(AtlasProofKind::MXU);
     BlockOwnership &block = blocks[r.block];
     MXUOwnership &owners = block.owners;
     auto error = [&](StringRef message) -> LogicalResult {
@@ -196,6 +199,7 @@ LogicalResult checkPathOwnership(ModuleOp module, ArrayRef<Record> records,
       consumers[r.weight].push_back(r.id);
   auto transfer = [&](size_t block, PathOwnership &state, bool diagnose) -> LogicalResult {
     for (size_t i = stream.starts[block]; i < stream.blockEnd(block); ++i) {
+      atlasProofTransfer(AtlasProofKind::MXU);
       auto found = tagged.find(stream.ops[i]);
       if (found == tagged.end())
         continue;
@@ -395,6 +399,7 @@ FailureOr<ArrayAttr> mlir::atlas::buildAtlasMXUContract(
 
 LogicalResult mlir::atlas::verifyAtlasGeneratedMXUContract(
     const AtlasVerificationContext &ctx) {
+  atlasProofInvocation(AtlasProofKind::MXU);
   ModuleOp module = ctx.module;
   if (failed(requireAtlasGeneratedArtifact(module)))
     return failure();
@@ -403,6 +408,7 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedMXUContract(
     return module.emitOpError("generated resource contract requires an atlas.virtual_mxu_contract array");
   SmallVector<Record> records;
   for (Attribute attr : array) {
+    atlasProofRecord(AtlasProofKind::MXU);
     auto record = parseRecord(module, attr);
     if (failed(record))
       return failure();
@@ -416,6 +422,7 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedMXUContract(
   llvm::DenseMap<Operation *, int32_t> tagged;
   llvm::DenseSet<int32_t> seen;
   for (Operation &op : module.getBody()->getOperations()) {
+    atlasProofRecord(AtlasProofKind::MXU);
     Attribute attr = op.getAttr(kAtlasTagMXUCommand);
     bool command = isa<MXUPushOp, MXUMatmulOp, MXUPopOp>(op);
     if (!attr && !command)
@@ -447,14 +454,17 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedMXUContract(
   // SELD writes at response arrival, so a later SELI does not prove restoration
   // without independent completion rules. Reject these writes anywhere in the
   // stream, including after readout; current virtual lowering uses only SELI.
-  for (size_t i = 0; i < stream->instrs.size(); ++i)
+  for (size_t i = 0; i < stream->instrs.size(); ++i) {
+    atlasProofRecord(AtlasProofKind::MXU);
     if (stream->instrs[i].op->opClass == timing::OpClass::ScaleLoad &&
         readoutScaleRegs.contains(stream->instrs[i].rd))
       return stream->ops[i]->emitOpError("MXU contract cannot prove FP8 scale contents with SELD writes to its scale register");
+  }
   const auto &scales = ctx.scaleEntry;
   for (size_t block = 0; block < stream->starts.size(); ++block) {
     timing::RegValues regs = scales[block];
     for (size_t i = stream->starts[block]; i < stream->blockEnd(block); ++i) {
+      atlasProofTransfer(AtlasProofKind::MXU);
       auto found = tagged.find(stream->ops[i]);
       if (found != tagged.end()) {
         const Record &r = records[found->second];

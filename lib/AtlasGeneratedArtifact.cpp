@@ -16,7 +16,8 @@ constexpr llvm::StringRef kContracts[] = {kAtlasDMAContract, kAtlasMXUContract,
 constexpr llvm::StringRef kPreserved[] = {
     kAtlasGeneratedMarker, kAtlasDMAContract, kAtlasMXUContract,
     kAtlasTileContract, kAtlasCFGContract, kAtlasSourceMemoryContract, kAtlasBufferContract,
-    kAtlasTimingState, kAtlasTimingProvider, kAtlasProgramSizeLimit};
+    kAtlasTimingState, kAtlasTimingProvider, kAtlasProgramSizeLimit,
+    "atlas.dram_contract", "atlas.timing_assumptions"};
 } // namespace
 
 ArrayRef<StringRef> mlir::atlas::atlasPreservedModuleAttrs() { return kPreserved; }

@@ -90,9 +90,23 @@ struct FixedResourcePlacement {
 enum class RegisterKind { BF16, FP8, Scalar };
 using RegisterCapacities = std::array<unsigned, 3>;
 
+// A literal operand implemented by one RV32 immediate ALU instruction, with
+// an optional Boolean finishing instruction. operand identifies the literal;
+// source is the other, register-valued input. finish is empty/invert/eq/ne.
+struct ScalarImmediate {
+  Value source;
+  StringRef kind, finish;
+  int32_t immediate;
+  unsigned operand;
+};
+std::optional<ScalarImmediate> scalarImmediateFor(Operation *operation);
+// True only for a nonempty-use literal whose every use is the dedicated
+// immediate operand selected above. Its source identity remains in CFG proof.
+bool isVirtualScalarImmediate(Value value);
+
 // The registers `value` takes once allocated: a pair for a BF16 tile, one
 // tensor register for an FP8 tile, one scalar register for an i1/i32 control.
-// None for a DMA immediate, which each launch builds (isVirtualDMAImmediate),
+// None for a DMA immediate or an ALU-only literal (isVirtualScalarImmediate),
 // a memory-resident entry control (isAtlasMemoryControl), or any other type.
 // A loaded tile takes them from where it is staged (stagingPoint).
 std::optional<RegisterKind> registerKindOf(Value value);
@@ -104,6 +118,9 @@ struct RegisterPressure {
   // operation where that many values need registers.
   unsigned peak = 0;
   Operation *peakAt = nullptr;
+  // Union of values held at all points attaining that peak, including
+  // operands/results. Pressure recovery must not demote unrelated phis.
+  llvm::SmallVector<Value> peakValues;
   // The registers the coloring used; empty when it did not fit.
   std::optional<unsigned> used;
 };

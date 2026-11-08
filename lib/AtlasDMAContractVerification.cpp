@@ -1,3 +1,4 @@
+#include "Atlas/AtlasProofWork.h"
 #include "Atlas/AtlasAddressAnalysis.h"
 #include "Atlas/AtlasDMAContractVerification.h"
 #include "Atlas/AtlasContractAttr.h"
@@ -102,8 +103,8 @@ FailureOr<ArrayAttr> mlir::atlas::buildAtlasDMAContract(
     const DMATransferPlacement &p = assignment.placement;
     Record r{p.id, p.channel, p.stagingWord, address->first, *size,
              p.stagingReg, p.dramReg, p.sizeReg, load ? "load" : "store"};
-    if (*size != (bf16 ? kAtlasBF16TileBytes : kAtlasRegisterBytes) || !validGeometry(r))
-      return source->emitOpError("DMA contract source must describe an aligned complete tile in the supported 32-bit address range");
+    if (!*size || *size > (bf16 ? kAtlasBF16TileBytes : kAtlasRegisterBytes) || *size % 32 || !validGeometry(r))
+      return source->emitOpError("DMA contract source must describe an aligned bounded tile prefix in the supported 32-bit address range");
     if (!provenI32(addressValue)) {
       auto id = atlasCFGValueID(addressValue);
       uint64_t span = uint64_t(address->last)-address->first+*size;
@@ -124,6 +125,7 @@ FailureOr<ArrayAttr> mlir::atlas::buildAtlasDMAContract(
 
 LogicalResult mlir::atlas::verifyAtlasGeneratedDMAContract(
     const AtlasVerificationContext &ctx) {
+  atlasProofInvocation(AtlasProofKind::DMA);
   assert(ctx.generated && "the structural stage checks transfer tags and launch/wait pairing");
   ModuleOp module = ctx.module;
   if (failed(requireAtlasGeneratedArtifact(module)))
@@ -134,6 +136,7 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedDMAContract(
   llvm::DenseMap<uint32_t, Record> records;
   std::optional<uint32_t> previous;
   for (Attribute attr : array) {
+    atlasProofRecord(AtlasProofKind::DMA);
     auto record = parseRecord(module, attr);
     if (failed(record))
       return failure();
@@ -145,6 +148,7 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedDMAContract(
 
   llvm::DenseMap<Operation *, uint32_t> tagged;
   for (Operation &op : module.getBody()->getOperations()) {
+    atlasProofRecord(AtlasProofKind::DMA);
     auto id = contractTag(&op, kAtlasTagDMATransfer);
     if (!id)
       continue;
@@ -180,6 +184,7 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedDMAContract(
     RegValues regs = s.entry[block];
     auto base = bases[block];
     for (size_t i = s.starts[block]; i < s.blockEnd(block); ++i) {
+      atlasProofTransfer(AtlasProofKind::DMA);
       Operation *op = s.ops[i];
       if (auto config = dyn_cast<DMAConfigOp>(op))
         base = regs[config.getBaseReg()];
@@ -245,6 +250,7 @@ LogicalResult compare(Operation *op, const Span &a, const Span &b,
 
 LogicalResult mlir::atlas::verifyAtlasGeneratedDMAMemory(
     const AtlasVerificationContext &ctx) {
+  atlasProofInvocation(AtlasProofKind::DMA);
   if (!ctx.hasDMA)
     return success();
   assert(ctx.stream && "a DMA stream is decoded");
@@ -276,6 +282,7 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedDMAMemory(
             return failure();
     }
     for (size_t i = s.starts[block]; i < s.blockEnd(block); ++i) {
+      atlasProofTransfer(AtlasProofKind::DMA);
       Operation *op = s.ops[i];
       if (auto config = dyn_cast<DMAConfigOp>(op)) {
         base = regs[config.getBaseReg()];

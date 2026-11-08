@@ -6,6 +6,7 @@
 #include "Atlas/AtlasRegisterAllocationVerification.h"
 #include "Atlas/AtlasTarget.h"
 #include "Atlas/AtlasVirtualVerification.h"
+#include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
 #include "mlir/IR/AsmState.h"
 #include "llvm/ADT/DenseSet.h"
@@ -93,6 +94,77 @@ unsigned capacity(RegisterKind kind, bool mixedFp8, bool hasPack) {
 }
 } // namespace
 
+std::optional<ScalarImmediate> mlir::atlas::scalarImmediateFor(Operation *op) {
+  if (op->getNumOperands() != 2 || op->getNumResults() != 1)
+    return std::nullopt;
+  bool commutative = isa<arith::AddIOp, arith::AndIOp, arith::OrIOp, arith::XOrIOp>(op);
+  bool shift = isa<arith::ShLIOp, arith::ShRUIOp>(op);
+  auto cmp = dyn_cast<arith::CmpIOp>(op);
+  if (!commutative && !shift && !cmp) return std::nullopt;
+  if (!op->getOperand(0).getType().isInteger(32) &&
+      !(op->getOperand(0).getType().isInteger(1) &&
+        isa<arith::AndIOp, arith::OrIOp, arith::XOrIOp>(op)))
+    return std::nullopt;
+  for (unsigned index : {1u, 0u}) {
+    if (index == 0 && shift) continue;
+    auto constant = op->getOperand(index).getDefiningOp<arith::ConstantOp>();
+    auto attr = constant ? dyn_cast<IntegerAttr>(constant.getValue()) : IntegerAttr{};
+    if (!attr) continue;
+    uint32_t bits = uint32_t(attr.getValue().getZExtValue());
+    int64_t immediate = int32_t(bits);
+    StringRef kind, finish;
+    if (cmp) {
+      auto predicate = cmp.getPredicate();
+      if (index == 0) {
+        switch (predicate) {
+        case arith::CmpIPredicate::slt: predicate = arith::CmpIPredicate::sgt; break;
+        case arith::CmpIPredicate::sle: predicate = arith::CmpIPredicate::sge; break;
+        case arith::CmpIPredicate::sgt: predicate = arith::CmpIPredicate::slt; break;
+        case arith::CmpIPredicate::sge: predicate = arith::CmpIPredicate::sle; break;
+        case arith::CmpIPredicate::ult: predicate = arith::CmpIPredicate::ugt; break;
+        case arith::CmpIPredicate::ule: predicate = arith::CmpIPredicate::uge; break;
+        case arith::CmpIPredicate::ugt: predicate = arith::CmpIPredicate::ult; break;
+        case arith::CmpIPredicate::uge: predicate = arith::CmpIPredicate::ule; break;
+        default: break;
+        }
+      }
+      if (predicate == arith::CmpIPredicate::eq || predicate == arith::CmpIPredicate::ne) {
+        kind = "xori"; finish = predicate == arith::CmpIPredicate::eq ? "eq" : "ne";
+      } else if (predicate == arith::CmpIPredicate::slt || predicate == arith::CmpIPredicate::sge) {
+        kind = "slti"; if (predicate == arith::CmpIPredicate::sge) finish = "invert";
+      } else if (predicate == arith::CmpIPredicate::sgt || predicate == arith::CmpIPredicate::sle) {
+        kind = "slti"; ++immediate;
+        if (predicate == arith::CmpIPredicate::sgt) finish = "invert";
+      } else {
+        kind = "sltiu";
+        if (predicate == arith::CmpIPredicate::ugt || predicate == arith::CmpIPredicate::ule) {
+          if (bits == UINT32_MAX) continue;
+          immediate = int32_t(bits + 1);
+        }
+        if (predicate == arith::CmpIPredicate::uge || predicate == arith::CmpIPredicate::ugt)
+          finish = "invert";
+      }
+    } else {
+      kind = isa<arith::AddIOp>(op) ? "addi" : isa<arith::AndIOp>(op) ? "andi" :
+          isa<arith::OrIOp>(op) ? "ori" : isa<arith::XOrIOp>(op) ? "xori" :
+          isa<arith::ShLIOp>(op) ? "slli" : "srli";
+    }
+    if (shift ? bits > 31 : immediate < -2048 || immediate > 2047) continue;
+    return ScalarImmediate{op->getOperand(1-index), kind, finish, int32_t(immediate), index};
+  }
+  return std::nullopt;
+}
+
+bool mlir::atlas::isVirtualScalarImmediate(Value value) {
+  if (!value.getDefiningOp<arith::ConstantOp>() ||
+      (!value.getType().isInteger(1) && !value.getType().isInteger(32)) || value.use_empty())
+    return false;
+  return llvm::all_of(value.getUses(), [](OpOperand &use) {
+    auto immediate = scalarImmediateFor(use.getOwner());
+    return immediate && immediate->operand == use.getOperandNumber();
+  });
+}
+
 std::optional<RegisterKind> mlir::atlas::registerKindOf(Value value) {
   Type type = value.getType();
   if (isa<VirtualBF16Type>(type))
@@ -100,6 +172,7 @@ std::optional<RegisterKind> mlir::atlas::registerKindOf(Value value) {
   if (isa<VirtualFP8Type>(type))
     return RegisterKind::FP8;
   if ((type.isInteger(1) || type.isInteger(32)) && !isVirtualDMAImmediate(value) &&
+      !isVirtualScalarImmediate(value) &&
       !isAtlasMemoryControl(value))
     return RegisterKind::Scalar;
   return std::nullopt;
@@ -451,11 +524,15 @@ LogicalResult VirtualAllocationPlan::colorValues(RegisterKind kind) {
   RegisterPressure &demand = pressure[static_cast<unsigned>(kind)];
   demand = {};
   demand.capacity = capacity(kind, mixedFp8, hasPack);
+  Set peakValues;
   auto note = [&](const Set &live, Operation *at) {
     if (live.size() > demand.peak) {
       demand.peak = live.size();
       demand.peakAt = at;
+      peakValues.clear();
     }
+    if (live.size() == demand.peak)
+      peakValues.insert(live.begin(), live.end());
   };
 
   llvm::DenseMap<Value, Set> neighbors;
@@ -552,6 +629,7 @@ LogicalResult VirtualAllocationPlan::colorValues(RegisterKind kind) {
     live.insert(args.begin(), args.end());
     note(live, &block.front());
   }
+  demand.peakValues.assign(peakValues.begin(), peakValues.end());
 
   // Stable degree-first coloring reduces pressure without depending on
   // textual SSA names. Any coloring is checked against the graph below.
@@ -698,6 +776,8 @@ llvm::json::Object VirtualAllocationPlan::report() const {
       registersOf(fp8Regs, "fp8", 1);
     } else if (isVirtualDMAImmediate(value)) {
       entry["kind"] = "dma_immediate"; // built in the command register at each launch
+    } else if (isVirtualScalarImmediate(value)) {
+      entry["kind"] = "scalar_immediate"; // checked literal at each consuming ALU
     } else if (isAtlasMemoryControl(value)) {
       entry["kind"] = "memory_control"; // read from the control buffer where used
     } else if (registerKindOf(value) == RegisterKind::Scalar) {

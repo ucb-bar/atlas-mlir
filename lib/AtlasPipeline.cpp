@@ -1,6 +1,8 @@
 #include "Atlas/AtlasPipeline.h"
 #include "Atlas/AtlasDMAWaitInsertion.h"
 #include "Atlas/AtlasDelayInsertion.h"
+#include "Atlas/AtlasEncoding.h"
+#include "Atlas/AtlasGeneratedArtifact.h"
 #include "Atlas/AtlasGeneratedSchedule.h"
 #include "Atlas/AtlasGuardedPack.h"
 #include "Atlas/AtlasScheduling.h"
@@ -17,6 +19,33 @@ using namespace mlir;
 using namespace mlir::atlas;
 
 namespace {
+// Fresh mandatory lowering clears any previous provider, and delay insertion
+// produces a timed built-in stream. The machine verifier already includes all
+// generated contracts and strict timing, plus LLVM target checks. Repeating
+// those checks in two more passes adds no facts; retain their metadata update.
+// This private pass is not used by standalone or custom-provider pipelines.
+struct FinalizeAtlasMandatoryCompilationPass
+    : PassWrapper<FinalizeAtlasMandatoryCompilationPass, OperationPass<ModuleOp>> {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(FinalizeAtlasMandatoryCompilationPass)
+  StringRef getArgument() const final { return "finalize-atlas-mandatory-compilation"; }
+  void runOnOperation() override {
+    ModuleOp module = getOperation();
+    if (failed(requireAtlasGeneratedArtifact(module)))
+      return signalPassFailure();
+    auto state = module->getAttrOfType<StringAttr>(kAtlasTimingState);
+    auto provider = module->getAttrOfType<StringAttr>(kAtlasTimingProvider);
+    if (!state || state.getValue() != "timed" || !provider ||
+        provider.getValue() != timing::kNpuModelTimingProviderId) {
+      module.emitError("mandatory finalization requires a timed built-in generated stream");
+      return signalPassFailure();
+    }
+    SmallVector<uint32_t> words;
+    if (failed(verifyAtlasArtifact(module, /*llvmBlock=*/true, words)))
+      return signalPassFailure();
+    recordAtlasVerifiedTiming(module, provider.getValue());
+  }
+};
+
 // Live MXU handles become saved tiles before the strict virtual verifier,
 // which bounds each unit's slots.
 void buildVerifyStage(OpPassManager &pm, const AtlasCompileOptions &options) {
@@ -97,7 +126,7 @@ void mlir::atlas::buildAtlasCompileUnscheduledPipeline(
   buildLowerStage(pm, options);
   insertDMAWaits(pm);
   pm.addPass(createInsertAtlasDelaysPass());
-  verifyTimedStream(pm);
+  pm.addPass(std::make_unique<FinalizeAtlasMandatoryCompilationPass>());
 }
 
 void mlir::atlas::registerAtlasCompilePipelines() {

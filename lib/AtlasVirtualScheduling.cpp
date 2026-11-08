@@ -78,7 +78,7 @@ bool isImplicitMemory(Operation *op) {
 Effects effectsOf(Operation *op) {
   Effects e;
   e.reads = bit(kBarrier);
-  if (isa<VirtualPackFP8Op, VirtualPackRoundTripBF16Op>(op))
+  if (isa<VirtualPackFP8Op, VirtualPackRoundTripBF16Op, VirtualRawPackFP8Op>(op))
     e.writes = bit(kPack);
   else if (auto load = dyn_cast<VirtualMXULoadWeightOp>(op))
     e.reads |= bit(kUnit0 + unitOf(load.getWeight().getType()));
@@ -96,7 +96,9 @@ Effects effectsOf(Operation *op) {
                 VirtualVPUUnaryOp, VirtualVPUBinaryOp, VirtualVPUReduceOp,
                 VirtualVPUSplatOp, VirtualXLUTransposeOp,
                 VirtualScaleConstantOp, VirtualSlotOp,
-                arith::ConstantOp, arith::AddIOp, arith::CmpIOp>(op))
+                arith::ConstantOp, arith::AddIOp, arith::CmpIOp,
+                arith::SubIOp, arith::AndIOp, arith::OrIOp, arith::XOrIOp,
+                arith::ShLIOp, arith::ShRUIOp, arith::ExtUIOp>(op))
     e.writes = bit(kNumPseudo) - 1;
   return e;
 }

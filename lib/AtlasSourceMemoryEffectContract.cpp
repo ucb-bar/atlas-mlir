@@ -1,3 +1,4 @@
+#include "Atlas/AtlasProofWork.h"
 #include "Atlas/AtlasSourceMemoryEffectContract.h"
 #include "Atlas/AtlasContractAttr.h"
 #include "Atlas/AtlasGeneratedArtifact.h"
@@ -41,6 +42,7 @@ FailureOr<std::vector<Effect>> deriveEffects(DictionaryAttr cfg, ArrayAttr recor
   if (!blocks || blocks.empty() || !operations) return failure();
   std::vector<Tile> tiles;
   for (Attribute a : records) {
+    atlasProofRecord(AtlasProofKind::SourceMemory);
     auto d = dyn_cast<DictionaryAttr>(a);
     if (!d) return failure();
     auto id = contractI32(d, "id"), dram = contractI32(d, "dram_byte"), bytes = contractI32(d, "bytes"), channel = contractI32(d, "channel");
@@ -56,6 +58,7 @@ FailureOr<std::vector<Effect>> deriveEffects(DictionaryAttr cfg, ArrayAttr recor
   std::map<int32_t, Owner> owners;
   int32_t previousSource = -1, previousBlock = -1, previousCommand = -1;
   for (Attribute a : operations) {
+    atlasProofRecord(AtlasProofKind::SourceMemory);
     auto d = dyn_cast<DictionaryAttr>(a);
     if (!d) return failure();
     auto source = contractI32(d, "id"), block = contractI32(d, "block");
@@ -75,6 +78,7 @@ FailureOr<std::vector<Effect>> deriveEffects(DictionaryAttr cfg, ArrayAttr recor
     if (!owners.count(id) && !owners.empty() && id > owners.begin()->first) return failure();
   std::vector<Effect> effects;
   for (unsigned launch = 0; launch < tiles.size(); ++launch) {
+    atlasProofRecord(AtlasProofKind::SourceMemory);
     const Tile &t = tiles[launch];
     if (t.kind != "dma_load" && t.kind != "dma_store") continue;
     auto owner = owners.find(launch);
@@ -144,6 +148,7 @@ FailureOr<DictionaryAttr> mlir::atlas::buildAtlasSourceMemoryEffectContract(
     return function.emitOpError("source memory contract requires the CFG and tile contracts");
   std::map<int32_t, DictionaryAttr> records;
   for (Attribute a : operations) {
+    atlasProofRecord(AtlasProofKind::SourceMemory);
     auto d = dyn_cast<DictionaryAttr>(a);
     auto id = d ? contractI32(d, "id") : std::nullopt;
     if (!id || !records.emplace(*id, d).second)
@@ -168,6 +173,7 @@ FailureOr<DictionaryAttr> mlir::atlas::buildAtlasSourceMemoryEffectContract(
 }
 
 LogicalResult mlir::atlas::verifyAtlasGeneratedSourceMemoryEffectContract(const AtlasVerificationContext &ctx) {
+  atlasProofInvocation(AtlasProofKind::SourceMemory);
   ModuleOp module = ctx.module;
   if (failed(requireAtlasGeneratedArtifact(module))) return failure();
   auto contract = module->getAttrOfType<DictionaryAttr>(kAtlasSourceMemoryContract);
@@ -184,6 +190,7 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedSourceMemoryEffectContract(const 
   if (!cfgEdges || !cfgBlocks) return bad();
   std::vector<SourceEdge> edges;
   for (Attribute a : cfgEdges) {
+    atlasProofRecord(AtlasProofKind::SourceMemory);
     auto d = dyn_cast<DictionaryAttr>(a);
     if (!d) return bad();
     auto id = contractI32(d, "id"), from = contractI32(d, "from"), to = contractI32(d, "to");
@@ -216,6 +223,7 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedSourceMemoryEffectContract(const 
   };
   auto run = [&](size_t block, State &state, bool diagnose) -> LogicalResult {
     for (size_t pc = s.starts[block]; pc < s.blockEnd(block); ++pc) {
+      atlasProofTransfer(AtlasProofKind::SourceMemory);
       Operation *op = s.ops[pc];
       auto command = contractTag(op, kAtlasTagTileCommand);
       auto launch = command ? launchEffect.find(*command) : launchEffect.end();
