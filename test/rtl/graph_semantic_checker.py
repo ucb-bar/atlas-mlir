@@ -24,7 +24,7 @@ from atlas_mlir_native.reference import (
     evaluate_scaled_pack,
 )
 from merlin.semantic_compiler.model import TensorType
-from merlin.semantic_compiler.precision_values import FloatBoundarySpec
+from merlin.compiler.quantization.contraction.values import FloatBoundarySpec
 from merlin.semantic_compiler.reference import TensorValue, evaluate_graph
 from test_mxu_numerics import dot
 

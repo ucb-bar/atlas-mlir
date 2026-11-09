@@ -223,8 +223,8 @@ def _native_import(compiled: Path, verification_path: Path) -> dict:
                 or conversion.get("target_axes_from_source") not in ([0, 1], [1, 0])):
             raise ValueError("native runtime input needs a supported f32 to FP8 boundary")
     from atlas_mlir_native.precision_abi import BF16_HALF_COLUMNS, TILE_EDGE
-    from merlin.semantic_compiler.precision_codegen import finite_f32_codebook
-    from merlin.semantic_compiler.precision_values import FloatBoundarySpec
+    from merlin.compiler.quantization.contraction.codegen import finite_f32_codebook
+    from merlin.compiler.quantization.contraction.values import FloatBoundarySpec
 
     tables = []
     for conversion in conversions:
@@ -411,7 +411,7 @@ def render(compiled: Path, capsule: Path, *, native_verification: Path | None = 
     if runtime_conversions is not None:
         if not isinstance(runtime_conversions, list) or len(runtime_conversions) != 2:
             raise ValueError("native host handoff needs two selected runtime conversions")
-        from merlin.semantic_compiler.precision_codegen import (
+        from merlin.compiler.quantization.contraction.codegen import (
             FiniteF32Codebook,
             render_finite_f32_codebook_c,
         )

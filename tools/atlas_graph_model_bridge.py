@@ -25,7 +25,7 @@ def _member(root: Path, name: str) -> bytes:
 
 
 def _float_spec(raw: dict):
-    from merlin.semantic_compiler.precision_values import FloatBoundarySpec
+    from merlin.compiler.quantization.contraction.values import FloatBoundarySpec
 
     if not isinstance(raw, dict) or raw.get("direction") != "encode":
         raise ValueError("graph input has no selected encode boundary")
@@ -59,7 +59,7 @@ def prepare(source_path: Path, bridge_root: Path, compiled: Path, *, runtime_inc
         implementation_paths,
     )
     from merlin.frontends.linalg_mlir import parse_mlir_text
-    from merlin.semantic_compiler.precision_codegen import (
+    from merlin.compiler.quantization.contraction.codegen import (
         finite_f32_codebook,
         render_finite_f32_codebook_c,
     )

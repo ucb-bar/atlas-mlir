@@ -31,18 +31,18 @@ from merlin.semantic_compiler.model import (
     TensorType,
     pointwise_identity_maps,
 )
-from merlin.semantic_compiler.precision_constants import (
+from merlin.compiler.quantization.contraction.constants import (
     PreparedStaticInput,
     load_declared_static_operand,
 )
-from merlin.semantic_compiler.precision_transform import (
+from merlin.compiler.quantization.contraction.transform import (
     DiagnosticMatmulTile,
     MatmulTileProfile,
     build_diagnostic_batched_matmul_tiles,
     build_diagnostic_matmul_tile,
     build_diagnostic_matmul_tiles,
 )
-from merlin.semantic_compiler.precision_values import FloatBoundarySpec
+from merlin.compiler.quantization.contraction.values import FloatBoundarySpec
 from merlin.semantic_compiler.rules import (
     AddressConstraint,
     AxisBound,

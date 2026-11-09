@@ -2937,7 +2937,7 @@ class NativeBindingTest(unittest.TestCase):
 
     def test_native_mxu0_tile_from_source_bound_f32_contraction(self) -> None:
         from atlas_mlir_native.binding import diagnostic_mxu0_f32_profile
-        from merlin.semantic_compiler.precision_transform import (
+        from merlin.compiler.quantization.contraction.transform import (
             build_diagnostic_matmul_tile,
         )
         from merlin.semantic_compiler.search import SearchLimits
@@ -2993,7 +2993,7 @@ class NativeBindingTest(unittest.TestCase):
 
     def test_small_source_bound_matmul_compiles_full_physical_tile(self) -> None:
         from atlas_mlir_native.binding import diagnostic_mxu0_f32_profile
-        from merlin.semantic_compiler.precision_transform import (
+        from merlin.compiler.quantization.contraction.transform import (
             build_diagnostic_matmul_tile,
         )
         from merlin.semantic_compiler.search import SearchLimits
@@ -3126,7 +3126,7 @@ class NativeBindingTest(unittest.TestCase):
             load_compile_inputs,
             stage_compile_inputs,
         )
-        from merlin.semantic_compiler.precision_constants import (
+        from merlin.compiler.quantization.contraction.constants import (
             load_declared_static_operand,
         )
         from merlin.targetgen.cli import main as targetgen_main
@@ -3363,7 +3363,7 @@ class NativeBindingTest(unittest.TestCase):
             (bundle / name).write_bytes(payload)
         (bundle / "manifest.json").write_text(json.dumps(record, sort_keys=True) + "\n")
         from merlin.frontends.linalg_mlir import parse_mlir_text
-        from merlin.semantic_compiler.precision_intake import (
+        from merlin.compiler.quantization.contraction.intake import (
             survey_source_f32_batched_matmuls,
         )
         from merlin.targetgen.application_graph import _program_graph
@@ -4351,7 +4351,7 @@ class NativeBindingTest(unittest.TestCase):
             load_compile_inputs,
             stage_compile_inputs,
         )
-        from merlin.semantic_compiler.precision_constants import (
+        from merlin.compiler.quantization.contraction.constants import (
             load_declared_static_operand,
         )
         from merlin.targetgen.cli import main as targetgen_main

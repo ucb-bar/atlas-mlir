@@ -11,7 +11,7 @@ from collections.abc import Sequence
 
 import numpy as np
 
-from merlin.semantic_compiler.precision_transform import (
+from merlin.compiler.quantization.contraction.transform import (
     DiagnosticMatmulTile,
     assemble_diagnostic_matmul_outputs,
 )

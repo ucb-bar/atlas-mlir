@@ -31,7 +31,7 @@ class MXU1BoundedReferenceTest(unittest.TestCase):
 
     def request(self):
         from atlas_mlir_native.binding import diagnostic_mxu1_f32_profile
-        from merlin.semantic_compiler.precision_transform import (
+        from merlin.compiler.quantization.contraction.transform import (
             build_diagnostic_matmul_tile,
         )
 

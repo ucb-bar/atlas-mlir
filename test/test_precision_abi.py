@@ -36,7 +36,7 @@ class PrecisionTileAbiTest(unittest.TestCase):
             diagnostic_mxu0_f32_profile,
             diagnostic_mxu1_f32_profile,
         )
-        from merlin.semantic_compiler.precision_transform import (
+        from merlin.compiler.quantization.contraction.transform import (
             build_diagnostic_matmul_tile,
         )
 
@@ -51,7 +51,7 @@ class PrecisionTileAbiTest(unittest.TestCase):
 
     def small_plan(self):
         from atlas_mlir_native.binding import diagnostic_mxu0_f32_profile
-        from merlin.semantic_compiler.precision_transform import (
+        from merlin.compiler.quantization.contraction.transform import (
             build_diagnostic_matmul_tile,
         )
 
@@ -97,7 +97,7 @@ class PrecisionTileAbiTest(unittest.TestCase):
     def test_source_output_windows_decode_and_assemble_both_physical_halves(self) -> None:
         from atlas_mlir_native.binding import diagnostic_mxu0_f32_profile
         from atlas_mlir_native.precision_abi import decode_source_results
-        from merlin.semantic_compiler.precision_transform import (
+        from merlin.compiler.quantization.contraction.transform import (
             build_diagnostic_matmul_tiles,
         )
 

@@ -25,7 +25,7 @@ from merlin.semantic_compiler.model import (
     TensorType,
     pointwise_identity_maps,
 )
-from merlin.semantic_compiler.precision_values import FloatBoundarySpec
+from merlin.compiler.quantization.contraction.values import FloatBoundarySpec
 
 from .admission import _mxu0_maps, _row_reduce_maps, _transpose_maps
 from .pack_lane import ROUNDED_PACK_DOMAIN, ROUNDED_PACK_POLICY

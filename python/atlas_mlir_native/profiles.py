@@ -14,10 +14,10 @@ from merlin.semantic_compiler.allocate import (
 from merlin.semantic_compiler.model import (
     pointwise_identity_maps,
 )
-from merlin.semantic_compiler.precision_transform import (
+from merlin.compiler.quantization.contraction.transform import (
     MatmulTileProfile,
 )
-from merlin.semantic_compiler.precision_values import FloatBoundarySpec
+from merlin.compiler.quantization.contraction.values import FloatBoundarySpec
 from merlin.semantic_compiler.rules import (
     AddressConstraint,
     AxisBound,

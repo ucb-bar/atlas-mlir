@@ -202,7 +202,7 @@ def prepare(compiled: Path, verification: Path, host_map: Path,
         if f32_boundary != "diagnostic-mxu0-f32":
             raise ValueError("unknown ordered-K f32 boundary policy")
         from atlas_mlir_native.binding import diagnostic_mxu0_f32_profile
-        from merlin.semantic_compiler.precision_codegen import (
+        from merlin.compiler.quantization.contraction.codegen import (
             finite_f32_codebook,
             render_finite_f32_codebook_c,
         )
