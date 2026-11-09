@@ -145,11 +145,13 @@ def prepare_c_package(source, compiled, name, *, target_source, runtime_linkage=
     }, files
 
 
-def render_nonnegative_guard_c(plan, prefix):
+def render_nonnegative_guard_c(plan, prefix, *, squared=False):
     """Replay positive FP32 tree additions and BF16 rounding before device I/O.
 
     Integer guard/sticky arithmetic is independent of the host floating-point
     environment. Every tree node, BF16 partial, and seeded add must stay finite.
+    With ``squared`` the data codes are a square's admitted input, and each
+    reduction operand is replayed as the selected BF16 nearest-even square.
     """
     shape = plan.source.nodes[0].type.shape
     rows, columns = plan.matrix_shape
@@ -161,13 +163,29 @@ def render_nonnegative_guard_c(plan, prefix):
     at = "0"
     for axis, extent in enumerate(shape):
         at = f"(({at})*{extent}u+{coordinates[axis]})"
+    read = f"{prefix}_code(data,{at})"
+    square = ""
+    if squared:
+        read = f"{prefix}_square({read})"
+        # Admitted codes are zero or have a normal BF16 square.
+        square = f"""static uint32_t {prefix}_square(uint32_t code) {{
+  if (!(code&0x7fffu)) return 0;
+  uint32_t mantissa=(code&0x7fu)|0x80u, product=mantissa*mantissa;
+  uint32_t exponent=2u*((code>>7)&0xffu)-127u, shift=7u;
+  if (product>=0x8000u) {{ shift=8u; ++exponent; }}
+  uint32_t rounded=product>>shift, rest=product&((1u<<shift)-1u), half=1u<<(shift-1u);
+  rounded+=rest>half || (rest==half && (rounded&1u));
+  if (rounded==0x100u) {{ rounded=0x80u; ++exponent; }}
+  return (exponent<<7)|(rounded&0x7fu);
+}}
+"""
     return f"""
 #include <stdint.h>
 #include <stddef.h>
 static uint32_t {prefix}_code(const uint8_t *p,size_t i) {{
   return (uint32_t)p[2*i]|((uint32_t)p[2*i+1]<<8);
 }}
-static uint32_t {prefix}_jam(uint32_t value,unsigned shift) {{
+{square}static uint32_t {prefix}_jam(uint32_t value,unsigned shift) {{
   if (!shift) return value;
   if (shift>=32) return value!=0;
   return (value>>shift)|((value&((1u<<shift)-1u))!=0);
@@ -192,7 +210,7 @@ static int {prefix}_domain(const uint8_t *data,const uint8_t *seed) {{
       uint32_t values[32];
       for (size_t lane=0;lane<32u;++lane) {{
         size_t col=start+lane;
-        values[lane]=col<{columns}u ? {prefix}_code(data,{at})<<16 : 0;
+        values[lane]=col<{columns}u ? {read}<<16 : 0;
       }}
       for (size_t width=32u;width>1u;width/=2u)
         for (size_t lane=0;lane<width/2u;++lane) {{

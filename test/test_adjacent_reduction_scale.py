@@ -13,6 +13,7 @@ import numpy as np
 
 from atlas_mlir_native.adjacent_reduction_scale import alternatives, compile_group, export_group, prepare
 from atlas_mlir_native.binding import DRAM_BASE
+from atlas_mlir_native.reduction import NONNEGATIVE_NORMAL_REDUCTION_POLICY as POSITIVE, REDUCTION_POLICY
 from merlin.semantic_compiler.model import SemanticNode, pointwise_identity_maps
 from merlin.xdsl_dialects.lowering.global_plan import BufferRepresentation, CycleInterval, RegionAlternative, ValueRepresentation
 from test_adjacent_square_reduce import case as prefix_case
@@ -33,7 +34,7 @@ def case(operand=0, shape=(3, 7), escape=False):
     ports = lambda keys: tuple(BufferRepresentation(key, ValueRepresentation('host_memory', 'dense', 'f32')) for key in keys)
     last = RegionAlternative('r2', (2,), 'source', 'accelerator', CycleInterval.unknown('test'),
                              ports(inputs), ports((divided.id,)), metadata=(('kind', 'pointwise_math'),))
-    return source, SimpleNamespace(), (*choices, last)
+    return source, SimpleNamespace(reduction_policy=REDUCTION_POLICY), (*choices, last)
 
 
 def fixture(group, data, seed, other):
@@ -49,8 +50,9 @@ def fixture(group, data, seed, other):
     def physical(raw):
         return b''.join(pack_bf16_pair_halves(raw[at:at + 2048]) for at in range(0, len(raw), 2048))
     first, second = group['prefix']['plans']
-    codes = np.frombuffer(input_spec().encode(data), dtype='<u2')
-    seed_codes = np.frombuffer(seed_spec().encode(seed), dtype='<u2')
+    policy = group['prefix']['reduction_policy']
+    codes = np.frombuffer(input_spec(reduction_policy=policy).encode(data), dtype='<u2')
+    seed_codes = np.frombuffer(seed_spec(reduction_policy=policy).encode(seed), dtype='<u2')
     squared = np.array([0 if code & 0x7fff == 0 else _round_bf16_product(int(code), int(code)) for code in codes], dtype='<u2')
     reduction_request = group['prefix']['precisions'][1].request
     def reduce(seed_values):
@@ -115,6 +117,39 @@ class ReductionScaleTest(unittest.TestCase):
             self.assertEqual(len(alternatives(adapter, source, choices)), 3)
 
     @unittest.skipUnless(os.environ.get('ATLAS_OOT_BIN_DIR'), 'select native tools')
+    def test_native_nonnegative_policy_receipt_and_overflow_guard(self):
+        from test_looped_mnk import ROOT, build_snapshot
+        from merlin.semantic_compiler.search import SearchLimits
+        from test_pointwise_loop import check_source_c_call
+        source, _, _ = case()
+        group = prepare(source, SimpleNamespace(reduction_policy=POSITIVE))
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            compiled, package = root / 'compiled', root / 'package'
+            compile_group(group, build_snapshot(root), target_source=ROOT, destination=compiled, limits=SearchLimits())
+            region = export_group(group, compiled, 'pointwise', target_source=ROOT)
+            receipt = region.description
+            self.assertEqual(receipt['intermediate_domain_proof']['square_preimage']['reduction_policy'], POSITIVE)
+            self.assertEqual(receipt['precision_plan'][1]['arithmetic'], POSITIVE)
+            self.assertEqual(receipt['outer_input_conversions']['seed']['policy'], POSITIVE)
+            for name, payload in region.files.items():
+                path = package / name
+                path.parent.mkdir(exist_ok=True, parents=True)
+                path.write_bytes(payload)
+            with (package / 'pointwise.c').open('a') as handle:
+                handle.write('\n#include "runtime/atlas_host.c"\n')
+            data = (((np.arange(21) % 7) - 3) / 2).astype('<f4').reshape(3, 7)
+            data[0, :2] = [0.0, -0.0]
+            seed, other = np.array([0.5, 0.0, 1.0], dtype='<f4'), np.ones(3, dtype='<f4')
+            initial, expected, wanted, status = fixture(group, data, seed, other)
+            self.assertEqual(status, 0)
+            # Squares of 2**63 overflow the FP32 tree; negative seeds leave the domain.
+            overflow = data.copy()
+            overflow[0, :4] = 2.0**63
+            check_source_c_call(self, package, initial, (compiled / 'program.bin').read_bytes(), lambda memory: expected,
+                                [data, seed, other], wanted, invalid_values=([overflow, seed, other], [data, -seed, other]))
+
+    @unittest.skipUnless(os.environ.get('ATLAS_OOT_BIN_DIR'), 'select native tools')
     def test_two_page_transition_composes_with_default_initialization_and_bounds(self):
         from atlas_mlir_native.adjacent_reduction_scale import transition_source
         from atlas_mlir_native.binding import AtlasNativeBinding, NATIVE_CHECKS, NATIVE_PIPELINES, _run
@@ -123,7 +158,7 @@ class ReductionScaleTest(unittest.TestCase):
         from atlas_mlir_native.region_composition import rematerialize_scalar_constants
         from atlas_mlir_native.resident_graph import compose_fragments
         source, _, _ = case(shape=(1, 64, 32))
-        group = prepare(source)
+        group = prepare(source, SimpleNamespace(reduction_policy=REDUCTION_POLICY))
         addresses, mutable = group['addresses'], group['mutable']
         first, second = group['prefix']['plans']
         catalog = {descriptor.computation: descriptor.name for descriptor in AtlasNativeBinding.profile().descriptors}
@@ -148,7 +183,7 @@ class ReductionScaleTest(unittest.TestCase):
             snapshot = build_snapshot(root)
             for operand in (0, 1):
                 source, _, _ = case(operand)
-                group = prepare(source)
+                group = prepare(source, SimpleNamespace(reduction_policy=REDUCTION_POLICY))
                 compiled = root / ('compiled' + str(operand))
                 compile_group(group, snapshot, target_source=ROOT, destination=compiled, limits=SearchLimits())
                 binary = (compiled / 'program.bin').read_bytes()

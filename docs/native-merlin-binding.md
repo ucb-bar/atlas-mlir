@@ -379,6 +379,8 @@ The separate domain admits positive zero and every positive normal BF16 code (`0
 
 The selected native arithmetic remains the 32-lane adjacent FP32 nearest-even tree, BF16 nearest-even partial readout, and left-to-right seeded FP32 addition with BF16 truncation after each tile. Before loading a program or writing device memory, generated C independently checks every FP32 tree intermediate, BF16 partial, and seeded addition for overflow. An inadmissible reduction returns `INPUT_DOMAIN`; its output buffer remains unchanged. The independent interpreter performs the same admission checks using exact rational values. Tests cover every positive normal BF16 encoding, the boundary below `0x2000`, axis permutations, tails, and intermediate overflow. Agreement with this selected policy does not establish source f32 equivalence or original-model quality.
 
+Adjacent square/reduction and reduction/scale enlargements use the same selected policy. Every square of a pointwise-admitted BF16 input is positive zero or a code in `0x0080` through `0x7e80`, so under the nonnegative policy the enlarged input domain is exactly the pointwise input domain. Their generated C replays the same overflow check on the selected BF16 squares before device I/O.
+
 ### BF16 source multiplication
 
 The v21 application policy adds an explicit device admission:

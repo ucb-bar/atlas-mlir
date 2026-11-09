@@ -1,7 +1,8 @@
 """Keep an adjacent square and trailing seeded reduction in one device image.
 
 The removed reduction encoder is moved to an exactly equivalent admission
-test on the square input. No arithmetic or reduction ordering is changed.
+test on the square input, under the selected reduction policy. No arithmetic
+or reduction ordering is changed.
 """
 from dataclasses import replace
 from functools import lru_cache
@@ -21,25 +22,28 @@ from .region_composition import (
     export_adjacent_package,
 )
 from .binding import DRAM_BASE, TILE_BYTES
+from .reduction import NONNEGATIVE_NORMAL_REDUCTION_POLICY, REDUCTION_POLICY
 
 PREIMAGE_POLICY = 'f32-to-bf16-square-reduction-exact-preimage-v1'
 
 
-@lru_cache(maxsize=1)
-def intermediate_domain_proof():
+@lru_cache(maxsize=4)
+def intermediate_domain_proof(reduction_policy=REDUCTION_POLICY):
     """Enumerate every BF16 code, retaining exactly the old two guards.
 
     f32 input conversion is unchanged RNE. Thus membership of its resulting
     BF16 code in this preimage is equivalent to the original input guard and
-    the reduction guard on the selected BF16 square. Both signed input zeros
-    square to positive zero, so reduction's negative-zero canonicalization
-    is redundant at this particular internal boundary.
+    the selected reduction policy's code guard on the BF16 square. Both signed
+    input zeros square to positive zero, so reduction's negative-zero
+    canonicalization or rejection is redundant at this internal boundary. The
+    nonnegative policy's combination overflow guard is not a per-code property;
+    export replays it on the squares before device I/O.
     """
     from .pointwise import input_spec
     from .reduction import input_spec as reduction_input_spec
     from . import reference
 
-    before, after = input_spec(), reduction_input_spec()
+    before, after = input_spec(), reduction_input_spec(reduction_policy=reduction_policy)
     admitted = lambda spec, code: any(low <= code <= high for low, high in spec.admitted_code_ranges)
     ranges, original, accepted, mapping = [], 0, 0, bytearray()
     for code in range(65536):
@@ -56,7 +60,7 @@ def intermediate_domain_proof():
             ranges[-1][1] = code
         else:
             ranges.append([code, code])
-    return dict(policy=PREIMAGE_POLICY, checked_codes=65536,
+    return dict(policy=PREIMAGE_POLICY, reduction_policy=reduction_policy, checked_codes=65536,
                 original_admitted_codes=original, admitted_preimage_codes=accepted,
                 admitted_code_ranges=ranges, mapping_sha256=sha256(mapping).hexdigest(),
                 arithmetic_reference_sha256=sha256(Path(reference.__file__).read_bytes()).hexdigest(),
@@ -67,9 +71,9 @@ def intermediate_domain_proof():
                 operation_order='complete square loop, then unchanged seeded left-to-right reduction loop')
 
 
-def input_spec():
+def input_spec(*, reduction_policy=REDUCTION_POLICY):
     from .pointwise import input_spec as original_spec
-    proof = intermediate_domain_proof()
+    proof = intermediate_domain_proof(reduction_policy)
     return replace(original_spec(), policy=PREIMAGE_POLICY,
                    admitted_code_ranges=tuple(tuple(row) for row in proof['admitted_code_ranges']))
 
@@ -88,8 +92,11 @@ def prepare(region, adapter=None):
             or region.node(square.inputs[0]).type != square.type
             or len(reduced.inputs) != 2 or reduced.inputs[0] != square.id or region.outputs != (reduced.id,)):
         raise ValueError('enlargement requires a dense self-product with only its reduction escaping')
+    # The selected application reduction policy, as for the separate region.
+    # A missing policy declines the enlargement instead of defaulting silently.
+    policy = getattr(adapter, 'reduction_policy', None)
     first = square_precision(extract_semantic_region(region, (square.id,)))
-    second = reduction_precision(extract_semantic_region(region, (reduced.id,)))
+    second = reduction_precision(extract_semantic_region(region, (reduced.id,)), reduction_policy=policy)
     _, first_plan, streaming = prepare_execution_plan(first.request)
     second_plan = reduction_plan(second.request)
     # Large source rows keep the existing separately selected square and
@@ -113,7 +120,7 @@ def prepare(region, adapter=None):
     return dict(region=region, precisions=(first, second), plans=(first_plan, second_plan),
                 inputs=inputs, outputs=(square.id, reduced.id), data=data, seed=seed,
                 addresses=addresses, sizes=sizes, arena_bytes=arena_bytes,
-                proof=intermediate_domain_proof())
+                reduction_policy=policy, proof=intermediate_domain_proof(policy))
 
 
 def alternatives(adapter, source, choices):
@@ -195,11 +202,37 @@ def compile_group(group, snapshot, *, target_source, destination, limits):
             source_request_digest=group['region'].digest()))
 
 
-def export_group(group, compiled, name, *, target_source):
+def outer_input_specs(group):
+    from .reduction import input_spec as seed_spec
+
+    policy = group['reduction_policy']
+    return {group['data']: input_spec(reduction_policy=policy), group['seed']: seed_spec(reduction_policy=policy)}
+
+
+def render_outer_encoder(group, key, count, name):
+    """Render the selected outer conversion of one square/reduction input."""
     from merlin.compile.c_conversions import render_f32_array_c
+    from .reduction_c import render_nonnegative_encoder_c
+
+    if key == group['seed'] and group['reduction_policy'] == NONNEGATIVE_NORMAL_REDUCTION_POLICY:
+        return render_nonnegative_encoder_c(count, name)
+    return render_f32_array_c(outer_input_specs(group)[key], count, name)
+
+
+def render_combination_guard(group, reduce_prefix, inputs):
+    """Replay the selected reduction's overflow guard on the squared data codes."""
+    from .reduction_c import render_nonnegative_guard_c
+
+    if group['reduction_policy'] != NONNEGATIVE_NORMAL_REDUCTION_POLICY:
+        return [], None
+    data, seed = (inputs.index(group[key]) for key in ('data', 'seed'))
+    return ([render_nonnegative_guard_c(group['plans'][1], reduce_prefix, squared=True)],
+            f'{reduce_prefix}_domain(operand_{data},operand_{seed})')
+
+
+def export_group(group, compiled, name, *, target_source):
     from merlin.compile.c_pointwise import render_pointwise_c
     from merlin.compile.c_reduction import render_reduction_c
-    from .reduction import input_spec as seed_spec
 
     region, compiled = group['region'], Path(compiled)
     execution = verify_adjacent_group(group, compiled, precision_plan=[p.record() for p in group['precisions']])
@@ -210,16 +243,15 @@ def export_group(group, compiled, name, *, target_source):
     helpers = [render_pointwise_c(first, data_prefix).replace('static void ', 'static inline void '),
                render_reduction_c(second, reduce_prefix).replace('static void ', 'static inline void ')]
     for index, key in enumerate(group['inputs']):
-        spec = input_spec() if key == group['data'] else seed_spec()
-        helpers.append(render_f32_array_c(spec, prod(region.node(key).type.shape), name + f'_encode_{index}'))
+        helpers.append(render_outer_encoder(group, key, prod(region.node(key).type.shape), name + f'_encode_{index}'))
         packer = data_prefix + '_pack_0' if key == group['data'] else reduce_prefix + '_pack_1'
         helpers.append(f'static void {name}_pack_{index}(uint8_t *out,const uint8_t *in) {{ {packer}(out,in); }}')
     helpers.append(f'''static void {name}_assemble(uint8_t *out,const uint8_t *arena) {{
   {reduce_prefix}_assemble(out,arena+{group['sizes'][group['outputs'][0]]}u);
 }}''')
+    guard, input_guard = render_combination_guard(group, reduce_prefix, group['inputs'])
     return export_adjacent_package(group, compiled, name, kind='adjacent_square_reduce', target_source=target_source,
-        execution=execution, input_sources=group['inputs'], helpers=helpers,
+        execution=execution, input_sources=group['inputs'], helpers=helpers + guard, input_guard=input_guard,
         packed_sizes=(*(group['sizes'][key] for key in group['inputs']),sum(group['sizes'][key] for key in group['outputs'])),
         metadata=dict(precision_plan=[precision.record() for precision in group['precisions']],
-            outer_input_conversions={key: (input_spec() if key == group['data'] else seed_spec()).record()
-                                     for key in group['inputs']}))
+            outer_input_conversions={key: outer_input_specs(group)[key].record() for key in group['inputs']}))

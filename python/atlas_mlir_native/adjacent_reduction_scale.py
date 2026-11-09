@@ -161,7 +161,6 @@ def export_group(group, compiled, name, *, target_source):
     from merlin.compile.c_conversions import render_f32_array_c
     from merlin.compile.c_pointwise import render_pointwise_c
     from merlin.compile.c_reduction import render_reduction_c
-    from .reduction import input_spec as seed_spec
 
     region, compiled = group['region'], Path(compiled)
     precision_plan = [*(p.record() for p in group['prefix']['precisions']), group['precision'].record()]
@@ -171,12 +170,14 @@ def export_group(group, compiled, name, *, target_source):
     helpers = [render_pointwise_c(first, prefixes[0]), render_reduction_c(second, prefixes[1]),
                render_pointwise_c(group['plan'], prefixes[2])]
     helpers = [text.replace('static void ', 'static inline void ') for text in helpers]
-    specs = {group['data']: square_reduce.input_spec(), group['seed']: seed_spec(),
-             group['other']: group['precision'].operand_specs[1 - group['operand']]}
+    prefix = group['prefix']
+    specs = {**square_reduce.outer_input_specs(prefix), group['other']: group['precision'].operand_specs[1 - group['operand']]}
     packers = {group['data']: prefixes[0] + '_pack_0', group['seed']: prefixes[1] + '_pack_1',
                group['other']: prefixes[2] + '_pack_' + str(1 - group['operand'])}
     for index, key in enumerate(group['inputs']):
-        helpers.append(render_f32_array_c(specs[key], prod(region.node(key).type.shape), name + f'_encode_{index}'))
+        count, encoder = prod(region.node(key).type.shape), name + f'_encode_{index}'
+        helpers.append(render_f32_array_c(specs[key], count, encoder) if key == group['other']
+                       else square_reduce.render_outer_encoder(prefix, key, count, encoder))
         helpers.append(f'static void {name}_pack_{index}(uint8_t *out,const uint8_t *in) {{ {packers[key]}(out,in); }}')
     first_address = group['addresses'][group['mutable'][0]]
     result_offset = group['addresses'][group['mutable'][3]] - first_address
@@ -185,7 +186,9 @@ def export_group(group, compiled, name, *, target_source):
     status_offset = sum(group['sizes'][key] for key in group['inputs']) + group['addresses'][group['status']] - first_address
     check = ('  if (' + ' | '.join(f'region->workspace[{status_offset + byte}u]' for byte in range(4))
              + f') return {name.upper()}_INPUT_DOMAIN;')
+    guard, input_guard = square_reduce.render_combination_guard(prefix, prefixes[1], group['inputs'])
     return export_adjacent_package(group, compiled, name, kind='adjacent_reduction_scale', target_source=target_source,
-        execution=execution, input_sources=group['inputs'], helpers=helpers, completion_check=check,
+        execution=execution, input_sources=group['inputs'], helpers=helpers + guard, completion_check=check,
+        input_guard=input_guard,
         packed_sizes=(*(group['sizes'][key] for key in group['inputs']),sum(group['sizes'][key] for key in group['mutable'])),
         metadata=dict(precision_plan=precision_plan, outer_input_conversions={key: spec.record() for key, spec in specs.items()}))

@@ -13,15 +13,22 @@ import unittest
 
 from atlas_mlir_native.adjacent_square_reduce import (
     alternatives, compile_group, export_group, input_spec, intermediate_domain_proof, prepare,
+    render_combination_guard,
 )
 from atlas_mlir_native.binding import TARGET_IDENTITY
 from atlas_mlir_native.pointwise import input_spec as original_spec
-from atlas_mlir_native.reduction import input_spec as reduction_spec, request_for
+from atlas_mlir_native.reduction import (
+    NONNEGATIVE_NORMAL_REDUCTION_POLICY as POSITIVE, REDUCTION_POLICY, input_spec as reduction_spec, request_for,
+)
 from atlas_mlir_native.reference import _round_bf16_product
 from merlin.semantic_compiler.model import KernelRequest, SemanticNode, TensorType, pointwise_identity_maps
 from merlin.xdsl_dialects.lowering.global_plan import (
     BufferRepresentation, CycleInterval, RegionAlternative, ValueRepresentation,
 )
+
+
+def admits(spec, code):
+    return any(low <= code <= high for low, high in spec.admitted_code_ranges)
 
 
 def case(shape=(3, 7), axes=None, escape=False):
@@ -43,7 +50,7 @@ def case(shape=(3, 7), axes=None, escape=False):
     choices = tuple(RegionAlternative('r' + str(index), (index,), 'source', 'accelerator',
         CycleInterval.unknown('test'), ports(node.inputs), ports((node.id,)), metadata=(('kind', kind),))
         for index, (node, kind) in enumerate(((square, 'pointwise'), (reduced, 'reduction'))))
-    return source, SimpleNamespace(), choices
+    return source, SimpleNamespace(reduction_policy=REDUCTION_POLICY), choices
 
 
 class SquareReductionTest(unittest.TestCase):
@@ -54,13 +61,80 @@ class SquareReductionTest(unittest.TestCase):
         self.assertEqual(proof['admitted_preimage_codes'], 16132)
         self.assertEqual(proof['admitted_code_ranges'], [[0, 0], [0x2fb5, 0x4f35],
                                                        [0x8000, 0x8000], [0xafb5, 0xcf35]])
-        admits = lambda spec, code: any(low <= code <= high for low, high in spec.admitted_code_ranges)
         for code in range(65536):
             expected = False
             if admits(original_spec(), code):
                 square = 0 if code & 0x7fff == 0 else _round_bf16_product(code, code)
                 expected = admits(reduction_spec(), square)
             self.assertEqual(admits(input_spec(), code), expected, hex(code))
+
+    def test_nonnegative_policy_preimage_is_the_pointwise_domain(self):
+        # Every square of a pointwise-admitted BF16 input is +0 or a positive
+        # normal code, so the selected reduction guard removes no input code.
+        squares = set()
+        for code in range(65536):
+            if admits(original_spec(), code):
+                square = 0 if code & 0x7fff == 0 else _round_bf16_product(code, code)
+                self.assertTrue(admits(reduction_spec(reduction_policy=POSITIVE), square), hex(code))
+                squares.add(square)
+        self.assertEqual((min(squares - {0}), max(squares)), (0x0080, 0x7e80))
+        proof = intermediate_domain_proof(POSITIVE)
+        self.assertEqual(proof['reduction_policy'], POSITIVE)
+        self.assertEqual((proof['original_admitted_codes'], proof['admitted_preimage_codes']), (32260, 32260))
+        self.assertEqual(tuple(map(tuple, proof['admitted_code_ranges'])), original_spec().admitted_code_ranges)
+        self.assertEqual(input_spec(reduction_policy=POSITIVE).admitted_code_ranges, original_spec().admitted_code_ranges)
+        self.assertEqual(intermediate_domain_proof()['reduction_policy'], REDUCTION_POLICY)
+
+    def test_fusion_records_the_selected_reduction_policy(self):
+        for policy in (REDUCTION_POLICY, POSITIVE):
+            source, _, choices = case()
+            adapter = SimpleNamespace(reduction_policy=policy)
+            fused = [row for row in alternatives(adapter, source, choices)
+                     if dict(row.metadata)['kind'] == 'adjacent_square_reduce']
+            self.assertEqual(len(fused), 1)
+            group, = adapter._square_groups.values()
+            self.assertEqual(group['reduction_policy'], policy)
+            self.assertEqual(group['proof'], intermediate_domain_proof(policy))
+            record = group['precisions'][1].record()
+            self.assertEqual(record['arithmetic'], policy)
+            self.assertEqual(record['input_conversion']['policy'], policy)
+        # Without a selected reduction policy the separate reduction refuses,
+        # and so does its enlargement.
+        source, _, choices = case()
+        adapter = SimpleNamespace(reduction_policy=None)
+        self.assertEqual(alternatives(adapter, source, choices), choices)
+
+    def test_nonnegative_guard_replays_the_selected_square(self):
+        import numpy as np
+
+        source, _, _ = case(shape=(1, 32))
+        group = prepare(source, SimpleNamespace(reduction_policy=POSITIVE))
+        guard = render_combination_guard(group, 'fused', group['inputs'])[0][0]
+        codes = [code for code in range(65536) if admits(original_spec(), code)]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / 'guard.c').write_text(guard + '''
+uint32_t square(uint32_t code) { return fused_square(code); }
+int domain(const uint8_t *data,const uint8_t *seed) { return fused_domain(data,seed); }
+''')
+            subprocess.run([shutil.which('cc'), '-std=c11', '-O2', '-shared', '-fPIC', '-Wall', '-Wextra', '-Werror',
+                            str(root / 'guard.c'), '-o', str(root / 'guard.so')], check=True, capture_output=True)
+            library = ctypes.CDLL(str(root / 'guard.so'))
+            library.square.argtypes, library.square.restype = [ctypes.c_uint32], ctypes.c_uint32
+            library.domain.argtypes = [ctypes.c_char_p, ctypes.c_char_p]
+            for code in codes:
+                self.assertEqual(library.square(code), 0 if code & 0x7fff == 0 else _round_bf16_product(code, code),
+                                 hex(code))
+            def domain(data, seed):
+                return library.domain(np.array(data, '<u2').tobytes(), np.array([seed], '<u2').tobytes())
+            witness = 0xafb1  # nonzero |x| < 2**-31.5: refused by the default reduction domain
+            self.assertFalse(admits(input_spec(), witness))
+            self.assertTrue(admits(input_spec(reduction_policy=POSITIVE), witness))
+            self.assertEqual(domain([witness] + [0] * 31, 0), 0)
+            self.assertEqual(domain([0x5f00] * 2 + [0] * 30, 0x3f80), 0)
+            # Squares of 2**63 are 2**126; four of them overflow FP32 in the tree.
+            self.assertEqual(domain([0x5f00] * 4 + [0] * 28, 0), 1)
+            self.assertEqual(domain([0x5f00] * 2 + [0] * 30, 0x7f7f), 1)
 
     def test_adjacent_pair_requires_identical_layout_and_no_escaping_square(self):
         source, adapter, choices = case()
@@ -127,6 +201,13 @@ class SquareReductionTest(unittest.TestCase):
 
     @unittest.skipUnless(os.environ.get('ATLAS_OOT_BIN_DIR'), 'select default native tools')
     def test_native_composition_c_numeric_roundtrip_and_guards(self):
+        self._check_native(REDUCTION_POLICY)
+
+    @unittest.skipUnless(os.environ.get('ATLAS_OOT_BIN_DIR'), 'select default native tools')
+    def test_native_nonnegative_composition_receipt_and_guards(self):
+        self._check_native(POSITIVE)
+
+    def _check_native(self, policy):
         import numpy as np
         from atlas_mlir_native.binding import DRAM_BASE
         from atlas_mlir_native.layout import pack_bf16_pair_halves
@@ -134,8 +215,9 @@ class SquareReductionTest(unittest.TestCase):
         from test_looped_mnk import ROOT, build_snapshot
         from test_pointwise_loop import check_source_c_call
 
-        source, adapter, _ = case()
-        group = prepare(source, adapter)
+        source, _, _ = case()
+        group = prepare(source, SimpleNamespace(reduction_policy=policy))
+        nonnegative = policy == POSITIVE
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             snapshot = build_snapshot(root)
@@ -145,6 +227,10 @@ class SquareReductionTest(unittest.TestCase):
             emitted = json.loads((compiled / 'physical-program.json').read_text())
             self.assertEqual(sum(row['operation'] == 'atlas.trap' for row in emitted['instructions']), 1)
             region = export_group(group, compiled, 'pointwise', target_source=ROOT)
+            receipt = region.description
+            self.assertEqual(receipt['intermediate_domain_proof']['reduction_policy'], policy)
+            self.assertEqual(receipt['precision_plan'][1]['arithmetic'], policy)
+            self.assertEqual(receipt['outer_input_conversions']['seed']['policy'], policy)
             package = root / 'package'
             package.mkdir()
             for name, payload in region.files.items():
@@ -156,15 +242,18 @@ class SquareReductionTest(unittest.TestCase):
                 handle.write('\n#include "runtime/atlas_host.c"\n')
             data = (((np.arange(21) % 7) - 3) / 2).astype('<f4').reshape(3, 7)
             data[0, :2] = [0.0, -0.0]
-            seed = np.array([0.5, -0.0, 1.0], dtype='<f4')
+            seed = np.array([0.5, 0.0 if nonnegative else -0.0, 1.0], dtype='<f4')
+            if nonnegative:
+                # Both squares leave the default reduction domain.
+                data[1, :2] = [2.0**-40, 2.0**40]
             squared = (data * data).astype('<f4')
             wanted = (squared.sum(axis=1) + seed).astype('<f4')
             def packed(matrix):
                 padded = np.zeros((32, 32), dtype='<u2')
                 padded[:matrix.shape[0], :matrix.shape[1]] = matrix
                 return pack_bf16_pair_halves(padded.tobytes())
-            data_codes = np.frombuffer(input_spec().encode(data), dtype='<u2').reshape(3, 7)
-            seed_codes = np.frombuffer(reduction_spec().encode(seed), dtype='<u2').reshape(3, 1)
+            data_codes = np.frombuffer(input_spec(reduction_policy=policy).encode(data), dtype='<u2').reshape(3, 7)
+            seed_codes = np.frombuffer(reduction_spec(reduction_policy=policy).encode(seed), dtype='<u2').reshape(3, 1)
             square_codes = (squared.view('<u4') >> 16).astype('<u2')
             sums = (squared.sum(axis=1).view('<u4') >> 16).astype('<u2')
             result_tile = np.zeros((32, 32), dtype='<u2')
@@ -188,8 +277,13 @@ class SquareReductionTest(unittest.TestCase):
 
             invalid_small, invalid_large = data.copy(), data.copy()
             invalid_small[0, 1], invalid_large[0, 1] = 2.0**-40, 2.0**40
+            invalid = ([invalid_small, seed], [invalid_large, seed])
+            if nonnegative:
+                # Below the square input domain; FP32 tree overflow; a negative seed.
+                invalid_small[0, 1], invalid_large[0, :4] = 2.0**-70, 2.0**63
+                invalid = (*invalid, [data, -seed])
             check_source_c_call(self, package, initial, binary, execute, [data, seed], wanted.tobytes(),
-                                invalid_values=([invalid_small, seed], [invalid_large, seed]))
+                                invalid_values=invalid)
 
     def _execute_model(self, compiled, binary, memory, expected):
         from test_looped_mnk import ROOT
