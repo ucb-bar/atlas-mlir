@@ -145,6 +145,7 @@ class AtlasApplicationAdapter:
                 "atlas.quantize_act": translate_activation_quantizer}
 
     def __init__(self, policy, *, original_source_sha256):
+        self.original_source_sha256 = original_source_sha256
         if "activation_quantizer" in policy:
             route = policy["activation_quantizer"]
             if route not in {"host", "device"}:
@@ -159,9 +160,10 @@ class AtlasApplicationAdapter:
         self.host_bf16_linear_policy = None
         if "host_bf16_linear" in policy:
             from merlin.compile.c_bf16_linear import POLICY as BF16_LINEAR_POLICY
+            from .source_bf16_linear import POLICY as SOURCE_BF16_LINEAR_POLICY
 
             selected = policy["host_bf16_linear"]
-            if selected != BF16_LINEAR_POLICY:
+            if not isinstance(selected, str) or selected not in {BF16_LINEAR_POLICY, SOURCE_BF16_LINEAR_POLICY}:
                 raise NativeCompilationError("unsupported_semantics", "host BF16 linear policy differs")
             self.__init__({key: value for key, value in policy.items() if key != "host_bf16_linear"},
                           original_source_sha256=original_source_sha256)
@@ -780,7 +782,21 @@ class AtlasApplicationAdapter:
                 "application needs the selected diagnostic source",
             )
         pure = [node for node in source.nodes if node.effect == "pure"]
-        if self.already_quantized and any(node.op == "source_f32_matmul_unqualified" for node in pure):
+        from .source_bf16_linear import POLICY as SOURCE_BF16_LINEAR_POLICY, recognize_source_bf16_linear
+
+        source_bf16_linear = {}
+        if self.host_bf16_linear_policy == SOURCE_BF16_LINEAR_POLICY:
+            for node in pure:
+                if node.op != "f32_to_bf16":
+                    continue
+                try:
+                    found = recognize_source_bf16_linear(source, node.id)
+                except (KeyError, ValueError):
+                    continue
+                source_bf16_linear[node.id] = found
+        admitted_contractions = {region.matmul for region in source_bf16_linear.values()}
+        if self.already_quantized and any(node.op == "source_f32_matmul_unqualified"
+                                         and node.id not in admitted_contractions for node in pure):
             raise NativeCompilationError(
                 "unsupported_semantics",
                 "already-quantized intake refuses floating contractions requiring operand recoding; "
@@ -814,7 +830,8 @@ class AtlasApplicationAdapter:
                 fused_values[node.id] = found
             if set(fused_values) != set(self.softmax_value_schedules):
                 raise NativeCompilationError("unsupported_semantics", "softmax value schedules must cover the exact private source regions")
-        fused_nodes = {key for region in (*fused_norms.values(), *fused_values.values()) for key in region.computations}
+        fused_nodes = {key for region in (*fused_norms.values(), *fused_values.values(),
+                                        *source_bf16_linear.values()) for key in region.computations}
         contractions = {node.id for node in pure if node.op == "source_f32_matmul_unqualified"}
         if (not set(self.mxu1_contraction_schedules) <= contractions - fused_nodes):
             raise NativeCompilationError("unsupported_semantics", "MXU1 schedule does not name an independent source contraction")
@@ -858,7 +875,7 @@ class AtlasApplicationAdapter:
             elif kind == "host_bf16_linear":
                 from merlin.compile.c_bf16_linear import emit_c
 
-                emit_c(region, "bf16_linear")
+                emit_c(region, "bf16_linear", policy=self.host_bf16_linear_policy)
             elif kind in {"static_quantize", "dynamic_quantize"}:
                 from . import dynamic_quantize, static_quantize
 
@@ -918,11 +935,15 @@ class AtlasApplicationAdapter:
                     CycleInterval.unknown("application region costs have not been calibrated"),
                     ports(node.id for node in region.nodes if node.effect in {"input", "constant"}),
                     ports(region.outputs),
-                    metadata=tuple(sorted((("kind", kind),) + ((("epilogue", epilogue),) if epilogue else ()))),
+                    metadata=tuple(sorted((("kind", kind),) + ((("epilogue", epilogue),) if epilogue else ())
+                                          + ((("application_source_digest", source.digest()),)
+                                             if kind == "host_bf16_linear" else ()))),
                 )
             )
             claimed.update(keys)
 
+        for region in source_bf16_linear.values():
+            add(region.computations, "host_bf16_linear")
         if self.rmsnorm:
             from merlin.semantic_compiler.qualified_rmsnorm_source import recognize_rmsnorm
 
@@ -1238,7 +1259,14 @@ class AtlasApplicationAdapter:
         if kind == "host_bf16_linear":
             from merlin.compile.c_bf16_linear import emit_c
 
-            record, files = emit_c(region, name)
+            record, files = emit_c(region, name, policy=self.host_bf16_linear_policy)
+            if any(node.op == "source_f32_matmul_unqualified" for node in region.nodes):
+                from .source_bf16_linear import recognize_source_bf16_linear
+
+                admitted = recognize_source_bf16_linear(region, region.outputs[0])
+                record["source_to_replacement_receipt"] = admitted.receipt(
+                    region, original_source_sha256=self.original_source_sha256,
+                    application_source_digest=dict(alternative.metadata)["application_source_digest"])
             return CompiledCRegion(name, name + ".h", tuple(record["inputs"]), region.outputs,
                                    {key: value.encode() if isinstance(value, str) else value
                                     for key, value in files.items()}, (), (), record)
