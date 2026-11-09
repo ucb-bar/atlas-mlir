@@ -137,7 +137,7 @@ class PrecisionTileAbiTest(unittest.TestCase):
             decode_source_results,
             pack_source_operand,
         )
-        from merlin.frontends.compile_inputs import StagedCompileInputs
+        from merlin.compiler.frontend.inputs import StagedCompileInputs
         from merlin.semantic_compiler.target_binding import NativeCompilationError
 
         source = (ROOT / "test/examples/source_bound_batched_matmul.mlir").read_text()
@@ -189,7 +189,7 @@ class PrecisionTileAbiTest(unittest.TestCase):
             diagnostic_mxu0_f32_profile,
         )
         from atlas_mlir_native.precision_abi import pack_source_operand
-        from merlin.frontends.compile_inputs import StagedCompileInputs
+        from merlin.compiler.frontend.inputs import StagedCompileInputs
         from merlin.semantic_compiler.linalg_bridge import LinalgBridgeError
 
         source = (ROOT / "test/examples/source_bound_batched_matmul.mlir").read_text()

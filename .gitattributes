@@ -1,0 +1,2 @@
+# Source-hashed example IR must retain its canonical Git bytes on every host.
+test/examples/*.mlir text eol=lf

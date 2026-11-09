@@ -3026,7 +3026,7 @@ class NativeBindingTest(unittest.TestCase):
         import numpy as np
         from atlas_mlir_native.binding import diagnostic_mxu0_f32_profile
         from atlas_mlir_native.precision_abi import pack_source_operand
-        from merlin.frontends.compile_inputs import (
+        from merlin.compiler.frontend.inputs import (
             load_compile_inputs,
             stage_compile_inputs,
         )
@@ -3122,7 +3122,7 @@ class NativeBindingTest(unittest.TestCase):
     def test_batched_source_tiles_compile_with_distinct_checked_boundaries(self) -> None:
         import numpy as np
         from atlas_mlir_native.binding import diagnostic_mxu0_f32_profile
-        from merlin.frontends.compile_inputs import (
+        from merlin.compiler.frontend.inputs import (
             load_compile_inputs,
             stage_compile_inputs,
         )
@@ -3272,7 +3272,7 @@ class NativeBindingTest(unittest.TestCase):
 
     def test_batched_source_grid_exports_one_checked_host_image(self) -> None:
         from atlas_mlir_native.binding import diagnostic_mxu0_f32_profile
-        from merlin.frontends.compile_inputs import stage_compile_inputs
+        from merlin.compiler.frontend.inputs import stage_compile_inputs
         from merlin.targetgen.cli import main as targetgen_main
         from safetensors.numpy import save
 
@@ -3580,7 +3580,7 @@ class NativeBindingTest(unittest.TestCase):
             diagnostic_mxu0_f32_profile,
         )
         from atlas_mlir_native.precision_abi import pack_source_operand
-        from merlin.frontends.compile_inputs import (
+        from merlin.compiler.frontend.inputs import (
             StagedCompileInputs,
             load_compile_inputs,
             stage_compile_inputs,
@@ -4188,7 +4188,7 @@ class NativeBindingTest(unittest.TestCase):
             MXU1_FINITE_POLICY,
             diagnostic_mxu1_finite_f32_profile,
         )
-        from merlin.frontends.compile_inputs import StagedCompileInputs
+        from merlin.compiler.frontend.inputs import StagedCompileInputs
         from merlin.semantic_compiler.search import SearchLimits
         from merlin.semantic_compiler.target_binding import (
             NativeCompilationError,
@@ -4248,7 +4248,7 @@ class NativeBindingTest(unittest.TestCase):
 
     def test_positive_zero_boundary_is_a_separate_source_policy(self) -> None:
         import numpy as np
-        from merlin.frontends.compile_inputs import StagedCompileInputs
+        from merlin.compiler.frontend.inputs import StagedCompileInputs
         from merlin.semantic_compiler.target_binding import NativeCompilationError
 
         examples = ROOT / "test/examples"
@@ -4283,7 +4283,7 @@ class NativeBindingTest(unittest.TestCase):
 
     def test_mixed_positive_zero_policy_keeps_both_mxu_arithmetic_contracts(self) -> None:
         import numpy as np
-        from merlin.frontends.compile_inputs import StagedCompileInputs
+        from merlin.compiler.frontend.inputs import StagedCompileInputs
         from merlin.semantic_compiler.search import SearchLimits
 
         examples = ROOT / "test/examples"
@@ -4347,7 +4347,7 @@ class NativeBindingTest(unittest.TestCase):
             decode_source_result,
             pack_source_operand,
         )
-        from merlin.frontends.compile_inputs import (
+        from merlin.compiler.frontend.inputs import (
             load_compile_inputs,
             stage_compile_inputs,
         )

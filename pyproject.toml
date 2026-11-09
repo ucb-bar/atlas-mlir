@@ -6,13 +6,17 @@ build-backend = "setuptools.build_meta"
 name = "atlas-mlir-native-support"
 version = "0.1.0"
 description = "Atlas out-of-tree binding for Merlin native compilation"
-requires-python = ">=3.11"
+requires-python = ">=3.12"
+dependencies = ["merlin[semantic-search]==0.0.1", "xdsl>=0.68,<0.69"]
 
 [project.optional-dependencies]
 test = ["pytest", "numpy", "safetensors"]
 
 [project.entry-points."merlin.native_target_compilers"]
 atlas = "atlas_mlir_native.binding:AtlasNativeBinding"
+
+[project.entry-points."merlin.backends"]
+atlas = "atlas_mlir_native.backend:AtlasBackend"
 
 [tool.setuptools]
 package-dir = {"" = "python"}

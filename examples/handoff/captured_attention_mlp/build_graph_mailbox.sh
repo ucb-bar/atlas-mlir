@@ -65,7 +65,8 @@ compile_defs+=("-DATLAS_MAX_POLLS=$max_polls")
   --out "$out/host-bridge"
 "$python_bin" "$repo_root/tools/atlas_graph_model_bridge.py" \
   --linalg "$source_linalg" --host-bridge "$out/host-bridge" \
-  --compiled "$compiled_native" --out "$out/graph-wrapper"
+  --compiled "$compiled_native" --out "$out/graph-wrapper" \
+  --runtime-include "$merlin_root/merlin/runtime/c"
 "$python_bin" -m merlin.llvmlower.cli \
   "$out/host-bridge/host-bridge.mlir" --target riscv --out "$out/host-lowered"
 

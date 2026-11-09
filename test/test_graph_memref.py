@@ -27,9 +27,10 @@ class GraphMemrefTest(unittest.TestCase):
                 "-I", str(ROOT / "runtime"),
                 "-I", str(Path(merlin) / "merlin/runtime/c"),
                 str(ROOT / "runtime/atlas_graph_memref.c"),
+                str(ROOT / "runtime/atlas_bf16_call.c"),
                 str(ROOT / "runtime/atlas_host.c"),
                 str(ROOT / "test/graph-memref-test.c"),
-                "-o", str(executable),
+                "-Wl,--wrap=malloc", "-o", str(executable),
             ]
             subprocess.run(command, check=True, capture_output=True, text=True)
             subprocess.run([str(executable)], check=True, capture_output=True, text=True)

@@ -12,6 +12,7 @@ import json
 import struct
 from dataclasses import dataclass, replace
 
+from merlin.common.digest import is_sha256
 from merlin.semantic_compiler.linalg_bridge import (
     LinalgBridgeError,
     translate_linalg_text,
@@ -26,7 +27,9 @@ from merlin.semantic_compiler.model import (
 )
 from merlin.semantic_compiler.precision_values import FloatBoundarySpec
 
-from .binding import (
+from .admission import _mxu0_maps, _row_reduce_maps, _transpose_maps
+from .pack_lane import ROUNDED_PACK_DOMAIN, ROUNDED_PACK_POLICY
+from .policy import (
     BF16_ADD_ATTRS,
     BF16_EXP_ATTRS,
     BF16_MUL_ATTRS,
@@ -37,17 +40,12 @@ from .binding import (
     BF16_SUB_ATTRS,
     MXU0_INPUT_DOMAIN,
     MXU0_POLICY,
-    ROUNDED_PACK_DOMAIN,
-    ROUNDED_PACK_POLICY,
     SCALED_PACK_DOMAIN,
     SCALED_PACK_POLICY,
     SCALED_PACK_RANGE,
     TARGET_IDENTITY,
-    _mxu0_maps,
-    _row_reduce_maps,
-    _transpose_maps,
-    diagnostic_mxu0_f32_profile,
 )
+from .profiles import diagnostic_mxu0_f32_profile
 
 _SOURCE_MATMUL_MAPS = (
     IndexMap(3, ((1, 0, 0), (0, 0, 1)), (0, 0)),
@@ -80,10 +78,12 @@ class DiagnosticGraphPrecision:
     replacements: tuple[tuple[str, str], ...]
     boundary_conversions: tuple[dict[str, object], ...]
     source_operations: tuple[str, ...]
+    original_source_sha256: str | None = None
 
     def record(self) -> dict[str, object]:
         return {
-            "schema": "atlas.diagnostic_graph_precision_result.v1",
+            "schema": ("atlas.diagnostic_graph_precision_result.v1" if self.original_source_sha256 is None
+                       else "atlas.diagnostic_graph_precision_result.v2"),
             "request_digest": self.request.digest(),
             "source_sha256": self.source_sha256,
             "policy_sha256": self.policy_sha256,
@@ -91,6 +91,8 @@ class DiagnosticGraphPrecision:
             "replacements": dict(self.replacements),
             "boundary_conversions": list(self.boundary_conversions),
             "source_operations": list(self.source_operations),
+            **({"original_source_sha256": self.original_source_sha256}
+               if self.original_source_sha256 is not None else {}),
             "qualification": "diagnostic_precision_change; original_model_quality_unmeasured",
         }
 
@@ -116,11 +118,14 @@ def diagnostic_graph_input_spec(policy: dict[str, object]) -> FloatBoundarySpec:
     return replace(base[0], policy=str(policy["input_conversion"]))
 
 
-def lower_diagnostic_graph(source: str, *, entry: str, policy: dict[str, object]) -> DiagnosticGraphPrecision:
+def lower_diagnostic_graph(source: str, *, entry: str, policy: dict[str, object],
+                           original_source_sha256: str | None = None) -> DiagnosticGraphPrecision:
     """Lower a fully parsed, static f32 graph using one declared Atlas policy.
 
     The policy is deliberately independent of model names and source node IDs.
     A caller must qualify input domains and original-model quality separately.
+    An explicit original capture identity must match the selected policy. It is
+    distinct from the exact prepared program hash and never selects arithmetic.
     """
     scale_code = policy.get("pack_scale_code") if type(policy) is dict else None
     expected = {
@@ -132,6 +137,11 @@ def lower_diagnostic_graph(source: str, *, entry: str, policy: dict[str, object]
         "interlayer_pack": "scaled-e8m0-exact-normal-v1",
         "pack_scale_code": scale_code,
     }
+    if original_source_sha256 is not None:
+        _require(is_sha256(original_source_sha256), "staged graph needs a canonical original source SHA-256")
+        _require(type(policy) is dict and policy.get("source_sha256") == original_source_sha256,
+                 "staged graph policy differs from its selected original source")
+        expected["source_sha256"] = original_source_sha256
     pack_policy = policy.get("interlayer_pack") if type(policy) is dict else None
     _require(
         type(scale_code) is int and scale_code in range(SCALED_PACK_RANGE[0], SCALED_PACK_RANGE[1] + 1)
@@ -403,5 +413,5 @@ def lower_diagnostic_graph(source: str, *, entry: str, policy: dict[str, object]
     )
     return DiagnosticGraphPrecision(
         request, source_sha, policy_sha, tuple(mapping.items()), tuple(replacements),
-        conversions, translated.source_operations,
+        conversions, translated.source_operations, original_source_sha256,
     )

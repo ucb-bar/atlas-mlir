@@ -30,16 +30,39 @@ Use MLIR and LLVM from one installation (tested with LLVM/MLIR 23.0.0git,
 python -m pip install -e '.[test]'
 cmake -S . -B build -G Ninja \
   -DMLIR_DIR=/path/to/llvm-install/lib/cmake/mlir -DCMAKE_BUILD_TYPE=Release \
+  -DMERLIN_RUNTIME_INCLUDE_DIR=/path/to/merlin/runtime/c \
   -DPython3_EXECUTABLE="$(command -v python)"
 cmake --build build --parallel 2
 ctest --test-dir build --output-on-failure
 ```
+
+`MERLIN_RUNTIME_INCLUDE_DIR` selects Merlin's shared numerical-boundary header.
+For an installed Merlin package, obtain this directory with
+`merlin.common.paths.data_path("runtime", "c")`; the header has one authority in
+Merlin. The refactor has also built the native compiler and runtime with released
+LLVM/MLIR 23.1.6; this does not requalify the recorded RTL results.
+
+Install the compiler entry points, packaging tools, runtime archives and headers
+with `cmake --install build --prefix /chosen/prefix`. Select
+`/chosen/prefix/bin` as the backend's explicit `tool_directory`. The installed
+tools still require their selected compatible LLVM/MLIR libraries. Installing the
+Python wheel alone does not build or install these native tools or a platform
+loader.
 
 CTest runs the portable tests with no hardware. Tests that run the RTL need
 `ATLAS_RTL_ROOT`, `ATLAS_MODEL_ROOT`, `ATLAS_ASSEMBLER_ROOT`, `ATLAS_ARC_MODEL`,
 `ATLAS_ARC_STATE`, `ATLAS_MODELIR_ROOT`, and `ATLAS_LLVM_BIN`; without them they
 skip. To run the Python tests against another build, set `ATLAS_OOT_BIN_DIR` to
 its `bin` directory.
+
+The virtual evaluator's numerical tests also require the separately selected
+Torch and `npu_model` environment described in
+`tools/requirements-virtual-evaluator.txt`. The Python package's `[test]` extra
+does not supply that model or establish those numerical prerequisites. A missing
+dependency remains a failed or unavailable obligation. To check only the native
+C/C++ compiler/runtime family, use
+`ctest --test-dir build --output-on-failure -E atlas-python-` and report that
+narrower scope explicitly.
 
 `ATLAS_ASSEMBLER_ROOT` selects the directory containing `atlas_asm.py`.
 The shared test helper runs canonical npu_model assembly in a Python 3.14

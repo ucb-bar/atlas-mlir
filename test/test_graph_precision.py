@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import os
 import subprocess
@@ -35,6 +36,26 @@ class GraphPrecisionTest(unittest.TestCase):
         sys.path.remove(str(ROOT / "python"))
         sys.path.remove(str(Path(MERLIN) / "src"))
 
+    def assert_source_accounting(self, source, parsed, *, semantic_nodes):
+        from merlin.frontends.linalg_mlir import parse_mlir_text
+
+        module = parse_mlir_text(source)
+        function = next(op for op in module.body.block.ops if op.name == "func.func")
+        source_operations = tuple(op.name for op in function.body.block.ops)
+        self.assertEqual(parsed.source_operations, source_operations)
+        self.assertEqual(source_operations.count("linalg.fill"), 7)
+        self.assertEqual(source_operations.count("tensor.splat"), 3)
+        # Seven exact same-shape positive-zero fills share one semantic literal.
+        # Source operation coverage and semantic value count are separate claims.
+        self.assertEqual(len(parsed.request.nodes), semantic_nodes)
+        self.assertEqual(len(parsed.request.constants), 4)
+        nodes = {node.id: node for node in parsed.request.nodes}
+        zero_tiles = [constant for constant in parsed.request.constants
+                      if constant.encoding == "f32-le-raw"
+                      and constant.data_hex == "00000000" * 1024
+                      and nodes[constant.node_id].type.shape == (32, 32)]
+        self.assertEqual(len(zero_tiles), 1)
+
     def test_all_source_nodes_and_two_outputs_are_accounted(self) -> None:
         from atlas_mlir_native.binding import _mxu_bf16_dag_request
         from merlin.semantic_compiler.linalg_bridge import translate_linalg_text
@@ -44,7 +65,7 @@ class GraphPrecisionTest(unittest.TestCase):
             self.source, entry="forward", target_identity=result.request.target_identity,
             lowering_policy="diagnostic",
         )
-        self.assertEqual(len(parsed.request.nodes), 38)
+        self.assert_source_accounting(self.source, parsed, semantic_nodes=32)
         self.assertEqual(len(result.request.nodes), 29)
         self.assertEqual({name for name, _ in result.source_to_target},
                          {node.id for node in parsed.request.nodes})
@@ -64,7 +85,7 @@ class GraphPrecisionTest(unittest.TestCase):
             source, entry="forward", target_identity=result.request.target_identity,
             lowering_policy="diagnostic",
         )
-        self.assertEqual(len(parsed.request.nodes), 39)
+        self.assert_source_accounting(source, parsed, semantic_nodes=33)
         self.assertEqual(len(result.request.nodes), 30)
         self.assertEqual(result.request.outputs, parsed.request.outputs)
         self.assertEqual(len(result.request.outputs), 3)
@@ -122,6 +143,60 @@ class GraphPrecisionTest(unittest.TestCase):
         bad["interlayer_pack"] = []
         with self.assertRaises(LinalgBridgeError):
             self.lower(self.source, entry="forward", policy=bad)
+
+    def test_staged_original_source_binding_preserves_prepared_hash_and_arithmetic(self) -> None:
+        from atlas_mlir_native.binding import AtlasNativeBinding
+
+        original = hashlib.sha256(self.source.replace("\n", "\r\n").encode("utf-8")).hexdigest()
+        prepared = hashlib.sha256(self.source.encode("utf-8")).hexdigest()
+        self.assertNotEqual(original, prepared)
+        ordinary = self.lower(self.source, entry="forward", policy=self.policy)
+        policy = {**self.policy, "source_sha256": original}
+        staged = AtlasNativeBinding.prepare_precision_graph(
+            self.source, entry="forward", policy=policy, original_source_sha256=original,
+        )
+        record = staged.record()
+        self.assertEqual(record["schema"], "atlas.diagnostic_graph_precision_result.v2")
+        self.assertEqual(record["original_source_sha256"], original)
+        self.assertEqual(record["source_sha256"], prepared)
+        self.assertEqual(record["policy_sha256"], hashlib.sha256(
+            json.dumps(policy, sort_keys=True, separators=(",", ":")).encode()).hexdigest())
+        self.assertEqual(staged.request.nodes, ordinary.request.nodes)
+        self.assertEqual(staged.request.outputs, ordinary.request.outputs)
+        self.assertEqual(staged.request.constants, ordinary.request.constants)
+        self.assertEqual(staged.source_to_target, ordinary.source_to_target)
+        self.assertEqual(staged.replacements, ordinary.replacements)
+        self.assertEqual(staged.boundary_conversions, ordinary.boundary_conversions)
+        self.assertNotEqual(staged.request.digest(), ordinary.request.digest())
+        # A different explicitly bound capture changes provenance, not choices.
+        other = hashlib.sha256((self.source + "\n// other original capture\n").encode()).hexdigest()
+        rebound = self.lower(self.source, entry="forward", policy={**self.policy, "source_sha256": other},
+                             original_source_sha256=other)
+        self.assertEqual(rebound.request.nodes, staged.request.nodes)
+        self.assertNotEqual(rebound.request.digest(), staged.request.digest())
+        self.assertEqual(ordinary.record()["schema"], "atlas.diagnostic_graph_precision_result.v1")
+        self.assertNotIn("original_source_sha256", ordinary.record())
+        self.assertNotIn("source_sha256", self.policy)  # Caller policy was not modified.
+
+    def test_staged_source_keyword_and_policy_must_match_without_fallback(self) -> None:
+        from atlas_mlir_native.binding import AtlasNativeBinding
+
+        from merlin.semantic_compiler.linalg_bridge import LinalgBridgeError
+
+        original = hashlib.sha256(b"selected original capture").hexdigest()
+        for selected in (None, True, "", original.upper(), original[:-1], "0" * 64):
+            with self.subTest(selected=selected), self.assertRaises(LinalgBridgeError):
+                AtlasNativeBinding.prepare_precision_graph(
+                    self.source, entry="forward", policy={**self.policy, "source_sha256": original},
+                    original_source_sha256=selected,
+                )
+        for policy in (self.policy, {**self.policy, "source_sha256": "0" * 64},
+                       {**self.policy, "source_sha256": original, "interlayer_pack": "unknown"},
+                       {**self.policy, "source_sha256": original, "unknown": True}):
+            with self.subTest(policy=policy), self.assertRaises(LinalgBridgeError):
+                AtlasNativeBinding.prepare_precision_graph(
+                    self.source, entry="forward", policy=policy, original_source_sha256=original,
+                )
 
     def test_rounded_pack_policy_has_distinct_graph_identity(self) -> None:
         from atlas_mlir_native.binding import (

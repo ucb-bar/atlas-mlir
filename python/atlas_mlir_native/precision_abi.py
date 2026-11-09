@@ -10,12 +10,13 @@ from __future__ import annotations
 from collections.abc import Sequence
 
 import numpy as np
+
 from merlin.semantic_compiler.precision_transform import (
     DiagnosticMatmulTile,
     assemble_diagnostic_matmul_outputs,
 )
 
-from .binding import TARGET_IDENTITY, TILE_BYTES
+from .policy import TARGET_IDENTITY, TILE_BYTES
 
 TILE_EDGE = 32
 BF16_HALF_COLUMNS = 16

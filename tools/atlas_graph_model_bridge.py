@@ -49,18 +49,34 @@ def _render_bytes(name: str, payload: bytes) -> list[str]:
     ]
 
 
-def prepare(source_path: Path, bridge_root: Path, compiled: Path) -> tuple[dict, dict[str, str]]:
+def prepare(source_path: Path, bridge_root: Path, compiled: Path, *, runtime_include: Path | None = None
+            ) -> tuple[dict, dict[str, str]]:
+    from xdsl.dialects import func
+
+    from merlin.common.paths import data_path
+    from merlin.compiler.build.hostbridge import (
+        diagnostic_whole_graph_host_bridge,
+        implementation_paths,
+    )
     from merlin.frontends.linalg_mlir import parse_mlir_text
     from merlin.semantic_compiler.precision_codegen import (
         finite_f32_codebook,
         render_finite_f32_codebook_c,
     )
     from merlin.semantic_compiler.target_binding import verify_native_publication
-    from merlin.targetgen.contract.model_host_bridge import (
-        diagnostic_whole_graph_host_bridge,
-    )
-    from xdsl.dialects import func
 
+    runtime = Path(__file__).resolve().parents[1] / "runtime"
+    include = Path(runtime_include) if runtime_include is not None else data_path("runtime", "c")
+    source_paths = (
+        Path(__file__).resolve(), *implementation_paths(),
+        *(runtime / name for name in (
+            "atlas_graph_memref.c", "atlas_graph_memref.h", "atlas_host.c", "atlas_host.h", "atlas_model_tile.h",
+        )),
+        include / "finite_float_boundary.h",
+    )
+    # Source observations describe these direct owners only. Native publication
+    # admission below still owns the actual checked program/artifact identity.
+    source_owners = {path: path.read_bytes() for path in source_paths}
     if bridge_root.is_symlink() or compiled.is_symlink():
         raise ValueError("graph bridge and native compilation must be real directories")
     bridge_bytes = _member(bridge_root, "manifest.json")
@@ -321,7 +337,11 @@ void atlas_graph_invoke_host(const atlas_f32_memref2 *inputs,
         "constant_count": len(constants),
         "linked": False,
         "executed": False,
+        "direct_sources": {str(path): _sha(payload) for path, payload in source_owners.items()},
+        "source_scope": "direct_source_files_only; no_loaded_code_or_transitive_dependency_attestation",
     }
+    if any(path.read_bytes() != payload for path, payload in source_owners.items()):
+        raise ValueError("graph bridge source owners changed during preparation")
     return record, files
 
 
@@ -331,11 +351,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--host-bridge", required=True, type=Path)
     parser.add_argument("--compiled", required=True, type=Path)
     parser.add_argument("--out", required=True, type=Path)
+    parser.add_argument("--runtime-include", type=Path, help="selected Merlin precision runtime header directory")
     args = parser.parse_args(argv)
     try:
         if args.out.exists() or args.out.is_symlink():
             raise ValueError("fresh graph wrapper output directory required")
-        record, files = prepare(args.linalg, args.host_bridge, args.compiled)
+        record, files = prepare(args.linalg, args.host_bridge, args.compiled, runtime_include=args.runtime_include)
         args.out.mkdir(parents=True)
         for name, content in files.items():
             (args.out / name).write_text(content)

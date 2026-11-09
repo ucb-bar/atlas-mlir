@@ -16,6 +16,10 @@ llvm_update_compile_flags(atlas-emit)
 target_link_libraries(atlas-emit PRIVATE MLIRParser MLIRAtlas)
 mlir_check_all_link_libraries(atlas-emit)
 
+# Install the selected compiler entry points alongside the runtime and packaging
+# tools. Their linked LLVM/MLIR libraries remain selected toolchain dependencies.
+install(TARGETS atlas-opt atlas-emit RUNTIME DESTINATION bin)
+
 # Host-side packaging of a checked reset-entry .text section. This tool is
 # independent of ACT and is deliberately narrower than an ELF loader/ABI.
 configure_file(atlas_boot_pack.py ${CMAKE_BINARY_DIR}/bin/atlas-boot-pack COPYONLY)

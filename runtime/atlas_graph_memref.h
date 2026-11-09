@@ -45,6 +45,35 @@ typedef struct {
   size_t active_buffer_capacity;
 } atlas_graph_memref_binding;
 
+/* Explicit dense-pointer context. All pointed-to binding/host/active-buffer
+ * objects belong to the caller and survive until the device is quiescent.
+ * The workspace is separate from logical inputs/outputs and persistent state.
+ * No output pointer is retained, and no output is modified on failure. */
+typedef struct {
+  atlas_graph_memref_binding *binding;
+  void *workspace;
+  size_t workspace_bytes;
+  size_t state_budget_bytes;
+  atlas_host_result device_result;
+} atlas_graph_pointer_context;
+
+/* Native sizeof/alignment-derived requirements, not an assumed host layout.
+ * state_bytes includes context, binding, host and active-buffer descriptors;
+ * immutable program/slot/codebook arrays remain separately owned artifacts. */
+atlas_model_tile_status atlas_graph_pointer_requirements(
+    const atlas_graph_memref_binding *binding, size_t *workspace_bytes,
+    size_t *workspace_alignment, size_t *state_bytes, size_t *state_alignment);
+atlas_model_tile_status atlas_graph_pointer_init(
+    atlas_graph_pointer_context *context, atlas_graph_memref_binding *binding,
+    void *workspace, size_t workspace_bytes, size_t state_budget_bytes);
+
+/* int(void *, const void *const *, void *const *) wrapper. Zero means the
+ * selected launch and required visibility operations completed and every
+ * dense f32 output is valid. A nonzero result leaves driver/context state
+ * retained; drain/reset before reuse. Inputs/outputs follow declared slots. */
+int atlas_graph_run_pointers(void *context, const void *const *arguments,
+                             void *const *results);
+
 /* One synchronous graph invocation. `results` remains unchanged on failure.
  * On success each result owns its allocated dense f32 storage. The caller
  * frees every result's `allocated` pointer. A timeout leaves host->active set;
