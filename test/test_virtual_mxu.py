@@ -88,11 +88,11 @@ class VirtualMXUTest(unittest.TestCase):
         mlp_source = (EXAMPLES / "virtual_fp8_two_layer_mlp.mlir").read_text()
         nonunit = run(
             "atlas-opt", mlp_source.replace("scale_code = 127 : i32",
-                                             "scale_code = 121 : i32"),
+                                             "scale_code = 256 : i32"),
             "--lower-atlas-virtual-to-machine", "--insert-atlas-dma-waits",
         )
         self.assertNotEqual(nonunit.returncode, 0)
-        self.assertIn("122..128", nonunit.stderr)
+        self.assertIn("[0, 255]", nonunit.stderr)
         scratch_overlap = run(
             "atlas-opt", mlp_source.replace("index = 2 : i32",
                                              "index = 64 : i32"),

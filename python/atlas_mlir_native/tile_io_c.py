@@ -6,7 +6,7 @@ from math import prod
 
 from merlin.compile.c_sources import c_source_pair
 
-from .c_runtime import program_array, runtime_members
+from .c_runtime import program_array, runtime_headers, runtime_members
 
 
 def render_tile_io_package(
@@ -22,12 +22,15 @@ def render_tile_io_package(
     helpers,
     source_dtype="f32",
     source_input_indices=None,
+    streaming=None,
+    input_guard=None,
+    completion_check="",
 ):
     addresses = execution["input_addresses"]
     output = execution["output_addresses"][0]
-    htext = (target_source / "runtime/atlas_host.h").read_text()
+    public = runtime_headers(target_source / "runtime")
     ctext = (target_source / "runtime/atlas_host.c").read_text()
-    members, files, runtime = runtime_members(htext, ctext, runtime_linkage)
+    members, files, runtime = runtime_members(public, ctext, runtime_linkage)
     sizes = tuple(packed_sizes)
     t = tile_bytes
     arity = len(sizes) - 1
@@ -43,6 +46,7 @@ def render_tile_io_package(
     source_type = "float" if source_dtype == "f32" else "uint8_t"
     if t != 2048 or len(sizes) != len(request.nodes) or any(size <= 0 or size % t for size in sizes):
         raise ValueError("tile I/O C pair layout differs from the selected target")
+    device_sizes = tuple([streaming["block_tiles"] * t] * len(sizes)) if streaming else sizes
     raw_workspace = sum(sizes) + t
     elements = [prod(node.type.shape) for node in request.nodes]
     source_workspace = 2 * sum(elements)
@@ -54,7 +58,7 @@ def render_tile_io_package(
     )
     buffers = ",".join(
         f"{{{addr}u,{size}u,ATLAS_HOST_DEVICE_{mode}}}"
-        for addr, size, mode in zip([*addresses, output], sizes, (*("READ",) * arity, "WRITE"), strict=True)
+        for addr, size, mode in zip([*addresses, output], device_sizes, (*("READ",) * arity, "WRITE"), strict=True)
     )
     declarations = f"""
 #define {upper}_WORKSPACE_BYTES {raw_workspace}u
@@ -96,6 +100,32 @@ int {name}_source_dispatch(void *,const void *const *,void *const *);
         f"    if (region->io.write(region->io.context,{address}u+at,physical,{t}u)) return {upper}_MEMORY_ERROR;\n  }}"
         for i, address in enumerate(addresses)
     )
+    loop_begin, loop_end = "", ""
+    reading = f"""  for (size_t at=0;at<{sizes[-1]}u;at+={t}u) {{
+    if (region->io.read(region->io.context,{output}u+at,physical,{t}u)) return {upper}_MEMORY_ERROR;
+    {name}_pair(region->workspace+{sum(sizes[:-1])}u+at,physical,0);
+  }}"""
+    if streaming:
+        block, total, columns = (streaming[key] for key in ("block_tiles", "total_tiles", "output_column_tiles"))
+        if (type(block) is not int or block < 1 or type(total) is not int or total % block
+                or total * t != sizes[-1] or len(streaming["input_tile_strides"]) != arity):
+            raise ValueError("tile I/O streaming geometry differs")
+        loop_begin = f"  for (size_t first=0;first<{total}u;first+={block}u) {{"
+        loop_end = "  }"
+        pieces = []
+        for i, address in enumerate(addresses):
+            row, column = streaming["input_tile_strides"][i]
+            pieces.append(f"""  for (size_t tile=0;tile<{block}u;++tile) {{
+    size_t index=first+tile;
+    size_t source_tile=(index/{columns}u)*{row}u+(index%{columns}u)*{column}u;
+    {name}_pair(physical,region->workspace+{sum(sizes[:i])}u+source_tile*{t}u,1);
+    if (region->io.write(region->io.context,{address}u+tile*{t}u,physical,{t}u)) return {upper}_MEMORY_ERROR;
+  }}""")
+        writing = "\n".join(pieces)
+        reading = f"""  for (size_t tile=0;tile<{block}u;++tile) {{
+    if (region->io.read(region->io.context,{output}u+tile*{t}u,physical,{t}u)) return {upper}_MEMORY_ERROR;
+    {name}_pair(region->workspace+{sum(sizes[:-1])}u+(first+tile)*{t}u,physical,0);
+  }}"""
     typed_inputs = ",".join(f"inputs[{i}]" for i in range(len(set(indices))))
     decode = (f"for (size_t i=0;i<{elements[-1]}u;++i) {{ "
               "uint32_t bits=((uint32_t)result[2*i]|((uint32_t)result[2*i+1]<<8))<<16; "
@@ -143,18 +173,18 @@ static void {name}_pair(uint8_t *out,const uint8_t *in,int pack) {{
       {" || ".join(checks)}) return {upper}_INVALID;
   {converted}; uint8_t *result=ctx->workspace+{sum(elements[:-1]) * 2}u;
   if ({encoding}) return {upper}_INPUT_DOMAIN;
-  {packing}
+  {f"if ({input_guard}) return {upper}_INPUT_DOMAIN;" + chr(10) + "  " if input_guard else ""}{packing}
   uint8_t *physical=region->workspace+{sum(sizes)}u;
   atlas_host_result status=atlas_host_ensure_loaded(region->host,{name}_words,{len(binary) // 4}u);
   if (device) *device=status; if (status!=ATLAS_HOST_OK) return {upper}_DEVICE_ERROR;
+{loop_begin}
 {writing}
   status=atlas_host_start(region->host,region->buffers,{arity + 1}u);
   if (status==ATLAS_HOST_OK) status=atlas_host_wait(region->host,region->max_polls);
   if (device) *device=status; if (status!=ATLAS_HOST_OK) return {upper}_DEVICE_ERROR;
-  for (size_t at=0;at<{sizes[-1]}u;at+={t}u) {{
-    if (region->io.read(region->io.context,{output}u+at,physical,{t}u)) return {upper}_MEMORY_ERROR;
-    {name}_pair(region->workspace+{sum(sizes[:-1])}u+at,physical,0);
-  }}
+{reading}
+{loop_end}
+{completion_check}
   {name}_assemble(result,region->workspace+{sum(sizes[:-1])}u);
   {decode}
   return {upper}_OK;
@@ -167,7 +197,7 @@ int {name}_source_dispatch(void *context,const void *const *inputs,void *const *
 """
     rendered = c_source_pair(
         name,
-        public_headers={"atlas_host.h": htext},
+        public_headers=public,
         private_headers={},
         sources={**members, "tile_io.c": helpers + implementation},
         declarations=declarations,

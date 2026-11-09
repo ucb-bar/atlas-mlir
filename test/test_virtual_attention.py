@@ -15,7 +15,8 @@ UNARY = {"mov": 0x40, "recip": 0x41, "exp": 0x42, "exp2": 0x43,
          "square": 0x46, "cube": 0x47, "relu": 0x48, "sin": 0x49,
          "cos": 0x4A, "tanh": 0x4B, "log2": 0x4C, "sqrt": 0x4D}
 BINARY = {"add": 0, "sub": 2, "mul": 3, "min": 4, "max": 6}
-REDUCE = {"row_sum": 0x21, "row_min": 0x24, "row_max": 0x26}
+REDUCE = {"row_sum": 0x21, "row_min": 0x24, "row_max": 0x26,
+          "col_sum": 0x01, "col_min": 0x05, "col_max": 0x07}
 
 
 def with_operation(operation: str) -> str:
@@ -74,7 +75,7 @@ class VirtualAttentionTest(unittest.TestCase):
         cases = [
             (f'"atlas.virtual_vpu_reduce"(%t0) {{kind = "{kind}"}} : ({BF16}) -> {BF16}',
              "unknown virtual reduce VPU kind")
-            for kind in ("col_sum", "col_max", "col_min", "sum", "unknown")
+            for kind in ("column_sum", "column_max", "column_min", "sum", "unknown")
         ]
         cases += [
             (f'"atlas.virtual_vpu_splat"() {{bits = {bits} : i32}} : () -> {BF16}',

@@ -284,10 +284,13 @@ class SoftmaxCPackageTest(unittest.TestCase):
 
         from merlin.semantic_compiler.tiled_softmax import assemble_row_softmax_outputs
 
-        origin = json.loads(importlib.metadata.distribution("npu-model").read_text("direct_url.json") or "{}")
-        self.assertTrue(
-            MODEL_REVISION in origin.get("url", "") or origin.get("vcs_info", {}).get("commit_id") == MODEL_REVISION
-        )
+        if hasattr(self, "authenticate_model_source"):
+            self.authenticate_model_source()
+        else:
+            origin = json.loads(importlib.metadata.distribution("npu-model").read_text("direct_url.json") or "{}")
+            self.assertTrue(
+                MODEL_REVISION in origin.get("url", "") or origin.get("vcs_info", {}).get("commit_id") == MODEL_REVISION
+            )
         compiler = shutil.which("cc")
         self.assertIsNotNone(compiler, "host C compiler required")
         torch.set_num_threads(1)

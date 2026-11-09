@@ -17,6 +17,7 @@ from merlin.semantic_compiler.model import (
     pointwise_identity_maps,
 )
 from merlin.semantic_compiler.reduction_tiling import ReductionTiling
+from merlin.semantic_compiler.precision_values import FloatBoundarySpec
 from merlin.semantic_compiler.target_binding import (
     NativeCompilationError,
     verify_native_publication,
@@ -37,10 +38,34 @@ from .binding import (
 from .pointwise import input_spec as pointwise_input_spec
 
 REDUCTION_POLICY = "bf16-adjacent-fp32-tree-rne-seeded-tile-sum-ltr-chop-v1"
+NONNEGATIVE_NORMAL_REDUCTION_POLICY = "bf16-nonnegative-normal-adjacent-fp32-tree-rne-seeded-tile-sum-ltr-chop-v1"
+REDUCTION_POLICIES = (REDUCTION_POLICY, NONNEGATIVE_NORMAL_REDUCTION_POLICY)
 
 
-def input_spec():
-    """Bounded RNE encoding, explicitly canonicalizing source negative zero."""
+class _NonnegativeNormalBoundary(FloatBoundarySpec):
+    def encode(self, source):
+        import numpy as np
+
+        if not isinstance(source, np.ndarray) or source.dtype != np.float32:
+            raise ValueError("reduction encoding requires a float32 source array")
+        bits = source.view(np.uint32)
+        magnitude = bits & 0x7fffffff
+        code = ((magnitude + 0x7fff + ((magnitude >> 16) & 1)) >> 16) | ((bits >> 16) & 0x8000)
+        if np.any(magnitude >= 0x7f800000) or np.any((code != 0) & ((code < 0x0080) | (code > 0x7f7f))):
+            raise ValueError("reduction encoding needs nonnegative normal or positive zero without overflow")
+        return code.astype("<u2")
+
+    def record(self):
+        return {**super().record(), "overflow": "reject"}
+
+
+def input_spec(*, reduction_policy=REDUCTION_POLICY):
+    """Select the boundary domain independently of the unchanged native arithmetic."""
+    if reduction_policy == NONNEGATIVE_NORMAL_REDUCTION_POLICY:
+        return _NonnegativeNormalBoundary(reduction_policy, "bf16", "encode",
+                                          admitted_code_ranges=((0, 0), (0x0080, 0x7f7f)))
+    if reduction_policy != REDUCTION_POLICY:
+        raise ValueError("reduction policy must be explicitly selected from the supported domains")
     return replace(pointwise_input_spec(), policy=REDUCTION_POLICY, canonicalize_negative_zero=True)
 
 
@@ -54,14 +79,14 @@ class ReductionPrecision:
             "schema": "atlas.reduction_precision.v1",
             "source_request_digest": self.source.digest(),
             "request_digest": self.request.digest(),
-            "input_conversion": input_spec().record(),
-            "arithmetic": REDUCTION_POLICY,
+            "input_conversion": input_spec(reduction_policy=self.request.nodes[-1].type.numerical_policy).record(),
+            "arithmetic": self.request.nodes[-1].type.numerical_policy,
             "output_conversion": "bf16-to-f32-exact",
             "qualification": "diagnostic_precision_change; original_model_quality_unmeasured",
         }
 
 
-def prepare_source(source):
+def prepare_source(source, *, reduction_policy=REDUCTION_POLICY):
     """Select new arithmetic explicitly; this is not an f32 equality rewrite."""
     if (
         source.target_identity != TARGET_IDENTITY
@@ -71,6 +96,7 @@ def prepare_source(source):
         or source.physical_extents
     ):
         raise ValueError("reduction precision needs a plain diagnostic source graph")
+    selected_spec = input_spec(reduction_policy=reduction_policy)
     pure = [node for node in source.nodes if node.effect == "pure"]
     if len(pure) != 1 or len(pure[0].inputs) != 2:
         raise ValueError("reduction needs one computation with explicit data and seed")
@@ -107,7 +133,7 @@ def prepare_source(source):
     data, seed = (source.node(key) for key in result.inputs)
     if any(n.effect not in {"input", "constant"} or n.index_maps for n in (data, seed)):
         raise ValueError("source reduction operands must be explicit boundary values")
-    request = request_for(data.type.shape, axes)
+    request = request_for(data.type.shape, axes, reduction_policy=reduction_policy)
     if (
         seed.type.shape != request.nodes[1].type.shape
         or result.type.shape != request.nodes[2].type.shape
@@ -124,12 +150,13 @@ def prepare_source(source):
             binding = constants[node.id]
             if binding.encoding != "f32-le-raw":
                 raise ValueError("reduction parameter needs exact f32 bytes")
-            input_spec().encode(np.frombuffer(bytes.fromhex(binding.data_hex), dtype="<f4"))
+            selected_spec.encode(np.frombuffer(bytes.fromhex(binding.data_hex), dtype="<f4"))
     return ReductionPrecision(source, request)
 
 
-def request_for(shape, axes):
+def request_for(shape, axes, *, reduction_policy=REDUCTION_POLICY):
     """Construct a public BF16 request; source-float precision selection is separate."""
+    input_spec(reduction_policy=reduction_policy)
     rank = len(shape)
     axes = tuple(axes)
     if (
@@ -171,7 +198,7 @@ def request_for(shape, axes):
                 "result",
                 "reduce_sum",
                 ("data", "seed"),
-                replace(seed_type, numerical_policy=REDUCTION_POLICY),
+                replace(seed_type, numerical_policy=reduction_policy),
                 (("axes", ",".join(map(str, axes))),),
                 index_maps=(
                     pointwise_identity_maps(rank, 1)[0],
@@ -206,7 +233,7 @@ def prepare_plan(request):
     if (
         out.attrs != (("axes", ",".join(map(str, axes))),)
         or out.type.dtype != "bf16"
-        or out.type.numerical_policy != REDUCTION_POLICY
+        or out.type.numerical_policy not in REDUCTION_POLICIES
         or any(node.type.numerical_policy != "raw-bit-pattern" for node in (data, seed))
         or data.attrs != (row.required_attrs[0],)
         or seed.attrs != (add.required_attrs[0],)

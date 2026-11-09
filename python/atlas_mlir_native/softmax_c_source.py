@@ -13,6 +13,7 @@ from merlin.semantic_compiler.precision_intake import SourceValueRef
 from merlin.semantic_compiler.precision_transform import BoundaryConversion
 
 from .softmax_precision import input_spec, lower_source_softmax
+from .row_softmax import SOFTMAX_DOMAIN, ROWSPAN80_DOMAIN, ROWSPAN80_MAX_COLUMNS
 
 
 def prepare_source_c_package(
@@ -58,8 +59,13 @@ def prepare_source_c_package(
     return result, files
 
 
-def render_source_interface(precision, name: str, raw_workspace: int):
+def render_source_interface(precision, name: str, raw_workspace: int, *, finite_sentinel_bits=None,
+                            score_domain=SOFTMAX_DOMAIN):
+    if dict(precision.request.nodes[0].attrs).get("input_domain") != score_domain:
+        raise ValueError("source interface score domain differs from the checked precision plan")
     shape = precision.request.nodes[0].type.shape
+    if score_domain == ROWSPAN80_DOMAIN and shape[1] > ROWSPAN80_MAX_COLUMNS:
+        raise ValueError("row-relative span80 domain supports at most 1024 columns")
     count = shape[0] * shape[1]
     masked = hasattr(precision.source_region, "mask")
     guarded = isinstance(precision.source_region, GuardedMaskedRowSoftmaxSource)
@@ -68,6 +74,8 @@ def render_source_interface(precision, name: str, raw_workspace: int):
     output_offset = encoded * (2 if masked else 1)
     arity = 2 if masked else 1
     mask_checks = ""
+    if finite_sentinel_bits is not None and (not masked or guarded):
+        raise ValueError("finite sentinel is only admitted for an additive masked softmax")
     if masked:
         from math import prod
 
@@ -75,7 +83,8 @@ def render_source_interface(precision, name: str, raw_workspace: int):
 
         region = precision.source_region
         mask_bytes = prod(region.mask_shape) * (1 if guarded else 4)
-        helpers = render_masked_softmax_inputs(region, region.mask_shape, input_spec(), b"\x00\xc2", name + "_masked")
+        helpers = render_masked_softmax_inputs(region, region.mask_shape, input_spec(score_domain), b"\x00\xc2", name + "_masked",
+                                               finite_sentinel_bits=finite_sentinel_bits)
         conversion_call = f"{name}_masked_prepare(inputs[0],inputs[1],ctx->workspace,ctx->workspace+{encoded}u)"
         mask_checks = f"""
   if (!{name}_valid(inputs[1],{mask_bytes}u) ||
@@ -94,8 +103,8 @@ def render_source_interface(precision, name: str, raw_workspace: int):
         TensorType(shape, "f32", "raw-bit-pattern"),
         precision.request.nodes[0].type,
         (0, 1),
-        input_spec().policy,
-        input_spec(),
+        input_spec(score_domain).policy,
+        input_spec(score_domain),
     )
     upper = name.upper()
     declarations = f"""
@@ -179,6 +188,10 @@ int {name}_source_dispatch(void *ctx, const void *const *inputs, void *const *ou
         **({"input_dtypes": ["f32", "i1"], "mask_semantics": "true-excludes-score"} if guarded else {}),
         "output_dtype": "f32",
         "precision_plan": precision.record(),
+        **({"additive_mask": {"zero_keeps": True, "finite_exclusion_bits": finite_sentinel_bits,
+                              "scores": "finite absolute value at most 128" if score_domain == ROWSPAN80_DOMAIN else "finite absolute value at most 32",
+                              "rows": "nonempty"}}
+           if finite_sentinel_bits is not None else {}),
     }
     mask_note = (
         "The second input contains Boolean exclusion bytes: zero keeps a score and one masks it. "

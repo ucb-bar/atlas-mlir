@@ -25,6 +25,8 @@ class ReductionLoopTest(unittest.TestCase):
         from atlas_mlir_native.binding import DRAM_BASE, AtlasNativeBinding
         from atlas_mlir_native.layout import pack_bf16_pair_halves
         from atlas_mlir_native.reduction import (
+            NONNEGATIVE_NORMAL_REDUCTION_POLICY,
+            REDUCTION_POLICY,
             input_spec,
             prepare_plan,
             prepare_source,
@@ -39,7 +41,9 @@ class ReductionLoopTest(unittest.TestCase):
         from npu_model.software.program import InstantiableProgram
         from test_pointwise_loop import check_source_c_call
         from test_softmax_primitives import _rounded_sum
-        from test_spill_model_execution import MODEL_REVISION, model_instruction
+        from test_spill_model_execution import model_instruction
+
+        MODEL_REVISION = "47b8599d8ffbe5ddd96059ffe2b5be2427a410f5"
         from test_vpu_row_sum_reference import _tree_row
         from tools.check_program_decode import decode_binary
 
@@ -51,11 +55,31 @@ class ReductionLoopTest(unittest.TestCase):
         from merlin.semantic_compiler.search import SearchLimits
         from merlin.semantic_compiler.target_binding import verify_native_publication
 
-        origin = json.loads(importlib.metadata.distribution("npu-model").read_text("direct_url.json") or "{}")
-        self.assertTrue(
-            MODEL_REVISION in origin.get("url", "") or origin.get("vcs_info", {}).get("commit_id") == MODEL_REVISION
-        )
+        try:
+            origin = json.loads(importlib.metadata.distribution("npu-model").read_text("direct_url.json") or "{}")
+        except importlib.metadata.PackageNotFoundError:
+            origin = {}
+        if not (MODEL_REVISION in origin.get("url", "")
+                or origin.get("vcs_info", {}).get("commit_id") == MODEL_REVISION):
+            # A pinned, clean source checkout is also an independent original backend.
+            model_root = Path(os.environ["ATLAS_NPU_MODEL_ROOT"]).resolve()
+            head = subprocess.check_output(["git", "-C", str(model_root), "rev-parse", "HEAD"], text=True).strip()
+            self.assertEqual(head, MODEL_REVISION)
+            subprocess.run(["git", "-C", str(model_root), "diff", "--exit-code", "HEAD", "--", "."],
+                           check=True, capture_output=True)
+            import npu_model
+            self.assertEqual(Path(npu_model.__file__).resolve().parents[1], model_root)
         torch.set_num_threads(1)
+        from npu_model.configs.numerics import NUMERICS
+
+        # Qualify every positive normal BF16 code and +0 on the unchanged
+        # original backend. A singleton tree must preserve the code exactly.
+        all_codes = torch.tensor([0, *range(0x80, 0x7f80)], dtype=torch.int16)
+        singleton_rows = torch.zeros((len(all_codes), 32), dtype=torch.bfloat16)
+        singleton_rows.view(torch.int16)[:, 0] = all_codes
+        partials = NUMERICS["rtl"].row_sum(singleton_rows)
+        combined = NUMERICS["rtl"].add(torch.zeros_like(partials), partials)
+        self.assertTrue(torch.equal(combined.view(torch.int16).reshape(-1), all_codes))
         inventory = json.loads((ROOT / "docs/selected-variant-inventory.json").read_text())
         with tempfile.TemporaryDirectory(dir=os.environ.get("TMPDIR")) as directory:
             root = Path(directory)
@@ -65,9 +89,14 @@ class ReductionLoopTest(unittest.TestCase):
                 ((33, 65), (1,)),
                 ((2, 3, 35), (0, 2)),
                 ((1, 8, 16, 16), (2, 3)),
+                ((8, 33), (1,)),
+                ((8, 1), (1,)),
             ]:
                 with self.subTest(shape=shape, axes=axes):
-                    raw_request = request_for(shape, axes)
+                    positive = shape in {(8, 33), (8, 1)}
+                    policy = NONNEGATIVE_NORMAL_REDUCTION_POLICY if positive else REDUCTION_POLICY
+                    spec = input_spec(reduction_policy=policy)
+                    raw_request = request_for(shape, axes, reduction_policy=policy)
                     data_node, seed_node, result_node = raw_request.nodes
                     float_type = lambda node: dataclasses.replace(
                         node.type, dtype="f32", numerical_policy="raw-bit-pattern"
@@ -93,7 +122,7 @@ class ReductionLoopTest(unittest.TestCase):
                             ),
                         ),
                     )
-                    request = prepare_source(source).request
+                    request = prepare_source(source, reduction_policy=policy).request
                     plan = prepare_plan(request)
                     abi = AtlasNativeBinding.plan_boundary_abi(request)
                     target = root / ("x".join(map(str, shape)))
@@ -121,8 +150,16 @@ class ReductionLoopTest(unittest.TestCase):
                     values.reshape(-1)[0] = -0.0
                     if shape == (33, 65):
                         values[0, :5] = [2.0**25, 1, -(2.0**25), 1, 2]
-                    data = np.frombuffer(input_spec().encode(values), dtype="<u2").reshape(shape)
-                    initial_codes = np.frombuffer(input_spec().encode(seed), dtype="<u2").reshape(plan.output_shape)
+                    if positive:
+                        codes = np.zeros(shape, dtype="<u4")
+                        codes[:, 0] = [0, 0x80, 0xff, 0x1ff5, 0x3f80, 0x7b00, 0x7f7e, 0x7f7f]
+                        if shape[1] > 1:
+                            codes[4, 16] = 0x3bc0  # final BF16 RNE tie discriminator
+                            codes[4, 32] = 0x3b80  # seeded add chops
+                        values = (codes << 16).view("<f4")
+                        seed = np.zeros(plan.output_shape, dtype="<f4")
+                    data = np.frombuffer(spec.encode(values), dtype="<u2").reshape(shape)
+                    initial_codes = np.frombuffer(spec.encode(seed), dtype="<u2").reshape(plan.output_shape)
                     matrix = data.transpose(plan.kept_axes + axes).reshape(plan.matrix_shape)
                     wanted = np.zeros((plan.matrix_shape[0], 32), dtype="<u2")
                     wanted[:, 0] = initial_codes.reshape(-1)
@@ -235,12 +272,28 @@ class ReductionLoopTest(unittest.TestCase):
                         "pointwise",
                         target_source=ROOT,
                         runtime_linkage="embedded",
+                        reduction_policy=policy,
                     )
                     package = target / "c-package"
                     package.mkdir()
                     for name, payload in files.items():
                         (package / name).write_bytes(payload)
                     wanted_float = (wanted[:, 0].astype(np.uint32) << 16).astype("<u4").tobytes()
+                    invalid = []
+                    if positive:
+                        # Reject before any program load or device-memory write.
+                        for code in (0x8000, 1, 0x7f80, 0x7fc0):
+                            bad = values.copy()
+                            bad.view("<u4").reshape(-1)[0] = code << 16
+                            invalid.append((bad, seed))
+                        bad_seed = seed.copy()
+                        bad_seed.view("<u4").reshape(-1)[-1] = 0x7f7f0000
+                        invalid.append((values, bad_seed))  # seeded FP32 overflow
+                        if shape[1] > 1:
+                            for code in (0x7f7f, 0x7b00):
+                                bad = values.copy()
+                                bad.view("<u4")[-1, 1] = code << 16
+                                invalid.append((bad, seed))  # tree or BF16-rounding overflow
                     check_source_c_call(
                         self,
                         package,
@@ -249,6 +302,7 @@ class ReductionLoopTest(unittest.TestCase):
                         execute,
                         [values, seed],
                         wanted_float,
+                        invalid_values=invalid,
                     )
                     if os.environ.get("ATLAS_LLVM_BIN"):
                         subprocess.run(

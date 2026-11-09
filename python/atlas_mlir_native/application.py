@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import os
+from pathlib import Path
+
 from merlin.compile.layout_c import emit_layout_c
 from merlin.compile.semantic_application import CompiledCRegion
 from merlin.compile.semantic_regions import extract_semantic_region
@@ -20,10 +23,12 @@ from .application_precision import (
     SCALED_CONTRACTION_POLICY,
     is_source_relu,
     prepare_contraction,
+    prepare_already_quantized_contraction,
 )
 from .binding import TARGET_IDENTITY, AtlasNativeBinding
+from .c_runtime import RUNTIME_SHARED_FILES
 from .gelu import is_source_gelu
-from .row_softmax import SOFTMAX_POLICY
+from .row_softmax import SOFTMAX_POLICY, SOFTMAX_DOMAIN
 from .softmax_precision import lower_semantic_softmax
 
 _LEGACY_LAYOUTS = ("transpose", "reshape", "copy")
@@ -117,16 +122,201 @@ class AtlasApplicationAdapter:
 
     Source softmax is fused only after its closed-region recognizer succeeds.
     Remaining contractions and byte-preserving layouts stay separate. There is
-    no host arithmetic fallback or model-name/shape-list selection.
+    no implicit host arithmetic fallback or model-name/shape-list selection.
     """
 
     @staticmethod
     def application_binding(name, regions, interface):
+        if regions and all(row["placement"] == "host" for row in regions):
+            return None
         from .application_c_context import application_binding
 
         return application_binding(name, regions, interface)
 
+    @property
+    def source_operation_translators(self):
+        from .source_translation import (
+            translate_prequantized_contraction, translate_activation_quantizer,
+        )
+        if not self.already_quantized:
+            return {}
+        return {**{op: translate_prequantized_contraction for op in
+                   ("atlas.qlinear", "atlas.qk_matmul", "atlas.pv_matmul")},
+                "atlas.quantize_act": translate_activation_quantizer}
+
     def __init__(self, policy, *, original_source_sha256):
+        if "activation_quantizer" in policy:
+            route = policy["activation_quantizer"]
+            if route not in {"host", "device"}:
+                raise NativeCompilationError("unsupported_semantics", "activation quantizer route must be host or device")
+            self.__init__({key: value for key, value in policy.items() if key != "activation_quantizer"},
+                          original_source_sha256=original_source_sha256)
+            self.activation_quantizer_route = route
+            return
+        self.activation_quantizer_route = "device"
+        from .already_quantized import POLICY as ALREADY_QUANTIZED_POLICY
+
+        self.host_bf16_linear_policy = None
+        if "host_bf16_linear" in policy:
+            from merlin.compile.c_bf16_linear import POLICY as BF16_LINEAR_POLICY
+
+            selected = policy["host_bf16_linear"]
+            if selected != BF16_LINEAR_POLICY:
+                raise NativeCompilationError("unsupported_semantics", "host BF16 linear policy differs")
+            self.__init__({key: value for key, value in policy.items() if key != "host_bf16_linear"},
+                          original_source_sha256=original_source_sha256)
+            self.host_bf16_linear_policy = selected
+            return
+        self.already_quantized = False
+        self.already_quantized_mask_sentinel = None
+        self.already_quantized_score_domain = SOFTMAX_DOMAIN
+        self.source_exp_policy = None
+        if "already_quantized" in policy:
+            if policy["already_quantized"] != ALREADY_QUANTIZED_POLICY:
+                raise NativeCompilationError("unsupported_semantics", "already-quantized intake policy differs")
+            extra_bf16 = policy.get("bf16_pointwise") if policy.get("schema") != "atlas.diagnostic_application_precision.v21" else None
+            selected_exp = policy.get("source_exp")
+            if "source_exp" in policy:
+                from .source_exp import POLICY as SOURCE_EXP_POLICY
+
+                if selected_exp != SOURCE_EXP_POLICY:
+                    raise NativeCompilationError("unsupported_semantics", "already-quantized source exp policy differs")
+            selected_mask = policy.get("already_quantized_mask")
+            if "already_quantized_mask" in policy and selected_mask not in {
+                "bf16-minfinite-zero-bounded32-nonempty-v1", "bf16-minfinite-zero-rowspan80-nonempty-v1"
+            }:
+                raise NativeCompilationError("unsupported_semantics", "already-quantized finite mask policy differs")
+            remove = {"already_quantized", "already_quantized_mask", "source_exp", *(("bf16_pointwise",) if extra_bf16 is not None else ())}
+            if extra_bf16 is not None:
+                from .pointwise import BF16_POINTWISE_POLICY
+
+                if extra_bf16 != BF16_POINTWISE_POLICY:
+                    raise NativeCompilationError("unsupported_semantics", "already-quantized BF16 pointwise policy differs")
+            self.__init__({key: value for key, value in policy.items() if key not in remove},
+                          original_source_sha256=original_source_sha256)
+            if extra_bf16 is not None:
+                if self.bf16_pointwise not in (None, extra_bf16):
+                    raise NativeCompilationError("unsupported_semantics", "conflicting already-quantized BF16 pointwise policy")
+                self.bf16_pointwise = extra_bf16
+            if selected_exp is not None:
+                self.source_exp_policy = selected_exp
+            if selected_mask is not None:
+                self.already_quantized_mask_sentinel = 0xff7f0000
+                if selected_mask == "bf16-minfinite-zero-rowspan80-nonempty-v1":
+                    self.already_quantized_score_domain = "bf16-row-relative-span80-pad32-v1"
+            self.already_quantized = True
+            return
+        if policy.get("schema") == "atlas.diagnostic_normalization_application_precision.v1":
+            from .rmsnorm import RMSNORM_POLICY
+            from .qualified_rne_add import RNE_ADD_POLICY
+
+            extra = set(policy) - {"schema", "source_sha256", "base_policy"}
+            if (not extra or not extra <= {"rmsnorm", "rne_add"}
+                    or policy.get("source_sha256") != original_source_sha256
+                    or not isinstance(policy.get("base_policy"), dict)):
+                raise NativeCompilationError("unsupported_semantics", "normalization precision fields or source differ")
+            base = policy["base_policy"]
+            if base.get("schema") == policy["schema"] or base.get("source_sha256") != original_source_sha256:
+                raise NativeCompilationError("unsupported_semantics", "normalization base policy differs")
+            if ("rmsnorm" in extra and policy["rmsnorm"] != RMSNORM_POLICY
+                    or "rne_add" in extra and policy["rne_add"] != RNE_ADD_POLICY):
+                raise NativeCompilationError("unsupported_semantics", "normalization arithmetic policy differs")
+            self.__init__(base, original_source_sha256=original_source_sha256)
+            if (("rne_add" in extra and self.rne_add is not None)
+                    or ("rmsnorm" in extra and self.rmsnorm_schedules)):
+                raise NativeCompilationError("unsupported_semantics", "conflicting nested arithmetic precision policies")
+            self.rmsnorm = "rmsnorm" in extra
+            self.qualified_rne_add = policy.get("rne_add")
+            return
+        self.rmsnorm = False
+        self.qualified_rne_add = None
+
+        if policy.get("schema") == "atlas.diagnostic_application_precision.v24":
+            from .hierarchical_rmsnorm import POLICY as norm_policy
+
+            base = policy.get("base_policy")
+            if (set(policy) != {"schema", "source_sha256", "base_policy", "rmsnorm_schedules"}
+                    or policy["source_sha256"] != original_source_sha256
+                    or not isinstance(base, dict) or base.get("schema") == policy["schema"]
+                    or base.get("source_sha256") != original_source_sha256):
+                raise NativeCompilationError("unsupported_semantics", "source-bound RMSNorm policy fields or source differ")
+            self.__init__(base, original_source_sha256=original_source_sha256)
+            if self.rmsnorm:
+                raise NativeCompilationError("unsupported_semantics", "conflicting nested normalization precision policies")
+            rows = policy["rmsnorm_schedules"]
+            if (not isinstance(rows, list) or not rows
+                    or any(not isinstance(row, dict) or not isinstance(row.get("source_output"), str) for row in rows)
+                    or len({row["source_output"] for row in rows}) != len(rows)):
+                raise NativeCompilationError("unsupported_semantics", "RMSNorm schedules need distinct source outputs")
+            for row in rows:
+                if (set(row) != {"source_output", "source_request_digest", "provenance_sha256", "policy", "output_scale_exponent"}
+                        or row["policy"] != norm_policy or type(row["output_scale_exponent"]) is not int
+                        or not -32 <= row["output_scale_exponent"] <= 32
+                        or any(not isinstance(row.get(key), str) or len(row[key]) != 64
+                               or any(c not in "0123456789abcdef" for c in row[key])
+                               for key in ("source_request_digest", "provenance_sha256"))):
+                    raise NativeCompilationError("unsupported_semantics", "RMSNorm precision selection or hash binding differs")
+            self.rmsnorm_schedules = {row["source_output"]: {key: value for key, value in row.items()
+                                      if key != "source_output"} for row in rows}
+            return
+        if policy.get("schema") == "atlas.diagnostic_application_precision.v23":
+            from .quantized_softmax_value import POLICY as value_policy
+            from .rne_add import RNE_ADD_POLICY
+
+            if (set(policy) != {"schema", "source_sha256", "base_policy", "rne_add",
+                               "softmax_value_schedules", "mxu1_contraction_schedules"}
+                    or policy["source_sha256"] != original_source_sha256
+                    or policy["base_policy"].get("schema") == policy["schema"]
+                    or policy["base_policy"].get("source_sha256") != original_source_sha256):
+                raise NativeCompilationError("unsupported_semantics", "source-bound attention policy fields or source differ")
+            self.__init__(policy["base_policy"], original_source_sha256=original_source_sha256)
+            if policy["rne_add"] not in (None, RNE_ADD_POLICY):
+                raise NativeCompilationError("unsupported_semantics", "RNE addition precision selection differs")
+            if policy["rne_add"] is not None and self.qualified_rne_add is not None:
+                raise NativeCompilationError("unsupported_semantics", "conflicting nested addition precision policies")
+            self.rne_add = policy["rne_add"]
+            for field, attribute in (("softmax_value_schedules", "softmax_value_schedules"),
+                                     ("mxu1_contraction_schedules", "mxu1_contraction_schedules")):
+                rows = policy[field]
+                if (not isinstance(rows, list) or any(not isinstance(row, dict)
+                        or not isinstance(row.get("source_output"), str) for row in rows)
+                        or len({row["source_output"] for row in rows}) != len(rows)):
+                    raise NativeCompilationError("unsupported_semantics", "source-bound precision schedules need distinct outputs")
+                selected = {}
+                for row in rows:
+                    if field == "softmax_value_schedules" and (set(row) != {
+                            "source_output", "source_request_digest", "provenance_sha256", "policy", "value_scale_exponent"}
+                            or row["policy"] != value_policy or type(row["value_scale_exponent"]) is not int
+                            or not -32 <= row["value_scale_exponent"] <= 32):
+                        raise NativeCompilationError("unsupported_semantics", "quantized softmax value precision selection differs")
+                    if any(not isinstance(row.get(key), str) or len(row[key]) != 64
+                           or any(c not in "0123456789abcdef" for c in row[key])
+                           for key in ("source_request_digest", "provenance_sha256")):
+                        raise NativeCompilationError("unsupported_semantics", "precision source and provenance hashes differ")
+                    selected[row["source_output"]] = {key: value for key, value in row.items() if key != "source_output"}
+                setattr(self, attribute, selected)
+            return
+        if policy.get("schema") == "atlas.diagnostic_application_precision.v22":
+            if set(policy) != {"schema", "source_sha256", "base_policy", "contraction_schedules"} or policy["source_sha256"] != original_source_sha256:
+                raise NativeCompilationError("unsupported_semantics", "column precision application fields or source differ")
+            base = policy["base_policy"]
+            if base.get("schema") == policy["schema"] or base.get("source_sha256") != original_source_sha256:
+                raise NativeCompilationError("unsupported_semantics", "column precision base policy differs")
+            self.__init__(base, original_source_sha256=original_source_sha256)
+            schedules = policy["contraction_schedules"]
+            if not isinstance(schedules, list) or not schedules or any(not isinstance(item, dict) or not isinstance(item.get("source_output"), str) for item in schedules):
+                raise NativeCompilationError("unsupported_semantics", "column precision needs source output schedules")
+            if len({item["source_output"] for item in schedules}) != len(schedules):
+                raise NativeCompilationError("unsupported_semantics", "duplicate contraction precision schedule")
+            self.contraction_schedules = {item["source_output"]: {key: value for key, value in item.items() if key != "source_output"} for item in schedules}
+            if os.environ.get("ATLAS_KERNEL_LIBRARY"):
+                raise NativeCompilationError("unsupported_semantics", "column precision does not admit an executable library provider")
+            return
+        self.contraction_schedules = None
+        self.rne_add = None
+        self.softmax_value_schedules = {}
+        self.mxu1_contraction_schedules = {}
+        self.rmsnorm_schedules = {}
         bf16_pointwise = None
         if policy.get("schema") == "atlas.diagnostic_application_precision.v21":
             from .pointwise import BF16_POINTWISE_POLICY
@@ -143,6 +333,7 @@ class AtlasApplicationAdapter:
         self.pointwise = False
         self.bf16_pointwise = bf16_pointwise
         self.reductions = False
+        self.reduction_policy = None
         self.pointwise_math = False
         self.sigmoid = False
         self.gelu = False
@@ -326,11 +517,12 @@ class AtlasApplicationAdapter:
             "atlas.diagnostic_application_precision.v19",
             "atlas.diagnostic_application_precision.v20",
         }:
-            from .reduction import REDUCTION_POLICY
+            from .reduction import REDUCTION_POLICIES
 
-            if policy.get("reduction") != REDUCTION_POLICY:
+            if policy.get("reduction") not in REDUCTION_POLICIES:
                 raise NativeCompilationError("unsupported_semantics", "selected reduction arithmetic differs")
-            expected["reduction"] = REDUCTION_POLICY
+            expected["reduction"] = policy["reduction"]
+            self.reduction_policy = policy["reduction"]
             self.reductions = True
         if policy.get("schema") in {
             "atlas.diagnostic_application_precision.v7",
@@ -549,6 +741,38 @@ class AtlasApplicationAdapter:
         if policy != expected:
             raise NativeCompilationError("unsupported_semantics", "selected application precision policy differs")
 
+    def _contraction_exponents(self, region):
+        if self.contraction_schedules is None:
+            return self.operand_scale_exponents
+        if len(region.outputs) != 1 or region.outputs[0] not in self.contraction_schedules:
+            raise NativeCompilationError("unsupported_semantics", "missing source-bound contraction precision schedule")
+        return self.contraction_schedules[region.outputs[0]]
+
+    def _extra_precision(self, kind, region):
+        if kind == "rne_add":
+            from . import rne_add as module
+
+            return module, {"policy": self.rne_add}
+        if len(region.outputs) != 1:
+            raise NativeCompilationError("unsupported_semantics", "source-bound region must have one result")
+        schedules = (self.rmsnorm_schedules if kind == "hierarchical_rmsnorm" else
+                     self.softmax_value_schedules if kind == "softmax_value" else self.mxu1_contraction_schedules)
+        selected = schedules.get(region.outputs[0])
+        if selected is None or selected["source_request_digest"] != region.digest():
+            raise NativeCompilationError("unsupported_semantics", "selected region source digest differs")
+        if kind == "softmax_value":
+            from . import quantized_softmax_value as module
+
+            return module, {"value_scale_exponent": selected["value_scale_exponent"],
+                            "provenance_sha256": selected["provenance_sha256"]}
+        if kind == "hierarchical_rmsnorm":
+            from . import hierarchical_rmsnorm as module
+
+            return module, {"policy": selected}
+        from . import mxu1_contraction as module
+
+        return module, {"policy": selected}
+
     def plan(self, source):
         if source.target_identity != TARGET_IDENTITY or source.lowering_policy != "diagnostic":
             raise NativeCompilationError(
@@ -556,6 +780,49 @@ class AtlasApplicationAdapter:
                 "application needs the selected diagnostic source",
             )
         pure = [node for node in source.nodes if node.effect == "pure"]
+        if self.already_quantized and any(node.op == "source_f32_matmul_unqualified" for node in pure):
+            raise NativeCompilationError(
+                "unsupported_semantics",
+                "already-quantized intake refuses floating contractions requiring operand recoding; "
+                "provide authored code/exponent operands or a separately qualified unchanged-weight lowering",
+            )
+        fused_norms = {}
+        if self.rmsnorm_schedules:
+            from merlin.semantic_compiler.rmsnorm_source import recognize_rmsnorm
+
+            for node in pure:
+                if node.op != "f32_mul":
+                    continue
+                try:
+                    found = recognize_rmsnorm(source, node.id)
+                except (KeyError, ValueError):
+                    continue
+                fused_norms[node.id] = found
+            if set(fused_norms) != set(self.rmsnorm_schedules):
+                raise NativeCompilationError("unsupported_semantics", "RMSNorm schedules must cover the exact private source regions")
+        fused_values = {}
+        if self.softmax_value_schedules:
+            from merlin.semantic_compiler.softmax_value_source import recognize_softmax_value
+
+            for node in pure:
+                if node.op != "source_f32_matmul_unqualified":
+                    continue
+                try:
+                    found = recognize_softmax_value(source, node.id, masked=True)
+                except (KeyError, ValueError):
+                    continue
+                fused_values[node.id] = found
+            if set(fused_values) != set(self.softmax_value_schedules):
+                raise NativeCompilationError("unsupported_semantics", "softmax value schedules must cover the exact private source regions")
+        fused_nodes = {key for region in (*fused_norms.values(), *fused_values.values()) for key in region.computations}
+        contractions = {node.id for node in pure if node.op == "source_f32_matmul_unqualified"}
+        if (not set(self.mxu1_contraction_schedules) <= contractions - fused_nodes):
+            raise NativeCompilationError("unsupported_semantics", "MXU1 schedule does not name an independent source contraction")
+        if self.contraction_schedules is not None and set(self.contraction_schedules) != {
+            node.id for node in pure if node.op == "source_f32_matmul_unqualified"
+            and node.id not in fused_nodes and node.id not in self.mxu1_contraction_schedules
+        }:
+            raise NativeCompilationError("unsupported_semantics", "contraction precision schedules must cover the exact source contractions")
         indices = {node.id: index for index, node in enumerate(pure)}
         claimed, regions = set(), []
 
@@ -563,22 +830,60 @@ class AtlasApplicationAdapter:
             if claimed.intersection(keys):
                 raise NativeCompilationError("compile_error", "source application regions overlap")
             region = extract_semantic_region(source, tuple(keys))
-            if kind == "contraction":
+            if kind in {"rne_add", "softmax_value", "mxu1_contraction", "hierarchical_rmsnorm"}:
+                module, selected = self._extra_precision(kind, region)
+                module.prepare_source(region, **selected)
+            elif kind == "vector_quantize":
+                from .vector_quantize import prepare_plan
+
+                prepare_plan(region)
+            elif kind == "layout_device":
+                from .layout_device import prepare_source
+
+                prepare_source(region)
+            elif kind == "exact_float_device":
+                from .exact_float_application import prepare_plan
+
+                prepare_plan(region)
+            elif kind == "activation_quantize_device":
+                from .activation_quantize_application import prepare_plan
+
+                prepare_plan(region)
+            elif kind == "scalar_broadcast":
+                from .scalar_broadcast import prepare_source
+
+                prepare_source(region)
+            elif kind == "already_quantized":
+                prepare_already_quantized_contraction(region)
+            elif kind == "host_bf16_linear":
+                from merlin.compile.c_bf16_linear import emit_c
+
+                emit_c(region, "bf16_linear")
+            elif kind in {"static_quantize", "dynamic_quantize"}:
+                from . import dynamic_quantize, static_quantize
+
+                (dynamic_quantize if kind == "dynamic_quantize" else static_quantize).prepare_source(region)
+            elif kind == "contraction":
                 prepare_contraction(
                     region,
-                    operand_scale_exponents=self.operand_scale_exponents,
+                    operand_scale_exponents=self._contraction_exponents(region),
                     epilogue=epilogue,
                 )
             elif kind in {"softmax", "masked_softmax", "guarded_softmax"}:
-                lower_semantic_softmax(region, allow_masked=kind != "softmax", allow_guarded=kind == "guarded_softmax")
+                lower_semantic_softmax(region, allow_masked=kind != "softmax", allow_guarded=kind == "guarded_softmax",
+                                       score_domain=self.already_quantized_score_domain)
             elif kind in {"pointwise", "pointwise_math"}:
                 from .pointwise import prepare_source
 
-                prepare_source(region, allow_math=kind == "pointwise_math", bf16_policy=self.bf16_pointwise)
+                prepare_source(region, allow_math=kind == "pointwise_math", bf16_policy=self.bf16_pointwise, exp_policy=self.source_exp_policy, rne_add_policy=self.qualified_rne_add if region.nodes[-1].op in {"f32_add", "bf16_add"} else None)
+            elif kind == "rmsnorm":
+                from .rmsnorm import prepare_source
+
+                prepare_source(region)
             elif kind == "reduction":
                 from .reduction import prepare_source
 
-                prepare_source(region)
+                prepare_source(region, reduction_policy=self.reduction_policy)
             elif kind == "integer":
                 _integer_c(region, "integer")
             elif kind == "float_cast":
@@ -608,7 +913,7 @@ class AtlasApplicationAdapter:
                     members,
                     "source_" + kind,
                     "host"
-                    if kind in {"layout", "predicate", "integer", "float_cast", "float_arithmetic", "unary_math"}
+                    if kind in {"layout", "predicate", "integer", "float_cast", "float_arithmetic", "unary_math", "static_quantize", "dynamic_quantize", "host_bf16_linear"}
                     else "accelerator",
                     CycleInterval.unknown("application region costs have not been calibrated"),
                     ports(node.id for node in region.nodes if node.effect in {"input", "constant"}),
@@ -618,6 +923,38 @@ class AtlasApplicationAdapter:
             )
             claimed.update(keys)
 
+        if self.rmsnorm:
+            from merlin.semantic_compiler.qualified_rmsnorm_source import recognize_rmsnorm
+
+            for node in pure:
+                if node.op != "f32_mul" or node.id in claimed or node.id in fused_nodes:
+                    continue
+                try:
+                    norm = recognize_rmsnorm(source, node.id)
+                except (KeyError, ValueError):
+                    continue
+                add(norm.computations, "rmsnorm")
+        for region in fused_norms.values():
+            add(region.computations, "hierarchical_rmsnorm")
+        for region in fused_values.values():
+            add(region.computations, "softmax_value")
+        for node in pure:
+            if node.id in self.mxu1_contraction_schedules:
+                add((node.id,), "mxu1_contraction")
+        if self.already_quantized:
+            for node in pure:
+                if node.op == "atlas.qconv2d":
+                    raise NativeCompilationError("unsupported_semantics", "already-quantized qconv2d intake is unsupported")
+                if node.op == "atlas.quantize_act.codes":
+                    peers = [item for item in pure if item.op == "atlas.quantize_act.exponent"
+                             and item.inputs == node.inputs and item.attrs == node.attrs]
+                    if len(peers) != 1:
+                        raise NativeCompilationError("unsupported_semantics", "static activation quantizer exponent projection differs")
+                    keys = (node.id, peers[0].id)
+                    aligned = self._is_vector_quantizer(source, keys)
+                    kind = ("activation_quantize_device" if self.activation_quantizer_route == "device" and aligned
+                            else "static_quantize" if dict(node.attrs).get("mode") == "static" else "dynamic_quantize")
+                    add(keys, kind)
         if self.guarded_masked_softmax:
             from merlin.semantic_compiler.guarded_softmax_source import (
                 recognize_guarded_masked_row_softmax,
@@ -680,25 +1017,40 @@ class AtlasApplicationAdapter:
         for node in pure:
             if node.id in claimed:
                 continue
-            if node.op == "source_f32_matmul_unqualified":
+            if self.already_quantized and node.op in {"atlas.qlinear", "atlas.qk_matmul", "atlas.pv_matmul"}:
+                add((node.id,), "already_quantized")
+            elif self.host_bf16_linear_policy and node.op == "source_bf16_matmul_unqualified":
+                add((node.id,), "host_bf16_linear")
+            elif self.source_exp_policy and node.op == "source_f32_exp_unqualified":
+                add((node.id,), "pointwise_math")
+            elif node.op == "source_f32_matmul_unqualified":
                 add((node.id,), "contraction")
+            elif node.op == "gather" and self._is_scalar_broadcast(source, node):
+                add((node.id,), "scalar_broadcast")
+            elif self.already_quantized and node.op in self.host_layouts and self._supports_device_source(source, node, "layout_device"):
+                add((node.id,), "layout_device")
             elif node.op in self.host_layouts:
                 add((node.id,), "layout")
             elif node.op in self.host_integer_ops:
                 add((node.id,), "integer")
             elif self.host_unary_math and node.op in self.host_unary_math["operations"]:
                 add((node.id,), "unary_math")
+            elif self.already_quantized and node.op in (*self.host_float_arithmetic, *self.host_float_casts) and self._supports_device_source(source, node, "exact_float_device"):
+                add((node.id,), "exact_float_device")
             elif node.op in self.host_float_arithmetic:
                 add((node.id,), "float_arithmetic")
             elif node.op in self.host_float_casts:
                 add((node.id,), "float_cast")
             elif node.op in self.host_predicates:
                 add((node.id,), "predicate")
+            elif self.rne_add and node.op == "f32_add":
+                add((node.id,), "rne_add")
             elif (
                 self.pointwise
                 and (node.op in {"f32_mul", "f32_add", "f32_sub"} or is_source_relu(node))
                 or self.bf16_pointwise
                 and node.op == "bf16_mul"
+                or self.qualified_rne_add and node.op in {"f32_add", "bf16_add"}
             ):
                 add((node.id,), "pointwise")
             elif self.reductions and node.op in {
@@ -730,14 +1082,80 @@ class AtlasApplicationAdapter:
             CycleInterval.unknown("structural first-valid; no performance claim"),
         )
 
+    @staticmethod
+    def _is_vector_quantizer(source, keys):
+        from math import prod
+        from .vector_quantize import prepare_plan
+        from .activation_quantize_application import prepare_plan as schedule
+
+        try:
+            region = extract_semantic_region(source, keys)
+            scheduled = schedule(region)
+            plans = [prepare_plan(body) for body in scheduled.bodies]
+            # Each body stages repeated authored exponents in one FP8 slot.
+            # Larger exponent rows keep the explicit host route selectable.
+            if any(prod(plan.exponents.type.shape) > 256 for plan in plans):
+                return False
+        except ValueError:
+            return False
+        return all(plan.width == 2 and not any(n % 32 for n in
+                   (plan.count, plan.group_elements, plan.head_elements)) for plan in plans)
+
+    @staticmethod
+    def _supports_device_source(source, node, kind):
+        from . import layout_device, exact_float_application
+
+        prepare = layout_device.prepare_source if kind == "layout_device" else exact_float_application.prepare_plan
+        try:
+            prepare(extract_semantic_region(source, (node.id,)))
+        except ValueError:
+            return False
+        return True
+
+    @staticmethod
+    def _is_scalar_broadcast(source, node):
+        from .scalar_broadcast import prepare_source
+
+        try:
+            prepare_source(extract_semantic_region(source, (node.id,)))
+        except ValueError:
+            return False
+        return True
+
     def compile_region(self, snapshot, region, alternative, name, segments, target_source, limits):
         kind = dict(alternative.metadata)["kind"]
-        if kind == "contraction":
+        if kind in {"rne_add", "softmax_value", "mxu1_contraction", "hierarchical_rmsnorm"}:
+            module, selected = self._extra_precision(kind, region)
+            module.compile_source(snapshot, region, **selected, target_source=target_source,
+                                  destination=segments / name, limits=limits)
+        elif kind in {"vector_quantize", "layout_device", "exact_float_device"}:
+            from . import vector_quantize, layout_device, exact_float_application
+
+            module = {"vector_quantize": vector_quantize, "layout_device": layout_device,
+                      "exact_float_device": exact_float_application}[kind]
+            module.compile_source(snapshot, region, target_source=target_source,
+                                  destination=segments / name, limits=limits)
+        elif kind == "activation_quantize_device":
+            from .activation_quantize_application import compile_source
+
+            compile_source(snapshot, region, target_source=target_source,
+                           destination=segments / name, limits=limits)
+        elif kind == "scalar_broadcast":
+            from .scalar_broadcast import compile_source
+
+            compile_source(snapshot, region, target_source=target_source,
+                           destination=segments / name, limits=limits)
+        elif kind == "already_quantized":
+            from .quantized_loop import compile_source
+
+            compile_source(snapshot, region, target_source=target_source,
+                           destination=segments / name, limits=limits)
+        elif kind == "contraction":
             from .looped_tiling import compile_looped, prepare_execution_plan
 
             precision = prepare_contraction(
                 region,
-                operand_scale_exponents=self.operand_scale_exponents,
+                operand_scale_exponents=self._contraction_exponents(region),
                 epilogue=dict(alternative.metadata).get("epilogue"),
             )
             abi = AtlasNativeBinding.plan_boundary_abi(precision.request)
@@ -770,7 +1188,8 @@ class AtlasApplicationAdapter:
             from .row_loop import compile_row_loop
 
             precision = lower_semantic_softmax(
-                region, allow_masked=kind != "softmax", allow_guarded=kind == "guarded_softmax"
+                region, allow_masked=kind != "softmax", allow_guarded=kind == "guarded_softmax",
+                score_domain=self.already_quantized_score_domain,
             )
             compile_row_loop(
                 snapshot,
@@ -779,6 +1198,13 @@ class AtlasApplicationAdapter:
                 destination=segments / name,
                 limits=limits,
             )
+        elif kind == "rmsnorm":
+            from .rmsnorm import prepare_source
+            from .row_loop import compile_row_loop
+
+            precision = prepare_source(region)
+            compile_row_loop(snapshot, precision.request, target_source=target_source,
+                             destination=segments / name, limits=limits)
         elif kind in {"pointwise", "pointwise_math", "reduction"}:
             if kind in {"pointwise", "pointwise_math"}:
                 from .pointwise import compile_pointwise as compile_region
@@ -790,9 +1216,9 @@ class AtlasApplicationAdapter:
             precision = prepare_source(
                 region,
                 **(
-                    {"allow_math": kind == "pointwise_math", "bf16_policy": self.bf16_pointwise}
+                    {"allow_math": kind == "pointwise_math", "bf16_policy": self.bf16_pointwise, "exp_policy": self.source_exp_policy, "rne_add_policy": self.qualified_rne_add if region.nodes[-1].op in {"f32_add", "bf16_add"} else None}
                     if kind != "reduction"
-                    else {}
+                    else {"reduction_policy": self.reduction_policy}
                 ),
             )
             abi = plan_abi(precision.request)
@@ -809,6 +1235,86 @@ class AtlasApplicationAdapter:
 
     def export_region(self, region, alternative, name, segments, target_source):
         kind = dict(alternative.metadata)["kind"]
+        if kind == "host_bf16_linear":
+            from merlin.compile.c_bf16_linear import emit_c
+
+            record, files = emit_c(region, name)
+            return CompiledCRegion(name, name + ".h", tuple(record["inputs"]), region.outputs,
+                                   {key: value.encode() if isinstance(value, str) else value
+                                    for key, value in files.items()}, (), (), record)
+        if kind == "rmsnorm":
+            from .rmsnorm import prepare_source
+            from .rmsnorm_c import prepare_c_package
+
+            precision = prepare_source(region)
+            record, files = prepare_c_package(precision, segments / name, name,
+                                             target_source=target_source, runtime_linkage="separate")
+            return CompiledCRegion(name + "_source_dispatch", name + ".h", precision.input_ids,
+                                   region.outputs, files, RUNTIME_SHARED_FILES,
+                                   ("segments/" + name,), record)
+        if kind in {"rne_add", "softmax_value", "mxu1_contraction", "hierarchical_rmsnorm"}:
+            module, selected = self._extra_precision(kind, region)
+            if kind == "softmax_value":
+                from . import quantized_softmax_value_c as module
+            elif kind == "hierarchical_rmsnorm":
+                from . import hierarchical_rmsnorm_c as module
+            record, files = module.prepare_c_package(region, segments / name, name,
+                **selected, target_source=target_source, runtime_linkage="separate")
+            programs = ("segments/" + name,)
+            if kind == "hierarchical_rmsnorm":
+                paths = record.get("native_program_paths")
+                if (not isinstance(paths, list) or len(paths) != 4
+                        or any(not isinstance(path, str) or Path(path).is_absolute() or ".." in Path(path).parts
+                               or Path(path).as_posix() != path or path in {"", "."} for path in paths)
+                        or len(set(paths)) != len(paths)):
+                    raise NativeCompilationError("compile_error", "RMSNorm export needs four relative native program paths")
+                programs = tuple("segments/" + name + "/" + path for path in paths)
+            return CompiledCRegion(record["dispatch_function"], name + ".h",
+                tuple(record["input_node_ids"]), tuple(record["output_node_ids"]), files,
+                RUNTIME_SHARED_FILES, programs, {"kind": kind, **record})
+        if kind in {"vector_quantize", "exact_float_device"}:
+            from . import vector_quantize, exact_float_application
+
+            module = vector_quantize if kind == "vector_quantize" else exact_float_application
+            return module.prepare_c_package(region, segments / name, name, target_source=target_source)
+        if kind == "layout_device":
+            from .layout_device import prepare_c_package
+
+            record, files = prepare_c_package(region, segments / name, name, target_source=target_source)
+            paths = record.get("native_program_paths")
+            programs = (("segments/" + name,) if paths is None else
+                        tuple("segments/" + name + "/" + path for path in paths))
+            return CompiledCRegion(name + "_source_dispatch", name + ".h",
+                tuple(record["input_node_ids"]), region.outputs, files, RUNTIME_SHARED_FILES,
+                programs, record)
+        if kind == "activation_quantize_device":
+            from .activation_quantize_application import prepare_c_package
+
+            return prepare_c_package(region, segments / name, name, target_source=target_source)
+        if kind == "scalar_broadcast":
+            from .scalar_broadcast import prepare_c_package
+
+            record, files = prepare_c_package(region, segments / name, name,
+                                              target_source=target_source)
+            return CompiledCRegion(name + "_source_dispatch", name + ".h",
+                tuple(record["input_node_ids"]), region.outputs, files, RUNTIME_SHARED_FILES,
+                ("segments/" + name,), record)
+        if kind == "already_quantized":
+            from .quantized_loop_c import prepare_c_package
+
+            record, files = prepare_c_package(region, segments / name, name, target_source=target_source)
+            paths = record.get("native_program_paths")
+            programs = (("segments/" + name,) if paths is None else
+                        tuple("segments/" + name + "/" + path for path in paths))
+            return CompiledCRegion(name + "_source_dispatch", name + ".h",
+                tuple(record["input_node_ids"]), region.outputs, files, RUNTIME_SHARED_FILES,
+                programs, record)
+        if kind in {"static_quantize", "dynamic_quantize"}:
+            from . import dynamic_quantize, static_quantize
+
+            record, files = (dynamic_quantize if kind == "dynamic_quantize" else static_quantize).emit_c(region, name)
+            return CompiledCRegion(name, name + ".h", tuple(record["inputs"]), region.outputs,
+                                   files, (), (), record)
         if kind in {"layout", "predicate", "integer", "float_cast", "float_arithmetic", "unary_math"}:
             if kind == "float_arithmetic":
                 emitter = _float_arithmetic_c
@@ -845,9 +1351,9 @@ class AtlasApplicationAdapter:
                 name,
                 target_source=target_source,
                 **(
-                    {"allow_math": kind == "pointwise_math", "bf16_policy": self.bf16_pointwise}
+                    {"allow_math": kind == "pointwise_math", "bf16_policy": self.bf16_pointwise, "exp_policy": self.source_exp_policy, "rne_add_policy": self.qualified_rne_add if region.nodes[-1].op in {"f32_add", "bf16_add"} else None}
                     if kind != "reduction"
-                    else {}
+                    else {"reduction_policy": self.reduction_policy}
                 ),
             )
             return CompiledCRegion(
@@ -856,7 +1362,7 @@ class AtlasApplicationAdapter:
                 tuple(record["input_node_ids"]),
                 tuple(record["output_node_ids"]),
                 files,
-                ("runtime/atlas_host.c", "runtime/atlas_host.h"),
+                RUNTIME_SHARED_FILES,
                 ("segments/" + name,),
                 {
                     "kind": kind,
@@ -876,7 +1382,7 @@ class AtlasApplicationAdapter:
 
             precision = prepare_contraction(
                 region,
-                operand_scale_exponents=self.operand_scale_exponents,
+                operand_scale_exponents=self._contraction_exponents(region),
                 epilogue=dict(alternative.metadata).get("epilogue"),
             )
             from .looped_tiling import prepare_execution_plan
@@ -897,7 +1403,7 @@ class AtlasApplicationAdapter:
                     target_source=target_source,
                     runtime_linkage="separate",
                     semantic_source=precision.plan.matrix_source if batched else region,
-                    semantic_operand_scale_exponents=self.operand_scale_exponents,
+                    semantic_operand_scale_exponents=self._contraction_exponents(region),
                     semantic_epilogue=dict(alternative.metadata).get("epilogue"),
                 )
                 if batched:
@@ -916,7 +1422,7 @@ class AtlasApplicationAdapter:
                     segments / name,
                     name,
                     target_source=target_source,
-                    operand_scale_exponents=self.operand_scale_exponents,
+                    operand_scale_exponents=self._contraction_exponents(region),
                 )
                 inputs = precision.plan.input_ids
             else:
@@ -927,7 +1433,7 @@ class AtlasApplicationAdapter:
                     target_source=target_source,
                     runtime_linkage="separate",
                     semantic_source=region,
-                    semantic_operand_scale_exponents=self.operand_scale_exponents,
+                    semantic_operand_scale_exponents=self._contraction_exponents(region),
                     semantic_epilogue=dict(alternative.metadata).get("epilogue"),
                 )
                 inputs = tuple(region.nodes[item.source_value.index].id for item in precision.inputs)
@@ -937,7 +1443,8 @@ class AtlasApplicationAdapter:
             from .softmax_c import _prepare_c_package
 
             precision = lower_semantic_softmax(
-                region, allow_masked=kind != "softmax", allow_guarded=kind == "guarded_softmax"
+                region, allow_masked=kind != "softmax", allow_guarded=kind == "guarded_softmax",
+                score_domain=self.already_quantized_score_domain,
             )
             record, files = _prepare_c_package(
                 precision.request,
@@ -949,6 +1456,8 @@ class AtlasApplicationAdapter:
                 allow_masked=kind != "softmax",
                 allow_guarded=kind == "guarded_softmax",
                 row_loop_compilation=segments / name,
+                finite_sentinel_bits=self.already_quantized_mask_sentinel if kind == "masked_softmax" else None,
+                score_domain=self.already_quantized_score_domain,
             )
             inputs = (
                 (precision.source_region.scores, precision.source_region.mask)
@@ -976,7 +1485,7 @@ class AtlasApplicationAdapter:
             inputs,
             region.outputs,
             files,
-            ("runtime/atlas_host.c", "runtime/atlas_host.h"),
+            RUNTIME_SHARED_FILES,
             programs,
             description,
         )

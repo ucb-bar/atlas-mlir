@@ -14,7 +14,7 @@ from verification_support import DELAY, TRANSFER, assert_boundaries, constant, d
 
 CONFLICT = "DMA memory conflict"
 UNKNOWN = "cannot prove DMA memory disjointness"
-# Operands no contract can describe (unknown values, non-tile lengths) still exercise the memory check, which runs
+# Unknown operands and invalid lengths still exercise the memory check, which runs
 # before the DMA contract check that then rejects them.
 UNCONTRACTED = "DMA contract"
 
@@ -126,7 +126,7 @@ class DMAMemoryVerificationTest(unittest.TestCase):
         # this checker cannot use it to prove disjointness of writes.
         self.checked(program([*prefix(), *constant(6, 1), ("dma_config", "channel = 0 : i32, base_reg = 6 : i32"),
                               *dram, launch("store"), *second]), UNKNOWN + " in DRAM")
-        for size, diagnostic in ((32, UNCONTRACTED), (64, UNKNOWN + " in DRAM")):
+        for size, diagnostic in ((32, "tile contract"), (64, UNKNOWN + " in DRAM")):
             with self.subTest(dram_end_crosses_32_bits=size == 64):
                 self.checked(program([*prefix(size=size, shared=True), *constant(7, 0xFFFFFFE0), *dram, launch("store"), *second]), diagnostic)
 

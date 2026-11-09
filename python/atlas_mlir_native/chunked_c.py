@@ -14,7 +14,7 @@ from merlin.semantic_compiler.model import KernelRequest
 from merlin.semantic_compiler.target_binding import verify_native_publication
 
 from .binding import DRAM_BASE, TILE_BYTES
-from .c_runtime import runtime_members
+from .c_runtime import runtime_headers, runtime_members
 from .chunked_tiling import check_frames, chunk_bodies
 
 
@@ -101,23 +101,28 @@ def prepare_members(
     bodies = chunk_bodies(source, plan)
     if set(roots) != {role for role, _ in bodies}:
         raise ValueError("chunk C export has missing or extra native bodies")
-    headers, sources, records, children, files = {}, {}, {}, {}, {}
+    headers = runtime_headers(target_source / "runtime")
+    sources, records, children, files = {}, {}, {}, {}
+    finite_top = False
+    if semantic_source is not None:
+        from .application_precision import prepare_contraction
+        precision = prepare_contraction(semantic_source, operand_scale_exponents=semantic_operand_scale_exponents, epilogue=semantic_epilogue)
+        finite_top = all(spec.max_normal_exponent_code == 15 for spec in precision.profile.conversion_specs[:2])
     for role, body in bodies:
         leaf = roots[role]
         if KernelRequest.from_record(json.loads((leaf / "source-request.json").read_text())) != body:
             raise ValueError("chunk leaf differs from the full source")
         child = name + "_" + role
         record, payloads = prepare_leaf(
-            leaf / "source-request.json", leaf, child, target_source=target_source, runtime_linkage="separate"
+            leaf / "source-request.json", leaf, child, target_source=target_source, runtime_linkage="separate", _finite_fp8_top=finite_top
         )
         records[role], children[role] = record, child
         headers[child + ".h"] = payloads[child + ".h"].decode()
         sources[child + ".c"] = payloads[child + ".c"].decode()
         files["programs/" + role + ".bin"] = (leaf / "program.bin").read_bytes()
     runtime = target_source / "runtime"
-    header, host_source = (runtime / "atlas_host.h").read_text(), (runtime / "atlas_host.c").read_text()
-    host_members, runtime_files, runtime_record = runtime_members(header, host_source, runtime_linkage)
-    headers["atlas_host.h"] = header
+    host_source = (runtime / "atlas_host.c").read_text()
+    host_members, runtime_files, runtime_record = runtime_members(runtime_headers(runtime), host_source, runtime_linkage)
     sources.update(host_members)
     driver_bytes = streamed_k_driver_workspace_bytes(plan)
     child_bytes = max(record["workspace_bytes"] for record in records.values())
@@ -142,6 +147,8 @@ def prepare_members(
         semantic_operand_scale_exponents=semantic_operand_scale_exponents,
         semantic_epilogue=semantic_epilogue,
     )
+    from .contraction_source_c import fp8_invalid_c
+    invalid_fp8 = fp8_invalid_c("codes[i]", finite_top=wrappers.finite_fp8_top)
     if wrappers.packing:
         sources["source_conversion.c"] = wrappers.packing
     fields = "\n".join(f"  {child}_context {role};" for role, child in children.items())
@@ -222,8 +229,7 @@ static int {name}_invoke_chunk(void *context,unsigned phase,const uint8_t *a,
   for (unsigned input=0;input<2;++input) {{
     const uint8_t *codes=values[input];
     for (size_t i=0;i<sizes[input];++i) {{
-      unsigned exponent=(codes[i]>>3)&15u;
-      if (codes[i] && (!exponent || exponent==15u)) return {upper}_INPUT_DOMAIN;
+      if {invalid_fp8} return {upper}_INPUT_DOMAIN;
     }}
   }}
   ctx->device=ATLAS_HOST_INVALID;

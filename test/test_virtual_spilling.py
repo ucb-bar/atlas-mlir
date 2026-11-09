@@ -137,8 +137,16 @@ def execute_copies(program, inputs, visits=None, runtime=None):
                 value = source ^ imm
             elif f["kind"] == "andi":
                 value = source & imm
+            elif f["kind"] == "ori":
+                value = source | imm
+            elif f["kind"] == "slli":
+                value = source << (imm & 31)
+            elif f["kind"] == "srli":
+                value = source >> (imm & 31)
             elif f["kind"] == "sltiu":
                 value = int(source < (imm & 0xffffffff))
+            elif f["kind"] == "slti":
+                value = int((source if source < 2**31 else source-2**32) < imm)
             else:
                 raise AssertionError(f)
             x[f["dst"]] = value & 0xffffffff
@@ -147,6 +155,16 @@ def execute_copies(program, inputs, visits=None, runtime=None):
             signed = lambda v: v if v < 2**31 else v - 2**32
             if f["kind"] == "add":
                 value = a + b
+            elif f["kind"] == "sub":
+                value = a - b
+            elif f["kind"] == "and":
+                value = a & b
+            elif f["kind"] == "or":
+                value = a | b
+            elif f["kind"] == "sll":
+                value = a << (b & 31)
+            elif f["kind"] == "srl":
+                value = a >> (b & 31)
             elif f["kind"] == "xor":
                 value = a ^ b
             elif f["kind"] == "slt":
@@ -198,6 +216,103 @@ def execute_copies(program, inputs, visits=None, runtime=None):
 
 
 class VirtualSpillingTest(unittest.TestCase):
+    def test_pressure_in_one_loop_does_not_demote_an_unrelated_loop_phi(self):
+        for choose_fast in (False,True):
+            with self.subTest(choose_fast=choose_fast):
+                names = ', '.join(f'%d{i}' for i in range(20))
+                types = ', '.join(['i32']*20)
+                arguments = ', '.join(f'%d{i}: i32' for i in range(20))
+                entry = ', '.join(f'%entry{i}' for i in range(20))
+                body = [f'%s0 = "atlas.virtual_start"() : () -> {STATE}',
+                        f'%s1,%a = "atlas.virtual_input_bf16"(%s0) {{index=0:i32}} : ({STATE}) -> ({STATE},{BF16})',
+                        f'%s2,%b = "atlas.virtual_input_bf16"(%s1) {{index=1:i32}} : ({STATE}) -> ({STATE},{BF16})',
+                        '%zero = arith.constant 0 : i32',f'%choose = arith.constant {int(choose_fast)} : i1',
+                        f'cf.cond_br %choose,^fast(%s2,%zero : {STATE},i32),^prepare(%s2 : {STATE})',
+                        f'^fast(%fs: {STATE},%fi: i32):','%fast_limit = arith.constant 7 : i32',
+                        '%fast_more = arith.cmpi slt,%fi,%fast_limit : i32',
+                        f'cf.cond_br %fast_more,^fast_body(%fs : {STATE}),^finish(%fs,%a : {STATE},{BF16})',
+                        f'^fast_body(%fbs: {STATE}):','%fast_one = arith.constant 1 : i32',
+                        '%fn = arith.addi %fi,%fast_one : i32',
+                        f'cf.br ^fast(%fbs,%fn : {STATE},i32)',f'^prepare(%ps: {STATE}):']
+                body += [f'%entry{i} = arith.constant {1000+i} : i32' for i in range(20)]
+                body += [f'cf.br ^slow(%ps,%zero,{entry} : {STATE},i32,{types})',
+                         f'^slow(%ss: {STATE},%si: i32,{arguments}):',
+                         '%slow_limit = arith.constant 3 : i32','%slow_more = arith.cmpi ult,%si,%slow_limit : i32',
+                         f'cf.cond_br %slow_more,^sum(%ss : {STATE}),^finish(%ss,%b : {STATE},{BF16})',
+                         f'^sum(%sum_state: {STATE}):']
+                for i in range(1,20):
+                    previous = '%d0' if i==1 else f'%sum{i-1}'
+                    body.append(f'%sum{i} = arith.addi {previous},%d{i} : i32')
+                body += ['%expected = arith.constant 20190 : i32',
+                         '%admitted = arith.cmpi eq,%sum19,%expected : i32',
+                         f'cf.cond_br %admitted,^slow_next(%sum_state : {STATE}),^finish(%sum_state,%a : {STATE},{BF16})',
+                         f'^slow_next(%sns: {STATE}):','%slow_one = arith.constant 1 : i32',
+                         '%sn = arith.addi %si,%slow_one : i32',
+                         f'cf.br ^slow(%sns,%sn,{names} : {STATE},i32,{types})',
+                         f'^finish(%es: {STATE},%result: {BF16}):',
+                         f'%done = "atlas.virtual_output_bf16"(%es,%result) {{index=0:i32}} : ({STATE},{BF16}) -> {STATE}',
+                         f'return %done : {STATE}']
+                source = wrap(body)
+                self.assertNotEqual(run(source,'--lower-atlas-virtual-to-machine').returncode,0)
+                spilled = run(source,'--spill-atlas-virtual','--verify-atlas-virtual-stream')
+                self.assertEqual(spilled.returncode,0,spilled.stderr)
+                self.assertIn('"atlas.virtual_restore"',spilled.stdout)
+                comparison = next(line for line in spilled.stdout.splitlines() if 'arith.cmpi slt,' in line)
+                fast_counter = comparison.split('arith.cmpi slt,',1)[1].split(',',1)[0].strip()
+                # It must remain a block argument, rather than a spill reload.
+                self.assertRegex(spilled.stdout,r'(?m)^\s*\^\w+\([^\n]*'+re.escape(fast_counter)+r': i32')
+                _,program = compile_program(spilled.stdout)
+                inputs = [(0x90000000,bytes([0x11])*2048),(0x90000800,bytes([0x22])*2048)]
+                memory = execute_copies(program,inputs)
+                wanted = inputs[0 if choose_fast else 1][1]
+                self.assertEqual(bytes(memory[0x90020000+i] for i in range(2048)),wanted)
+
+    def test_data_admission_guard_spills_without_losing_counted_dma_proof(self):
+        # Twenty loop-carried data scalars feed an equality admission guard.
+        # The separate unsigned counter and address recurrence must stay in
+        # SSA; protecting this data guard as an address guard exhausts XRF.
+        names = ', '.join(f'%d{i}' for i in range(20))
+        types = ', '.join(['i32']*20)
+        arguments = ', '.join(f'%d{i}: i32' for i in range(20))
+        body = [f'%s0 = "atlas.virtual_start"() : () -> {STATE}',
+                f'%s1,%initial = "atlas.virtual_input_bf16"(%s0) {{index=4:i32}} : ({STATE}) -> ({STATE},{BF16})',
+                '%zero = arith.constant 0 : i32','%base = arith.constant -1879048192 : i32']
+        body += [f'%entry{i} = arith.constant {i+1} : i32' for i in range(20)]
+        entry = ', '.join(f'%entry{i}' for i in range(20))
+        body += [f'cf.br ^loop(%s1,%zero,%base,%initial,{entry} : {STATE},i32,i32,{BF16},{types})',
+                 f'^loop(%ls: {STATE},%i: i32,%address: i32,%acc: {BF16},{arguments}):',
+                 '%limit = arith.constant 3 : i32','%more = arith.cmpi ult,%i,%limit : i32',
+                 f'cf.cond_br %more,^data(%ls : {STATE}),^exit(%ls,%acc : {STATE},{BF16})',
+                 f'^data(%ds: {STATE}):']
+        for i in range(1,20):
+            previous = '%d0' if i==1 else f'%sum{i-1}'
+            body.append(f'%sum{i} = arith.addi {previous},%d{i} : i32')
+        body += ['%expected = arith.constant 210 : i32',
+                 '%admitted = arith.cmpi eq,%sum19,%expected : i32',
+                 f'cf.cond_br %admitted,^load(%ds : {STATE}),^skip(%ds : {STATE})',
+                 f'^load(%read_state: {STATE}):','%bytes = arith.constant 2048 : i32',
+                 f'%loaded,%tile = "atlas.virtual_dma_load_bf16"(%read_state,%address,%bytes) : ({STATE},i32,i32) -> ({STATE},{BF16})',
+                 f'cf.br ^next(%loaded,%tile : {STATE},{BF16})',
+                 f'^skip(%skip_state: {STATE}):',f'cf.br ^next(%skip_state,%acc : {STATE},{BF16})',
+                 f'^next(%ns: {STATE},%result: {BF16}):',
+                 '%one = arith.constant 1 : i32','%stride = arith.constant 2048 : i32',
+                 '%in = arith.addi %i,%one : i32','%an = arith.addi %address,%stride : i32',
+                 f'cf.br ^loop(%ns,%in,%an,%result,{names} : {STATE},i32,i32,{BF16},{types})',
+                 f'^exit(%es: {STATE},%final: {BF16}):',
+                 f'%done = "atlas.virtual_output_bf16"(%es,%final) {{index=0:i32}} : ({STATE},{BF16}) -> {STATE}',
+                 f'return %done : {STATE}']
+        source = wrap(body)
+        self.assertNotEqual(run(source,'--lower-atlas-virtual-to-machine').returncode,0)
+        spilled = run(source,'--spill-atlas-virtual','--verify-atlas-virtual-stream')
+        self.assertEqual(spilled.returncode,0,spilled.stderr)
+        self.assertIn('"atlas.virtual_restore"',spilled.stdout)
+        machine,program = compile_program(spilled.stdout)
+        self.assertIn('dram_span = 6144 : i32',machine)
+        inputs = [(0x90000000+i*2048,bytes([0x40+i])*2048) for i in range(3)]
+        inputs.append((0x90002000,bytes([0x33])*2048))
+        memory = execute_copies(program,inputs)
+        self.assertEqual(bytes(memory[0x90020000+i] for i in range(2048)),inputs[2][1])
+
     def test_mixed_fp8_bf16_pressure_preserves_the_shared_register_file(self):
         source = pressure(16)
         start = f'%s0 = "atlas.virtual_start"() : () -> {STATE}'

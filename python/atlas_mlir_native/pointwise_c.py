@@ -23,7 +23,7 @@ from .binding import (
     dram_slots,
 )
 from .pointwise import (
-    prepare_plan,
+    prepare_execution_plan,
     prepare_source,
     selected_body_descriptor,
     virtual_program,
@@ -40,11 +40,21 @@ def prepare_c_package(
     runtime_linkage="separate",
     allow_math=False,
     bf16_policy=None,
+    rne_add_policy=None,
+    exp_policy=None,
 ):
-    precision = prepare_source(source, allow_math=allow_math, bf16_policy=bf16_policy)
+    precision = prepare_source(source, allow_math=allow_math, bf16_policy=bf16_policy,
+                               rne_add_policy=rne_add_policy, exp_policy=exp_policy)
+    return prepare_precision_c_package(precision, compiled, name, target_source=target_source,
+                                       runtime_linkage=runtime_linkage)
+
+
+def prepare_precision_c_package(precision, compiled, name, *, target_source, runtime_linkage="separate"):
+    """Replay a precision-owned target and render its explicit source operands."""
+    source = precision.source
     request = precision.request
     arity = len(request.nodes) - 1
-    plan = prepare_plan(request)
+    full_plan, plan, streaming = prepare_execution_plan(request)
     manifest = json.loads((compiled / "manifest.json").read_text())
     check_io_memory_manifest(manifest)
     verify_native_publication(
@@ -102,6 +112,7 @@ def prepare_c_package(
         "output_bytes": plan.packed_bytes,
         "output_physical_layouts": ["mn_tiles_bf16_pair_halves"],
         "tiling": plan.record(),
+        **({"streaming": streaming, "source_tiling": full_plan.record()} if streaming else {}),
     }
     if execution != expected or (compiled / "atlas-virtual.mlir").read_text() != virtual_program(
         plan, addresses, output, descriptor
@@ -135,7 +146,7 @@ def prepare_c_package(
     encode = render_bf16_codes_c if source_dtype == "bf16" else render_f32_array_c
     source_inputs = tuple(node.id for node in source.nodes if node.effect in {"input", "constant"})
     helpers = (
-        render_pointwise_c(plan, name)
+        render_pointwise_c(full_plan, name)
         + "\n"
         + "\n".join(
             encode(spec, count, name + f"_encode_{i}")
@@ -149,7 +160,8 @@ def prepare_c_package(
         name,
         target_source=target_source,
         runtime_linkage=runtime_linkage,
-        packed_sizes=sizes,
+        packed_sizes=(*full_plan.input_packed_bytes, full_plan.packed_bytes),
+        streaming=streaming,
         tile_bytes=plan.tile_bytes,
         helpers=helpers,
         source_dtype=source_dtype,
@@ -158,6 +170,7 @@ def prepare_c_package(
     return {
         **io_record,
         "precision_plan": precision.record(),
+        **({"streaming": streaming} if streaming else {}),
         "input_node_ids": list(source_inputs),
         "output_node_ids": list(source.outputs),
         "native_manifest_sha256": hashlib.sha256((compiled / "manifest.json").read_bytes()).hexdigest(),

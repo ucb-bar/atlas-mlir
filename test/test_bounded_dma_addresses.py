@@ -18,6 +18,28 @@ def loop_source(count):
     return SOURCE.replace("%count = arith.constant 3", f"%count = arith.constant {count}")
 
 
+def pointer_loop_source(*, start=0x90000000, distance=3072, step=1024):
+    """Use the advancing A address itself as the unsigned loop guard."""
+    def signed(value):
+        return value if value < 2**31 else value-2**32
+    source = SOURCE.replace('  %zero = arith.constant 0 : i32\n', '')
+    source = source.replace('%s, %zero, %a, %w, %initial : !atlas.virtual_state, i32, i32, i32, !atlas.virtual_bf16',
+                            '%s, %a, %w, %initial : !atlas.virtual_state, i32, i32, !atlas.virtual_bf16')
+    source = source.replace('%ls: !atlas.virtual_state, %k: i32, %ap: i32',
+                            '%ls: !atlas.virtual_state, %ap: i32')
+    source = source.replace('%a = arith.constant -1879048192',
+                            f'%a = arith.constant {signed(start)}')
+    source = source.replace('%count = arith.constant 3',
+                            f'%count = arith.constant {signed(start+distance)}')
+    source = source.replace('cmpi ult, %k, %count', 'cmpi ult, %ap, %count')
+    source = source.replace('  %one = arith.constant 1 : i32\n',
+                            f'  %advance = arith.constant {signed(step)} : i32\n')
+    source = source.replace('  %kn = arith.addi %k, %one : i32\n', '')
+    source = source.replace('%an = arith.addi %ap, %bytes', '%an = arith.addi %ap, %advance')
+    return source.replace('%s6, %kn, %an, %wn, %tile : !atlas.virtual_state, i32, i32, i32, !atlas.virtual_bf16',
+                          '%s6, %an, %wn, %tile : !atlas.virtual_state, i32, i32, !atlas.virtual_bf16')
+
+
 def loop_inputs(count):
     """Integer-valued sparse contractions, independently packed and evaluated.
 
@@ -46,6 +68,55 @@ def loop_inputs(count):
 
 
 class BoundedDMAAddressTest(unittest.TestCase):
+    def test_pointer_guard_uses_ceil_trip_count_without_a_separate_counter(self):
+        for distance, step, span in ((1, 1024, 1024), (2049, 1024, 3072),
+                                     (3072, 1024, 3072), (3104, 1536, 4096)):
+            with self.subTest(distance=distance, step=step):
+                source = pointer_loop_source(distance=distance, step=step)
+                self.assertNotIn('%k:', source)
+                machine = run('atlas-opt', source, *PIPELINE)
+                self.assertEqual(machine.returncode, 0, machine.stderr[:2000])
+                self.assertIn(f'dram_span = {span} : i32', machine.stdout)
+                checked = run('atlas-opt', machine.stdout,
+                              '--verify-atlas-generated-schedule', '--verify-atlas-timing')
+                self.assertEqual(checked.returncode, 0, checked.stderr[:2000])
+
+    def test_pointer_guard_replay_rejects_forged_start_limit_and_step(self):
+        machine = run('atlas-opt', pointer_loop_source(distance=3104, step=1536), *PIPELINE)
+        self.assertEqual(machine.returncode, 0, machine.stderr[:2000])
+        for old, new in (('constant = -1879048192 : i32', 'constant = -1879048160 : i32'),
+                         ('constant = -1879045088 : i32', 'constant = -1879043552 : i32'),
+                         ('constant = 1536 : i32', 'constant = 1568 : i32'),
+                         ('dram_span = 4096 : i32', 'dram_span = 5632 : i32')):
+            with self.subTest(field=old):
+                self.assertIn(old, machine.stdout)
+                checked = run('atlas-opt', machine.stdout.replace(old, new, 1),
+                              '--verify-atlas-generated-schedule')
+                self.assertNotEqual(checked.returncode, 0)
+                self.assertIn('bounded DMA address', checked.stderr)
+
+    def test_pointer_guard_refuses_unknown_nonincreasing_and_wrapped_exit(self):
+        source = pointer_loop_source()
+        invalid = [pointer_loop_source(distance=0), pointer_loop_source(distance=-1024),
+                   pointer_loop_source(step=0), pointer_loop_source(step=2**32-1024),
+                   # The first DMA tile fits DRAM, but the guard's
+                   # final update wraps and would incorrectly enter again.
+                   pointer_loop_source(start=0xfffffc00, distance=1023),
+                   source.replace('cmpi ult', 'cmpi ule'),
+                   source.replace('@stream()', '@stream(%unknown: i32)').replace(
+                       '%an = arith.addi %ap, %advance', '%an = arith.addi %ap, %unknown'),
+                   source.replace('@stream()', '@stream(%unknown: i32)').replace(
+                       'cmpi ult, %ap, %count', 'cmpi ult, %ap, %unknown'),
+                   source.replace('@stream()', '@stream(%unknown: i32)').replace(
+                       'cf.br ^loop(%s, %a, %w', 'cf.br ^loop(%s, %unknown, %w'),
+                   source.replace('%wn = arith.addi %wp, %bytes', '%wn = arith.addi %wp, %ap'),
+                   source.replace('%w = arith.constant -1878982656', '%w = arith.constant -1024')]
+        for index, changed in enumerate(invalid):
+            with self.subTest(case=index):
+                checked = run('atlas-opt', changed, '--verify-atlas-virtual-stream')
+                self.assertNotEqual(checked.returncode, 0)
+                self.assertEqual(checked.stdout, '')
+
     def test_k_loop_survives_waits_timing_and_reparse(self):
         result = run("atlas-opt", SOURCE, *PIPELINE)
         self.assertEqual(result.returncode, 0, result.stderr[:2000])
