@@ -6,15 +6,19 @@ mix another runtime value into the unary preparation.
 """
 
 POLICY = "selected-unary-math-host-preparation-v1"
+SCOPE_POLICY = "integer-inputs-and-bound-constants-v1"
 
 
-def select(source, roots, host_kind, *, excluded=()):
+def select(source, roots, host_kind, *, excluded=(), input_boundaries=None):
     """Return computation IDs and checked host kinds in the preparation closure.
 
     ``host_kind`` checks the existing emitter for one unchanged source slice.
     Forward edges may reuse preparation ancestors and exact constant-derived
     source values, but may not introduce unrelated runtime boundary values or
-    computations. Explicit device schedules are supplied as exclusions.
+    computations. Explicit device schedules are supplied as exclusions. With
+    ``input_boundaries``, every root must have a fully supported ancestry ending
+    at constants or those explicitly admitted inputs; unsupported or excluded
+    computations cannot silently become preparation boundaries.
     """
     excluded = set(excluded)
     selected = {}
@@ -25,6 +29,28 @@ def select(source, roots, host_kind, *, excluded=()):
             node = source.node(key)
             kinds[key] = (host_kind(node) if node.effect == "pure" and key not in excluded else None)
         return kinds[key]
+
+    if input_boundaries is not None:
+        input_boundaries = set(input_boundaries)
+        provenance = {}
+        pending = [(key, False) for key in roots]
+        while pending:
+            key, checked_inputs = pending.pop()
+            if key in provenance:
+                continue
+            node = source.node(key)
+            if node.effect == "constant":
+                provenance[key] = True
+            elif node.effect == "input":
+                provenance[key] = key in input_boundaries
+            elif not node.inputs or kind(key) is None:
+                provenance[key] = False
+            elif checked_inputs:
+                provenance[key] = all(provenance[value] for value in node.inputs)
+            else:
+                pending.append((key, True))
+                pending.extend((value, False) for value in node.inputs)
+        roots = tuple(key for key in roots if provenance[key])
 
     pending = list(roots)
     while pending:

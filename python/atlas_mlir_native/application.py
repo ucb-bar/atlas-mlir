@@ -156,6 +156,35 @@ class AtlasApplicationAdapter:
 
     def __init__(self, policy, *, original_source_sha256):
         self.original_source_sha256 = original_source_sha256
+        self.host_preparation_scope = None
+        if "host_preparation_scope" in policy:
+            from .host_unary_preparation import SCOPE_POLICY
+            from merlin.semantic_compiler.model import TensorType
+
+            scope = policy["host_preparation_scope"]
+            if (not isinstance(scope, dict) or set(scope) != {"policy", "constant_inputs"}
+                    or scope["policy"] != SCOPE_POLICY or not isinstance(scope["constant_inputs"], list)):
+                raise NativeCompilationError("unsupported_semantics", "host preparation scope differs")
+            identifiers = set()
+            for entry in scope["constant_inputs"]:
+                if (not isinstance(entry, dict) or set(entry) != {"node_id", "type"}
+                        or not isinstance(entry["node_id"], str) or not entry["node_id"]
+                        or entry["node_id"] in identifiers):
+                    raise NativeCompilationError("unsupported_semantics", "host preparation constant input contract differs")
+                try:
+                    TensorType.from_record(entry["type"])
+                except (TypeError, ValueError, KeyError) as error:
+                    raise NativeCompilationError("unsupported_semantics", "host preparation constant input type differs") from error
+                identifiers.add(entry["node_id"])
+            self.__init__({key: value for key, value in policy.items() if key != "host_preparation_scope"},
+                          original_source_sha256=original_source_sha256)
+            if not self.host_unary_math:
+                raise NativeCompilationError("unsupported_semantics", "host preparation scope requires selected unary math")
+            # Payload authentication belongs to the caller's existing immutable
+            # parameter binding. Planning checks this explicit source boundary
+            # contract, and never infers a constant from a floating input type.
+            self.host_preparation_scope = json.loads(json.dumps(scope))
+            return
         if "activation_quantizer" in policy:
             route = policy["activation_quantizer"]
             if route not in {"host", "device"}:
@@ -809,15 +838,6 @@ class AtlasApplicationAdapter:
             if node.op == "source_f32_matmul_unqualified"
             and node.id not in admitted_contractions and self._is_host_k1(source, node)
         }
-        if self.already_quantized and any(
-            node.op == "source_f32_matmul_unqualified"
-            and node.id not in admitted_contractions and node.id not in host_k1 for node in pure
-        ):
-            raise NativeCompilationError(
-                "unsupported_semantics",
-                "already-quantized intake refuses floating contractions requiring operand recoding; "
-                "provide authored code/exponent operands or a separately qualified unchanged-weight lowering",
-            )
         fused_norms = {}
         if self.rmsnorm_schedules:
             from merlin.semantic_compiler.rmsnorm_source import recognize_rmsnorm
@@ -859,6 +879,17 @@ class AtlasApplicationAdapter:
         host_preparation, host_preparation_receipt = self._host_unary_preparation(
             source, host_k1, excluded=fused_nodes | set(self.mxu1_contraction_schedules)
         )
+        if self.host_preparation_scope is not None:
+            host_k1 &= host_preparation.keys()
+        if self.already_quantized and any(
+            node.op == "source_f32_matmul_unqualified"
+            and node.id not in admitted_contractions and node.id not in host_k1 for node in pure
+        ):
+            raise NativeCompilationError(
+                "unsupported_semantics",
+                "already-quantized intake refuses floating contractions requiring operand recoding; "
+                "provide authored code/exponent operands or a separately qualified unchanged-weight lowering",
+            )
         indices = {node.id: index for index, node in enumerate(pure)}
         claimed, regions = set(), []
 
@@ -1085,11 +1116,12 @@ class AtlasApplicationAdapter:
                 add((node.id,), "layout")
             elif node.op in self.host_integer_ops:
                 add((node.id,), "integer")
-            elif self.host_unary_math and node.op in self.host_unary_math["operations"]:
+            elif (self.host_preparation_scope is None and self.host_unary_math
+                  and node.op in self.host_unary_math["operations"]):
                 add((node.id,), "unary_math")
             elif self.already_quantized and node.op in (*self.host_float_arithmetic, *self.host_float_casts) and self._supports_device_source(source, node, "exact_float_device"):
                 add((node.id,), "exact_float_device")
-            elif node.op in self.host_float_arithmetic:
+            elif self.host_preparation_scope is None and node.op in self.host_float_arithmetic:
                 add((node.id,), "float_arithmetic")
             elif node.op in self.host_float_casts:
                 add((node.id,), "float_cast")
@@ -1173,9 +1205,6 @@ class AtlasApplicationAdapter:
 
         roots = tuple(node.id for node in source.nodes if node.effect == "pure"
                       and node.op in self.host_unary_math["operations"])
-        if not roots:
-            return {}, ""
-
         def host_kind(node):
             if node.id in host_k1:
                 kind, emitter = "host_k1_contraction", _host_k1_c
@@ -1198,14 +1227,41 @@ class AtlasApplicationAdapter:
                 return None
             return kind
 
-        selected = select(source, roots, host_kind, excluded=excluded)
+        boundaries = None
+        scope_receipt = {}
+        if self.host_preparation_scope is not None:
+            boundaries = {node.id for node in source.nodes if node.effect == "input"
+                          and node.type.dtype.startswith(("i", "u"))
+                          and node.type.dtype[1:].isdigit()}
+            for entry in self.host_preparation_scope["constant_inputs"]:
+                try:
+                    node = source.node(entry["node_id"])
+                except KeyError as error:
+                    raise NativeCompilationError("unsupported_semantics", "host preparation constant input is absent") from error
+                if node.effect != "input" or node.type.record() != entry["type"]:
+                    raise NativeCompilationError("unsupported_semantics", "host preparation constant input source type differs")
+                boundaries.add(node.id)
+            scope_receipt = {
+                "scope": self.host_preparation_scope,
+                "constant_input_authentication": "immutable parameter binding authenticates payload bytes",
+            }
+        if not roots:
+            return {}, ""
+        selected = select(source, roots, host_kind, excluded=excluded, input_boundaries=boundaries)
+        if boundaries is not None:
+            used = {key for node in source.nodes if node.id in selected for key in node.inputs}
+            scope_receipt["input_boundaries"] = [
+                {"node_id": node.id, "type": node.type.record()}
+                for node in source.nodes if node.id in boundaries and node.id in used
+            ]
         receipt = json.dumps({
             "policy": POLICY, "source_request_digest": source.digest(),
-            "selected_unary_nodes": list(roots),
+            "selected_unary_nodes": [key for key in roots if key in selected],
             "source_nodes": [node.id for node in source.nodes if node.id in selected],
             "placement": "host", "arithmetic_rewrite": "none",
             "forward_boundary": "stop at operands outside preparation or supported constant-derived values",
             "qualification": "existing emitter arithmetic and selected unary library/effect requirements remain in force",
+            **scope_receipt,
         }, sort_keys=True, separators=(",", ":"))
         return selected, receipt
 

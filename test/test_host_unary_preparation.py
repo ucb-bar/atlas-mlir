@@ -1,11 +1,12 @@
 """Selected unary preparation stays on the host without moving model math."""
 
 from dataclasses import replace
+import json
 
 import pytest
 
 from atlas_mlir_native.application import AtlasApplicationAdapter
-from atlas_mlir_native.host_unary_preparation import POLICY
+from atlas_mlir_native.host_unary_preparation import POLICY, SCOPE_POLICY
 from merlin.compile.semantic_regions import extract_semantic_region
 from merlin.semantic_compiler.model import ConstantBinding, IndexMap, SemanticNode, TensorType, pointwise_identity_maps
 from merlin.semantic_compiler.target_binding import NativeCompilationError
@@ -163,3 +164,107 @@ def test_global_host_arithmetic_selection_still_refuses_unrelated_broadcast():
                      input_storages=(*source.input_storages, (model.id, "external"), (gain.id, "external")))
     with pytest.raises(NativeCompilationError, match="float arithmetic source types, indexing or numerical policy differ"):
         adapter().plan(source)
+
+
+def scoped_policy(source):
+    # This boundary is an explicit immutable parameter contract, never inferred from
+    # a floating input's shape or graph position. The caller authenticates bytes.
+    return {**policy(), "host_preparation_scope": {
+        "policy": SCOPE_POLICY,
+        "constant_inputs": [{"node_id": "frequencies", "type": source.node("frequencies").type.record()}],
+    }}
+
+
+def scoped_adapter(source, selected=None):
+    selected = scoped_policy(source) if selected is None else selected
+    return AtlasApplicationAdapter(selected, original_source_sha256=selected["source_sha256"])
+
+
+def test_scoped_preparation_admits_only_integer_and_explicit_constant_boundaries():
+    source = rotary_source()
+    before = source.record()
+    selected = scoped_adapter(source).plan(source)
+    assert all(alternative.placement == "host" for alternative in selected.selected)
+    receipt = json.loads(dict(selected.selected[0].metadata)["host_preparation"])
+    assert {entry["node_id"] for entry in receipt["input_boundaries"]} == {"positions", "frequencies"}
+    assert receipt["scope"] == scoped_policy(source)["host_preparation_scope"]
+    assert set(receipt["selected_unary_nodes"]) == {"sin", "cos"}
+    assert source.record() == before
+
+
+def test_scoped_host_arithmetic_leaves_unrelated_broadcast_on_existing_device_route():
+    source = rotary_source()
+    type_ = source.node("combined").type
+    model = SemanticNode("model", "input", (), type_, effect="input")
+    gain = SemanticNode("gain", "input", (), replace(type_, shape=(2, 1)), effect="input")
+    identity = pointwise_identity_maps(2, 1)[0]
+    broadcast = IndexMap(2, ((1, 0), (0, 0)), (0, 0))
+    output = SemanticNode("model_scaled", "f32_mul", (model.id, gain.id), type_,
+                          (("numeric_semantics", "ieee754-f32-mul-rne-v1"),),
+                          index_maps=(identity, broadcast, identity))
+    source = replace(source, nodes=(*source.nodes, model, gain, output),
+                     outputs=(*source.outputs, output.id), output_storages=("external", "external"),
+                     input_storages=(*source.input_storages, (model.id, "external"), (gain.id, "external")))
+    by_id = by_source_id(source, scoped_adapter(source).plan(source))
+    assert by_id["rotary"].placement == "host"
+    assert by_id["model_scaled"].placement == "accelerator"
+    assert dict(by_id["model_scaled"].metadata)["kind"] == "pointwise"
+    assert "host_preparation" not in dict(by_id["model_scaled"].metadata)
+
+
+@pytest.mark.parametrize("dependency", ["float-input", "unsupported-computation", "device-exclusion"])
+def test_scoped_activation_dependent_trig_cannot_become_host_preparation(dependency):
+    source = rotary_source()
+    selected = scoped_policy(source)
+    if dependency == "float-input":
+        selected["host_preparation_scope"]["constant_inputs"] = []
+    elif dependency == "unsupported-computation":
+        # Even integer-derived unsupported computations cannot be silently
+        # treated as host preparation input boundaries.
+        source = replace(source, nodes=tuple(replace(node, op="unsupported_activation")
+                         if node.id == "position_offset" else node for node in source.nodes))
+    excluded = {"y"} if dependency == "device-exclusion" else set()
+    adapter_ = scoped_adapter(source, selected)
+    closure, _ = adapter_._host_unary_preparation(source, {"y"}, excluded=excluded)
+    assert closure == {}
+    if dependency == "float-input":
+        with pytest.raises(NativeCompilationError, match="floating contractions requiring operand recoding"):
+            adapter_.plan(source)
+
+
+def test_scoped_direct_activation_trig_has_no_host_alternative():
+    source = rotary_source()
+    type_ = source.node("sin").type
+    model = SemanticNode("model", "input", (), type_, effect="input")
+    trig = replace(source.node("sin"), id="model_sin", inputs=(model.id,))
+    source = replace(source, nodes=(*source.nodes, model, trig), outputs=(*source.outputs, trig.id),
+                     output_storages=("external", "external"),
+                     input_storages=(*source.input_storages, (model.id, "external")))
+    adapter_ = scoped_adapter(source)
+    closure, receipt = adapter_._host_unary_preparation(source, {"y"}, excluded=set())
+    assert "sin" in closure and "model_sin" not in closure
+    assert set(json.loads(receipt)["selected_unary_nodes"]) == {"sin", "cos"}
+    with pytest.raises(NativeCompilationError, match="no compiled application route for model_sin"):
+        adapter_.plan(source)
+
+
+@pytest.mark.parametrize("mutation", ["unknown-policy", "duplicate", "extra-field", "type", "absent", "shape"])
+def test_scope_constant_input_contract_is_validated(mutation):
+    source = rotary_source()
+    selected = scoped_policy(source)
+    scope = selected["host_preparation_scope"]
+    entry = scope["constant_inputs"][0]
+    if mutation == "unknown-policy":
+        scope["policy"] = "unknown"
+    elif mutation == "duplicate":
+        scope["constant_inputs"].append(dict(entry))
+    elif mutation == "extra-field":
+        entry["sha256"] = "1" * 64
+    elif mutation == "type":
+        entry["type"] = {"dtype": "bf16"}
+    elif mutation == "absent":
+        entry["node_id"] = "absent"
+    else:
+        entry["type"]["shape"] = [3, 1]
+    with pytest.raises(NativeCompilationError, match="host preparation"):
+        scoped_adapter(source, selected).plan(source)
