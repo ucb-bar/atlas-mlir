@@ -6,9 +6,6 @@ from pathlib import Path
 from . import exact_float_device as device
 from merlin.semantic_compiler.model import pointwise_identity_maps
 
-CHUNK_ELEMENTS=2048
-ADD_CHUNK_ELEMENTS=1024
-
 def _json(r):return (json.dumps(r,sort_keys=True,indent=2)+"\n").encode()
 
 @dataclass(frozen=True)
@@ -19,7 +16,7 @@ class FloatSchedule:
     @property
     def source(self):return self.plan.source
     @property
-    def chunk_elements(self):return ADD_CHUNK_ELEMENTS if self.plan.op in ("bf16_add","bf16_sub") else CHUNK_ELEMENTS
+    def chunk_elements(self):return device.chunk_elements(self.plan)
     def record(self):
         return dict(schema="atlas.exact_float_schedule.v1",source_request_digest=self.source.digest(),
                     operation=self.plan.op,chunk_elements=self.chunk_elements,input_node_ids=[n.id for n in self.plan.operands],
@@ -30,7 +27,7 @@ class FloatSchedule:
 
 def prepare_plan(source):
     p=device.prepare_plan(source);bodies=[];sizes={};launches=[]
-    chunk=ADD_CHUNK_ELEMENTS if p.op in ("bf16_add","bf16_sub") else CHUNK_ELEMENTS
+    chunk=device.chunk_elements(p)
     for start in range(0,p.count,chunk):
         size=min(chunk,p.count-start)
         if size not in sizes:

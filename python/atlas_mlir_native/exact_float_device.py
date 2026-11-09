@@ -16,6 +16,24 @@ OPS = {"bf16_to_f32": (2,4,"bf16-to-f32-exact-v1"),
        "bf16_add": (2,2,"ieee754-bf16-add-rne-v1"),
        "bf16_sub": (2,2,"ieee754-bf16-sub-rne-v1")}
 
+# Tile-aligned policies leave at least 3% of the unchanged instruction budget
+# unused in the checked conversion and sign-flip bodies. Binary operations
+# retain their existing tile size because both numeric arms are charged.
+MAX_LEAF_ELEMENTS = {"bf16_to_f32": 20480, "f32_to_bf16": 18432,
+                     "bf16_neg": 43008, "f32_neg": 43008,
+                     "bf16_add": 1024, "bf16_sub": 1024}
+
+
+def chunk_elements(plan):
+    """Respect both the operation policy and the selected I/O window."""
+    available = plan.descriptor()["io_memory_bytes"] - 32
+    per_element = len(plan.operands) * plan.width + plan.output_width
+    capacity = available // per_element
+    capacity -= capacity % plan.tile_lanes
+    if capacity <= 0:
+        raise ValueError("exact float cannot fit a tile in selected I/O window")
+    return min(MAX_LEAF_ELEMENTS[plan.op], capacity)
+
 @dataclass(frozen=True)
 class FloatPlan:
     source: object
@@ -161,8 +179,8 @@ def compile_source(snapshot,region,*,target_source,destination,limits):
     from merlin.semantic_compiler.target_binding import verify_native_publication
     from .binding import NATIVE_CHECKS,RTL_REVISION,_run
     p=prepare_plan(region)
-    maximum=1024 if p.op in ("bf16_add","bf16_sub") else 2048
-    if p.count>maximum: raise ValueError(f"exact float leaf requires at most{maximum} elements")
+    maximum=MAX_LEAF_ELEMENTS[p.op]
+    if p.count>maximum: raise ValueError(f"exact float leaf requires at most {maximum} elements")
     if p.workspace_bytes>p.descriptor()["io_memory_bytes"]: raise ValueError("exact float exceeds selected I/O window")
     tools=Path(os.environ.get("ATLAS_OOT_BIN_DIR",Path(target_source)/"build/bin"))
     virtual=virtual_program(p)
@@ -170,13 +188,22 @@ def compile_source(snapshot,region,*,target_source,destination,limits):
     _run([str(tools/"atlas-opt"),*NATIVE_CHECKS,"--verify-atlas-timing","-"],input_text=machine)
     program=json.loads(_run([str(tools/"atlas-emit"),"--program-json","-"],input_text=machine))
     if program.get("selected_rtl_revision")!=RTL_REVISION: raise ValueError("exact float emitter RTL differs")
+    from .restoration_budget import instruction_bound
+    from merlin.semantic_compiler.target_binding import NativeCompilationError
+    try:
+        bound=instruction_bound(virtual,machine,program)
+    except (ValueError,KeyError,IndexError) as error:
+        raise NativeCompilationError("resource_limit","exact float instruction bound is unproved: "+str(error)) from error
+    if not bound["admitted"]:
+        raise NativeCompilationError("resource_limit","exact float worst-case instruction bound exceeds 1000000: "+str(bound["instruction_bound"]))
     binary=b"".join(r["word_u32"].to_bytes(4,"little") for r in program["instructions"])
     budget=current_codegen_options().program_size_limit_bytes
     if budget is not None and len(binary)>budget: raise ValueError("exact float exceeds selected program budget")
     encoded=lambda r:(json.dumps(r,sort_keys=True,indent=2)+"\n").encode()
     files={"source-request.json":encoded(region.record()),"float-plan.json":encoded(p.record()),
            "execution_plan.json":encoded(p.record()),"atlas-virtual.mlir":virtual.encode(),
-           "atlas-machine.mlir":machine.encode(),"physical-program.json":encoded(program),"program.bin":binary}
+           "atlas-machine.mlir":machine.encode(),"physical-program.json":encoded(program),"program.bin":binary,
+           "float-instruction-bound.json":encoded(bound)}
     destination=Path(destination);destination.mkdir(parents=True,exist_ok=False)
     for filename,data in files.items():(destination/filename).write_bytes(data)
     artifacts={k:hashlib.sha256(v).hexdigest() for k,v in files.items()}
@@ -214,6 +241,10 @@ def prepare_c_package(region,compiled,name,*,target_source,runtime_linkage="sepa
     program=json.loads(_run([str(tools/"atlas-emit"),"--program-json","-"],input_text=machine))
     binary=b"".join(r["word_u32"].to_bytes(4,"little") for r in program["instructions"])
     if binary!=(compiled/"program.bin").read_bytes():raise ValueError("exact float binary differs from source replay")
+    from .restoration_budget import instruction_bound
+    bound=instruction_bound(virtual_program(p),machine,program)
+    if not bound["admitted"] or json.loads((compiled/"float-instruction-bound.json").read_text())!=bound:
+        raise ValueError("exact float instruction bound differs or exceeds default")
     upper=name.upper();n=len(p.operands);logical=p.count*p.width;obytes=p.count*p.output_width
     states=[("ctx","sizeof(*ctx)"),("region","sizeof(*region)"),("region->host","sizeof(*region->host)"),
             ("region->workspace",f"{p.workspace_bytes}u"),("inputs",f"{n}u*sizeof(*inputs)"),("outputs","sizeof(*outputs)")]

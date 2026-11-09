@@ -12,6 +12,8 @@ import sys
 import tempfile
 import unittest
 from atlas_mlir_native import exact_float_application as app
+from atlas_mlir_native import exact_float_device as device
+from merlin.semantic_compiler.codegen import CodegenOptions,codegen_options
 from test_exact_float_device import request,host_reference,scalar_execute,OPS
 ROOT=Path(__file__).resolve().parents[1]
 BIN=Path(os.environ.get('ATLAS_OOT_BIN_DIR',ROOT/'build/bin'))
@@ -19,24 +21,39 @@ BIN=Path(os.environ.get('ATLAS_OOT_BIN_DIR',ROOT/'build/bin'))
 class ExactFloatScheduleTest(unittest.TestCase):
     def test_full_and_tail_source_mapping(self):
         for op in OPS:
-            p=app.prepare_plan(request(op,2051))
+            chunk=app.prepare_plan(request(op,device.MAX_LEAF_ELEMENTS[op]+3)).chunk_elements
+            count=2*chunk+3
+            p=app.prepare_plan(request(op,count))
             self.assertEqual(len(p.bodies),2)
-            binary=op in ('bf16_add','bf16_sub');chunk=1024 if binary else 2048
-            offsets=[0,1024,2048] if binary else [0,2048]
+            offsets=[0,chunk,2*chunk]
             self.assertEqual(len(p.launches),len(offsets))
+            self.assertEqual([row['body_index'] for row in p.launches],[0,0,1])
             self.assertEqual([r['input_offset_bytes'] for r in p.launches],[i*p.plan.width for i in offsets])
-            self.assertEqual([r['output_bytes'] for r in p.launches],[min(chunk,2051-i)*p.plan.output_width for i in offsets])
+            self.assertEqual([r['output_bytes'] for r in p.launches],[min(chunk,count-i)*p.plan.output_width for i in offsets])
+
+    def test_selected_io_window_caps_larger_chunks(self):
+        for window,expected in ((262144,32256),(67108864,43008)):
+            with codegen_options(CodegenOptions(io_memory_bytes=window)):
+                p=app.prepare_plan(request('f32_neg',100000))
+                self.assertEqual(p.chunk_elements,expected)
+                self.assertTrue(all(device.prepare_plan(body).workspace_bytes<=window for body in p.bodies))
 
 @unittest.skipUnless((BIN/'atlas-opt').is_file(),'select built Atlas tools')
 class ExactFloatCompilationTest(unittest.TestCase):
     def test_every_op_two_chunks_c_export_and_rehashed_slice_rejection(self):
         for op in OPS:
-            source=request(op,2051)
+            chunk=app.prepare_plan(request(op,device.MAX_LEAF_ELEMENTS[op]+3)).chunk_elements
+            source=request(op,chunk+3)
             with tempfile.TemporaryDirectory(prefix='atlas-float-export-') as directory:
                 directory=Path(directory);compiled=directory/'compiled'
                 manifest=app.compile_source(None,source,target_source=ROOT,destination=compiled,limits=None)
                 exported=app.prepare_c_package(source,compiled,'float_test',target_source=ROOT)
-                self.assertEqual(exported.description['device_launch_schedule']['total_launches'],3 if op in ('bf16_add','bf16_sub') else 2)
+                self.assertEqual(exported.description['device_launch_schedule']['total_launches'],2)
+                for segment in manifest['segments']:
+                    bound=json.loads((compiled/segment['path']/'float-instruction-bound.json').read_text())
+                    self.assertTrue(bound['admitted'])
+                    self.assertEqual(bound['max_instructions'],1000000)
+                    self.assertLessEqual(bound['instruction_bound'],1000000)
                 package=directory/'package'
                 for name,data in exported.files.items():
                     (package/name).parent.mkdir(parents=True,exist_ok=True);(package/name).write_bytes(data)
@@ -64,7 +81,7 @@ class ExactFloatModelTest(unittest.TestCase):
             directory=Path(directory)
             for op in OPS:
                 # Two genuine chunks prove atomic publication on late failure.
-                count=2051 if op in ('bf16_to_f32','f32_to_bf16','bf16_add','bf16_sub') else 35
+                count=app.prepare_plan(request(op,device.MAX_LEAF_ELEMENTS[op]+3)).chunk_elements+3
                 source=request(op,count);p=app.prepare_plan(source);compiled=directory/op
                 manifest=app.compile_source(None,source,target_source=ROOT,destination=compiled,limits=None)
                 exported=app.prepare_c_package(source,compiled,'float_test',target_source=ROOT)

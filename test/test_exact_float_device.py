@@ -9,7 +9,9 @@ import shutil
 import subprocess
 import tempfile
 import unittest
-from atlas_mlir_native.exact_float_device import prepare_plan,machine_program,OPS
+from unittest.mock import patch
+from hashlib import sha256
+from atlas_mlir_native.exact_float_device import prepare_plan,machine_program,OPS,MAX_LEAF_ELEMENTS,compile_source,prepare_c_package
 from atlas_mlir_native.binding import TARGET_IDENTITY
 from atlas_mlir_native.limits import DEFAULT_FUNCTIONAL_INSTRUCTION_LIMIT
 from merlin.semantic_compiler.model import TensorType,pointwise_identity_maps
@@ -106,13 +108,35 @@ class ExactFloatTypedTest(unittest.TestCase):
         return b''.join(row['word_u32'].to_bytes(4,'little') for row in json.loads(r.stdout)['instructions'])
     def test_all_operations_use_complete_standard_contracts(self):
         for op in OPS:
-            for count in (1,35,1024 if op in ("bf16_add","bf16_sub") else 2048):
+            for count in (1,35,MAX_LEAF_ELEMENTS[op]):
                 source=request(op,count);machine=self.lower(source)
                 r=subprocess.run([str(BIN/'atlas-opt'),'--verify-atlas-generated-schedule','--verify-atlas-machine-stream','--verify-atlas-timing','-'],input=machine,text=True,capture_output=True,timeout=30)
                 self.assertEqual(r.returncode,0,r.stderr)
                 for contract in ('virtual_dma_contract','virtual_tile_contract','virtual_cfg_contract','virtual_source_memory_contract','virtual_buffer_contract'):
                     self.assertIn(contract,machine)
                 self.assertNotIn('exact_float_contract',machine)
+
+    def test_rehashed_bound_rejected_by_source_replay(self):
+        source=request('bf16_to_f32',35)
+        with tempfile.TemporaryDirectory(prefix='atlas-float-bound-') as directory:
+            compiled=Path(directory)/'compiled'
+            manifest=compile_source(None,source,target_source=ROOT,destination=compiled,limits=None)
+            proof=compiled/'float-instruction-bound.json'
+            record=json.loads(proof.read_text());record['instruction_bound']-=1
+            proof.write_text(json.dumps(record))
+            manifest['stage_artifacts'][proof.name]=sha256(proof.read_bytes()).hexdigest()
+            (compiled/'manifest.json').write_text(json.dumps(manifest))
+            with self.assertRaisesRegex(ValueError,'instruction bound differs'):
+                prepare_c_package(source,compiled,'changed_bound',target_source=ROOT)
+
+    def test_oversized_physical_bound_refused_without_changing_limit(self):
+        from merlin.semantic_compiler.target_binding import NativeCompilationError
+        source=request('bf16_to_f32',21504)
+        with tempfile.TemporaryDirectory(prefix='atlas-float-limit-') as directory:
+            # Bypass only the chunk policy to exercise the real bound gate.
+            with patch.dict(MAX_LEAF_ELEMENTS,{'bf16_to_f32':21504}):
+                with self.assertRaisesRegex(NativeCompilationError,'exceeds 1000000'):
+                    compile_source(None,source,target_source=ROOT,destination=Path(directory)/'compiled',limits=None)
     def test_instruction_domain_status_and_module_mutations_rejected(self):
         machine=self.lower(request('bf16_add',35))
         mutations=[machine.replace('direction = "store"','direction = "load"',1),
