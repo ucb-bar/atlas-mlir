@@ -186,7 +186,7 @@ class ResidentGraphTest(unittest.TestCase):
         self.assertEqual(plan.buffer_bytes, (18432, 9216))
         self.assertEqual(plan.tiles, 9)
         self.assertEqual(plan.body_request().nodes[0].type.shape, (32, 32))
-        for code in (122, 127, 128):
+        for code in (0, 117, 119, 120, 122, 127, 128, 129, 254, 255):
             current = prepare_plan(pack_request(code=code))
             self.assertEqual(
                 run(
@@ -196,8 +196,9 @@ class ResidentGraphTest(unittest.TestCase):
                 ).returncode,
                 0,
             )
-        with self.assertRaises(NativeCompilationError):
-            prepare_plan(pack_request(code=129))
+        for code in (-1, 256, True):
+            with self.subTest(invalid_scale=code), self.assertRaises(NativeCompilationError):
+                prepare_plan(pack_request(code=code))
         wrong = replace(
             request.nodes[-1],
             type=replace(request.nodes[-1].type, numerical_policy="raw-bit-pattern"),

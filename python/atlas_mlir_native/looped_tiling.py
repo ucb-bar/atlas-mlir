@@ -167,17 +167,31 @@ def _virtual(
     *,
     seed_address=None,
     k_unroll=1,
+    unit=0,
+    batch_count=1,
+    shared_weight=True,
+    exponent_pages=(),
+    restoration=None,
+    output_window_bytes=None,
 ) -> str:
     """Emit only typed operations; scheduling and physical placement stay downstream."""
+    if type(batch_count) is not int or batch_count < 1 or type(shared_weight) is not bool:
+        raise ValueError("batch count must be positive and weight sharing must be boolean")
+    if batch_count > 1 and seed_address is not None:
+        raise ValueError("batched external accumulator seeds require a separate ABI")
+    if unit not in (0, 1):
+        raise ValueError("MXU unit must be 0 or 1")
     if type(k_unroll) is not int or not 1 <= k_unroll <= 64:
         raise ValueError("K unroll factor must be an integer in [1,64]")
     mc, nc, kc = plan.counts
     ab, wb, ob = plan.tile_bytes
     a, w = addresses
     state, fp8, bf16 = "!atlas.virtual_state", "!atlas.virtual_fp8", "!atlas.virtual_bf16"
+    retention = "atlas.retain_bf16_accumulators, " if k_unroll > 1 else ""
+    output_window_bytes = plan.buffer_bytes[2] if output_window_bytes is None else output_window_bytes
     lines = [
         "module {",
-        f"  func.func @looped_matmul() -> {state} attributes {{atlas.input_dram_base = {a} : i64, atlas.output_dram_base = {output} : i64, atlas.output_dram_bytes = {plan.buffer_bytes[2]} : i64}} {{",
+        f"  func.func @looped_matmul() -> {state} attributes {{{retention}atlas.input_dram_base = {a} : i64, atlas.output_dram_base = {output} : i64, atlas.output_dram_bytes = {output_window_bytes} : i64}} {{",
         f'    %start = "atlas.virtual_start"() : () -> {state}',
     ]
 
@@ -196,7 +210,7 @@ def _virtual(
             + f") -> {returns}"
         )
 
-    def tile_product(prefix, before, ap, wp, acc=None):
+    def tile_operands(prefix, before, ap, wp):
         c(prefix + "_bytes", ab)
         effect("dma_load_fp8", before, prefix + "_a_s", [ap, prefix + "_bytes"], ["i32", "i32"], (prefix + "_a", fp8))
         effect(
@@ -207,15 +221,20 @@ def _virtual(
             ["i32", "i32"],
             (prefix + "_w", fp8),
         )
-        weight, accum = "!atlas.virtual_mxu_weight<0>", "!atlas.virtual_mxu_acc<0>"
+        return prefix + "_w_s"
+
+    def tile_product(prefix, before, ap, wp, acc=None, *, loaded=False):
+        if not loaded:
+            before = tile_operands(prefix, before, ap, wp)
+        weight, accum = f"!atlas.virtual_mxu_weight<{unit}>", f"!atlas.virtual_mxu_acc<{unit}>"
         effect(
             "mxu_load_weight",
-            prefix + "_w_s",
+            before,
             prefix + "_weight_s",
             [prefix + "_w"],
             [fp8],
             (prefix + "_weight", weight),
-            "{unit = 0 : i32}",
+            f"{{unit = {unit} : i32}}",
         )
         if acc is None:
             effect(
@@ -234,7 +253,7 @@ def _virtual(
                 [acc],
                 [bf16],
                 (prefix + "_seed", accum),
-                "{unit = 0 : i32}",
+                f"{{unit = {unit} : i32}}",
             )
             effect(
                 "mxu_accumulate",
@@ -253,9 +272,57 @@ def _virtual(
             (prefix + "_result", bf16),
         )
 
+    # The loop owner carries all affine page addresses beside its operand
+    # addresses. Hooks emit typed readout operations without rewriting this CFG.
+    if exponent_pages and len(exponent_pages) != 2:
+        raise ValueError("exponent pages require left and right descriptors")
+    batch_pages = [i for i, page in enumerate(exponent_pages) if batch_count > 1 and page[2]]
+    def page_name(i, suffix):
+        return "restore_" + ("l" if i == 0 else "r") + suffix
+    def values(names):
+        return "".join(", %" + name for name in names)
+    def parameters(names):
+        return "".join(", %" + name + ": i32" for name in names)
+    batch_w_type = "" if shared_weight else ", i32"
+    batch_w_initial = "" if shared_weight else ", %w_initial"
+    batch_w_parameter = "" if shared_weight else ", %batch_w: i32"
+    batch_w_next = "" if shared_weight else ", %batch_wn"
+    batch_types = ", i32" * len(batch_pages)
+    row_types = ", i32" if exponent_pages and exponent_pages[0][1] else ""
+    col_types = ", i32" if exponent_pages and exponent_pages[1][1] else ""
+    entry_state = "start"
+    if restoration is not None:
+        lines.extend(restoration.entry())
+        entry_state = "restore_start"
+    for i, (base, tile_stride, batch_stride) in enumerate(exponent_pages):
+        c(page_name(i, "base"), base)
     c("zero_m", 0)
-    c("abase", a)
-    c("ybase", output)
+    c("a_initial", a)
+    c("w_initial", w)
+    c("y_initial", output)
+    if batch_count > 1:
+        lines += [
+            f"    cf.br ^batch_header(%{entry_state}, %a_initial{batch_w_initial}, %y_initial{values(page_name(i, "base") for i in batch_pages)} : {state}, i32{batch_w_type}, i32{batch_types})",
+            f"  ^batch_header(%bs: {state}, %batch_a: i32{batch_w_parameter}, %batch_y: i32{parameters(page_name(i, "batch") for i in batch_pages)}):",
+        ]
+        c("batch_end", a + batch_count * mc * kc * ab)
+        lines += [
+            "    %batch_more = arith.cmpi ult, %batch_a, %batch_end : i32",
+            f"    cf.cond_br %batch_more, ^batch_body(%bs : {state}), ^all_done(%bs : {state})",
+            f"  ^batch_body(%batch_start: {state}):",
+        ]
+    else:
+        lines += [f"    cf.br ^batch_body(%{entry_state} : {state})", f"  ^batch_body(%batch_start: {state}):"]
+    a_origin = "batch_a" if batch_count > 1 else "a_initial"
+    w_origin = "batch_w" if batch_count > 1 and not shared_weight else "w_initial"
+    y_origin = "batch_y" if batch_count > 1 else "y_initial"
+    a_row = "arow" if mc > 1 else a_origin
+    y_row = "yrow" if mc > 1 else y_origin
+    w_row = "wrow" if nc > 1 else w_origin
+    y_tile = "ytile" if nc > 1 else y_row
+    page_origins = [page_name(i, "batch" if i in batch_pages else "base") for i in range(len(exponent_pages))]
+    page_addresses = [page_name(i, "page") if page[1] and (mc if i == 0 else nc) > 1 else page_origins[i]
+                      for i, page in enumerate(exponent_pages)]
     if seed_address is not None:
         c("seed_base", seed_address)
     seed_type = ", i32" if seed_address is not None else ""
@@ -265,8 +332,8 @@ def _virtual(
     seed_n_parameter = ", %seed_tile: i32" if seed_address is not None else ""
     if mc > 1:
         lines += [
-            f"    cf.br ^m_header(%start, %zero_m, %abase, %ybase{seed_entry} : {state}, i32, i32, i32{seed_type})",
-            f"  ^m_header(%ms: {state}, %m: i32, %arow: i32, %yrow: i32{seed_m_parameter}):",
+            f"    cf.br ^m_header(%batch_start, %zero_m, %{a_origin}, %{y_origin}{seed_entry}{values([page_origins[0]]) if row_types else ""} : {state}, i32, i32, i32{seed_type}{row_types})",
+            f"  ^m_header(%ms: {state}, %m: i32, %arow: i32, %yrow: i32{seed_m_parameter}{parameters([page_name(0, "page")]) if row_types else ""}):",
         ]
         c("m_count", mc)
         lines += [
@@ -275,17 +342,14 @@ def _virtual(
             f"  ^m_body(%mb: {state}):",
         ]
     else:
-        c("arow", a)
-        c("yrow", output)
         if seed_address is not None:
             c("seed_row", seed_address)
-        lines += [f"    cf.br ^m_body(%start : {state})", f"  ^m_body(%mb: {state}):"]
+        lines += [f"    cf.br ^m_body(%batch_start : {state})", f"  ^m_body(%mb: {state}):"]
     c("zero_n", 0)
-    c("wbase", w)
     if nc > 1:
         lines += [
-            f"    cf.br ^n_header(%mb, %zero_n, %wbase, %yrow{seed_m_value} : {state}, i32, i32, i32{seed_type})",
-            f"  ^n_header(%ns: {state}, %n: i32, %wrow: i32, %ytile: i32{seed_n_parameter}):",
+            f"    cf.br ^n_header(%mb, %zero_n, %{w_origin}, %{y_row}{seed_m_value}{values([page_origins[1]]) if col_types else ""} : {state}, i32, i32, i32{seed_type}{col_types})",
+            f"  ^n_header(%ns: {state}, %n: i32, %wrow: i32, %ytile: i32{seed_n_parameter}{parameters([page_name(1, "page")]) if col_types else ""}):",
         ]
         c("n_count", nc)
         lines += [
@@ -294,19 +358,16 @@ def _virtual(
             f"  ^n_body(%nb: {state}):",
         ]
     else:
-        c("wrow", w)
-        # A one-tile column interval uses the same output base. Preserve its
-        # scalar dependence when the row dimension still has a loop.
-        lines.append("    %ytile = arith.addi %yrow, %zero_n : i32")
+        # A one-tile column interval uses the same output base.
         if seed_address is not None:
             lines.append("    %seed_tile = arith.addi %seed_row, %zero_n : i32")
         lines += [f"    cf.br ^n_body(%mb : {state})", f"  ^n_body(%nb: {state}):"]
     if seed_address is None:
-        tile_product("first", "nb", "arow", "wrow")
+        tile_product("first", "nb", a_row, w_row)
     else:
         c("seed_bytes", ob)
         effect("dma_load_bf16", "nb", "seed_loaded", ["seed_tile", "seed_bytes"], ["i32", "i32"], ("seed_value", bf16))
-        tile_product("first", "seed_loaded", "arow", "wrow", "seed_value")
+        tile_product("first", "seed_loaded", a_row, w_row, "seed_value")
     if kc > 1 and k_unroll > 1:
         # Replicate complete, ordered tile steps. The reset remains first, and
         # each step consumes the previous completed BF16 value. This changes
@@ -318,8 +379,8 @@ def _virtual(
         c("a_step", ab)
         c("w_step", wb)
         lines += [
-            "    %afirst = arith.addi %arow, %a_step : i32",
-            "    %wfirst = arith.addi %wrow, %w_step : i32",
+            f"    %afirst = arith.addi %{a_row}, %a_step : i32",
+            f"    %wfirst = arith.addi %{w_row}, %w_step : i32",
             f"    cf.br ^ku_header(%first_result_s, %zero_k, %afirst, %wfirst, %first_result : {state}, i32, i32, i32, {bf16})",
             f"  ^ku_header(%kus: {state}, %ku: i32, %ku_ap: i32, %ku_wp: i32, %ku_value: {bf16}):",
         ]
@@ -331,21 +392,36 @@ def _virtual(
         ]
 
         def ordered_steps(prefix, count, before, ap, wp, value):
-            for index in range(count):
-                step = f"{prefix}_{index}"
-                left, right = ap, wp
-                if index:
-                    c(step + "_a_offset", index * ab)
-                    c(step + "_w_offset", index * wb)
-                    lines.extend(
-                        (
-                            f"    %{step}_ap = arith.addi %{ap}, %{step}_a_offset : i32",
-                            f"    %{step}_wp = arith.addi %{wp}, %{step}_w_offset : i32",
+            # Stage at most four tile pairs before consuming them. Eight
+            # transfers fit the generic DMA staging windows. Their first
+            # uses still govern waits, so later operand transfers can run
+            # while earlier ordered BF16 contractions execute.
+            for first in range(0, count, 4):
+                steps = []
+                prior_left, prior_right = ap, wp
+                for index in range(first, min(first + 4, count)):
+                    step = f"{prefix}_{index}"
+                    left, right = ap, wp
+                    if index:
+                        # Consecutive operands in one DMA staging group use
+                        # one tile-sized increment. This keeps the constants
+                        # in RV32's immediate range and shortens pointer lives.
+                        increment = index != first
+                        c(step + "_a_offset", ab if increment else index * ab)
+                        c(step + "_w_offset", wb if increment else index * wb)
+                        lines.extend(
+                            (
+                                f"    %{step}_ap = arith.addi %{prior_left if increment else ap}, %{step}_a_offset : i32",
+                                f"    %{step}_wp = arith.addi %{prior_right if increment else wp}, %{step}_w_offset : i32",
+                            )
                         )
-                    )
-                    left, right = step + "_ap", step + "_wp"
-                tile_product(step, before, left, right, value)
-                before, value = step + "_result_s", step + "_result"
+                        left, right = step + "_ap", step + "_wp"
+                    before = tile_operands(step, before, left, right)
+                    prior_left, prior_right = left, right
+                    steps.append(step)
+                for step in steps:
+                    tile_product(step, before, None, None, value, loaded=True)
+                    before, value = step + "_result_s", step + "_result"
             return before, value
 
         current, value = ordered_steps("ku_step", factor, "kub", "ku_ap", "ku_wp", "ku_value")
@@ -365,8 +441,8 @@ def _virtual(
             c("kt_w_offset", completed_tiles * wb)
             lines.extend(
                 (
-                    "    %kt_ap = arith.addi %arow, %kt_a_offset : i32",
-                    "    %kt_wp = arith.addi %wrow, %kt_w_offset : i32",
+                    f"    %kt_ap = arith.addi %{a_row}, %kt_a_offset : i32",
+                    f"    %kt_wp = arith.addi %{w_row}, %kt_w_offset : i32",
                 )
             )
         current, value = ordered_steps("kt_step", remainder, "kut", "kt_ap", "kt_wp", "kt_value")
@@ -376,8 +452,8 @@ def _virtual(
         c("a_step", ab)
         c("w_step", wb)
         lines += [
-            "    %afirst = arith.addi %arow, %a_step : i32",
-            "    %wfirst = arith.addi %wrow, %w_step : i32",
+            f"    %afirst = arith.addi %{a_row}, %a_step : i32",
+            f"    %wfirst = arith.addi %{w_row}, %w_step : i32",
             f"    cf.br ^k_header(%first_result_s, %zero_k, %afirst, %wfirst, %first_result : {state}, i32, i32, i32, {bf16})",
             f"  ^k_header(%ks: {state}, %k: i32, %ap: i32, %wp: i32, %carried: {bf16}):",
         ]
@@ -403,24 +479,24 @@ def _virtual(
         lines.append(f'    %activated = "atlas.virtual_vpu_unary"(%result) {{kind = "relu"}} : ({bf16}) -> {bf16}')
         output_value = "activated"
     c("out_bytes", ob)
-    effect(
-        "dma_store_bf16",
-        "ss",
-        "stored",
-        [output_value, "ytile", "out_bytes"],
-        [bf16, "i32", "i32"],
-    )
+    if restoration is None:
+        effect("dma_store_bf16", "ss", "stored", [output_value, y_tile, "out_bytes"], [bf16, "i32", "i32"])
+    else:
+        lines.extend(restoration.tile(output_address=y_tile, exponent_addresses=page_addresses))
     if nc > 1:
         c("one_n", 1)
         c("w_row_step", kc * wb)
     if seed_address is not None and nc > 1:
         lines.append("    %seed_next = arith.addi %seed_tile, %out_bytes : i32")
+    if nc > 1 and col_types:
+        c("restore_rstride", exponent_pages[1][1])
+        lines.append("    %restore_rpage_next = arith.addi %restore_rpage, %restore_rstride : i32")
     seed_n_next = ", %seed_next" if seed_address is not None else ""
     n_next = [
         "    %nn = arith.addi %n, %one_n : i32",
-        "    %wnext = arith.addi %wrow, %w_row_step : i32",
-        "    %ynext = arith.addi %ytile, %out_bytes : i32",
-        f"    cf.br ^n_header(%stored, %nn, %wnext, %ynext{seed_n_next} : {state}, i32, i32, i32{seed_type})",
+        f"    %wnext = arith.addi %{w_row}, %w_row_step : i32",
+        f"    %ynext = arith.addi %{y_tile}, %out_bytes : i32",
+        f"    cf.br ^n_header(%stored, %nn, %wnext, %ynext{seed_n_next}{values(["restore_rpage_next"]) if col_types else ""} : {state}, i32, i32, i32{seed_type}{col_types})",
     ]
     if nc == 1:
         n_next = [f"    cf.br ^m_next(%stored : {state})"]
@@ -431,20 +507,38 @@ def _virtual(
         c("y_row_step", nc * ob)
     if seed_address is not None and mc > 1:
         lines.append("    %seed_row_next = arith.addi %seed_row, %y_row_step : i32")
+    if mc > 1 and row_types:
+        c("restore_lstride", exponent_pages[0][1])
+        lines.append("    %restore_lpage_next = arith.addi %restore_lpage, %restore_lstride : i32")
     seed_m_next = ", %seed_row_next" if seed_address is not None else ""
     m_next = [
         "    %mm = arith.addi %m, %one_m : i32",
-        "    %arow_next = arith.addi %arow, %a_row_step : i32",
-        "    %yrow_next = arith.addi %yrow, %y_row_step : i32",
-        f"    cf.br ^m_header(%mn, %mm, %arow_next, %yrow_next{seed_m_next} : {state}, i32, i32, i32{seed_type})",
+        f"    %arow_next = arith.addi %{a_row}, %a_row_step : i32",
+        f"    %yrow_next = arith.addi %{y_row}, %y_row_step : i32",
+        f"    cf.br ^m_header(%mn, %mm, %arow_next, %yrow_next{seed_m_next}{values(["restore_lpage_next"]) if row_types else ""} : {state}, i32, i32, i32{seed_type}{row_types})",
     ]
     if mc == 1:
         m_next = [f"    cf.br ^done(%mn : {state})"]
-    lines += [*m_next, f"  ^done(%end: {state}):",
-        f"    return %end : {state}",
-        "  }",
-        "}",
-    ]
+    lines += [*m_next, f"  ^done(%end: {state}):"]
+    if batch_count > 1:
+        c("batch_a_stride", mc * kc * ab)
+        c("batch_y_stride", mc * nc * ob)
+        if not shared_weight:
+            c("batch_w_stride", nc * kc * wb)
+            lines.append("    %batch_wn = arith.addi %batch_w, %batch_w_stride : i32")
+        for i in batch_pages:
+            c(page_name(i, "batchstride"), exponent_pages[i][2])
+            lines.append(f"    %{page_name(i, 'batch_next')} = arith.addi %{page_name(i, 'batch')}, %{page_name(i, 'batchstride')} : i32")
+        lines += [
+            "    %batch_an = arith.addi %batch_a, %batch_a_stride : i32",
+            "    %batch_yn = arith.addi %batch_y, %batch_y_stride : i32",
+            f"    cf.br ^batch_header(%end, %batch_an{batch_w_next}, %batch_yn{values(page_name(i, "batch_next") for i in batch_pages)} : {state}, i32{batch_w_type}, i32{batch_types})",
+            f"  ^all_done(%final: {state}):",
+            *(restoration.finish("final") if restoration is not None else [f"    return %final : {state}"]),
+        ]
+    else:
+        lines.extend(restoration.finish("end") if restoration is not None else [f"    return %end : {state}"])
+    lines += ["  }", "}"]
     return "\n".join(lines) + "\n"
 
 
@@ -473,9 +567,40 @@ def tuning_key(snapshot, request, fixed_inputs, fixed_outputs, limits):
         "fixed_inputs": fixed_inputs,
         "fixed_outputs": list(fixed_outputs),
         "pipeline": _native_pipeline(),
+        "operand_reuse": _operand_reuse_policy(),
         "search_limits": limits.record(),
         "program_size_limit_bytes": codegen.current_codegen_options().program_size_limit_bytes,
     }
+
+
+def _operand_reuse_policy():
+    policy = os.environ.get("ATLAS_LOOPED_OPERAND_REUSE", "ordered")
+    if policy not in ("ordered", "resident-a"):
+        raise NativeCompilationError(
+            "unsupported_semantics", "ATLAS_LOOPED_OPERAND_REUSE must be ordered or resident-a"
+        )
+    return policy
+
+
+def _virtual_schedule(plan, addresses, output, epilogue=None, *, seed_address=None, k_unroll=1):
+    policy = _operand_reuse_policy()
+    record = {"operand_reuse_requested": policy}
+    if policy == "resident-a" and plan.counts[1] > 1:
+        from .binding import _native_pipeline
+        from .resident_looped_tiling import schedule_record, virtual_resident_a
+
+        if _native_pipeline() != "mandatory":
+            raise NativeCompilationError(
+                "unsupported_semantics", "resident-a is qualified with ATLAS_NATIVE_PIPELINE=mandatory only"
+            )
+        record.update(schedule_record(plan))
+        virtual = virtual_resident_a(plan, addresses, output, epilogue, seed_address=seed_address)
+    else:
+        record["operand_reuse"] = "ordered"
+        if policy == "resident-a":
+            record["operand_reuse_fallback"] = "one output-column tile provides no activation reuse"
+        virtual = _virtual(plan, addresses, output, epilogue, seed_address=seed_address, k_unroll=k_unroll)
+    return virtual, record
 
 
 def compile_looped(snapshot, request, *, fixed_inputs, fixed_outputs, target_source, destination, limits):
@@ -631,14 +756,11 @@ def compile_looped(snapshot, request, *, fixed_inputs, fixed_outputs, target_sou
             "candidate_attempts": picked.candidate_attempts,
             "ordering_attempts": picked.ordering_attempts,
         }
-    virtual = _virtual(
-        plan,
-        (ranges[0][0], ranges[1][0]),
-        ranges[-1][0],
-        epilogue,
-        seed_address=ranges[2][0] if seed else None,
-        k_unroll=unroll,
+    virtual, schedule = _virtual_schedule(
+        plan, (ranges[0][0], ranges[1][0]), ranges[-1][0], epilogue,
+        seed_address=ranges[2][0] if seed else None, k_unroll=unroll,
     )
+    codegen.update(schedule)
     tools = Path(os.environ.get("ATLAS_OOT_BIN_DIR", target_source / "build/bin"))
     pipeline = _native_pipeline()
     if codegen["program_size_limit_bytes"] is not None:
@@ -775,6 +897,8 @@ def compile_looped(snapshot, request, *, fixed_inputs, fixed_outputs, target_sou
         "io_memory_bytes": dram_slots() * TILE_BYTES,
         "binding_source_sha256": sha(Path(__file__).with_name("binding.py").read_bytes()),
         "loop_lowering_source_sha256": sha(Path(__file__).read_bytes()),
+        **({"resident_loop_lowering_source_sha256": sha(Path(__file__).with_name("resident_looped_tiling.py").read_bytes())}
+           if codegen["operand_reuse"] == "resident-a" else {}),
         "atlas_opt_sha256": sha((tools / "atlas-opt").read_bytes()),
         "atlas_emit_sha256": sha((tools / "atlas-emit").read_bytes()),
         "target_inventory_sha256": sha((target_source / "docs/selected-variant-inventory.json").read_bytes()),
