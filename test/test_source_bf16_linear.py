@@ -1,7 +1,12 @@
 """Explicit source f32 accumulation admission without rewriting source types."""
 
 from dataclasses import replace
+import json
+import os
 from pathlib import Path
+import shutil
+import subprocess
+import tempfile
 import unittest
 
 from atlas_mlir_native.already_quantized import POLICY as INTAKE_POLICY
@@ -56,6 +61,76 @@ def changed(source, key, **fields):
 
 
 class SourceBF16LinearTest(unittest.TestCase):
+    def test_full_host_application_replays_and_executes_with_default_limits(self):
+        compiler = shutil.which("cc")
+        if not compiler or not os.environ.get("MERLIN_NATIVE_SNAPSHOT"):
+            self.skipTest("requires C compiler and MERLIN_NATIVE_SNAPSHOT")
+        from merlin.compile.semantic_application import compile_semantic_application, verify_semantic_application
+        from merlin.semantic_compiler.search import SearchLimits
+        from merlin.semantic_compiler.snapshot import open_native_snapshot
+
+        source = source_request()
+        original = source.record()
+        selected_adapter = adapter()
+        snapshot = open_native_snapshot(Path(os.environ["MERLIN_NATIVE_SNAPSHOT"]))
+        # Keep the saved-capsule example's default one MiB budget, the default
+        # search limits and the ordinary semantic arena allocator.
+        capacity = 1 << 20
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            artifact = root / "application"
+            manifest = compile_semantic_application(source, adapter=selected_adapter, snapshot=snapshot,
+                target_source=Path(__file__).parent.parent, destination=artifact, limits=SearchLimits(),
+                name="tiny_head", capacity=capacity, allow_host_only=True)
+            self.assertEqual(manifest["artifact_kind"], "host_application")
+            self.assertEqual(manifest["application_memory_bytes"], capacity)
+            self.assertFalse(manifest["segments"])
+            self.assertEqual(len(manifest["regions"]), 1)
+            compiled = manifest["regions"][0]
+            self.assertEqual(compiled["inputs"], ["a", "w", "seed"])
+            self.assertEqual(compiled["outputs"], ["y"])
+            self.assertEqual(compiled["description"]["source_to_replacement_receipt"]["selected_policy"], POLICY)
+            interface = manifest["application_interface"]
+            self.assertEqual(interface["inputs"], ["a"])
+            self.assertEqual(interface["outputs"], ["y"])
+            self.assertLessEqual(interface["workspace_bytes"], capacity)
+            self.assertEqual(json.loads((artifact / "source-request.json").read_text()), original)
+            replay = verify_semantic_application(source, adapter=selected_adapter, snapshot=snapshot,
+                target_source=Path(__file__).parent.parent, artifact=artifact, allow_host_only=True)
+            self.assertEqual(replay["status"], "checked")
+            self.assertEqual(replay["source_wiring"], "checked")
+            package = artifact / "c-package"
+            (package / "check.c").write_text(r'''
+#include "combined/tiny_head_combined.h"
+#include <assert.h>
+#include <stdint.h>
+#include <string.h>
+int main(void) {
+  _Alignas(TINY_HEAD_WORKSPACE_ALIGNMENT) unsigned char workspace[TINY_HEAD_WORKSPACE_BYTES];
+  tiny_head_driver_state state={0};
+  void *context_items[]={0}; tiny_head_driver_contexts contexts={context_items,1};
+  uint16_t input[6]={0x3f80,0x4000,0x4040,0x4080,0x40a0,0x40c0};
+  uint16_t original[6],output[10];
+  const uint16_t expected[10]={0x40a0,0x40c0,0x40c0,0x40c0,0x40c0,
+                               0x4130,0x4170,0x4170,0x4170,0x4170};
+  const void *inputs[]={input}; void *outputs[]={output};
+  memcpy(original,input,sizeof(input));memset(output,0xa5,sizeof(output));
+  assert(tiny_head_invoke(&state,workspace,sizeof(workspace),inputs,outputs,&contexts)==0);
+  assert(!memcmp(output,expected,sizeof(output)));
+  assert(!memcmp(input,original,sizeof(input)));
+  input[0]=0x7fc0;memset(output,0xa5,sizeof(output));
+  assert(tiny_head_invoke(&state,workspace,sizeof(workspace),inputs,outputs,&contexts)==TINY_HEAD_DRIVER_KERNEL_ERROR);
+  for (unsigned i=0;i<sizeof(output);++i) assert(((const unsigned char *)output)[i]==0xa5);
+  return 0;
+}
+''')
+            subprocess.run(["nice", "-n", "10", compiler, "-std=c11", "-O2", "-Wall", "-Wextra", "-Werror",
+                "-frounding-math", "-ffp-contract=off", *manifest["link_sources"], "check.c", "-lm", "-o", "check"],
+                cwd=package, check=True, capture_output=True)
+            result = subprocess.run([str(package / "check")], capture_output=True)
+            self.assertEqual(result.returncode, 0, result.stderr.decode())
+        self.assertEqual(source.record(), original)
+
     def test_translated_identity_extf_named_matmul_and_rne_truncf(self):
         from merlin.semantic_compiler.linalg_bridge import translate_linalg_text
 
