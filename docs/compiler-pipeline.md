@@ -34,6 +34,13 @@ contiguous, indexed local I/O must first be lowered to explicit DMA, and target
 attributes must agree. See [single-program profiling](single-program-profiling.md)
 for the supported interface and tests.
 
+Native Python compilation records the actual single registered pipeline invocation in
+`compilation-pipeline.json`. Set `ATLAS_CAPTURE_POSTSPILL=1` for audit runs that
+also need `mandatory-spilled-virtual.mlir`. Only that opt-in enables
+`--mlir-disable-threading` and the before-lowering IR dump; ordinary publication
+does not scrape diagnostic IR. Capture uses the same bounded compilation, with
+no compiler replay or extra spill budget.
+
 ### Device temporaries
 
 An allocated DRAM buffer is not initialized storage. Explicit DMA may read a
@@ -183,7 +190,11 @@ matmul computes `A[M,K] @ W[N,K].T`.
 | `dma_*`, `input_*`, `output_bf16` | Sequential memory effects (next section) |
 
 Lowering accepts every VPU kind the dialect defines; the evaluator runs only
-the kinds above. Tests: `test_virtual_evaluator_arithmetic.py`,
+the kinds above. Native lowering also admits `vpu_reduce` kind `col_sum`,
+used with the physical 64-by-16 column geometry for exact sparse power-of-two
+broadcasts in exponent restoration. The virtual evaluator reports that kind as
+unsupported; its independent arithmetic model is covered by
+`test/power2_restoration_model.py`. Tests: `test_virtual_evaluator_arithmetic.py`,
 `test_virtual_evaluator_attention.py`, and `test_virtual_evaluator_core.py`
 (compares with the RTL core model; setup in [hardware status](hardware-status.md)).
 

@@ -175,7 +175,7 @@ program does not check it.
 | Row sum | VREDSUM_ROW_BF16 | BF16 normal or +0; partial sums stay normal | Five-level f32 pairwise tree (RNE), one BF16 rounding. Row broadcast. |
 | Exp | VEXP | BF16 normal in [−80, 80], or ±0 | RTL LUT approximation (`exp_lane.py`), not math `exp`. |
 | Reciprocal | VRECIP | Positive normal BF16 in [1, 32] | RTL LUT with truncation (`recip_lane.py`). |
-| Pack BF16→FP8 | VPU PACK, then a scalar loop that interleaves the halves into rows | Unit (127): {+0, ±0.5, ±1, ±2}. Scaled (122–128): +0 or values that scale to normal E4M3 without rounding. Rounded (122–128): any BF16 | Code set by SELI. Rounded mode follows `FP8Pack.scala` (`pack_lane.py`). |
+| Pack BF16→FP8 | VPU PACK, unit UNPACK, and accumulator copy/pop; scalar interleave when both MXUs are busy | Unit (127): {+0, ±0.5, ±1, ±2}. Exact-normal (122..128): +0 or values that scale to normal E4M3 without rounding. Explicit rounded (0..255): any BF16 | Code set by SELI. Rounded `clamp-0-255-v1` follows `FP8Pack.scala` (`pack_lane.py`); it permits rounding, flush, and saturation. |
 
 Tested compositions run from MXU0→ReLU up to Q/K/V attention followed by a
 two-layer ReLU MLP with two or three ordered outputs.
@@ -218,7 +218,8 @@ NaN and Inf are refused. In the native routes a result of −0 is refused unless
 the policy maps it (v5, v6, v8). Biases and literal tiles round to BF16. BF16
 outputs widen to f32 without loss.
 
-**Scale codes.** E8M0 code *c* is a factor of 2^(c−127); 122–128 are accepted.
+**Scale codes.** Raw PACK accepts all byte codes `0..255`, with exponent `min(c - 127, 127)`, so 255 aliases 254 and code 0 means `2^-127`. The explicit native rounded `clamp-0-255-v1` descriptor accepts that same domain, including code 119. The exact-normal descriptor, importer, and model region precision policies keep their `122..128` range and their separate input obligations. Rounded admission does not imply exact-normal arithmetic. The [raw PACK audit](pack-scale-domain.md) separates source and model evidence from the checked-in hardware cases 126 and 128.
+
 In the importer (v2) and in model regions, the activation is multiplied by
 2^(127−c) and the constant weight by 2^(c−127) before E4M3 rounding, so the
 factors cancel except for rounding (code 122: activation ×32, weight ÷32). The
@@ -370,6 +371,14 @@ mirrors equal-bank, equal-row reads; assignment checks allow the same register
 pair only for the same SSA operand. Distinct live values and the result still
 require nonoverlapping pairs.
 
+### Nonnegative normal seeded reductions
+
+The existing `bf16-adjacent-fp32-tree-rne-seeded-tile-sum-ltr-chop-v1` reduction policy remains the default. Applications that explicitly select a `reduction` field may instead set it to `bf16-nonnegative-normal-adjacent-fp32-tree-rne-seeded-tile-sum-ltr-chop-v1`. Direct Python callers pass `reduction_policy=NONNEGATIVE_NORMAL_REDUCTION_POLICY` to `reduction.prepare_source`, `reduction.request_for`, and `reduction_c.prepare_c_package`.
+
+The separate domain admits positive zero and every positive normal BF16 code (`0x0080` through `0x7f7f`) for both data and seeds. Source f32 values are encoded with nearest-even rounding; negative zero, negative codes, subnormal BF16 results, nonfinite inputs, and BF16 overflow are rejected. A positive f32 value that rounds to positive zero is admitted. The existing pointwise, multiplication, and bounded reduction domains are unchanged.
+
+The selected native arithmetic remains the 32-lane adjacent FP32 nearest-even tree, BF16 nearest-even partial readout, and left-to-right seeded FP32 addition with BF16 truncation after each tile. Before loading a program or writing device memory, generated C independently checks every FP32 tree intermediate, BF16 partial, and seeded addition for overflow. An inadmissible reduction returns `INPUT_DOMAIN`; its output buffer remains unchanged. The independent interpreter performs the same admission checks using exact rational values. Tests cover every positive normal BF16 encoding, the boundary below `0x2000`, axis permutations, tails, and intermediate overflow. Agreement with this selected policy does not establish source f32 equivalence or original-model quality.
+
 ### BF16 source multiplication
 
 The v21 application policy adds an explicit device admission:
@@ -457,6 +466,34 @@ and without fast-math, and checks the final link's suppliers. This is CPU work,
 not Atlas execution or fallback. The selected library's agreement with the
 original framework must be measured separately. Compiler-only MPFR bounds are
 used in tests; generated C does not depend on MPFR/GMP or a reference evaluator.
+
+### Source-bound hierarchical RMS normalization
+
+Application precision `atlas.diagnostic_application_precision.v24` wraps an
+existing application policy with `rmsnorm_schedules`. Each schedule binds one
+`source_output`, its extracted `source_request_digest`, a `provenance_sha256`,
+an `output_scale_exponent`, and policy
+`f32-private-rmsnorm-bf16-tree32-group1024-mean-chop-lut-fp8-cap448-v1`.
+Schedules must cover exactly the recognized private norm expressions. The
+source is dense f32 `H * rsqrt(mean(H*H) + 1e-5) * gamma`, with literal bytes,
+affine broadcasts, and all private uses checked. H remains a boundary even
+when another source operation consumes it as a residual.
+
+This is an explicit numerical change. BF16 RNE squares are reduced by a
+32-lane FP32 tree with BF16 RNE readout, followed by the same reduction over
+32 partials per 1024-channel group and then over the group totals. Supported
+widths are powers of two from 1024 through 32768. The final sum is scaled by
+the reciprocal width; adding BF16 epsilon `0x3728` uses chopped VADD, followed
+by the existing SQRT and RECIP LUT primitives. H, the inverse, and gamma are
+multiplied with BF16 RNE. An exact power-of-two prescale followed by native
+FP8 pack127 preserves the finite cap448 publication boundary. The public
+source f32 view must unpack those FP8 codes at the selected exponent.
+
+Four native templates implement square/reduce, reduce, inverse, and
+normalization/pack. Host staging copies completed BF16 row lanes into partial
+columns and broadcasts gamma bytes; it does no normalization arithmetic.
+Every operation-domain obligation must be discharged before a result is
+published. This route does not grant source f32 equivalence or full decoder qualification.
 
 ### Wide BF16 row groups
 
@@ -568,6 +605,14 @@ statuses. Copy it and `DmaScalarCoreDiagnosticTest.scala` into
 `src/test/scala/atlas/scalar/` of an RTL checkout, then run
 `ATLAS_DMA_DECODE_PROGRAM=/abs/program.bin ./mill atlas.test.testOnly
 atlas.scalar.CompiledProgramScalarCoreDiagnosticTest`.
+
+## Ordered contraction scheduling
+
+Use `ATLAS_NATIVE_PIPELINE=optimized` with the generic `native-compile --reduction-unroll 4` option to prefetch operands in bounded groups of four pairs. The default automatic policy still selects factor 1 without a matching measured tuning profile. This scheduling option applies to supported ordered contractions of arbitrary shapes.
+
+Unrolled loop functions request the unit attribute `atlas.retain_bf16_accumulators`. It permits the lowerer to remove a BF16 accumulator readout whose only use reloads the same MXU in the same block. Both instructions copy raw BF16 storage, and each matmul already writes its BF16 result. The rewrite retains K order, FP8 codes, scale exponents, and final conversion. CFG boundaries, FP8 conversions, multiple uses, and unit changes keep their materialization. The complete virtual contracts and actual allocator must accept the extended lifetime, or the original function is retained. Existing native proof templates do not request this transformation.
+
+Every emitted program still requires the physical, resource, generated-schedule, and timing verifiers, followed by numerical qualification of the selected program. Optimized factor 8 has a pre-existing multi-axis induction-proof refusal and is outside this qualification.
 
 ## Limits
 
