@@ -467,6 +467,22 @@ not Atlas execution or fallback. The selected library's agreement with the
 original framework must be measured separately. Compiler-only MPFR bounds are
 used in tests; generated C does not depend on MPFR/GMP or a reference evaluator.
 
+Selected unary math also keeps its supported preparation on the CPU. The
+planner follows ancestors through explicitly selected host layouts, integer
+operations, float casts/arithmetic and proven K=1 f32 contractions. It follows
+unary-dependent descendants through the same checked host implementations when
+every other operand is already preparation or a supported constant-derived
+value. This includes concatenation, constant scaling and final BF16 casts;
+introducing unrelated runtime model data stops the forward closure. Explicit
+device precision schedules retain their boundaries. Each selected region
+records a `selected-unary-math-host-preparation-v1` placement receipt while
+retaining the existing emitter's arithmetic and library requirements.
+
+Other source regions keep their existing placement rules. In particular,
+globally selecting `host_float_arithmetic` still requires every matching source
+operation to satisfy that C emitter; preparation selection does not create a
+fallback for incompatible broadcast arithmetic.
+
 ### Source-bound hierarchical RMS normalization
 
 Application precision `atlas.diagnostic_application_precision.v24` wraps an

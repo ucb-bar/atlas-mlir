@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 
@@ -855,6 +856,9 @@ class AtlasApplicationAdapter:
             and node.id not in fused_nodes and node.id not in self.mxu1_contraction_schedules
         }:
             raise NativeCompilationError("unsupported_semantics", "contraction precision schedules must cover the exact source contractions")
+        host_preparation, host_preparation_receipt = self._host_unary_preparation(
+            source, host_k1, excluded=fused_nodes | set(self.mxu1_contraction_schedules)
+        )
         indices = {node.id: index for index, node in enumerate(pure)}
         claimed, regions = set(), []
 
@@ -952,15 +956,22 @@ class AtlasApplicationAdapter:
                     CycleInterval.unknown("application region costs have not been calibrated"),
                     ports(node.id for node in region.nodes if node.effect in {"input", "constant"}),
                     ports(region.outputs),
-                    metadata=tuple(sorted((("kind", kind),) + ((("epilogue", epilogue),) if epilogue else ())
-                                          + ((("application_source_digest", source.digest()),)
-                                             if kind == "host_bf16_linear" else ()))),
+                    metadata=tuple(sorted(
+                        (("kind", kind),) + ((("epilogue", epilogue),) if epilogue else ())
+                        + ((("application_source_digest", source.digest()),)
+                           if kind == "host_bf16_linear" else ())
+                        + ((("host_preparation", host_preparation_receipt),)
+                           if all(key in host_preparation for key in keys) else ())
+                    )),
                 )
             )
             claimed.update(keys)
 
         for region in source_bf16_linear.values():
             add(region.computations, "host_bf16_linear")
+        for node in pure:
+            if node.id in host_preparation and node.id not in claimed:
+                add((node.id,), host_preparation[node.id])
         if self.rmsnorm:
             from merlin.semantic_compiler.qualified_rmsnorm_source import recognize_rmsnorm
 
@@ -1154,6 +1165,49 @@ class AtlasApplicationAdapter:
         except ValueError:
             return False
         return True
+
+    def _host_unary_preparation(self, source, host_k1, *, excluded):
+        if not self.host_unary_math:
+            return {}, ""
+        from .host_unary_preparation import POLICY, select
+
+        roots = tuple(node.id for node in source.nodes if node.effect == "pure"
+                      and node.op in self.host_unary_math["operations"])
+        if not roots:
+            return {}, ""
+
+        def host_kind(node):
+            if node.id in host_k1:
+                kind, emitter = "host_k1_contraction", _host_k1_c
+            elif node.op in self.host_layouts:
+                kind, emitter = "layout", emit_layout_c
+            elif node.op in self.host_integer_ops:
+                kind, emitter = "integer", _integer_c
+            elif node.op in self.host_float_arithmetic:
+                kind, emitter = "float_arithmetic", _float_arithmetic_c
+            elif node.op in self.host_float_casts:
+                kind, emitter = "float_cast", _float_cast_c
+            elif node.op in self.host_unary_math["operations"]:
+                kind = "unary_math"
+                emitter = lambda region, name: _unary_math_c(region, name, self.host_unary_math)
+            else:
+                return None
+            try:
+                emitter(extract_semantic_region(source, (node.id,)), "host_preparation")
+            except (ValueError, NativeCompilationError):
+                return None
+            return kind
+
+        selected = select(source, roots, host_kind, excluded=excluded)
+        receipt = json.dumps({
+            "policy": POLICY, "source_request_digest": source.digest(),
+            "selected_unary_nodes": list(roots),
+            "source_nodes": [node.id for node in source.nodes if node.id in selected],
+            "placement": "host", "arithmetic_rewrite": "none",
+            "forward_boundary": "stop at operands outside preparation or supported constant-derived values",
+            "qualification": "existing emitter arithmetic and selected unary library/effect requirements remain in force",
+        }, sort_keys=True, separators=(",", ":"))
+        return selected, receipt
 
     @staticmethod
     def _supports_device_source(source, node, kind):
@@ -1392,6 +1446,9 @@ class AtlasApplicationAdapter:
             record, generated = (
                 _unary_math_c(region, name, self.host_unary_math) if kind == "unary_math" else emitter(region, name)
             )
+            placement_receipt = dict(alternative.metadata).get("host_preparation")
+            if placement_receipt is not None:
+                record["host_preparation"] = json.loads(placement_receipt)
             return CompiledCRegion(
                 name,
                 name + ".h",
