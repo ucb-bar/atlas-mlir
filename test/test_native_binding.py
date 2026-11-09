@@ -1575,6 +1575,39 @@ class NativeBindingTest(unittest.TestCase):
             )
         self.assertEqual(caught.exception.status, "unsupported_semantics")
 
+    def test_native_rounded_pack_accepts_raw_byte_scales_only(self) -> None:
+        from atlas_mlir_native.binding import (
+            ROUNDED_PACK_POLICY, SCALED_PACK_POLICY, _scaled_pack_code, check_pack_stream,
+        )
+        from atlas_mlir_native.reference import evaluate_rounded_scaled_pack
+        from merlin.semantic_compiler.reference import TensorValue
+        from merlin.semantic_compiler.search import SearchLimits
+
+        for code in (0, 119, 120, 129, 254, 255):
+            with self.subTest(code=code):
+                request = self.pack_request(policy=ROUNDED_PACK_POLICY, scale_code=code)
+                self.assertEqual(_scaled_pack_code(request.nodes[1]), code)
+                expected = evaluate_rounded_scaled_pack(request.nodes[1], (
+                    TensorValue(request.nodes[0].type, (0x3f80,) * 1024),))
+                self.assertEqual(expected.elements, ({0: 0x7e, 119: 0x78, 120: 0x70,
+                                                       129: 0x28, 254: 0, 255: 0}[code],) * 1024)
+                destination = self.work / f"rounded-byte-{code}"
+                self.compile_verified(request, fixed_inputs={"x": 3}, fixed_outputs=(35,),
+                                      destination=destination, limits=SearchLimits())
+                program = json.loads((destination / "physical-program.json").read_text())
+                check_pack_stream(program, input_address=0x90001800,
+                                  output_address=0x90011800, scale_code=code)
+        for code in (-1, 256, True):
+            with self.subTest(invalid=code):
+                request = self.pack_request(policy=ROUNDED_PACK_POLICY, scale_code=code)
+                self.assertIsNone(_scaled_pack_code(request.nodes[1]))
+                with self.assertRaises(ValueError):
+                    evaluate_rounded_scaled_pack(request.nodes[1], (
+                        TensorValue(request.nodes[0].type, (0x3f80,) * 1024),))
+        for code in (119, 120, 129):
+            self.assertIsNone(_scaled_pack_code(
+                self.pack_request(policy=SCALED_PACK_POLICY, scale_code=code).nodes[1]))
+
     def test_native_unit_pack_selects_and_checks_on_chip_relayout(self) -> None:
         from atlas_mlir_native.binding import check_pack_stream
         from atlas_mlir_native.reference import evaluate_unit_pack
@@ -2622,6 +2655,10 @@ class NativeBindingTest(unittest.TestCase):
             environment.get("PYTHONPATH", ""),
         ))
         executable = Path(sys.executable).with_name("merlin-targetgen")
+        if not executable.is_file():
+            selected = shutil.which("merlin-targetgen")
+            if selected:
+                executable = Path(selected)
         self.assertTrue(executable.is_file())
 
         def invoke(*args: str) -> subprocess.CompletedProcess[str]:
@@ -6057,7 +6094,7 @@ class NativeBindingTest(unittest.TestCase):
                                 function="native_tile")
         with self.assertRaises(UnsupportedVirtualMode):
             parse_program((destination / "atlas-virtual.mlir").read_text().replace(
-                "scale_code = 122 : i32", "scale_code = 121 : i32"
+                "scale_code = 122 : i32", "scale_code = 256 : i32"
             ), function="native_tile")
         executed = evaluate(virtual, RuntimeInputs(tiles={
             0: Tile("fp8", inputs["arg0"].elements),

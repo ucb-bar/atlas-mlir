@@ -178,6 +178,86 @@ def _mxu1_anchor_reset_lane(lhs: tuple[int, ...], rhs: tuple[int, ...]) -> int:
     return _round_exact_bf16(Fraction(total) * _pow2(anchor - 31))
 
 
+_MXU1_CAP448_POLICY = "mxu1-model47-e4m3-cap448-anchor-bf16-seeded-ordered-v1"
+
+
+def mxu1_cap448_lane(lhs: tuple[int, ...], rhs: tuple[int, ...], seed: int = 0) -> int:
+    """Model47 E4M3 anchor arithmetic, including its BF16 partial.
+
+    Attributed to unmodified npu_model 47b8599 configs/rtl_math.py ipt_row,
+    including its small-integer cancellation behavior. This is a verification
+    oracle, never an executable compiler or runtime fallback. Each 32-K
+    contraction rounds to BF16; the seed participates in anchor selection.
+    """
+    if len(lhs) != 32 or len(rhs) != 32:
+        raise ValueError("MXU1 cap448 lane needs 32 FP8 pairs")
+    if type(seed) is not int or not 0 <= seed <= 65535 or (seed != 0 and not 1 <= (seed >> 7 & 255) <= 254):
+        raise ValueError("MXU1 seed requires finite normal BF16 or positive zero")
+    products = []
+    for left, right in zip(lhs, rhs, strict=True):
+        for code in (left, right):
+            if (type(code) is not int or not 0 <= code <= 255
+                    or code != 0 and not (1 <= (code >> 3 & 15) <= 14
+                                         or (code >> 3 & 15) == 15 and (code & 7) <= 6)):
+                raise ValueError("MXU1 cap448 input is outside positive-zero/finite-normal domain")
+        if not left or not right:
+            continue
+        significand = (8 | (left & 7)) * (8 | (right & 7))
+        carry = significand >> 7
+        exponent = (left >> 3 & 15) + (right >> 3 & 15) - 14 + carry
+        fraction = (significand if carry else significand << 1) & 127
+        products.append(((left ^ right) >> 7, exponent, 128 | fraction))
+    pe, pm = (seed >> 7) & 255, seed & 127
+    anchor = max([exponent for _, exponent, _ in products]
+                 + [pe - 127 if seed & 32767 else -1024]) + 7
+    total = sum((-1 if sign else 1) * ((sig << 24) >> (anchor - exponent))
+                for sign, exponent, sig in products)
+    shift = anchor - (pe - 127) - 24
+    sig = (128 if pe else 0) | pm
+    magnitude = (0 if shift >= 32 or shift < -31 else
+                 sig >> shift if shift >= 0 else (sig << -shift) & 0xffffffff)
+    total += -magnitude if seed & 32768 else magnitude
+    total = ((total + (1 << 31)) & 0xffffffff) - (1 << 31)
+    if not total:
+        return 0
+    sign, magnitude = int(total < 0), abs(total)
+    lead = magnitude.bit_length() - 1
+    shift = max(0, lead - 7)
+    # Preserve model47 when lead < 7: it packs the low significand bits
+    # without the left normalization used by an exact real-number sum.
+    sig, remainder = magnitude >> shift, magnitude & ((1 << shift) - 1)
+    if shift and (remainder > 1 << (shift - 1)
+                  or remainder == 1 << (shift - 1) and sig & 1):
+        sig += 1
+    if sig >= 256:
+        sig >>= 1
+        lead += 1
+    exponent = lead + anchor - 31 + 127
+    return (0 if exponent <= 0 else (sign << 15) | 0x7f7f if exponent >= 255
+            else (sign << 15) | (exponent << 7) | (sig & 127))
+
+
+def evaluate_mxu1_cap448(node, operands: tuple[TensorValue, ...]) -> TensorValue:
+    """Reset or ternary ordered BF16-seeded MXU1 contraction at K=32."""
+    continued = node.op == "matmul_accumulate"
+    maps = _MXU_MATMUL_MAPS
+    expected_maps = (maps[0], maps[1], maps[2], maps[2]) if continued else maps
+    if (node.op not in {"matmul", "matmul_accumulate"}
+            or len(operands) != (3 if continued else 2) or node.attrs
+            or node.index_maps != expected_maps or node.type.shape != (32, 32)
+            or node.type.dtype != "bf16" or node.type.numerical_policy != _MXU1_CAP448_POLICY
+            or any(value.type.shape != (32, 32) or value.type.dtype != "fp8_e4m3"
+                   or value.type.numerical_policy not in {"raw-bit-pattern", ROUNDED_PACK_POLICY} for value in operands[:2])
+            or continued and (operands[2].type.shape != (32, 32) or operands[2].type.dtype != "bf16"
+                              or operands[2].type.numerical_policy not in {"raw-bit-pattern", _MXU1_CAP448_POLICY})):
+        raise ValueError("MXU1 cap448 has an unsupported semantic contract")
+    activation, weight = (value.elements for value in operands[:2])
+    seed = operands[2].elements if continued else (0,) * 1024
+    return TensorValue(node.type, tuple(
+        mxu1_cap448_lane(activation[row*32:(row+1)*32], weight[col*32:(col+1)*32], seed[row*32+col])
+        for row in range(32) for col in range(32)))
+
+
 def evaluate_mxu1_finite_reset(node, operands: tuple[TensorValue, ...]) -> TensorValue:
     """Verify a finite-normal MXU1 reset graph using the selected anchor path.
 
@@ -297,6 +377,8 @@ def evaluate_bf16_row_sum(node, operands: tuple[TensorValue, ...]) -> TensorValu
 
 def evaluate_seeded_bf16_reduction(node, operands: tuple[TensorValue, ...]) -> TensorValue:
     """Interpret logical reduction axes without the compiler's tiler or packer."""
+    from .reduction import NONNEGATIVE_NORMAL_REDUCTION_POLICY, REDUCTION_POLICIES
+
     if len(operands) != 2:
         raise ValueError("seeded reduction needs data and an initializer")
     data, seed = operands
@@ -310,13 +392,17 @@ def evaluate_seeded_bf16_reduction(node, operands: tuple[TensorValue, ...]) -> T
     expected_shape = tuple(data.type.shape[axis] for axis in kept)
     projection = IndexMap(rank, tuple(tuple(int(i == axis) for i in range(rank)) for axis in kept), (0,) * len(kept))
     if (node.op != "reduce_sum" or node.type.dtype != "bf16"
-            or node.type.numerical_policy != "bf16-adjacent-fp32-tree-rne-seeded-tile-sum-ltr-chop-v1"
+            or node.type.numerical_policy not in REDUCTION_POLICIES
             or node.attrs != (("axes", ",".join(map(str, axes))),)
             or node.type.shape != expected_shape or seed.type.shape != expected_shape
             or any(value.type.dtype != "bf16" or value.type.numerical_policy != "raw-bit-pattern" for value in operands)
             or node.index_maps != (pointwise_identity_maps(rank, 1)[0], projection, projection)
             or prod(data.type.shape[axis] for axis in axes) > 65536):
         raise ValueError("seeded reduction has an unsupported semantic contract")
+    if node.type.numerical_policy == NONNEGATIVE_NORMAL_REDUCTION_POLICY:
+        if any(type(code) is not int or not (code == 0 or 0x0080 <= code <= 0x7f7f)
+               for value in operands for code in value.elements):
+            raise ValueError("seeded reduction needs nonnegative normal or positive-zero codes")
     output = []
     for output_at, coordinate in enumerate(product(*(range(data.type.shape[axis]) for axis in kept))):
         indices = dict(zip(kept, coordinate, strict=True))
@@ -356,6 +442,18 @@ def evaluate_bf16_exp(node, operands: tuple[TensorValue, ...]) -> TensorValue:
     ):
         raise ValueError("BF16 exponential has an unsupported semantic contract")
     return TensorValue(node.type, tuple(vexp_bf16_bits(code) for code in operands[0].elements))
+
+
+def evaluate_bf16_exp_nonpositive(node, operands: tuple[TensorValue, ...]) -> TensorValue:
+    """Replay the separately admitted EXP domain, including gradual underflow."""
+    from .bf16_domains import EXP_NONPOSITIVE_ATTRS, vexp_bf16_nonpositive_bits
+    if (node.op != "exp_bf16_nonpositive" or len(operands) != 1
+            or node.type.shape != (32, 32) or node.type.dtype != "bf16"
+            or node.type.numerical_policy != "raw-bit-pattern" or operands[0].type != node.type
+            or node.index_maps != pointwise_identity_maps(2, 1)
+            or node.attrs != EXP_NONPOSITIVE_ATTRS):
+        raise ValueError("nonpositive BF16 exponential has an unsupported semantic contract")
+    return TensorValue(node.type, tuple(vexp_bf16_nonpositive_bits(code) for code in operands[0].elements))
 
 
 def evaluate_bf16_cube(node, operands: tuple[TensorValue, ...]) -> TensorValue:
@@ -580,6 +678,38 @@ def evaluate_bf16_binary_rne(node, operands: tuple[TensorValue, ...]) -> TensorV
             raise ValueError("BF16 rounded addition has a nonnormal nonzero result")
         output.append(result)
     return TensorValue(node.type, tuple(output))
+
+
+def evaluate_bf16_sub_nonnan(node, operands: tuple[TensorValue, ...]) -> TensorValue:
+    """FP32 RNE then BF16 chop on an explicit asymmetric infinity-safe domain."""
+    from .bf16_domains import SUB_NONNAN_ATTRS
+    if (node.op != "sub_bf16_nonnan" or len(operands) != 2
+            or node.type.shape != (32, 32) or node.type.dtype != "bf16"
+            or node.type.numerical_policy != "raw-bit-pattern"
+            or any(operand.type != node.type for operand in operands)
+            or node.index_maps != pointwise_identity_maps(2, 2) or node.attrs != SUB_NONNAN_ATTRS):
+        raise ValueError("nonnan BF16 subtraction has an unsupported semantic contract")
+    output = []
+    for left, right in zip(operands[0].elements, operands[1].elements, strict=True):
+        for code, infinity in ((left, 0xff80), (right, 0x7f80)):
+            if (type(code) is not int or not 0 <= code <= 0xffff
+                    or (code >> 7) & 255 == 255 and code != infinity):
+                raise ValueError("nonnan BF16 subtraction input is outside its asymmetric domain")
+        output.append(_f32_add_rne(left << 16, (right ^ 0x8000) << 16) >> 16)
+    return TensorValue(node.type, tuple(output))
+
+
+def evaluate_bf16_mul_finite(node, operands: tuple[TensorValue, ...]) -> TensorValue:
+    """One BF16 product rounding with gradual underflow and finite inputs."""
+    from .bf16_domains import MUL_FINITE_ATTRS, mul_bf16_finite_bits
+    if (node.op != "mul_bf16_finite" or len(operands) != 2
+            or node.type.shape != (32, 32) or node.type.dtype != "bf16"
+            or node.type.numerical_policy != "raw-bit-pattern"
+            or any(operand.type != node.type for operand in operands)
+            or node.index_maps != pointwise_identity_maps(2, 2) or node.attrs != MUL_FINITE_ATTRS):
+        raise ValueError("finite BF16 multiply has an unsupported semantic contract")
+    return TensorValue(node.type, tuple(mul_bf16_finite_bits(left, right)
+        for left, right in zip(operands[0].elements, operands[1].elements, strict=True)))
 
 
 def evaluate_bf16_add(node, operands: tuple[TensorValue, ...]) -> TensorValue:
@@ -816,7 +946,7 @@ def evaluate_rounded_scaled_pack(node, operands: tuple[TensorValue, ...]) -> Ten
         or node.index_maps != pointwise_identity_maps(len(node.type.shape), 1)
         or set(attrs) != {"input_domain", "scale_code"}
         or attrs["input_domain"] != ROUNDED_PACK_DOMAIN
-        or type(code) is not int or not 122 <= code <= 128
+        or type(code) is not int or not 0 <= code <= 255
     ):
         raise ValueError("rounded scaled pack has an unsupported semantic contract")
     return TensorValue(node.type, tuple(
