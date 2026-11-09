@@ -159,11 +159,10 @@ class AtlasApplicationAdapter:
 
         self.host_bf16_linear_policy = None
         if "host_bf16_linear" in policy:
-            from merlin.compile.c_bf16_linear import POLICY as BF16_LINEAR_POLICY
-            from .source_bf16_linear import POLICY as SOURCE_BF16_LINEAR_POLICY
+            from merlin.compile.c_bf16_linear import SOURCE_POLICY as SOURCE_BF16_LINEAR_POLICY
 
             selected = policy["host_bf16_linear"]
-            if not isinstance(selected, str) or selected not in {BF16_LINEAR_POLICY, SOURCE_BF16_LINEAR_POLICY}:
+            if selected != SOURCE_BF16_LINEAR_POLICY:
                 raise NativeCompilationError("unsupported_semantics", "host BF16 linear policy differs")
             self.__init__({key: value for key, value in policy.items() if key != "host_bf16_linear"},
                           original_source_sha256=original_source_sha256)

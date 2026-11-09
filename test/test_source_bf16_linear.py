@@ -183,14 +183,14 @@ int main(void) {
         self.assertEqual(source.node("w").type.dtype, "bf16")
 
     def test_requires_explicit_source_policy_and_preserves_unrelated_f32_refusal(self):
-        from merlin.compile.c_bf16_linear import POLICY as LEGACY_POLICY, SOURCE_POLICY
+        from merlin.compile.c_bf16_linear import SOURCE_POLICY
 
         self.assertEqual(POLICY, SOURCE_POLICY)
         source = source_request()
-        for selected in (None, LEGACY_POLICY):
-            with self.subTest(policy=selected), self.assertRaisesRegex(Exception, "refuses floating contractions"):
-                adapter(selected).plan(source)
-        for selected in ("unknown", [], 17):
+        with self.assertRaisesRegex(Exception, "refuses floating contractions"):
+            adapter(None).plan(source)
+        historical_policy = "bf16-product-rne-tree32-f32-rne-bf16-rne-tiles-ltr-chop-v1"
+        for selected in (historical_policy, "unknown", [], 17):
             with self.subTest(unknown_policy=selected), self.assertRaisesRegex(Exception, "host BF16 linear policy differs"):
                 adapter(selected)
         lhs = SemanticNode("u_a", "input", (), TensorType((2, 3), "f32", "raw-bit-pattern"), effect="input")

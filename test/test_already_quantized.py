@@ -40,7 +40,7 @@ class AlreadyQuantizedTest(unittest.TestCase):
         from atlas_mlir_native.application import AtlasApplicationAdapter
         from atlas_mlir_native.application_precision import CONTRACTION_POLICY
         from atlas_mlir_native.row_softmax import SOFTMAX_POLICY
-        from merlin.compile.c_bf16_linear import POLICY as HOST_POLICY
+        from merlin.compile.c_bf16_linear import SOURCE_POLICY as HOST_POLICY
         from merlin.semantic_compiler.model import IndexMap
         policy = dict(schema='atlas.diagnostic_application_precision.v1', source_sha256='0'*64,
             target_identity=TARGET_IDENTITY, contraction=CONTRACTION_POLICY,
@@ -59,8 +59,9 @@ class AlreadyQuantizedTest(unittest.TestCase):
         plan = selected.plan(source)
         self.assertEqual(plan.selected[0].placement, 'host')
         self.assertEqual(dict(plan.selected[0].metadata)['kind'], 'host_bf16_linear')
-        with self.assertRaisesRegex(Exception, 'host BF16 linear policy differs'):
-            AtlasApplicationAdapter({**policy,'host_bf16_linear':'unknown'},original_source_sha256='0'*64)
+        for refused in ('unknown', 'bf16-product-rne-tree32-f32-rne-bf16-rne-tiles-ltr-chop-v1'):
+            with self.subTest(policy=refused), self.assertRaisesRegex(Exception, 'host BF16 linear policy differs'):
+                AtlasApplicationAdapter({**policy,'host_bf16_linear':refused},original_source_sha256='0'*64)
 
     def test_immutable_intake_refuses_unquantized_contraction_before_selection(self):
         from atlas_mlir_native.application import AtlasApplicationAdapter
