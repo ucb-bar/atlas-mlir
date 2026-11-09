@@ -94,6 +94,15 @@ def _unary_math_c(region, name, policy):
         raise NativeCompilationError("unsupported_semantics", str(error)) from error
 
 
+def _host_k1_c(region, name):
+    from .host_k1_contraction import emit_c
+
+    try:
+        return emit_c(region, name)
+    except ValueError as error:
+        raise NativeCompilationError("unsupported_semantics", str(error)) from error
+
+
 def checked_host_layouts(operations, *, allow_embedding=False, allow_indexed_update=False, allow_identity=False):
     """Validate explicit CPU layout placement without admitting host arithmetic."""
     if (
@@ -794,8 +803,15 @@ class AtlasApplicationAdapter:
                     continue
                 source_bf16_linear[node.id] = found
         admitted_contractions = {region.matmul for region in source_bf16_linear.values()}
-        if self.already_quantized and any(node.op == "source_f32_matmul_unqualified"
-                                         and node.id not in admitted_contractions for node in pure):
+        host_k1 = {
+            node.id for node in pure
+            if node.op == "source_f32_matmul_unqualified"
+            and node.id not in admitted_contractions and self._is_host_k1(source, node)
+        }
+        if self.already_quantized and any(
+            node.op == "source_f32_matmul_unqualified"
+            and node.id not in admitted_contractions and node.id not in host_k1 for node in pure
+        ):
             raise NativeCompilationError(
                 "unsupported_semantics",
                 "already-quantized intake refuses floating contractions requiring operand recoding; "
@@ -906,6 +922,8 @@ class AtlasApplicationAdapter:
                 _float_cast_c(region, "float_cast")
             elif kind == "float_arithmetic":
                 _float_arithmetic_c(region, "float_arithmetic")
+            elif kind == "host_k1_contraction":
+                _host_k1_c(region, "host_k1_contraction")
             elif kind == "unary_math":
                 _unary_math_c(region, "unary_math", self.host_unary_math)
             elif kind == "predicate":
@@ -929,7 +947,7 @@ class AtlasApplicationAdapter:
                     members,
                     "source_" + kind,
                     "host"
-                    if kind in {"layout", "predicate", "integer", "float_cast", "float_arithmetic", "unary_math", "static_quantize", "dynamic_quantize", "host_bf16_linear"}
+                    if kind in {"layout", "predicate", "integer", "float_cast", "float_arithmetic", "unary_math", "static_quantize", "dynamic_quantize", "host_bf16_linear", "host_k1_contraction"}
                     else "accelerator",
                     CycleInterval.unknown("application region costs have not been calibrated"),
                     ports(node.id for node in region.nodes if node.effect in {"input", "constant"}),
@@ -1028,6 +1046,7 @@ class AtlasApplicationAdapter:
                 consumers = [item.id for item in source.nodes if producer.id in item.inputs]
                 if (
                     producer.op == "source_f32_matmul_unqualified"
+                    and producer.id not in host_k1
                     and len(producer.type.shape) == 2
                     and producer.id not in claimed
                     and producer.id not in source.outputs
@@ -1043,6 +1062,8 @@ class AtlasApplicationAdapter:
                 add((node.id,), "host_bf16_linear")
             elif self.source_exp_policy and node.op == "source_f32_exp_unqualified":
                 add((node.id,), "pointwise_math")
+            elif node.id in host_k1:
+                add((node.id,), "host_k1_contraction")
             elif node.op == "source_f32_matmul_unqualified":
                 add((node.id,), "contraction")
             elif node.op == "gather" and self._is_scalar_broadcast(source, node):
@@ -1120,6 +1141,19 @@ class AtlasApplicationAdapter:
             return False
         return all(plan.width == 2 and not any(n % 32 for n in
                    (plan.count, plan.group_elements, plan.head_elements)) for plan in plans)
+
+    def _is_host_k1(self, source, node):
+        # An explicit device precision schedule retains ownership of its source.
+        if ("f32_mul" not in self.host_float_arithmetic or self.contraction_schedules is not None
+                or node.id in self.mxu1_contraction_schedules or node.id in self.softmax_value_schedules):
+            return False
+        from .host_k1_contraction import prepare_source
+
+        try:
+            prepare_source(extract_semantic_region(source, (node.id,)))
+        except ValueError:
+            return False
+        return True
 
     @staticmethod
     def _supports_device_source(source, node, kind):
@@ -1342,8 +1376,10 @@ class AtlasApplicationAdapter:
             record, files = (dynamic_quantize if kind == "dynamic_quantize" else static_quantize).emit_c(region, name)
             return CompiledCRegion(name, name + ".h", tuple(record["inputs"]), region.outputs,
                                    files, (), (), record)
-        if kind in {"layout", "predicate", "integer", "float_cast", "float_arithmetic", "unary_math"}:
-            if kind == "float_arithmetic":
+        if kind in {"layout", "predicate", "integer", "float_cast", "float_arithmetic", "unary_math", "host_k1_contraction"}:
+            if kind == "host_k1_contraction":
+                emitter = _host_k1_c
+            elif kind == "float_arithmetic":
                 emitter = _float_arithmetic_c
             elif kind == "float_cast":
                 emitter = _float_cast_c
