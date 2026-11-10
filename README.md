@@ -75,6 +75,82 @@ For full end-to-end runs, see the [examples](examples/handoff/README.md): LLVM
 and ELF stages for small tiles, a captured attention + MLP block from Linalg
 to a device program and host ELF, and tiled matmuls launched from a host.
 
+## Initial Merlin shared dense path
+
+The `feat/atlas-target` companion worktrees add a small diagnostic path from
+explicit ordered FP8/BF16 Linalg through Merlin's existing checked dense loops
+to Atlas virtual SSA and the existing compiler. It admits full 32×32 MXU0 tiles,
+including continued K reductions and multiple output tiles. Atlas owns the
+physical tile layout, numerical policy, instruction expansion and scheduling.
+The source must select `mxu0-e4m3-ordered-bf16-finite-v1` and
+`finite-normal-e4m3-or-positive-zero`; `pack_inputs` checks actual input codes.
+This path performs no implicit conversion from f32, padding or reassociation.
+
+Use these compatible baselines:
+
+| Component | Revision |
+| --- | --- |
+| Merlin before the local changes | `04ed0ae2533f484c2bcca8ecb50e8d5746012099` |
+| Atlas MLIR before the local changes | `c9f50c3310a68d9eb8fa318e68492896a5a45737` |
+| `npu_model` for execution | `47b8599d8ffbe5ddd96059ffe2b5be2427a410f5` |
+| RTL identity selected by Atlas MLIR | `0079c0541111197741a231c002e3843fa6f545b2` |
+
+The model pin is deliberate: `c119e54` changed PACK row layout, and the older
+`rtl-match` tip uses different DMA encoding. The selected model matches both
+the instruction encoding and the PACK layout expected by this compiler. This
+is model execution evidence; this change has not been executed on RTL.
+
+From this Atlas worktree, using the Merlin environment (tested with xDSL 0.73.0):
+
+```sh
+export MERLIN_ROOT=/home/jeremy/Projects/merlin-atlas-target
+export MERLIN_PYTHON=/home/jeremy/Projects/merlin/.venv/bin/python
+export ATLAS_BIN=/home/jeremy/Projects/atlas-mlir/build/bin
+export MODEL_ROOT=/home/jeremy/Projects/npu-model-atlas-target
+export MODEL_PYTHON=/home/jeremy/Projects/npu_model/.venv/bin/python
+export PYTHONPATH="$MERLIN_ROOT/src:$PWD/python:$PWD"
+
+"$MERLIN_PYTHON" -m atlas_mlir_native.shared_dense \
+  test/examples/native_mxu0_ordered_linalg.mlir --entry mxu0_tile \
+  --destination "$MERLIN_ROOT/out/build/atlas-single" \
+  --atlas-bin-dir "$ATLAS_BIN" --pipeline optimized
+
+"$MERLIN_PYTHON" -m pytest -q test/test_shared_dense.py
+"$MERLIN_PYTHON" tools/check_shared_dense.py \
+  --output-dir "$MERLIN_ROOT/out/build/atlas-regression" \
+  --atlas-bin-dir "$ATLAS_BIN" --model-root "$MODEL_ROOT" \
+  --model-python "$MODEL_PYTHON"
+```
+
+Choose fresh output directories. Compilation writes the source, actual checked
+logical schedule, virtual/machine IR, final bytes and a manifest. The regression
+driver checks the model revision, compiles each program once, independently
+decodes its final bytes, and executes different runtime inputs. It compares
+every output byte and checks that input and guard bytes are preserved. Its
+finite-range FMA oracle uses exact integer arithmetic, independently of both
+the compiler and the model. This is a deterministic test driver, with no
+compiler generation or optimization agent loop.
+
+Measured model cycles include the complete diagnostic program and transfers:
+
+| M × K × N | Source-order words / cycles | Optimized words / cycles |
+| --- | --- | --- |
+| 32 × 32 × 32 | 37 / 3,271 | 42 / 3,183 |
+| 32 × 64 × 32 | 53 / 4,921 | 66 / 4,712 |
+| 64 × 32 × 64 | 125 / 11,362 | 146 / 10,122 |
+| 64 × 64 × 32 | 90 / 8,163 | 108 / 7,344 |
+
+The 32×32 shared result is byte-identical to the direct Atlas virtual matmul
+reference in both modes. The driver also tests direct Atlas matmul→ReLU and
+matmul→ReLU→PACK→matmul with an observable intermediate output. These reference
+chains establish the baseline; they do not yet implement shared floating fusion.
+
+This is an initial integration checkpoint, not a generated backend or a repair
+of the older native binding. Merlin's new timing/overlap checker is not yet
+connected to Atlas physical timing effects. Shared floating sequence fusion,
+tails, final target qualification and a reviewed shared-SDK release remain.
+FP4/FP6 codec work in Merlin does not grant those formats to Atlas hardware.
+
 ## Read next
 
 | Doc | Covers |
