@@ -430,7 +430,7 @@ def publish_route(plan, compiled, sizing, *, target_source=None):
                         request_digest=body.digest(),target_identity=plan.source.target_identity)
             programs.append(dict(path=role,manifest_sha256=_digest(path),
                                  binary_sha256=manifest['binary_sha256']))
-    payload = _json(record)
+    payload = _json(publication_record(record))
     route = dict(schema='atlas.quantized_selected_route.v1',route=record['route'],reason=record['reason'],
         source_request_digest=plan.source.digest(),target_identity=plan.source.target_identity,
         selected_io_memory_bytes=dram_slots()*TILE_BYTES,physical_instruction_limit=MAX_INSTRUCTIONS,
@@ -445,6 +445,34 @@ def publish_route(plan, compiled, sizing, *, target_source=None):
         manifest['stage_artifacts'].update({'quantized-sizing.json':sha256(payload).hexdigest(),
                                             'quantized-route.json':sha256(route_bytes).hexdigest()})
         (compiled/'manifest.json').write_bytes(_json(manifest))
+
+
+def publication_record(record):
+    """Preserve default sizing bytes; strip cache bookkeeping only on opt-in.
+
+    The operational cache retains and authenticates its exact directory/files.
+    Native artifacts carry the same semantic identity, proof values and tool
+    arguments, with a relative report output path and no private cache locator.
+    """
+    from .publication_options import deterministic_receipts_enabled
+
+    result = dict(record)
+    if not deterministic_receipts_enabled():
+        return result
+    cache = result.pop('sizing_cache', None)
+    if cache is not None and 'resource_command' in result:
+        report = str(Path(cache['directory']) / 'resource.json')
+        prefix = '--lower-atlas-virtual-to-machine=resource-planning-report='
+        arguments = []
+        for argument in result['resource_command']:
+            if argument.startswith(prefix):
+                path, separator, remaining = argument[len(prefix):].partition(' ')
+                if path != report:
+                    raise ValueError('sizing resource output differs from private checked cache')
+                argument = prefix + 'resource.json' + separator + remaining
+            arguments.append(argument)
+        result['resource_command'] = arguments
+    return result
 
 
 def selected_route(plan, compiled):

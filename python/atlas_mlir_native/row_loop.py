@@ -345,6 +345,7 @@ def verify_row_loop(source, compiled, *, target_source):
     # budget. The source/frame is still independently reconstructed above, and
     # saved physical contracts plus exact current emission are checked below.
     receipt = json.loads((compiled / "compilation-pipeline.json").read_text())
+    from .publication_options import valid_receipt_timing
     captured = "spilled_virtual_sha256" in receipt
     capture_options = ["--mlir-disable-threading",
                 "--mlir-print-ir-before=lower-atlas-virtual-to-machine",
@@ -353,7 +354,7 @@ def verify_row_loop(source, compiled, *, target_source):
     machine = (compiled / "atlas-machine.mlir").read_text()
     if (receipt.get("argv") != expected or receipt.get("wall_limit_s") != 30
             or receipt.get("verifier_limits") != "compiler defaults"
-            or not 0 <= receipt.get("elapsed_s", -1) <= 30
+            or not valid_receipt_timing(receipt)
             or receipt.get("input_sha256") != _sha(virtual.encode())
             or receipt.get("output_sha256") != _sha(machine.encode())
             or (captured and receipt["spilled_virtual_sha256"] != _sha((compiled / "mandatory-spilled-virtual.mlir").read_bytes()))

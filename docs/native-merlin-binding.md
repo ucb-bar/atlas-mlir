@@ -29,6 +29,28 @@ requests identify v24; historical artifacts and suite hashes stay unchanged.
 uv pip install --python /path/to/venv/bin/python --no-deps -e .
 ```
 
+Native compilation preserves elapsed compile times in pipeline receipts and
+operational sizing cache records by default. These invocation values and their
+digest bindings can differ between otherwise identical fresh compilations.
+Use `native-compile --deterministic-receipts` for repeatable receipt bytes: it
+omits elapsed times, declares `receipt_mode: deterministic-v1`, and publishes
+sizing records without cache locations or absolute resource report outputs.
+Reuse flags remain independent of this option. Python callers can scope the
+same behavior with
+`AtlasApplicationAdapter.publication_options(deterministic_receipts=True)`.
+Receipt verification requires bounded elapsed timing for the default format;
+only a declared deterministic receipt can omit it. Verification of published
+receipts does not require the option to remain enabled.
+
+Optional instruction slots use the separate `atlas_program_slots` extension;
+the default host runtime and ABI retain their original bytes. One owner must
+control the endpoint. Use `atlas_slots_discard` for invalidation and
+`atlas_slots_reset_completed` after a platform reset, including active recovery.
+These calls stale every slot handle. The extension also detects external host
+loads and observable invalidation through host counters and load state. Direct
+MMIO changes or host reinitialization require discarding slots first; an
+unobservable external reset cannot be inferred from the baseline host ABI.
+
 | Variable | Meaning |
 | --- | --- |
 | `ATLAS_OOT_BIN_DIR` | Directory with `atlas-opt` and `atlas-emit`. Default `<target-source>/build/bin`. |

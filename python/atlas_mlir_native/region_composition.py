@@ -353,6 +353,7 @@ def compile_virtual_with_receipt(virtual, *, tools, pipeline, destination):
     """Record one bounded compile; opt in to post-spill audit capture explicitly."""
     from time import perf_counter
     from .binding import NATIVE_PIPELINES, _run
+    from .publication_options import deterministic_receipts_enabled
 
     destination, tools = Path(destination), Path(tools)
     capture = os.environ.get('ATLAS_CAPTURE_POSTSPILL') == '1'
@@ -368,6 +369,9 @@ def compile_virtual_with_receipt(virtual, *, tools, pipeline, destination):
         verifier_limits='compiler defaults', wall_limit_s=30,
         tool_sha256={name: hashlib.sha256((tools / name).read_bytes()).hexdigest()
                      for name in ('atlas-opt', 'atlas-emit')})
+    if deterministic_receipts_enabled():
+        receipt.pop('elapsed_s')
+        receipt['receipt_mode'] = 'deterministic-v1'
     if capture:
         diagnostic_text = ''.join(diagnostics)
         marker = '// -----// IR Dump Before'

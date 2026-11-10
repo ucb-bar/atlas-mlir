@@ -72,6 +72,38 @@ def test_provider_advertises_capability_without_enabling_reuse():
     assert not hasattr(AtlasApplicationAdapter, "materialization_cache_supported")
 
 
+def test_materialization_identity_uses_effective_inputs_and_receipt_mode(tmp_path, monkeypatch):
+    class Choice:
+        def to_dict(self):
+            return dict(id="choice", nodes=[], inputs=[], outputs=[], resident_inputs=[], resident_outputs=[])
+
+    adapter = AtlasApplicationAdapter.__new__(AtlasApplicationAdapter)
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    for name in ("atlas-opt", "atlas-emit"):
+        (tools / name).write_bytes(name.encode())
+    monkeypatch.setenv("ATLAS_OOT_BIN_DIR", str(tools))
+    monkeypatch.setenv("ATLAS_NATIVE_PIPELINE", "mandatory")
+    monkeypatch.delenv("ATLAS_CAPTURE_POSTSPILL", raising=False)
+    source, choice = request("bf16_neg", 3), Choice()
+    original = adapter.materialization_identity(source, choice)
+    monkeypatch.setenv("UNRELATED_COMPILER_TEST", "changed")
+    working = tmp_path / "working"
+    working.mkdir()
+    monkeypatch.chdir(working)
+    assert adapter.materialization_identity(source, choice) == original
+    with adapter.publication_options(deterministic_receipts=True):
+        changed = adapter.materialization_identity(source, choice)
+        assert changed != original
+        assert changed["compilation_identity"]["deterministic_receipts"] is True
+    assert adapter.materialization_identity(source, choice) == original
+    monkeypatch.setenv("ATLAS_NATIVE_PIPELINE", "optimized")
+    assert adapter.materialization_identity(source, choice) != original
+    monkeypatch.setenv("ATLAS_NATIVE_PIPELINE", "mandatory")
+    monkeypatch.setenv("ATLAS_CAPTURE_POSTSPILL", "1")
+    assert adapter.materialization_identity(source, choice) != original
+
+
 def test_unsupported_kinds_decline_materialization():
     for kind in ("contraction", "host_k1_contraction", "vector_quantize", "guarded_softmax"):
         assert not AtlasApplicationAdapter.supports_region_materialization(None, SimpleNamespace(metadata=(("kind", kind),)))

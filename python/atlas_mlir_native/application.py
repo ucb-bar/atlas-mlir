@@ -32,6 +32,7 @@ from .c_runtime import RUNTIME_SHARED_FILES
 from .gelu import is_source_gelu
 from .row_softmax import SOFTMAX_POLICY, SOFTMAX_DOMAIN
 from .softmax_precision import lower_semantic_softmax
+from .publication_options import publication_options
 
 _LEGACY_LAYOUTS = ("transpose", "reshape", "copy")
 _INDEXED_LAYOUTS = ("gather", "insert_slice", "concat")
@@ -140,6 +141,7 @@ class AtlasApplicationAdapter:
     region_loop_parameters = ("static_exp", "tag")
     # Provider capability only. Both caller reuse options default to False.
     supports_materialization_cache = True
+    publication_options = staticmethod(publication_options)
 
     @staticmethod
     def supports_region_materialization(region, alternative):
@@ -219,6 +221,7 @@ class AtlasApplicationAdapter:
         from . import binding
         from .application_materialization import provider_sources
         from .binding import _native_pipeline
+        from .publication_options import deterministic_receipts_enabled
 
         names = {node.id: f"node_{i}" for i, node in enumerate(region.nodes)}
         choice = alternative.to_dict()
@@ -249,6 +252,7 @@ class AtlasApplicationAdapter:
                 "tools": tool_identities,
                 "pipeline": _native_pipeline(),
                 "capture_postspill": os.environ.get("ATLAS_CAPTURE_POSTSPILL") == "1",
+                "deterministic_receipts": deterministic_receipts_enabled(),
             },
         }
 

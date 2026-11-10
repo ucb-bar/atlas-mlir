@@ -65,7 +65,7 @@ def test_every_saved_source_class_retains_every_published_byte(tmp_path, kind):
     adapter.already_quantized_score_domain = "bf16-row-relative-span80-pad32-v1"
     adapter.already_quantized_mask_sentinel = None
     alternative = SimpleNamespace(metadata=(("kind", kind),))
-    with codegen_options(CodegenOptions(io_memory_bytes=67108864)):
+    with codegen_options(CodegenOptions(io_memory_bytes=67108864)), adapter.publication_options(deterministic_receipts=True):
         for index, original in enumerate(classes.values()):
             directory = tmp_path / str(index)
             with materialization_session(enabled=False):
