@@ -131,10 +131,10 @@ class ExactFloatTypedTest(unittest.TestCase):
 
     def test_oversized_physical_bound_refused_without_changing_limit(self):
         from merlin.semantic_compiler.target_binding import NativeCompilationError
-        source=request('bf16_to_f32',21504)
+        source=request('bf16_to_f32',32768)
         with tempfile.TemporaryDirectory(prefix='atlas-float-limit-') as directory:
             # Bypass only the chunk policy to exercise the real bound gate.
-            with patch.dict(MAX_LEAF_ELEMENTS,{'bf16_to_f32':21504}):
+            with patch.dict(MAX_LEAF_ELEMENTS,{'bf16_to_f32':32768}):
                 with self.assertRaisesRegex(NativeCompilationError,'exceeds 1000000'):
                     compile_source(None,source,target_source=ROOT,destination=Path(directory)/'compiled',limits=None)
     def test_instruction_domain_status_and_module_mutations_rejected(self):

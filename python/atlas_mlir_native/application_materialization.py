@@ -199,7 +199,8 @@ def _publish_quantizer_leaf(original, canonical, materialized, destination):
     plan, checked = quantizer.prepare_plan(original), quantizer.prepare_plan(canonical)
     previous, files = _checked_machine_files(
         original, canonical, materialized, original_plan=plan, canonical_plan=checked, virtual=quantizer.virtual_program,
-        names=("atlas-machine.mlir", "physical-program.json", "program.bin"),
+        names=("atlas-machine.mlir", "physical-program.json", "program.bin",
+               "quantizer-instruction-bound.json"),
         plan_files=("execution_plan.json", "quantizer-plan.json"))
     if previous["lowering_pipeline"] != _native_pipeline():
         raise ValueError("canonical quantizer lowering choices differ")

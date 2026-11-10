@@ -1,17 +1,18 @@
 """Fail-closed dynamic instruction bound for generated restoration images.
 
 The source proves loop trips from unsigned, constant seeded affine inductions.
-The verified final machine CFG must have exactly those counted loops. Every
-encoded word is charged on every visit to its owning block, including untaken
-edge copies, both numeric arms, spills, waits, and delay slots. This intentionally
-overcounts branches; it does not depend on observed activation exponents.
+The verified final machine CFG must have exactly those counted loops. Each block
+is charged its longest executable word path, including spills, waits and branch
+delay slots. Counted headers distinguish continuing visits from the single exit.
+Unrecognized physical control retains the conservative all-encoded-word charge;
+the proof does not depend on observed activation exponents.
 """
 from collections import Counter, defaultdict
 from math import prod
 import re
 
 
-MAX_INSTRUCTIONS = 1_000_000
+from .limits import DEFAULT_FUNCTIONAL_INSTRUCTION_LIMIT as MAX_INSTRUCTIONS
 # Full scalar admission remains available for small images. Larger images have
 # an explicit zero fallback budget and report a domain/resource refusal instead.
 MAX_SCALAR_TILES = 2
@@ -181,13 +182,96 @@ def _fresh_counter_read(header, members, induction, old, *, restores, effects, s
                        if target != header and target in members)
     return reached
 
-def instruction_bound(source, machine, program):
+def _block_path_words(instructions, successors):
+    """Bound words from block entry to each CFG successor (None for return).
+
+    Only contiguous blocks with recognized, acyclic internal control and exact
+    CFG exits receive a tighter charge. Synthetic untimed programs and unknown
+    layouts retain the old all-words charge. The caller has already verified the
+    machine CFG and its physical control contract.
+    """
+    owned = defaultdict(list)
+    for index, instruction in enumerate(instructions):
+        owned[instruction['fields']['atlas.virtual_cfg_block']].append(index)
+    entries = {block: indices[0] for block, indices in owned.items()}
+    costs, refined = {}, set()
+    for block, targets in successors.items():
+        indices = owned[block]
+        fallback = {target: len(indices) for target in targets or [None]}
+        costs[block] = fallback
+        if not indices or indices != list(range(indices[0], indices[-1]+1)):
+            continue
+        memo, active = {}, set()
+        def walk(index):
+            if type(index) is not int or not 0 <= index < len(instructions):
+                raise ValueError('unrecognized physical target')
+            destination = instructions[index]['fields']['atlas.virtual_cfg_block']
+            if destination != block:
+                if destination not in targets or entries[destination] != index:
+                    raise ValueError('unrecognized CFG exit')
+                return {destination: 0}
+            if index in memo:
+                return memo[index]
+            if index in active:
+                raise ValueError('cyclic internal physical control')
+            active.add(index)
+            row = instructions[index]
+            control = row.get('control', {})
+            kind = control.get('kind')
+            charge = 1
+            if 'delay_slot_for_word_index' in row:
+                raise ValueError('entry into physical delay slot')
+            if kind == 'sequential':
+                paths = [walk(index+1)]
+            elif kind == 'trap' and not targets:
+                paths = [{None: 0}]
+            elif kind in ('conditional_direct', 'jump_direct'):
+                delay = control.get('delay_slot_word_index')
+                if type(delay) is not int or delay != index+1 or delay not in indices:
+                    raise ValueError('unrecognized physical delay slot')
+                slot = instructions[delay]
+                if (slot.get('control', {}).get('kind') != 'sequential' or
+                        slot.get('delay_slot_for_word_index') != index):
+                    raise ValueError('unrecognized physical delay instruction')
+                charge += 1
+                destinations = [control.get('target_word_index')]
+                if kind == 'conditional_direct':
+                    if control.get('fallthrough_word_index') != delay+1:
+                        raise ValueError('unrecognized physical fallthrough')
+                    destinations.append(control['fallthrough_word_index'])
+                paths = [walk(destination) for destination in destinations]
+            else:
+                raise ValueError('unrecognized physical control')
+            result = {}
+            for path in paths:
+                for target, cost in path.items():
+                    result[target] = max(result.get(target, 0), charge+cost)
+            active.remove(index)
+            memo[index] = result
+            return result
+        try:
+            paths = walk(entries[block])
+            if set(paths) == set(fallback) and max(paths.values()) <= len(indices):
+                costs[block] = paths
+                refined.add(block)
+        except (KeyError, TypeError, ValueError, RecursionError):
+            # The verified all-word bound remains valid for unknown layouts.
+            pass
+    return costs, refined
+
+
+def instruction_bound(source, machine, program, *, max_instructions=MAX_INSTRUCTIONS,
+                      schema="atlas.restoration_instruction_bound.v2"):
     """Return a conservative physical bound or raise on an unproved image.
 
     Call only after the existing CFG, control, address and timing verifiers.
     Their source contract ties every machine comparison to its captured scalar
     producer; this routine adds the stricter per-launch resource admission.
     """
+    if type(max_instructions) is not int or max_instructions <= 0:
+        raise ValueError('instruction bound: invalid instruction limit')
+    if schema not in {'atlas.restoration_instruction_bound.v1', 'atlas.restoration_instruction_bound.v2'}:
+        raise ValueError('instruction bound: unsupported schema')
     source_loops = _source_loop_trips(source)
     trips_by_bound = defaultdict(set)
     for bound, trips in source_loops:
@@ -362,12 +446,44 @@ def instruction_bound(source, machine, program):
         if instruction['word_index'] != index or block not in visits:
             raise ValueError('instruction bound: encoded word lacks unique CFG ownership')
         words[block] += 1
-    bound = sum(words[block]*visits[block] for block in successors)
-    return dict(schema='atlas.restoration_instruction_bound.v1', max_instructions=MAX_INSTRUCTIONS,
-                instruction_bound=bound, admitted=bound <= MAX_INSTRUCTIONS,
-                method='sum_all_encoded_words_times_proved_maximum_block_visits',
+    if schema == 'atlas.restoration_instruction_bound.v1':
+        # Replay the original conservative format exactly for existing publications.
+        if max_instructions != MAX_INSTRUCTIONS:
+            raise ValueError('instruction bound: v1 requires the Atlas default cap')
+        bound = sum(words[block]*visits[block] for block in successors)
+        return dict(schema=schema, max_instructions=MAX_INSTRUCTIONS,
+                    instruction_bound=bound, admitted=bound <= MAX_INSTRUCTIONS,
+                    method='sum_all_encoded_words_times_proved_maximum_block_visits',
+                    source_loop_inventory=[dict(bound=bound, trip_count=trips) for bound, trips in sorted(source_loops)],
+                    loops=[dict(header=header, trip_count=loop_trips[header], **final_proofs[header], blocks=sorted(members))
+                           for header, members in sorted(loops.items())],
+                    blocks=[dict(block=block, encoded_words=words[block], maximum_visits=visits[block])
+                            for block in sorted(successors)])
+    path_words, refined = _block_path_words(program['instructions'], successors)
+    blocks = []
+    for block in sorted(successors):
+        paths = path_words[block]
+        record = dict(block=block, encoded_words=words[block], maximum_visits=visits[block],
+                      maximum_words_per_visit=max(paths.values()),
+                      word_charge='longest_executable_path' if block in refined else 'all_encoded_words',
+                      successor_path_words=[dict(successor=target, words=cost) for target, cost in paths.items()])
+        if block in loops:
+            invocations = prod(loop_trips[header] for header, members in loops.items()
+                               if header != block and block in members)
+            continuing, exiting = successors[block]
+            record.update(continue_visits=invocations*loop_trips[block], exit_visits=invocations)
+            record['instruction_bound'] = (paths[continuing]*record['continue_visits'] +
+                                           paths[exiting]*record['exit_visits'])
+        else:
+            record['instruction_bound'] = max(paths.values())*visits[block]
+        blocks.append(record)
+    bound = sum(record['instruction_bound'] for record in blocks)
+    return dict(schema=schema, max_instructions=max_instructions,
+                instruction_limit_source='atlas_default_with_optional_lower_target_cap',
+                default_functional_instruction_limit=MAX_INSTRUCTIONS,
+                instruction_bound=bound, admitted=bound <= max_instructions,
+                method='sum_longest_executable_block_paths_with_counted_header_continue_and_exit_visits',
                 source_loop_inventory=[dict(bound=bound, trip_count=trips) for bound, trips in sorted(source_loops)],
                 loops=[dict(header=header, trip_count=loop_trips[header], **final_proofs[header], blocks=sorted(members))
                        for header, members in sorted(loops.items())],
-                blocks=[dict(block=block, encoded_words=words[block], maximum_visits=visits[block])
-                        for block in sorted(successors)])
+                blocks=blocks)

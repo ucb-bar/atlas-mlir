@@ -193,6 +193,16 @@ def bind_pointwise(original, canonical, materialized, destination, capture, *, r
                         native_snapshot_sha256=previous["native_snapshot_sha256"], io_memory_bytes=dram_slots() * TILE_BYTES)
     if virtual.encode() != (materialized / "atlas-virtual.mlir").read_bytes():
         raise ValueError("rebound loop virtual program differs from checked canonical source")
+    from .restoration_budget import instruction_bound
+    from .limits import functional_instruction_limit
+    from types import SimpleNamespace
+    bound_name = "reduction-instruction-bound.json" if reduction else "pointwise-instruction-bound.json"
+    saved_bound = json.loads((materialized / bound_name).read_text())
+    cap = functional_instruction_limit(SimpleNamespace(functional_instruction_limit=saved_bound["max_instructions"]))
+    bound = instruction_bound(virtual, (materialized / "atlas-machine.mlir").read_text(),
+                              json.loads((materialized / "physical-program.json").read_text()), max_instructions=cap)
+    if not bound["admitted"] or saved_bound != bound:
+        raise ValueError("rebound loop instruction bound differs or exceeds its saved limit")
     for name, data in _inventory(materialized).items():
         if name.startswith("body/") or name == "manifest.json":
             continue

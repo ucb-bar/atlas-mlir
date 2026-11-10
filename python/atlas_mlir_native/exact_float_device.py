@@ -247,7 +247,8 @@ def prepare_c_package(region,compiled,name,*,target_source,runtime_linkage="sepa
     binary=b"".join(r["word_u32"].to_bytes(4,"little") for r in program["instructions"])
     if binary!=(compiled/"program.bin").read_bytes():raise ValueError("exact float binary differs from source replay")
     from .restoration_budget import instruction_bound
-    bound=instruction_bound(virtual_program(p),machine,program)
+    saved_bound = json.loads((compiled / "float-instruction-bound.json").read_text())
+    bound=instruction_bound(virtual_program(p),machine,program,schema=saved_bound["schema"])
     if not bound["admitted"] or json.loads((compiled/"float-instruction-bound.json").read_text())!=bound:
         raise ValueError("exact float instruction bound differs or exceeds default")
     upper=name.upper();n=len(p.operands);logical=p.count*p.width;obytes=p.count*p.output_width

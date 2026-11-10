@@ -133,6 +133,15 @@ def compile_source(snapshot, region, *, target_source, destination, limits, _pla
     program=json.loads(_run([str(tools/'atlas-emit'),'--program-json','-'], input_text=machine))
     if program.get('selected_rtl_revision') != RTL_REVISION:
         raise ValueError('activation quantizer emitter uses a different RTL revision')
+    from .restoration_budget import instruction_bound
+    from merlin.semantic_compiler.target_binding import NativeCompilationError
+    try:
+        from .limits import functional_instruction_limit
+        bound=instruction_bound(virtual,machine,program,max_instructions=functional_instruction_limit(limits))
+    except (ValueError,KeyError,IndexError) as error:
+        raise NativeCompilationError('resource_limit','activation quantizer instruction bound is unproved: '+str(error)) from error
+    if not bound['admitted']:
+        raise NativeCompilationError('resource_limit','activation quantizer worst-case instruction bound exceeds '+str(bound['max_instructions'])+': '+str(bound['instruction_bound']))
     binary=b''.join(row['word_u32'].to_bytes(4,'little') for row in program['instructions'])
     budget=current_codegen_options().program_size_limit_bytes
     if budget is not None and len(binary)>budget:
@@ -141,7 +150,8 @@ def compile_source(snapshot, region, *, target_source, destination, limits, _pla
         return (json.dumps(record,sort_keys=True,indent=2)+'\n').encode()
     files={'source-request.json':encoded(region.record()),'quantizer-plan.json':encoded(plan.record()),
            'atlas-virtual.mlir':virtual.encode(),'atlas-machine.mlir':machine.encode(),
-           'physical-program.json':encoded(program),'execution_plan.json':encoded(plan.record()),'program.bin':binary}
+           'physical-program.json':encoded(program),'execution_plan.json':encoded(plan.record()),'program.bin':binary,
+           'quantizer-instruction-bound.json':encoded(bound)}
     for key,data in files.items():
         (destination/key).write_bytes(data)
     artifacts={key:hashlib.sha256(data).hexdigest() for key,data in files.items()}
@@ -189,6 +199,14 @@ def prepare_c_package(region, compiled, name, *, target_source, runtime_linkage=
     binary=b''.join(row['word_u32'].to_bytes(4,'little') for row in emitted['instructions'])
     if binary != (compiled/'program.bin').read_bytes():
         raise ValueError('activation quantizer binary differs from replay of its exact typed source')
+    from .restoration_budget import instruction_bound
+    from .limits import functional_instruction_limit
+    saved_bound=json.loads((compiled/'quantizer-instruction-bound.json').read_text())
+    from types import SimpleNamespace
+    cap=functional_instruction_limit(SimpleNamespace(functional_instruction_limit=saved_bound['max_instructions']))
+    bound=instruction_bound(virtual_program(plan),regenerated,emitted,max_instructions=cap)
+    if not bound['admitted'] or json.loads((compiled/'quantizer-instruction-bound.json').read_text())!=bound:
+        raise ValueError('activation quantizer instruction bound differs or exceeds default')
     upper=name.upper()
     input_bytes=plan.count*plan.width
     exponent_bytes=prod(plan.exponents.type.shape)*4

@@ -249,6 +249,14 @@ def compile_row_loop(snapshot, source, *, target_source, destination, limits):
     program = json.loads(_run([str(tools / "atlas-emit"), "--program-json", "-"], input_text=machine))
     if program.get("selected_rtl_revision") != RTL_REVISION:
         raise NativeCompilationError("unqualified_target", "row loop emitter uses a different RTL revision")
+    from .restoration_budget import instruction_bound
+    from .limits import functional_instruction_limit
+    try:
+        bound = instruction_bound(virtual, machine, program, max_instructions=functional_instruction_limit(limits))
+    except (ValueError, KeyError, IndexError) as error:
+        raise NativeCompilationError("resource_limit", "row loop instruction bound is unproved: " + str(error)) from error
+    if not bound["admitted"]:
+        raise NativeCompilationError("resource_limit", "row loop worst-case instruction bound exceeds " + str(bound["max_instructions"]) + ": " + str(bound["instruction_bound"]))
     binary = b"".join(row["word_u32"].to_bytes(4, "little") for row in program["instructions"])
     execution = plan.execution_record()
     files = {
@@ -258,6 +266,7 @@ def compile_row_loop(snapshot, source, *, target_source, destination, limits):
         "atlas-virtual.mlir": virtual.encode(),
         "atlas-machine.mlir": machine.encode(),
         "physical-program.json": _json(program),
+        "row-loop-instruction-bound.json": _json(bound),
         "program.bin": binary,
     }
     for name, data in files.items():
@@ -368,4 +377,12 @@ def verify_row_loop(source, compiled, *, target_source):
         or binary != (compiled / "program.bin").read_bytes()
     ):
         raise ValueError("row-loop program differs from its checked physical lowering")
+    from .restoration_budget import instruction_bound
+    from .limits import functional_instruction_limit
+    from types import SimpleNamespace
+    saved_bound = json.loads((compiled / "row-loop-instruction-bound.json").read_text())
+    cap = functional_instruction_limit(SimpleNamespace(functional_instruction_limit=saved_bound["max_instructions"]))
+    bound = instruction_bound(virtual, machine, program, max_instructions=cap)
+    if not bound["admitted"] or saved_bound != bound:
+        raise ValueError("row loop instruction bound differs or exceeds default")
     return plan, manifest

@@ -27,14 +27,10 @@ STATIC_CHUNK_ELEMENTS = 2048
 # npu_model measured 819,249 at count 524,256 (the largest gcd32 extent).
 # Larger inputs or smaller I/O windows retain bounded chunk dispatch.
 STATIC_WHOLE_BODY_MAX_ELEMENTS = 1 << 19
-# Unchanged-model execution with every 1,024-lane tile exceptional measures
-# 119,499 instructions for ref and 119,525 for nc per 4,096-element group.
-# The correction and exponent DAGs have no data-dependent lane branches.
-# Short groups need at most 64 instructions/lane, 256/prefix tile and 512
-# fixed instructions: 64*1024 + 256*32 + 512 = 74,240 per group. The largest
-# gcd32 short group (992) measured 33,521; eight measured 267,867. Thus the
-# full-tile bound also covers all aligned groups of at most 1,024 elements.
-# Eight groups cost at most 8 * 119,525 = 956,200 under the default 1M bound.
+# Legacy measured scheduling estimate retained to preserve chunking and images.
+# The current exceptional-lane loop has 25 words, so the older 119,525/group
+# measurement is not a worst-case proof. Admission uses the replayed machine
+# instruction bound; do not use this scheduling constant as that proof.
 DYNAMIC_GROUP_WORST_INSTRUCTIONS = 119_525
 DYNAMIC_GROUPS_PER_LAUNCH = DEFAULT_FUNCTIONAL_INSTRUCTION_LIMIT // DYNAMIC_GROUP_WORST_INSTRUCTIONS
 # Counted full-tile groups scale with their number of 4,096-element blocks.

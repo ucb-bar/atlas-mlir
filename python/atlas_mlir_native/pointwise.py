@@ -608,6 +608,14 @@ def compile_pointwise(
     program = json.loads(_run([str(tools / "atlas-emit"), "--program-json", "-"], input_text=machine))
     if program.get("selected_rtl_revision") != RTL_REVISION:
         raise NativeCompilationError("unqualified_target", "pointwise emitter uses a different RTL")
+    from .restoration_budget import instruction_bound
+    from .limits import functional_instruction_limit
+    try:
+        bound = instruction_bound(virtual, machine, program, max_instructions=functional_instruction_limit(limits))
+    except (ValueError, KeyError, IndexError) as error:
+        raise NativeCompilationError("resource_limit", "pointwise instruction bound is unproved: " + str(error)) from error
+    if not bound["admitted"]:
+        raise NativeCompilationError("resource_limit", "pointwise worst-case instruction bound exceeds " + str(bound["max_instructions"]) + ": " + str(bound["instruction_bound"]))
     binary = b"".join(row["word_u32"].to_bytes(4, "little") for row in program["instructions"])
     execution = {
         "schema": "atlas.pointwise_execution_plan.v1",
@@ -625,6 +633,7 @@ def compile_pointwise(
         "execution_plan.json": execution,
         "pointwise-tiling.json": full_plan.record(),
         "physical-program.json": program,
+        "pointwise-instruction-bound.json": bound,
     }
     for name, data in files.items():
         (destination / name).write_text(json.dumps(data, sort_keys=True, indent=2) + "\n")

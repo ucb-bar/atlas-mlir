@@ -112,6 +112,14 @@ def prepare_c_package(source, compiled, name, *, target_source, runtime_linkage=
         row["word_u32"].to_bytes(4, "little") for row in replay["instructions"]
     ):
         raise ValueError("reduction binary differs from checked source lowering")
+    from .restoration_budget import instruction_bound
+    from .limits import functional_instruction_limit
+    from types import SimpleNamespace
+    saved_bound = json.loads((compiled / "reduction-instruction-bound.json").read_text())
+    cap = functional_instruction_limit(SimpleNamespace(functional_instruction_limit=saved_bound["max_instructions"]))
+    bound = instruction_bound(virtual, machine, replay, max_instructions=cap)
+    if not bound["admitted"] or saved_bound != bound:
+        raise ValueError("reduction instruction bound differs or exceeds default")
     nonnegative = reduction_policy == NONNEGATIVE_NORMAL_REDUCTION_POLICY
     helpers = (
         render_reduction_c(plan, name)

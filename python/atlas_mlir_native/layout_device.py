@@ -487,7 +487,8 @@ def prepare_c_package(source, compiled, name, *, target_source, runtime_linkage=
     if binary != (compiled / "program.bin").read_bytes():
         raise ValueError("device layout binary differs")
     from .restoration_budget import instruction_bound
-    bound = instruction_bound(virtual, machine, program)
+    saved_bound = json.loads((compiled / "layout-instruction-bound.json").read_text())
+    bound = instruction_bound(virtual, machine, program, schema=saved_bound["schema"])
     if not bound["admitted"] or json.loads((compiled / "layout-instruction-bound.json").read_text()) != bound:
         raise ValueError("device layout instruction bound differs or exceeds default")
     inputs = [key for key, _ in source.input_storages]

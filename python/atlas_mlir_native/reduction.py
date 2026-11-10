@@ -450,6 +450,14 @@ def compile_reduction(
     program = json.loads(program_text)
     if program.get("selected_rtl_revision") != RTL_REVISION:
         raise NativeCompilationError("unqualified_target", "reduction emitter uses a different RTL")
+    from .restoration_budget import instruction_bound
+    from .limits import functional_instruction_limit
+    try:
+        bound = instruction_bound(virtual, machine, program, max_instructions=functional_instruction_limit(limits))
+    except (ValueError, KeyError, IndexError) as error:
+        raise NativeCompilationError("resource_limit", "reduction instruction bound is unproved: " + str(error)) from error
+    if not bound["admitted"]:
+        raise NativeCompilationError("resource_limit", "reduction worst-case instruction bound exceeds " + str(bound["max_instructions"]) + ": " + str(bound["instruction_bound"]))
     binary = b"".join(row["word_u32"].to_bytes(4, "little") for row in program["instructions"])
     execution = {
         "schema": "atlas.reduction_execution_plan.v1",
@@ -464,6 +472,7 @@ def compile_reduction(
         "source-request.json": request.record(),
         "execution_plan.json": execution,
         "reduction-tiling.json": plan.record(),
+        "reduction-instruction-bound.json": bound,
     }.items():
         (destination / name).write_text(json.dumps(value, sort_keys=True, indent=2) + "\n")
     for name, text in {

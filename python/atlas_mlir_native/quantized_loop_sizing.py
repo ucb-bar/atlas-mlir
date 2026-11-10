@@ -19,7 +19,7 @@ from merlin.semantic_compiler.target_binding import NativeCompilationError, veri
 
 from .binding import (AtlasNativeBinding, DRAM_BASE, TILE_BYTES, NATIVE_CHECKS,
                       NATIVE_PIPELINES, RTL_REVISION, _native_pipeline, _run, dram_slots)
-from .restoration_budget import MAX_INSTRUCTIONS, instruction_bound
+from .restoration_budget import MAX_INSTRUCTIONS, instruction_bound, fallback_tiles
 
 # Process-local decisions avoid repeating expensive planning for the same
 # exact source, tools, profile, and limits, including failed attempts.
@@ -526,8 +526,11 @@ def selected_route(plan, compiled):
             request_digest=plan.source.digest(),target_identity=plan.source.target_identity)
         actual = instruction_bound((compiled/'atlas-virtual.mlir').read_text(),
             (compiled/'atlas-machine.mlir').read_text(),
-            json.loads((compiled/'physical-program.json').read_text()))
-        if actual['instruction_bound'] != bound['instruction_bound'] or not actual['admitted']:
+            json.loads((compiled/'physical-program.json').read_text()), schema=bound['schema'])
+        actual['scalar_fallback_tile_budget'] = fallback_tiles(plan)
+        from .quantized_loop import execution_layout
+        actual['restoration_admission'] = execution_layout(plan)['restoration_admission']
+        if actual != bound or not actual['admitted']:
             raise ValueError('counted publication physical instruction proof differs')
         expected = [dict(path='.',binary_sha256=manifest['binary_sha256'])]
     else:

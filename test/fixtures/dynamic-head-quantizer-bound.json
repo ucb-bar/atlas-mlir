@@ -1,0 +1,3741 @@
+{
+  "source": "module {\n  func.func @activation_quantizer() -> !atlas.virtual_state attributes {atlas.input_dram_base = 2415919104 : i64, atlas.output_dram_base = 2415984640 : i64, atlas.output_dram_bytes = 32800 : i64} {\n    %quant0 = \"atlas.virtual_start\"() : () -> !atlas.virtual_state\n    %quant1 = \"atlas.virtual_slot\"() {kind = \"bf16\", words = 512 : i32, slot_word = -1 : i32, purpose = \"scratch\"} : () -> !atlas.virtual_spill\n    %quant2 = \"atlas.virtual_slot\"() {kind = \"fp8\", words = 256 : i32, slot_word = -1 : i32, purpose = \"scratch\"} : () -> !atlas.virtual_spill\n    %quant3 = \"atlas.virtual_vpu_splat\"() {bits = 0 : i32} : () -> !atlas.virtual_bf16\n    %scalar4 = arith.constant 127 : i32\n    %quant5 = \"atlas.virtual_raw_pack_fp8\"(%quant3, %scalar4) : (!atlas.virtual_bf16, i32) -> !atlas.virtual_fp8\n    %quant6 = \"atlas.virtual_save\"(%quant0, %quant2, %quant5) : (!atlas.virtual_state, !atlas.virtual_spill, !atlas.virtual_fp8) -> !atlas.virtual_state\n    %scalar7 = arith.constant 0 : i32\n    %scalar8 = arith.constant -1879048192 : i32\n    %scalar9 = arith.constant -1878982656 : i32\n    cf.br ^group(%quant6, %scalar7, %scalar8, %scalar9 : !atlas.virtual_state, i32, i32, i32)\n    ^group(%gs: !atlas.virtual_state, %gi: i32, %gip: i32, %gop: i32):\n    %scalar10 = arith.constant 8 : i32\n    %scalar11 = arith.cmpi ult, %gi, %scalar10 : i32\n    cf.cond_br %scalar11, ^group_body(%gs : !atlas.virtual_state), ^finish(%gs : !atlas.virtual_state)\n    ^group_body(%gbs: !atlas.virtual_state):\n    %scalar12 = arith.constant 0 : i32\n    %scalar13 = arith.constant 0 : i32\n    cf.br ^amax(%gbs, %scalar12, %scalar13, %gip : !atlas.virtual_state, i32, i32, i32)\n    ^amax(%as: !atlas.virtual_state, %ai: i32, %am: i32, %aptr: i32):\n    %scalar14 = arith.constant 4 : i32\n    %scalar15 = arith.cmpi ult, %ai, %scalar14 : i32\n    cf.cond_br %scalar15, ^amax_body(%as : !atlas.virtual_state), ^scale(%as, %am : !atlas.virtual_state, i32)\n    ^amax_body(%abs: !atlas.virtual_state):\n    %scalar16 = arith.constant 2048 : i32\n    %quant17, %quant18 = \"atlas.virtual_dma_load_bf16\"(%abs, %aptr, %scalar16) : (!atlas.virtual_state, i32, i32) -> (!atlas.virtual_state, !atlas.virtual_bf16)\n    %quant19 = \"atlas.virtual_vpu_reduce\"(%quant18) {kind = \"row_max\"} : (!atlas.virtual_bf16) -> !atlas.virtual_bf16\n    %quant20 = \"atlas.virtual_vpu_reduce\"(%quant19) {kind = \"col_max\"} : (!atlas.virtual_bf16) -> !atlas.virtual_bf16\n    %quant21 = \"atlas.virtual_save\"(%quant17, %quant1, %quant20) : (!atlas.virtual_state, !atlas.virtual_spill, !atlas.virtual_bf16) -> !atlas.virtual_state\n    %quant22, %quant23 = \"atlas.virtual_slot_load\"(%quant21, %quant1) {kind = \"lhu\", byte_offset = 0 : i32} : (!atlas.virtual_state, !atlas.virtual_spill) -> (!atlas.virtual_state, i32)\n    %quant24 = \"atlas.virtual_vpu_reduce\"(%quant18) {kind = \"row_min\"} : (!atlas.virtual_bf16) -> !atlas.virtual_bf16\n    %quant25 = \"atlas.virtual_vpu_reduce\"(%quant24) {kind = \"col_min\"} : (!atlas.virtual_bf16) -> !atlas.virtual_bf16\n    %quant26 = \"atlas.virtual_save\"(%quant22, %quant1, %quant25) : (!atlas.virtual_state, !atlas.virtual_spill, !atlas.virtual_bf16) -> !atlas.virtual_state\n    %quant27, %quant28 = \"atlas.virtual_slot_load\"(%quant26, %quant1) {kind = \"lhu\", byte_offset = 0 : i32} : (!atlas.virtual_state, !atlas.virtual_spill) -> (!atlas.virtual_state, i32)\n    %scalar29 = arith.constant 32767 : i32\n    %scalar30 = arith.andi %quant23, %scalar29 : i32\n    %scalar31 = arith.constant 32767 : i32\n    %scalar32 = arith.andi %quant28, %scalar31 : i32\n    %scalar33 = arith.cmpi ult, %scalar30, %scalar32 : i32\n    %scalar34 = arith.extui %scalar33 : i1 to i32\n    %scalar35 = arith.constant 0 : i32\n    %scalar36 = arith.subi %scalar35, %scalar34 : i32\n    %scalar37 = arith.xori %scalar32, %scalar30 : i32\n    %scalar38 = arith.andi %scalar37, %scalar36 : i32\n    %scalar39 = arith.xori %scalar30, %scalar38 : i32\n    %scalar40 = arith.constant 32640 : i32\n    %scalar41 = arith.cmpi uge, %scalar39, %scalar40 : i32\n    cf.cond_br %scalar41, ^exception(%quant27 : !atlas.virtual_state), ^fast(%quant27 : !atlas.virtual_state)\n    ^exception(%es: !atlas.virtual_state):\n    %quant42 = \"atlas.virtual_save\"(%es, %quant1, %quant18) : (!atlas.virtual_state, !atlas.virtual_spill, !atlas.virtual_bf16) -> !atlas.virtual_state\n    %scalar43 = arith.constant 0 : i32\n    cf.br ^lane(%quant42, %scalar43, %am : !atlas.virtual_state, i32, i32)\n    ^lane(%ls: !atlas.virtual_state, %li: i32, %lm: i32):\n    %scalar44 = arith.constant 1024 : i32\n    %scalar45 = arith.cmpi ult, %li, %scalar44 : i32\n    cf.cond_br %scalar45, ^lane_body(%ls : !atlas.virtual_state), ^join(%ls, %lm : !atlas.virtual_state, i32)\n    ^lane_body(%lbs: !atlas.virtual_state):\n    %quant46, %quant47 = \"atlas.virtual_slot_load\"(%lbs, %quant1, %li) {kind = \"lhu\", byte_offset = 0 : i32} : (!atlas.virtual_state, !atlas.virtual_spill, i32) -> (!atlas.virtual_state, i32)\n    %scalar48 = arith.constant 32767 : i32\n    %scalar49 = arith.andi %quant47, %scalar48 : i32\n    %scalar50 = arith.cmpi ult, %lm, %scalar49 : i32\n    %scalar51 = arith.extui %scalar50 : i1 to i32\n    %scalar52 = arith.constant 32640 : i32\n    %scalar53 = arith.cmpi ult, %scalar49, %scalar52 : i32\n    %scalar54 = arith.extui %scalar53 : i1 to i32\n    %scalar55 = arith.andi %scalar51, %scalar54 : i32\n    %scalar56 = arith.constant 0 : i32\n    %scalar57 = arith.subi %scalar56, %scalar55 : i32\n    %scalar58 = arith.xori %scalar49, %lm : i32\n    %scalar59 = arith.andi %scalar58, %scalar57 : i32\n    %scalar60 = arith.xori %lm, %scalar59 : i32\n    %scalar61 = arith.constant 1 : i32\n    %scalar62 = arith.addi %li, %scalar61 : i32\n    cf.br ^lane(%quant46, %scalar62, %scalar60 : !atlas.virtual_state, i32, i32)\n    ^fast(%fs: !atlas.virtual_state):\n    %scalar63 = arith.cmpi ult, %am, %scalar39 : i32\n    %scalar64 = arith.extui %scalar63 : i1 to i32\n    %scalar65 = arith.constant 0 : i32\n    %scalar66 = arith.subi %scalar65, %scalar64 : i32\n    %scalar67 = arith.xori %scalar39, %am : i32\n    %scalar68 = arith.andi %scalar67, %scalar66 : i32\n    %scalar69 = arith.xori %am, %scalar68 : i32\n    cf.br ^join(%fs, %scalar69 : !atlas.virtual_state, i32)\n    ^join(%js: !atlas.virtual_state, %jm: i32):\n    %scalar70 = arith.constant 1 : i32\n    %scalar71 = arith.addi %ai, %scalar70 : i32\n    %scalar72 = arith.constant 2048 : i32\n    %scalar73 = arith.addi %aptr, %scalar72 : i32\n    cf.br ^amax(%js, %scalar71, %jm, %scalar73 : !atlas.virtual_state, i32, i32, i32)\n    ^scale(%ss: !atlas.virtual_state, %sm: i32):\n    %scalar74 = arith.constant 0 : i32\n    %scalar75 = arith.constant 7 : i32\n    %scalar76 = arith.shrui %sm, %scalar75 : i32\n    %scalar77 = arith.constant 135 : i32\n    %scalar78 = arith.subi %scalar76, %scalar77 : i32\n    %scalar79 = arith.constant 16 : i32\n    %scalar80 = arith.cmpi uge, %sm, %scalar79 : i32\n    %scalar81 = arith.extui %scalar80 : i1 to i32\n    %scalar82 = arith.constant 4 : i32\n    %scalar83 = arith.shrui %sm, %scalar82 : i32\n    %scalar84 = arith.constant 0 : i32\n    %scalar85 = arith.subi %scalar84, %scalar81 : i32\n    %scalar86 = arith.xori %scalar83, %sm : i32\n    %scalar87 = arith.andi %scalar86, %scalar85 : i32\n    %scalar88 = arith.xori %sm, %scalar87 : i32\n    %scalar89 = arith.constant 4 : i32\n    %scalar90 = arith.constant 0 : i32\n    %scalar91 = arith.subi %scalar90, %scalar81 : i32\n    %scalar92 = arith.xori %scalar89, %scalar74 : i32\n    %scalar93 = arith.andi %scalar92, %scalar91 : i32\n    %scalar94 = arith.xori %scalar74, %scalar93 : i32\n    %scalar95 = arith.addi %scalar74, %scalar94 : i32\n    %scalar96 = arith.constant 4 : i32\n    %scalar97 = arith.cmpi uge, %scalar88, %scalar96 : i32\n    %scalar98 = arith.extui %scalar97 : i1 to i32\n    %scalar99 = arith.constant 2 : i32\n    %scalar100 = arith.shrui %scalar88, %scalar99 : i32\n    %scalar101 = arith.constant 0 : i32\n    %scalar102 = arith.subi %scalar101, %scalar98 : i32\n    %scalar103 = arith.xori %scalar100, %scalar88 : i32\n    %scalar104 = arith.andi %scalar103, %scalar102 : i32\n    %scalar105 = arith.xori %scalar88, %scalar104 : i32\n    %scalar106 = arith.constant 2 : i32\n    %scalar107 = arith.constant 0 : i32\n    %scalar108 = arith.subi %scalar107, %scalar98 : i32\n    %scalar109 = arith.xori %scalar106, %scalar74 : i32\n    %scalar110 = arith.andi %scalar109, %scalar108 : i32\n    %scalar111 = arith.xori %scalar74, %scalar110 : i32\n    %scalar112 = arith.addi %scalar95, %scalar111 : i32\n    %scalar113 = arith.constant 2 : i32\n    %scalar114 = arith.cmpi uge, %scalar105, %scalar113 : i32\n    %scalar115 = arith.extui %scalar114 : i1 to i32\n    %scalar116 = arith.constant 1 : i32\n    %scalar117 = arith.shrui %scalar105, %scalar116 : i32\n    %scalar118 = arith.constant 0 : i32\n    %scalar119 = arith.subi %scalar118, %scalar115 : i32\n    %scalar120 = arith.xori %scalar117, %scalar105 : i32\n    %scalar121 = arith.andi %scalar120, %scalar119 : i32\n    %scalar122 = arith.xori %scalar105, %scalar121 : i32\n    %scalar123 = arith.constant 1 : i32\n    %scalar124 = arith.constant 0 : i32\n    %scalar125 = arith.subi %scalar124, %scalar115 : i32\n    %scalar126 = arith.xori %scalar123, %scalar74 : i32\n    %scalar127 = arith.andi %scalar126, %scalar125 : i32\n    %scalar128 = arith.xori %scalar74, %scalar127 : i32\n    %scalar129 = arith.addi %scalar112, %scalar128 : i32\n    %scalar130 = arith.constant 141 : i32\n    %scalar131 = arith.subi %scalar129, %scalar130 : i32\n    %scalar132 = arith.cmpi ne, %scalar76, %scalar74 : i32\n    %scalar133 = arith.extui %scalar132 : i1 to i32\n    %scalar134 = arith.constant 0 : i32\n    %scalar135 = arith.subi %scalar134, %scalar133 : i32\n    %scalar136 = arith.xori %scalar78, %scalar131 : i32\n    %scalar137 = arith.andi %scalar136, %scalar135 : i32\n    %scalar138 = arith.xori %scalar131, %scalar137 : i32\n    %scalar139 = arith.cmpi ne, %sm, %scalar74 : i32\n    %scalar140 = arith.extui %scalar139 : i1 to i32\n    %scalar141 = arith.constant 0 : i32\n    %scalar142 = arith.subi %scalar141, %scalar140 : i32\n    %scalar143 = arith.xori %scalar138, %scalar74 : i32\n    %scalar144 = arith.andi %scalar143, %scalar142 : i32\n    %scalar145 = arith.xori %scalar74, %scalar144 : i32\n    %scalar146 = arith.constant -127 : i32\n    %scalar147 = arith.constant -127 : i32\n    %scalar148 = arith.cmpi slt, %scalar145, %scalar147 : i32\n    %scalar149 = arith.extui %scalar148 : i1 to i32\n    %scalar150 = arith.constant 0 : i32\n    %scalar151 = arith.subi %scalar150, %scalar149 : i32\n    %scalar152 = arith.xori %scalar146, %scalar145 : i32\n    %scalar153 = arith.andi %scalar152, %scalar151 : i32\n    %scalar154 = arith.xori %scalar145, %scalar153 : i32\n    %scalar155 = arith.constant 127 : i32\n    %scalar156 = arith.constant 127 : i32\n    %scalar157 = arith.cmpi slt, %scalar156, %scalar154 : i32\n    %scalar158 = arith.extui %scalar157 : i1 to i32\n    %scalar159 = arith.constant 0 : i32\n    %scalar160 = arith.subi %scalar159, %scalar158 : i32\n    %scalar161 = arith.xori %scalar155, %scalar154 : i32\n    %scalar162 = arith.andi %scalar161, %scalar160 : i32\n    %scalar163 = arith.xori %scalar154, %scalar162 : i32\n    %scalar164 = arith.constant 127 : i32\n    %scalar165 = arith.addi %scalar163, %scalar164 : i32\n    %scalar166 = arith.constant 0 : i32\n    cf.br ^exponent(%ss, %scalar166 : !atlas.virtual_state, i32)\n    ^exponent(%xs: !atlas.virtual_state, %xi: i32):\n    %scalar167 = arith.constant 1 : i32\n    %scalar168 = arith.cmpi ult, %xi, %scalar167 : i32\n    cf.cond_br %scalar168, ^exponent_body(%xs : !atlas.virtual_state), ^encode_start(%xs : !atlas.virtual_state)\n    ^exponent_body(%xbs: !atlas.virtual_state):\n    %scalar169 = arith.constant 0 : i32\n    %scalar170 = arith.addi %scalar169, %gi : i32\n    %scalar171 = arith.addi %scalar170, %xi : i32\n    %scalar172 = arith.constant 255 : i32\n    %scalar173 = arith.andi %scalar171, %scalar172 : i32\n    %quant174 = \"atlas.virtual_slot_store\"(%xbs, %quant2, %scalar145, %scalar173) {kind = \"sw\", byte_offset = 0 : i32} : (!atlas.virtual_state, !atlas.virtual_spill, i32, i32) -> !atlas.virtual_state\n    %scalar175 = arith.constant 1 : i32\n    %scalar176 = arith.addi %xi, %scalar175 : i32\n    cf.br ^exponent(%quant174, %scalar176 : !atlas.virtual_state, i32)\n    ^encode_start(%start_encode: !atlas.virtual_state):\n    %scalar177 = arith.constant 0 : i32\n    cf.br ^encode(%start_encode, %scalar177, %gip, %gop : !atlas.virtual_state, i32, i32, i32)\n    ^encode(%cs: !atlas.virtual_state, %ci: i32, %cip: i32, %cop: i32):\n    %scalar178 = arith.constant 4 : i32\n    %scalar179 = arith.cmpi ult, %ci, %scalar178 : i32\n    cf.cond_br %scalar179, ^encode_body(%cs : !atlas.virtual_state), ^group_end(%cs : !atlas.virtual_state)\n    ^encode_body(%cbs: !atlas.virtual_state):\n    %scalar180 = arith.constant 2048 : i32\n    %quant181, %quant182 = \"atlas.virtual_dma_load_bf16\"(%cbs, %cip, %scalar180) : (!atlas.virtual_state, i32, i32) -> (!atlas.virtual_state, !atlas.virtual_bf16)\n    %quant183 = \"atlas.virtual_raw_pack_fp8\"(%quant182, %scalar165) : (!atlas.virtual_bf16, i32) -> !atlas.virtual_fp8\n    %scalar184 = arith.constant 1024 : i32\n    %quant185 = \"atlas.virtual_dma_store_fp8\"(%quant181, %quant183, %cop, %scalar184) : (!atlas.virtual_state, !atlas.virtual_fp8, i32, i32) -> !atlas.virtual_state\n    %scalar186 = arith.constant 1 : i32\n    %scalar187 = arith.addi %ci, %scalar186 : i32\n    %scalar188 = arith.constant 2048 : i32\n    %scalar189 = arith.addi %cip, %scalar188 : i32\n    %scalar190 = arith.constant 1024 : i32\n    %scalar191 = arith.addi %cop, %scalar190 : i32\n    cf.br ^encode(%quant185, %scalar187, %scalar189, %scalar191 : !atlas.virtual_state, i32, i32, i32)\n    ^group_end(%ges: !atlas.virtual_state):\n    %scalar192 = arith.constant 1 : i32\n    %scalar193 = arith.addi %gi, %scalar192 : i32\n    %scalar194 = arith.constant 8192 : i32\n    %scalar195 = arith.addi %gip, %scalar194 : i32\n    %scalar196 = arith.constant 4096 : i32\n    %scalar197 = arith.addi %gop, %scalar196 : i32\n    cf.br ^group(%ges, %scalar193, %scalar195, %scalar197 : !atlas.virtual_state, i32, i32, i32)\n    ^finish(%final: !atlas.virtual_state):\n    %quant198, %quant199 = \"atlas.virtual_restore\"(%final, %quant2) : (!atlas.virtual_state, !atlas.virtual_spill) -> (!atlas.virtual_state, !atlas.virtual_fp8)\n    %scalar200 = arith.constant -1878949888 : i32\n    %scalar201 = arith.constant 32 : i32\n    %quant202 = \"atlas.virtual_dma_store_fp8\"(%quant198, %quant199, %scalar200, %scalar201) : (!atlas.virtual_state, !atlas.virtual_fp8, i32, i32) -> !atlas.virtual_state\n    return %quant202 : !atlas.virtual_state\n  }\n}\n",
+  "machine": "atlas.virtual_cfg_contract = {blocks = [{args = array<i32>, condition = -1 : i32, edges = array<i32: 0>, id = 0 : i32, live_in = array<i32>, operations = array<i32: 1, 2, 5, 6, 7, 8, 9>}, {args = array<i32: 6, 7, 8>, condition = 10 : i32, edges = array<i32: 1, 2>, id = 1 : i32, live_in = array<i32>, operations = array<i32: 12>}, {args = array<i32>, condition = -1 : i32, edges = array<i32>, id = 2 : i32, live_in = array<i32>, operations = array<i32: 14, 17>}, {args = array<i32>, condition = -1 : i32, edges = array<i32: 3>, id = 3 : i32, live_in = array<i32: 6, 7, 8>, operations = array<i32: 19, 20>}, {args = array<i32: 14, 15, 16>, condition = 18 : i32, edges = array<i32: 4, 5>, id = 4 : i32, live_in = array<i32: 6, 7, 8>, operations = array<i32: 23>}, {args = array<i32: 19>, condition = -1 : i32, edges = array<i32: 6>, id = 5 : i32, live_in = array<i32: 6, 7, 8>, operations = array<i32: 27, 28, 29, 31, 32, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 48, 49, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 65, 66, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 99, 100, 101, 102, 103, 104, 105, 108, 109, 110, 111, 112, 113, 114, 116, 117>}, {args = array<i32: 113>, condition = 115 : i32, edges = array<i32: 7, 8>, id = 6 : i32, live_in = array<i32: 6, 7, 8, 91, 111>, operations = array<i32: 120>}, {args = array<i32>, condition = -1 : i32, edges = array<i32: 9>, id = 7 : i32, live_in = array<i32: 6, 7, 8, 111>, operations = array<i32: 122>}, {args = array<i32: 117, 118, 119>, condition = 121 : i32, edges = array<i32: 10, 11>, id = 8 : i32, live_in = array<i32: 6, 7, 8, 111>, operations = array<i32: 125>}, {args = array<i32>, condition = -1 : i32, edges = array<i32: 12>, id = 9 : i32, live_in = array<i32: 6, 7, 8>, operations = array<i32: 128, 129, 130, 131, 132>}, {args = array<i32>, condition = -1 : i32, edges = array<i32: 13>, id = 10 : i32, live_in = array<i32: 6, 7, 8, 111, 117, 118, 119>, operations = array<i32: 135, 138, 140, 141, 142, 143, 144>}, {args = array<i32>, condition = -1 : i32, edges = array<i32: 14>, id = 11 : i32, live_in = array<i32: 6, 7, 8, 91, 111, 113>, operations = array<i32: 147, 148, 150, 151, 153>}, {args = array<i32>, condition = 162 : i32, edges = array<i32: 15, 16>, id = 12 : i32, live_in = array<i32: 6, 7, 8, 14, 15, 16>, operations = array<i32: 156, 157, 158, 159, 160, 161, 162, 163, 164, 165, 166, 167, 168, 169, 170, 171, 172, 173, 174, 175, 176, 177>}, {args = array<i32>, condition = -1 : i32, edges = array<i32: 17>, id = 13 : i32, live_in = array<i32: 6, 7, 8, 14, 15, 16, 160>, operations = array<i32: 179, 180, 181, 182, 183, 184, 185>}, {args = array<i32>, condition = -1 : i32, edges = array<i32: 18>, id = 14 : i32, live_in = array<i32: 6, 7, 8, 14, 15, 16, 143>, operations = array<i32: 187, 188>}, {args = array<i32: 171, 172>, condition = 174 : i32, edges = array<i32: 19, 20>, id = 15 : i32, live_in = array<i32: 6, 7, 8, 14, 16>, operations = array<i32: 191>}, {args = array<i32: 175>, condition = -1 : i32, edges = array<i32: 21>, id = 16 : i32, live_in = array<i32: 6, 7, 8, 14, 16>, operations = array<i32: 194, 195, 196>}, {args = array<i32>, condition = -1 : i32, edges = array<i32: 22>, id = 17 : i32, live_in = array<i32: 6, 7, 8, 14, 16, 171, 172>, operations = array<i32: 198, 199, 200, 201, 202, 203, 204, 205, 206, 207, 208, 209, 210, 211, 213>}], edges = [{from = 0 : i32, id = 0 : i32, incoming = array<i32: 3, 4, 5>, to = 1 : i32}, {from = 1 : i32, id = 1 : i32, incoming = array<i32>, to = 3 : i32}, {from = 1 : i32, id = 2 : i32, incoming = array<i32>, to = 2 : i32}, {from = 3 : i32, id = 3 : i32, incoming = array<i32: 12, 13, 7>, to = 4 : i32}, {from = 4 : i32, id = 4 : i32, incoming = array<i32>, to = 12 : i32}, {from = 4 : i32, id = 5 : i32, incoming = array<i32: 15>, to = 5 : i32}, {from = 5 : i32, id = 6 : i32, incoming = array<i32: 112>, to = 6 : i32}, {from = 6 : i32, id = 7 : i32, incoming = array<i32>, to = 11 : i32}, {from = 6 : i32, id = 8 : i32, incoming = array<i32>, to = 7 : i32}, {from = 7 : i32, id = 9 : i32, incoming = array<i32: 116, 7, 8>, to = 8 : i32}, {from = 8 : i32, id = 10 : i32, incoming = array<i32>, to = 10 : i32}, {from = 8 : i32, id = 11 : i32, incoming = array<i32>, to = 9 : i32}, {from = 9 : i32, id = 12 : i32, incoming = array<i32: 123, 125, 127>, to = 1 : i32}, {from = 10 : i32, id = 13 : i32, incoming = array<i32: 132, 133, 134>, to = 8 : i32}, {from = 11 : i32, id = 14 : i32, incoming = array<i32: 142>, to = 6 : i32}, {from = 12 : i32, id = 15 : i32, incoming = array<i32>, to = 14 : i32}, {from = 12 : i32, id = 16 : i32, incoming = array<i32>, to = 13 : i32}, {from = 13 : i32, id = 17 : i32, incoming = array<i32: 169>, to = 16 : i32}, {from = 14 : i32, id = 18 : i32, incoming = array<i32: 170, 15>, to = 15 : i32}, {from = 15 : i32, id = 19 : i32, incoming = array<i32>, to = 17 : i32}, {from = 15 : i32, id = 20 : i32, incoming = array<i32: 172>, to = 16 : i32}, {from = 16 : i32, id = 21 : i32, incoming = array<i32: 177, 175, 179>, to = 4 : i32}, {from = 17 : i32, id = 22 : i32, incoming = array<i32: 195, 193>, to = 15 : i32}], operations = [{block = 0 : i32, id = 1 : i32, mxu_commands = array<i32>, name = \"atlas.virtual_vpu_splat\", operands = array<i32>, results = array<i32: 0>, tile_commands = array<i32>}, {block = 0 : i32, id = 2 : i32, mxu_commands = array<i32>, name = \"arith.constant\", operands = array<i32>, results = array<i32: 1>, tile_commands = array<i32>}, {block = 0 : i32, id = 5 : i32, mxu_commands = array<i32>, name = \"atlas.virtual_raw_pack_fp8\", operands = array<i32: 0, 1>, results = array<i32: 2>, tile_commands = array<i32: 0, 1>}, {block = 0 : i32, id = 6 : i32, mxu_commands = array<i32>, name = \"atlas.virtual_save\", operands = array<i32: 2>, results = array<i32>, slot_kind = \"fp8\", slot_word = 135680 : i32, slot_words = 256 : i32, tile_commands = array<i32: 2>}, {block = 0 : i32, id = 7 : i32, mxu_commands = array<i32>, name = \"arith.constant\", operands = array<i32>, results = array<i32: 3>, tile_commands = array<i32>}, {block = 0 : i32, id = 8 : i32, mxu_commands = array<i32>, name = \"arith.constant\", operands = array<i32>, results = array<i32: 4>, tile_commands = array<i32>}, {block = 0 : i32, id = 9 : i32, mxu_commands = array<i32>, name = \"arith.constant\", operands = array<i32>, results = array<i32: 5>, tile_commands = array<i32>}, {block = 1 : i32, id = 12 : i32, mxu_commands = array<i32>, name = \"arith.cmpi\", operands = array<i32: 6, 9>, results = array<i32: 10>, tile_commands = array<i32>}, {block = 2 : i32, id = 14 : i32, mxu_commands = array<i32>, name = \"atlas.virtual_restore\", operands = array<i32>, results = array<i32: 11>, slot_kind = \"fp8\", slot_word = 135680 : i32, slot_words = 256 : i32, tile_commands = array<i32: 3>}, {block = 2 : i32, id = 17 : i32, mxu_commands = array<i32>, name = \"atlas.virtual_dma_store_fp8\", operands = array<i32: 11>, results = array<i32>, tile_commands = array<i32: 4, 5, 6>}, {block = 3 : i32, id = 19 : i32, mxu_commands = array<i32>, name = \"arith.constant\", operands = array<i32>, results = array<i32: 12>, tile_commands = array<i32>}, {block = 3 : i32, id = 20 : i32, mxu_commands = array<i32>, name = \"arith.constant\", operands = array<i32>, results = array<i32: 13>, tile_commands = array<i32>}, {block = 4 : i32, id = 23 : i32, mxu_commands = array<i32>, name = \"arith.cmpi\", operands = array<i32: 14, 17>, results = array<i32: 18>, tile_commands = array<i32>}, {block = 5 : i32, id = 27 : i32, mxu_commands = array<i32>, name = \"arith.shrui\", operands = array<i32: 19, 21>, results = array<i32: 22>, tile_commands = array<i32>}, {block = 5 : i32, id = 28 : i32, mxu_commands = array<i32>, name = \"arith.constant\", operands = array<i32>, results = array<i32: 23>, tile_commands = array<i32>}, {block = 5 : i32, id = 29 : i32, mxu_commands = array<i32>, name = \"arith.subi\", operands = array<i32: 22, 23>, results = array<i32: 24>, tile_commands = array<i32>}, {block = 5 : i32, id = 31 : i32, mxu_commands = array<i32>, name = \"arith.cmpi\", operands = array<i32: 19, 25>, results = array<i32: 26>, tile_commands = array<i32>}, {block = 5 : i32, id = 32 : i32, mxu_commands = array<i32>, name = \"arith.extui\", operands = array<i32: 26>, results = array<i32: 27>, tile_commands = array<i32>}, {block = 5 : i32, id = 34 : i32, mxu_commands = array<i32>, name = \"arith.shrui\", operands = array<i32: 19, 28>, results = array<i32: 29>, tile_commands = array<i32>}, {block = 5 : i32, id = 35 : i32, mxu_commands = array<i32>, name = \"arith.constant\", operands = array<i32>, results = array<i32: 30>, tile_commands = array<i32>}, {block = 5 : i32, id = 36 : i32, mxu_commands = array<i32>, name = \"arith.subi\", operands = array<i32: 30, 27>, results = array<i32: 31>, tile_commands = array<i32>}, {block = 5 : i32, id = 37 : i32, mxu_commands = array<i32>, name = \"arith.xori\", operands = array<i32: 29, 19>, results = array<i32: 32>, tile_commands = array<i32>}, {block = 5 : i32, id = 38 : i32, mxu_commands = array<i32>, name = \"arith.andi\", operands = array<i32: 32, 31>, results = array<i32: 33>, tile_commands = array<i32>}, {block = 5 : i32, id = 39 : i32, mxu_commands = array<i32>, name = \"arith.xori\", operands = array<i32: 19, 33>, results = array<i32: 34>, tile_commands = array<i32>}, {block = 5 : i32, id = 40 : i32, mxu_commands = array<i32>, name = \"arith.constant\", operands = array<i32>, results = array<i32: 35>, tile_commands = array<i32>}, {block = 5 : i32, id = 41 : i32, mxu_commands = array<i32>, name = \"arith.constant\", operands = array<i32>, results = array<i32: 36>, tile_commands = array<i32>}, {block = 5 : i32, id = 42 : i32, mxu_commands = array<i32>, name = \"arith.subi\", operands = array<i32: 36, 27>, results = array<i32: 37>, tile_commands = array<i32>}, {block = 5 : i32, id = 43 : i32, mxu_commands = array<i32>, name = \"arith.xori\", operands = array<i32: 35, 20>, results = array<i32: 38>, tile_commands = array<i32>}, {block = 5 : i32, id = 44 : i32, mxu_commands = array<i32>, name = \"arith.andi\", operands = array<i32: 38, 37>, results = array<i32: 39>, tile_commands = array<i32>}, {block = 5 : i32, id = 45 : i32, mxu_commands = array<i32>, name = \"arith.xori\", operands = array<i32: 20, 39>, results = array<i32: 40>, tile_commands = array<i32>}, {block = 5 : i32, id = 46 : i32, mxu_commands = array<i32>, name = \"arith.addi\", operands = array<i32: 20, 40>, results = array<i32: 41>, tile_commands = array<i32>}, {block = 5 : i32, id = 48 : i32, mxu_commands = array<i32>, name = \"arith.cmpi\", operands = array<i32: 34, 42>, results = array<i32: 43>, tile_commands = array<i32>}, {block = 5 : i32, id = 49 : i32, mxu_commands = array<i32>, name = \"arith.extui\", operands = array<i32: 43>, results = array<i32: 44>, tile_commands = array<i32>}, {block = 5 : i32, id = 51 : i32, mxu_commands = array<i32>, name = \"arith.shrui\", operands = array<i32: 34, 45>, results = array<i32: 46>, tile_commands = array<i32>}, {block = 5 : i32, id = 52 : i32, mxu_commands = array<i32>, name = \"arith.constant\", operands = array<i32>, results = array<i32: 47>, tile_commands = array<i32>}, {block = 5 : i32, id = 53 : i32, mxu_commands = array<i32>, name = \"arith.subi\", operands = array<i32: 47, 44>, results = array<i32: 48>, tile_commands = array<i32>}, {block = 5 : i32, id = 54 : i32, mxu_commands = array<i32>, name = \"arith.xori\", operands = array<i32: 46, 34>, results = array<i32: 49>, tile_commands = array<i32>}, {block = 5 : i32, id = 55 : i32, mxu_commands = array<i32>, name = \"arith.andi\", operands = array<i32: 49, 48>, results = array<i32: 50>, tile_commands = array<i32>}, {block = 5 : i32, id = 56 : i32, mxu_commands = array<i32>, name = \"arith.xori\", operands = array<i32: 34, 50>, results = array<i32: 51>, tile_commands = array<i32>}, {block = 5 : i32, id = 57 : i32, mxu_commands = array<i32>, name = \"arith.constant\", operands = array<i32>, results = array<i32: 52>, tile_commands = array<i32>}, {block = 5 : i32, id = 58 : i32, mxu_commands = array<i32>, name = \"arith.constant\", operands = array<i32>, results = array<i32: 53>, tile_commands = array<i32>}, {block = 5 : i32, id = 59 : i32, mxu_commands = array<i32>, name = \"arith.subi\", operands = array<i32: 53, 44>, results = array<i32: 54>, tile_commands = array<i32>}, {block = 5 : i32, id = 60 : i32, mxu_commands = array<i32>, name = \"arith.xori\", operands = array<i32: 52, 20>, results = array<i32: 55>, tile_commands = array<i32>}, {block = 5 : i32, id = 61 : i32, mxu_commands = array<i32>, name = \"arith.andi\", operands = array<i32: 55, 54>, results = array<i32: 56>, tile_commands = array<i32>}, {block = 5 : i32, id = 62 : i32, mxu_commands = array<i32>, name = \"arith.xori\", operands = array<i32: 20, 56>, results = array<i32: 57>, tile_commands = array<i32>}, {block = 5 : i32, id = 63 : i32, mxu_commands = array<i32>, name = \"arith.addi\", operands = array<i32: 41, 57>, results = array<i32: 58>, tile_commands = array<i32>}, {block = 5 : i32, id = 65 : i32, mxu_commands = array<i32>, name = \"arith.cmpi\", operands = array<i32: 51, 59>, results = array<i32: 60>, tile_commands = array<i32>}, {block = 5 : i32, id = 66 : i32, mxu_commands = array<i32>, name = \"arith.extui\", operands = array<i32: 60>, results = array<i32: 61>, tile_commands = array<i32>}, {block = 5 : i32, id = 68 : i32, mxu_commands = array<i32>, name = \"arith.shrui\", operands = array<i32: 51, 62>, results = array<i32: 63>, tile_commands = array<i32>}, {block = 5 : i32, id = 69 : i32, mxu_commands = array<i32>, name = \"arith.constant\", operands = array<i32>, results = array<i32: 64>, tile_commands = array<i32>}, {block = 5 : i32, id = 70 : i32, mxu_commands = array<i32>, name = \"arith.subi\", operands = array<i32: 64, 61>, results = array<i32: 65>, tile_commands = array<i32>}, {block = 5 : i32, id = 71 : i32, mxu_commands = array<i32>, name = \"arith.xori\", operands = array<i32: 63, 51>, results = array<i32: 66>, tile_commands = array<i32>}, {block = 5 : i32, id = 72 : i32, mxu_commands = array<i32>, name = \"arith.andi\", operands = array<i32: 66, 65>, results = array<i32: 67>, tile_commands = array<i32>}, {block = 5 : i32, id = 73 : i32, mxu_commands = array<i32>, name = \"arith.xori\", operands = array<i32: 51, 67>, results = array<i32: 68>, tile_commands = array<i32>}, {block = 5 : i32, id = 74 : i32, mxu_commands = array<i32>, name = \"arith.constant\", operands = array<i32>, results = array<i32: 69>, tile_commands = array<i32>}, {block = 5 : i32, id = 75 : i32, mxu_commands = array<i32>, name = \"arith.constant\", operands = array<i32>, results = array<i32: 70>, tile_commands = array<i32>}, {block = 5 : i32, id = 76 : i32, mxu_commands = array<i32>, name = \"arith.subi\", operands = array<i32: 70, 61>, results = array<i32: 71>, tile_commands = array<i32>}, {block = 5 : i32, id = 77 : i32, mxu_commands = array<i32>, name = \"arith.xori\", operands = array<i32: 69, 20>, results = array<i32: 72>, tile_commands = array<i32>}, {block = 5 : i32, id = 78 : i32, mxu_commands = array<i32>, name = \"arith.andi\", operands = array<i32: 72, 71>, results = array<i32: 73>, tile_commands = array<i32>}, {block = 5 : i32, id = 79 : i32, mxu_commands = array<i32>, name = \"arith.xori\", operands = array<i32: 20, 73>, results = array<i32: 74>, tile_commands = array<i32>}, {block = 5 : i32, id = 80 : i32, mxu_commands = array<i32>, name = \"arith.addi\", operands = array<i32: 58, 74>, results = array<i32: 75>, tile_commands = array<i32>}, {block = 5 : i32, id = 81 : i32, mxu_commands = array<i32>, name = \"arith.constant\", operands = array<i32>, results = array<i32: 76>, tile_commands = array<i32>}, {block = 5 : i32, id = 82 : i32, mxu_commands = array<i32>, name = \"arith.subi\", operands = array<i32: 75, 76>, results = array<i32: 77>, tile_commands = array<i32>}, {block = 5 : i32, id = 83 : i32, mxu_commands = array<i32>, name = \"arith.cmpi\", operands = array<i32: 22, 20>, results = array<i32: 78>, tile_commands = array<i32>}, {block = 5 : i32, id = 84 : i32, mxu_commands = array<i32>, name = \"arith.extui\", operands = array<i32: 78>, results = array<i32: 79>, tile_commands = array<i32>}, {block = 5 : i32, id = 85 : i32, mxu_commands = array<i32>, name = \"arith.constant\", operands = array<i32>, results = array<i32: 80>, tile_commands = array<i32>}, {block = 5 : i32, id = 86 : i32, mxu_commands = array<i32>, name = \"arith.subi\", operands = array<i32: 80, 79>, results = array<i32: 81>, tile_commands = array<i32>}, {block = 5 : i32, id = 87 : i32, mxu_commands = array<i32>, name = \"arith.xori\", operands = array<i32: 24, 77>, results = array<i32: 82>, tile_commands = array<i32>}, {block = 5 : i32, id = 88 : i32, mxu_commands = array<i32>, name = \"arith.andi\", operands = array<i32: 82, 81>, results = array<i32: 83>, tile_commands = array<i32>}, {block = 5 : i32, id = 89 : i32, mxu_commands = array<i32>, name = \"arith.xori\", operands = array<i32: 77, 83>, results = array<i32: 84>, tile_commands = array<i32>}, {block = 5 : i32, id = 90 : i32, mxu_commands = array<i32>, name = \"arith.cmpi\", operands = array<i32: 19, 20>, results = array<i32: 85>, tile_commands = array<i32>}, {block = 5 : i32, id = 91 : i32, mxu_commands = array<i32>, name = \"arith.extui\", operands = array<i32: 85>, results = array<i32: 86>, tile_commands = array<i32>}, {block = 5 : i32, id = 92 : i32, mxu_commands = array<i32>, name = \"arith.constant\", operands = array<i32>, results = array<i32: 87>, tile_commands = array<i32>}, {block = 5 : i32, id = 93 : i32, mxu_commands = array<i32>, name = \"arith.subi\", operands = array<i32: 87, 86>, results = array<i32: 88>, tile_commands = array<i32>}, {block = 5 : i32, id = 94 : i32, mxu_commands = array<i32>, name = \"arith.xori\", operands = array<i32: 84, 20>, results = array<i32: 89>, tile_commands = array<i32>}, {block = 5 : i32, id = 95 : i32, mxu_commands = array<i32>, name = \"arith.andi\", operands = array<i32: 89, 88>, results = array<i32: 90>, tile_commands = array<i32>}, {block = 5 : i32, id = 96 : i32, mxu_commands = array<i32>, name = \"arith.xori\", operands = array<i32: 20, 90>, results = array<i32: 91>, tile_commands = array<i32>}, {block = 5 : i32, id = 99 : i32, mxu_commands = array<i32>, name = \"arith.cmpi\", operands = array<i32: 91, 93>, results = array<i32: 94>, tile_commands = array<i32>}, {block = 5 : i32, id = 100 : i32, mxu_commands = array<i32>, name = \"arith.extui\", operands = array<i32: 94>, results = array<i32: 95>, tile_commands = array<i32>}, {block = 5 : i32, id = 101 : i32, mxu_commands = array<i32>, name = \"arith.constant\", operands = array<i32>, results = array<i32: 96>, tile_commands = array<i32>}, {block = 5 : i32, id = 102 : i32, mxu_commands = array<i32>, name = \"arith.subi\", operands = array<i32: 96, 95>, results = array<i32: 97>, tile_commands = array<i32>}, {block = 5 : i32, id = 103 : i32, mxu_commands = array<i32>, name = \"arith.xori\", operands = array<i32: 92, 91>, results = array<i32: 98>, tile_commands = array<i32>}, {block = 5 : i32, id = 104 : i32, mxu_commands = array<i32>, name = \"arith.andi\", operands = array<i32: 98, 97>, results = array<i32: 99>, tile_commands = array<i32>}, {block = 5 : i32, id = 105 : i32, mxu_commands = array<i32>, name = \"arith.xori\", operands = array<i32: 91, 99>, results = array<i32: 100>, tile_commands = array<i32>}, {block = 5 : i32, id = 108 : i32, mxu_commands = array<i32>, name = \"arith.cmpi\", operands = array<i32: 102, 100>, results = array<i32: 103>, tile_commands = array<i32>}, {block = 5 : i32, id = 109 : i32, mxu_commands = array<i32>, name = \"arith.extui\", operands = array<i32: 103>, results = array<i32: 104>, tile_commands = array<i32>}, {block = 5 : i32, id = 110 : i32, mxu_commands = array<i32>, name = \"arith.constant\", operands = array<i32>, results = array<i32: 105>, tile_commands = array<i32>}, {block = 5 : i32, id = 111 : i32, mxu_commands = array<i32>, name = \"arith.subi\", operands = array<i32: 105, 104>, results = array<i32: 106>, tile_commands = array<i32>}, {block = 5 : i32, id = 112 : i32, mxu_commands = array<i32>, name = \"arith.xori\", operands = array<i32: 101, 100>, results = array<i32: 107>, tile_commands = array<i32>}, {block = 5 : i32, id = 113 : i32, mxu_commands = array<i32>, name = \"arith.andi\", operands = array<i32: 107, 106>, results = array<i32: 108>, tile_commands = array<i32>}, {block = 5 : i32, id = 114 : i32, mxu_commands = array<i32>, name = \"arith.xori\", operands = array<i32: 100, 108>, results = array<i32: 109>, tile_commands = array<i32>}, {block = 5 : i32, id = 116 : i32, mxu_commands = array<i32>, name = \"arith.addi\", operands = array<i32: 109, 110>, results = array<i32: 111>, tile_commands = array<i32>}, {block = 5 : i32, id = 117 : i32, mxu_commands = array<i32>, name = \"arith.constant\", operands = array<i32>, results = array<i32: 112>, tile_commands = array<i32>}, {block = 6 : i32, id = 120 : i32, mxu_commands = array<i32>, name = \"arith.cmpi\", operands = array<i32: 113, 114>, results = array<i32: 115>, tile_commands = array<i32>}, {block = 7 : i32, id = 122 : i32, mxu_commands = array<i32>, name = \"arith.constant\", operands = array<i32>, results = array<i32: 116>, tile_commands = array<i32>}, {block = 8 : i32, id = 125 : i32, mxu_commands = array<i32>, name = \"arith.cmpi\", operands = array<i32: 117, 120>, results = array<i32: 121>, tile_commands = array<i32>}, {block = 9 : i32, id = 128 : i32, mxu_commands = array<i32>, name = \"arith.addi\", operands = array<i32: 6, 122>, results = array<i32: 123>, tile_commands = array<i32>}, {block = 9 : i32, id = 129 : i32, mxu_commands = array<i32>, name = \"arith.constant\", operands = array<i32>, results = array<i32: 124>, tile_commands = array<i32>}, {block = 9 : i32, id = 130 : i32, mxu_commands = array<i32>, name = \"arith.addi\", operands = array<i32: 7, 124>, results = array<i32: 125>, tile_commands = array<i32>}, {block = 9 : i32, id = 131 : i32, mxu_commands = array<i32>, name = \"arith.constant\", operands = array<i32>, results = array<i32: 126>, tile_commands = array<i32>}, {block = 9 : i32, id = 132 : i32, mxu_commands = array<i32>, name = \"arith.addi\", operands = array<i32: 8, 126>, results = array<i32: 127>, tile_commands = array<i32>}, {block = 10 : i32, id = 135 : i32, mxu_commands = array<i32>, name = \"atlas.virtual_dma_load_bf16\", operands = array<i32: 118>, results = array<i32: 128>, tile_commands = array<i32: 7, 8, 9, 10>}, {block = 10 : i32, id = 138 : i32, mxu_commands = array<i32>, name = \"arith.constant\", operands = array<i32>, results = array<i32: 130>, tile_commands = array<i32>}, {block = 10 : i32, id = 140 : i32, mxu_commands = array<i32>, name = \"arith.addi\", operands = array<i32: 117, 129>, results = array<i32: 132>, tile_commands = array<i32>}, {block = 10 : i32, id = 141 : i32, mxu_commands = array<i32>, name = \"arith.addi\", operands = array<i32: 118, 130>, results = array<i32: 133>, tile_commands = array<i32>}, {block = 10 : i32, id = 142 : i32, mxu_commands = array<i32>, name = \"arith.addi\", operands = array<i32: 119, 131>, results = array<i32: 134>, tile_commands = array<i32>}, {block = 10 : i32, id = 143 : i32, mxu_commands = array<i32>, name = \"atlas.virtual_raw_pack_fp8\", operands = array<i32: 128, 111>, results = array<i32: 135>, tile_commands = array<i32: 11, 12>}, {block = 10 : i32, id = 144 : i32, mxu_commands = array<i32>, name = \"atlas.virtual_dma_store_fp8\", operands = array<i32: 135, 119>, results = array<i32>, tile_commands = array<i32: 13, 14, 15>}, {block = 11 : i32, id = 147 : i32, mxu_commands = array<i32>, name = \"arith.addi\", operands = array<i32: 136, 6>, results = array<i32: 137>, tile_commands = array<i32>}, {block = 11 : i32, id = 148 : i32, mxu_commands = array<i32>, name = \"arith.addi\", operands = array<i32: 137, 113>, results = array<i32: 138>, tile_commands = array<i32>}, {block = 11 : i32, id = 150 : i32, mxu_commands = array<i32>, name = \"arith.andi\", operands = array<i32: 138, 139>, results = array<i32: 140>, tile_commands = array<i32>}, {block = 11 : i32, byte_offset = 0 : i32, id = 151 : i32, kind = \"sw\", mxu_commands = array<i32>, name = \"atlas.virtual_slot_store\", operands = array<i32: 91, 140>, results = array<i32>, slot_kind = \"fp8\", slot_word = 135680 : i32, slot_words = 256 : i32, tile_commands = array<i32: 16>}, {block = 11 : i32, id = 153 : i32, mxu_commands = array<i32>, name = \"arith.addi\", operands = array<i32: 113, 141>, results = array<i32: 142>, tile_commands = array<i32>}, {block = 12 : i32, id = 156 : i32, mxu_commands = array<i32>, name = \"atlas.virtual_dma_load_bf16\", operands = array<i32: 16>, results = array<i32: 143>, tile_commands = array<i32: 17, 18, 19, 20>}, {block = 12 : i32, id = 157 : i32, mxu_commands = array<i32>, name = \"atlas.virtual_vpu_reduce\", operands = array<i32: 143>, results = array<i32: 144>, tile_commands = array<i32>}, {block = 12 : i32, id = 158 : i32, mxu_commands = array<i32>, name = \"atlas.virtual_vpu_reduce\", operands = array<i32: 144>, results = array<i32: 145>, tile_commands = array<i32>}, {block = 12 : i32, id = 159 : i32, mxu_commands = array<i32>, name = \"atlas.virtual_save\", operands = array<i32: 145>, results = array<i32>, slot_kind = \"bf16\", slot_word = 135168 : i32, slot_words = 512 : i32, tile_commands = array<i32: 21, 22>}, {block = 12 : i32, byte_offset = 0 : i32, id = 160 : i32, kind = \"lhu\", mxu_commands = array<i32>, name = \"atlas.virtual_slot_load\", operands = array<i32>, results = array<i32: 146>, slot_kind = \"bf16\", slot_word = 135168 : i32, slot_words = 512 : i32, tile_commands = array<i32: 23>}, {block = 12 : i32, id = 161 : i32, mxu_commands = array<i32>, name = \"atlas.virtual_vpu_reduce\", operands = array<i32: 143>, results = array<i32: 147>, tile_commands = array<i32>}, {block = 12 : i32, id = 162 : i32, mxu_commands = array<i32>, name = \"atlas.virtual_vpu_reduce\", operands = array<i32: 147>, results = array<i32: 148>, tile_commands = array<i32>}, {block = 12 : i32, id = 163 : i32, mxu_commands = array<i32>, name = \"atlas.virtual_save\", operands = array<i32: 148>, results = array<i32>, slot_kind = \"bf16\", slot_word = 135168 : i32, slot_words = 512 : i32, tile_commands = array<i32: 24, 25>}, {block = 12 : i32, byte_offset = 0 : i32, id = 164 : i32, kind = \"lhu\", mxu_commands = array<i32>, name = \"atlas.virtual_slot_load\", operands = array<i32>, results = array<i32: 149>, slot_kind = \"bf16\", slot_word = 135168 : i32, slot_words = 512 : i32, tile_commands = array<i32: 26>}, {block = 12 : i32, id = 165 : i32, mxu_commands = array<i32>, name = \"arith.constant\", operands = array<i32>, results = array<i32: 150>, tile_commands = array<i32>}, {block = 12 : i32, id = 166 : i32, mxu_commands = array<i32>, name = \"arith.andi\", operands = array<i32: 146, 150>, results = array<i32: 151>, tile_commands = array<i32>}, {block = 12 : i32, id = 167 : i32, mxu_commands = array<i32>, name = \"arith.constant\", operands = array<i32>, results = array<i32: 152>, tile_commands = array<i32>}, {block = 12 : i32, id = 168 : i32, mxu_commands = array<i32>, name = \"arith.andi\", operands = array<i32: 149, 152>, results = array<i32: 153>, tile_commands = array<i32>}, {block = 12 : i32, id = 169 : i32, mxu_commands = array<i32>, name = \"arith.cmpi\", operands = array<i32: 151, 153>, results = array<i32: 154>, tile_commands = array<i32>}, {block = 12 : i32, id = 170 : i32, mxu_commands = array<i32>, name = \"arith.extui\", operands = array<i32: 154>, results = array<i32: 155>, tile_commands = array<i32>}, {block = 12 : i32, id = 171 : i32, mxu_commands = array<i32>, name = \"arith.constant\", operands = array<i32>, results = array<i32: 156>, tile_commands = array<i32>}, {block = 12 : i32, id = 172 : i32, mxu_commands = array<i32>, name = \"arith.subi\", operands = array<i32: 156, 155>, results = array<i32: 157>, tile_commands = array<i32>}, {block = 12 : i32, id = 173 : i32, mxu_commands = array<i32>, name = \"arith.xori\", operands = array<i32: 153, 151>, results = array<i32: 158>, tile_commands = array<i32>}, {block = 12 : i32, id = 174 : i32, mxu_commands = array<i32>, name = \"arith.andi\", operands = array<i32: 158, 157>, results = array<i32: 159>, tile_commands = array<i32>}, {block = 12 : i32, id = 175 : i32, mxu_commands = array<i32>, name = \"arith.xori\", operands = array<i32: 151, 159>, results = array<i32: 160>, tile_commands = array<i32>}, {block = 12 : i32, id = 176 : i32, mxu_commands = array<i32>, name = \"arith.constant\", operands = array<i32>, results = array<i32: 161>, tile_commands = array<i32>}, {block = 12 : i32, id = 177 : i32, mxu_commands = array<i32>, name = \"arith.cmpi\", operands = array<i32: 160, 161>, results = array<i32: 162>, tile_commands = array<i32>}, {block = 13 : i32, id = 179 : i32, mxu_commands = array<i32>, name = \"arith.cmpi\", operands = array<i32: 15, 160>, results = array<i32: 163>, tile_commands = array<i32>}, {block = 13 : i32, id = 180 : i32, mxu_commands = array<i32>, name = \"arith.extui\", operands = array<i32: 163>, results = array<i32: 164>, tile_commands = array<i32>}, {block = 13 : i32, id = 181 : i32, mxu_commands = array<i32>, name = \"arith.constant\", operands = array<i32>, results = array<i32: 165>, tile_commands = array<i32>}, {block = 13 : i32, id = 182 : i32, mxu_commands = array<i32>, name = \"arith.subi\", operands = array<i32: 165, 164>, results = array<i32: 166>, tile_commands = array<i32>}, {block = 13 : i32, id = 183 : i32, mxu_commands = array<i32>, name = \"arith.xori\", operands = array<i32: 160, 15>, results = array<i32: 167>, tile_commands = array<i32>}, {block = 13 : i32, id = 184 : i32, mxu_commands = array<i32>, name = \"arith.andi\", operands = array<i32: 167, 166>, results = array<i32: 168>, tile_commands = array<i32>}, {block = 13 : i32, id = 185 : i32, mxu_commands = array<i32>, name = \"arith.xori\", operands = array<i32: 15, 168>, results = array<i32: 169>, tile_commands = array<i32>}, {block = 14 : i32, id = 187 : i32, mxu_commands = array<i32>, name = \"atlas.virtual_save\", operands = array<i32: 143>, results = array<i32>, slot_kind = \"bf16\", slot_word = 135168 : i32, slot_words = 512 : i32, tile_commands = array<i32: 27, 28>}, {block = 14 : i32, id = 188 : i32, mxu_commands = array<i32>, name = \"arith.constant\", operands = array<i32>, results = array<i32: 170>, tile_commands = array<i32>}, {block = 15 : i32, id = 191 : i32, mxu_commands = array<i32>, name = \"arith.cmpi\", operands = array<i32: 171, 173>, results = array<i32: 174>, tile_commands = array<i32>}, {block = 16 : i32, id = 194 : i32, mxu_commands = array<i32>, name = \"arith.addi\", operands = array<i32: 14, 176>, results = array<i32: 177>, tile_commands = array<i32>}, {block = 16 : i32, id = 195 : i32, mxu_commands = array<i32>, name = \"arith.constant\", operands = array<i32>, results = array<i32: 178>, tile_commands = array<i32>}, {block = 16 : i32, id = 196 : i32, mxu_commands = array<i32>, name = \"arith.addi\", operands = array<i32: 16, 178>, results = array<i32: 179>, tile_commands = array<i32>}, {block = 17 : i32, byte_offset = 0 : i32, id = 198 : i32, kind = \"lhu\", mxu_commands = array<i32>, name = \"atlas.virtual_slot_load\", operands = array<i32: 171>, results = array<i32: 180>, slot_kind = \"bf16\", slot_word = 135168 : i32, slot_words = 512 : i32, tile_commands = array<i32: 29>}, {block = 17 : i32, id = 199 : i32, mxu_commands = array<i32>, name = \"arith.constant\", operands = array<i32>, results = array<i32: 181>, tile_commands = array<i32>}, {block = 17 : i32, id = 200 : i32, mxu_commands = array<i32>, name = \"arith.andi\", operands = array<i32: 180, 181>, results = array<i32: 182>, tile_commands = array<i32>}, {block = 17 : i32, id = 201 : i32, mxu_commands = array<i32>, name = \"arith.cmpi\", operands = array<i32: 172, 182>, results = array<i32: 183>, tile_commands = array<i32>}, {block = 17 : i32, id = 202 : i32, mxu_commands = array<i32>, name = \"arith.extui\", operands = array<i32: 183>, results = array<i32: 184>, tile_commands = array<i32>}, {block = 17 : i32, id = 203 : i32, mxu_commands = array<i32>, name = \"arith.constant\", operands = array<i32>, results = array<i32: 185>, tile_commands = array<i32>}, {block = 17 : i32, id = 204 : i32, mxu_commands = array<i32>, name = \"arith.cmpi\", operands = array<i32: 182, 185>, results = array<i32: 186>, tile_commands = array<i32>}, {block = 17 : i32, id = 205 : i32, mxu_commands = array<i32>, name = \"arith.extui\", operands = array<i32: 186>, results = array<i32: 187>, tile_commands = array<i32>}, {block = 17 : i32, id = 206 : i32, mxu_commands = array<i32>, name = \"arith.andi\", operands = array<i32: 184, 187>, results = array<i32: 188>, tile_commands = array<i32>}, {block = 17 : i32, id = 207 : i32, mxu_commands = array<i32>, name = \"arith.constant\", operands = array<i32>, results = array<i32: 189>, tile_commands = array<i32>}, {block = 17 : i32, id = 208 : i32, mxu_commands = array<i32>, name = \"arith.subi\", operands = array<i32: 189, 188>, results = array<i32: 190>, tile_commands = array<i32>}, {block = 17 : i32, id = 209 : i32, mxu_commands = array<i32>, name = \"arith.xori\", operands = array<i32: 182, 172>, results = array<i32: 191>, tile_commands = array<i32>}, {block = 17 : i32, id = 210 : i32, mxu_commands = array<i32>, name = \"arith.andi\", operands = array<i32: 191, 190>, results = array<i32: 192>, tile_commands = array<i32>}, {block = 17 : i32, id = 211 : i32, mxu_commands = array<i32>, name = \"arith.xori\", operands = array<i32: 172, 192>, results = array<i32: 193>, tile_commands = array<i32>}, {block = 17 : i32, id = 213 : i32, mxu_commands = array<i32>, name = \"arith.addi\", operands = array<i32: 171, 194>, results = array<i32: 195>, tile_commands = array<i32>}], output_buffer = {base = 2415984640 : i64, bytes = 32800 : i64}, values = [{block = 0 : i32, constant = 0 : i32, def = \"atlas.virtual_vpu_splat\", id = 0 : i32, operands = array<i32>, reg = 32 : i32, type = \"bf16\"}, {block = 0 : i32, constant = 127 : i32, def = \"arith.constant\", id = 1 : i32, operands = array<i32>, reg = 10 : i32, type = \"i32\"}, {block = 0 : i32, def = \"atlas.virtual_raw_pack_fp8\", id = 2 : i32, operands = array<i32: 0, 1>, reg = 0 : i32, type = \"fp8\"}, {block = 0 : i32, constant = 0 : i32, def = \"arith.constant\", id = 3 : i32, operands = array<i32>, reg = 10 : i32, type = \"i32\"}, {block = 0 : i32, constant = -1879048192 : i32, def = \"arith.constant\", id = 4 : i32, operands = array<i32>, reg = 11 : i32, type = \"i32\"}, {block = 0 : i32, constant = -1878982656 : i32, def = \"arith.constant\", id = 5 : i32, operands = array<i32>, reg = 12 : i32, type = \"i32\"}, {block = 1 : i32, def = \"argument\", id = 6 : i32, operands = array<i32>, reg = 12 : i32, type = \"i32\"}, {block = 1 : i32, def = \"argument\", id = 7 : i32, operands = array<i32>, reg = 11 : i32, type = \"i32\"}, {block = 1 : i32, def = \"argument\", id = 8 : i32, operands = array<i32>, reg = 10 : i32, type = \"i32\"}, {block = 1 : i32, constant = 8 : i32, def = \"arith.constant\", id = 9 : i32, operands = array<i32>, reg = 0 : i32, type = \"i32\"}, {block = 1 : i32, def = \"arith.cmpi\", id = 10 : i32, operands = array<i32: 6, 9>, predicate = 6 : i32, reg = 13 : i32, type = \"i1\"}, {block = 2 : i32, def = \"atlas.virtual_restore\", id = 11 : i32, operands = array<i32>, reg = 0 : i32, type = \"fp8\"}, {block = 3 : i32, constant = 0 : i32, def = \"arith.constant\", id = 12 : i32, operands = array<i32>, reg = 13 : i32, type = \"i32\"}, {block = 3 : i32, constant = 0 : i32, def = \"arith.constant\", id = 13 : i32, operands = array<i32>, reg = 14 : i32, type = \"i32\"}, {block = 4 : i32, def = \"argument\", id = 14 : i32, operands = array<i32>, reg = 14 : i32, type = \"i32\"}, {block = 4 : i32, def = \"argument\", id = 15 : i32, operands = array<i32>, reg = 15 : i32, type = \"i32\"}, {block = 4 : i32, def = \"argument\", id = 16 : i32, operands = array<i32>, reg = 13 : i32, type = \"i32\"}, {block = 4 : i32, constant = 4 : i32, def = \"arith.constant\", id = 17 : i32, operands = array<i32>, reg = 0 : i32, type = \"i32\"}, {block = 4 : i32, def = \"arith.cmpi\", id = 18 : i32, operands = array<i32: 14, 17>, predicate = 6 : i32, reg = 16 : i32, type = \"i1\"}, {block = 5 : i32, def = \"argument\", id = 19 : i32, operands = array<i32>, reg = 13 : i32, type = \"i32\"}, {block = 5 : i32, constant = 0 : i32, def = \"arith.constant\", id = 20 : i32, operands = array<i32>, reg = 0 : i32, type = \"i32\"}, {block = 5 : i32, constant = 7 : i32, def = \"arith.constant\", id = 21 : i32, operands = array<i32>, reg = 0 : i32, type = \"i32\"}, {block = 5 : i32, def = \"arith.shrui\", id = 22 : i32, operands = array<i32: 19, 21>, reg = 15 : i32, type = \"i32\"}, {block = 5 : i32, constant = 135 : i32, def = \"arith.constant\", id = 23 : i32, operands = array<i32>, reg = 16 : i32, type = \"i32\"}, {block = 5 : i32, def = \"arith.subi\", id = 24 : i32, operands = array<i32: 22, 23>, reg = 14 : i32, type = \"i32\"}, {block = 5 : i32, constant = 16 : i32, def = \"arith.constant\", id = 25 : i32, operands = array<i32>, reg = 0 : i32, type = \"i32\"}, {block = 5 : i32, def = \"arith.cmpi\", id = 26 : i32, operands = array<i32: 19, 25>, predicate = 9 : i32, reg = 17 : i32, type = \"i1\"}, {block = 5 : i32, def = \"arith.extui\", id = 27 : i32, operands = array<i32: 26>, reg = 16 : i32, type = \"i32\"}, {block = 5 : i32, constant = 4 : i32, def = \"arith.constant\", id = 28 : i32, operands = array<i32>, reg = 0 : i32, type = \"i32\"}, {block = 5 : i32, def = \"arith.shrui\", id = 29 : i32, operands = array<i32: 19, 28>, reg = 18 : i32, type = \"i32\"}, {block = 5 : i32, constant = 0 : i32, def = \"arith.constant\", id = 30 : i32, operands = array<i32>, reg = 19 : i32, type = \"i32\"}, {block = 5 : i32, def = \"arith.subi\", id = 31 : i32, operands = array<i32: 30, 27>, reg = 17 : i32, type = \"i32\"}, {block = 5 : i32, def = \"arith.xori\", id = 32 : i32, operands = array<i32: 29, 19>, reg = 19 : i32, type = \"i32\"}, {block = 5 : i32, def = \"arith.andi\", id = 33 : i32, operands = array<i32: 32, 31>, reg = 18 : i32, type = \"i32\"}, {block = 5 : i32, def = \"arith.xori\", id = 34 : i32, operands = array<i32: 19, 33>, reg = 17 : i32, type = \"i32\"}, {block = 5 : i32, constant = 4 : i32, def = \"arith.constant\", id = 35 : i32, operands = array<i32>, reg = 19 : i32, type = \"i32\"}, {block = 5 : i32, constant = 0 : i32, def = \"arith.constant\", id = 36 : i32, operands = array<i32>, reg = 20 : i32, type = \"i32\"}, {block = 5 : i32, def = \"arith.subi\", id = 37 : i32, operands = array<i32: 36, 27>, reg = 18 : i32, type = \"i32\"}, {block = 5 : i32, def = \"arith.xori\", id = 38 : i32, operands = array<i32: 35, 20>, reg = 16 : i32, type = \"i32\"}, {block = 5 : i32, def = \"arith.andi\", id = 39 : i32, operands = array<i32: 38, 37>, reg = 19 : i32, type = \"i32\"}, {block = 5 : i32, def = \"arith.xori\", id = 40 : i32, operands = array<i32: 20, 39>, reg = 16 : i32, type = \"i32\"}, {block = 5 : i32, def = \"arith.addi\", id = 41 : i32, operands = array<i32: 20, 40>, reg = 18 : i32, type = \"i32\"}, {block = 5 : i32, constant = 4 : i32, def = \"arith.constant\", id = 42 : i32, operands = array<i32>, reg = 0 : i32, type = \"i32\"}, {block = 5 : i32, def = \"arith.cmpi\", id = 43 : i32, operands = array<i32: 34, 42>, predicate = 9 : i32, reg = 16 : i32, type = \"i1\"}, {block = 5 : i32, def = \"arith.extui\", id = 44 : i32, operands = array<i32: 43>, reg = 19 : i32, type = \"i32\"}, {block = 5 : i32, constant = 2 : i32, def = \"arith.constant\", id = 45 : i32, operands = array<i32>, reg = 0 : i32, type = \"i32\"}, {block = 5 : i32, def = \"arith.shrui\", id = 46 : i32, operands = array<i32: 34, 45>, reg = 20 : i32, type = \"i32\"}, {block = 5 : i32, constant = 0 : i32, def = \"arith.constant\", id = 47 : i32, operands = array<i32>, reg = 21 : i32, type = \"i32\"}, {block = 5 : i32, def = \"arith.subi\", id = 48 : i32, operands = array<i32: 47, 44>, reg = 16 : i32, type = \"i32\"}, {block = 5 : i32, def = \"arith.xori\", id = 49 : i32, operands = array<i32: 46, 34>, reg = 21 : i32, type = \"i32\"}, {block = 5 : i32, def = \"arith.andi\", id = 50 : i32, operands = array<i32: 49, 48>, reg = 20 : i32, type = \"i32\"}, {block = 5 : i32, def = \"arith.xori\", id = 51 : i32, operands = array<i32: 34, 50>, reg = 16 : i32, type = \"i32\"}, {block = 5 : i32, constant = 2 : i32, def = \"arith.constant\", id = 52 : i32, operands = array<i32>, reg = 20 : i32, type = \"i32\"}, {block = 5 : i32, constant = 0 : i32, def = \"arith.constant\", id = 53 : i32, operands = array<i32>, reg = 21 : i32, type = \"i32\"}, {block = 5 : i32, def = \"arith.subi\", id = 54 : i32, operands = array<i32: 53, 44>, reg = 17 : i32, type = \"i32\"}, {block = 5 : i32, def = \"arith.xori\", id = 55 : i32, operands = array<i32: 52, 20>, reg = 19 : i32, type = \"i32\"}, {block = 5 : i32, def = \"arith.andi\", id = 56 : i32, operands = array<i32: 55, 54>, reg = 20 : i32, type = \"i32\"}, {block = 5 : i32, def = \"arith.xori\", id = 57 : i32, operands = array<i32: 20, 56>, reg = 19 : i32, type = \"i32\"}, {block = 5 : i32, def = \"arith.addi\", id = 58 : i32, operands = array<i32: 41, 57>, reg = 17 : i32, type = \"i32\"}, {block = 5 : i32, constant = 2 : i32, def = \"arith.constant\", id = 59 : i32, operands = array<i32>, reg = 0 : i32, type = \"i32\"}, {block = 5 : i32, def = \"arith.cmpi\", id = 60 : i32, operands = array<i32: 51, 59>, predicate = 9 : i32, reg = 19 : i32, type = \"i1\"}, {block = 5 : i32, def = \"arith.extui\", id = 61 : i32, operands = array<i32: 60>, reg = 18 : i32, type = \"i32\"}, {block = 5 : i32, constant = 1 : i32, def = \"arith.constant\", id = 62 : i32, operands = array<i32>, reg = 0 : i32, type = \"i32\"}, {block = 5 : i32, def = \"arith.shrui\", id = 63 : i32, operands = array<i32: 51, 62>, reg = 20 : i32, type = \"i32\"}, {block = 5 : i32, constant = 0 : i32, def = \"arith.constant\", id = 64 : i32, operands = array<i32>, reg = 21 : i32, type = \"i32\"}, {block = 5 : i32, def = \"arith.subi\", id = 65 : i32, operands = array<i32: 64, 61>, reg = 19 : i32, type = \"i32\"}, {block = 5 : i32, def = \"arith.xori\", id = 66 : i32, operands = array<i32: 63, 51>, reg = 21 : i32, type = \"i32\"}, {block = 5 : i32, def = \"arith.andi\", id = 67 : i32, operands = array<i32: 66, 65>, reg = 20 : i32, type = \"i32\"}, {block = 5 : i32, def = \"arith.xori\", id = 68 : i32, operands = array<i32: 51, 67>, reg = 19 : i32, type = \"i32\"}, {block = 5 : i32, constant = 1 : i32, def = \"arith.constant\", id = 69 : i32, operands = array<i32>, reg = 19 : i32, type = \"i32\"}, {block = 5 : i32, constant = 0 : i32, def = \"arith.constant\", id = 70 : i32, operands = array<i32>, reg = 20 : i32, type = \"i32\"}, {block = 5 : i32, def = \"arith.subi\", id = 71 : i32, operands = array<i32: 70, 61>, reg = 16 : i32, type = \"i32\"}, {block = 5 : i32, def = \"arith.xori\", id = 72 : i32, operands = array<i32: 69, 20>, reg = 18 : i32, type = \"i32\"}, {block = 5 : i32, def = \"arith.andi\", id = 73 : i32, operands = array<i32: 72, 71>, reg = 19 : i32, type = \"i32\"}, {block = 5 : i32, def = \"arith.xori\", id = 74 : i32, operands = array<i32: 20, 73>, reg = 16 : i32, type = \"i32\"}, {block = 5 : i32, def = \"arith.addi\", id = 75 : i32, operands = array<i32: 58, 74>, reg = 18 : i32, type = \"i32\"}, {block = 5 : i32, constant = 141 : i32, def = \"arith.constant\", id = 76 : i32, operands = array<i32>, reg = 17 : i32, type = \"i32\"}, {block = 5 : i32, def = \"arith.subi\", id = 77 : i32, operands = array<i32: 75, 76>, reg = 16 : i32, type = \"i32\"}, {block = 5 : i32, def = \"arith.cmpi\", id = 78 : i32, operands = array<i32: 22, 20>, predicate = 1 : i32, reg = 18 : i32, type = \"i1\"}, {block = 5 : i32, def = \"arith.extui\", id = 79 : i32, operands = array<i32: 78>, reg = 17 : i32, type = \"i32\"}, {block = 5 : i32, constant = 0 : i32, def = \"arith.constant\", id = 80 : i32, operands = array<i32>, reg = 18 : i32, type = \"i32\"}, {block = 5 : i32, def = \"arith.subi\", id = 81 : i32, operands = array<i32: 80, 79>, reg = 15 : i32, type = \"i32\"}, {block = 5 : i32, def = \"arith.xori\", id = 82 : i32, operands = array<i32: 24, 77>, reg = 17 : i32, type = \"i32\"}, {block = 5 : i32, def = \"arith.andi\", id = 83 : i32, operands = array<i32: 82, 81>, reg = 18 : i32, type = \"i32\"}, {block = 5 : i32, def = \"arith.xori\", id = 84 : i32, operands = array<i32: 77, 83>, reg = 14 : i32, type = \"i32\"}, {block = 5 : i32, def = \"arith.cmpi\", id = 85 : i32, operands = array<i32: 19, 20>, predicate = 1 : i32, reg = 16 : i32, type = \"i1\"}, {block = 5 : i32, def = \"arith.extui\", id = 86 : i32, operands = array<i32: 85>, reg = 15 : i32, type = \"i32\"}, {block = 5 : i32, constant = 0 : i32, def = \"arith.constant\", id = 87 : i32, operands = array<i32>, reg = 16 : i32, type = \"i32\"}, {block = 5 : i32, def = \"arith.subi\", id = 88 : i32, operands = array<i32: 87, 86>, reg = 13 : i32, type = \"i32\"}, {block = 5 : i32, def = \"arith.xori\", id = 89 : i32, operands = array<i32: 84, 20>, reg = 15 : i32, type = \"i32\"}, {block = 5 : i32, def = \"arith.andi\", id = 90 : i32, operands = array<i32: 89, 88>, reg = 14 : i32, type = \"i32\"}, {block = 5 : i32, def = \"arith.xori\", id = 91 : i32, operands = array<i32: 20, 90>, reg = 13 : i32, type = \"i32\"}, {block = 5 : i32, constant = -127 : i32, def = \"arith.constant\", id = 92 : i32, operands = array<i32>, reg = 0 : i32, type = \"i32\"}, {block = 5 : i32, constant = -127 : i32, def = \"arith.constant\", id = 93 : i32, operands = array<i32>, reg = 0 : i32, type = \"i32\"}, {block = 5 : i32, def = \"arith.cmpi\", id = 94 : i32, operands = array<i32: 91, 93>, predicate = 2 : i32, reg = 14 : i32, type = \"i1\"}, {block = 5 : i32, def = \"arith.extui\", id = 95 : i32, operands = array<i32: 94>, reg = 15 : i32, type = \"i32\"}, {block = 5 : i32, constant = 0 : i32, def = \"arith.constant\", id = 96 : i32, operands = array<i32>, reg = 16 : i32, type = \"i32\"}, {block = 5 : i32, def = \"arith.subi\", id = 97 : i32, operands = array<i32: 96, 95>, reg = 14 : i32, type = \"i32\"}, {block = 5 : i32, def = \"arith.xori\", id = 98 : i32, operands = array<i32: 92, 91>, reg = 16 : i32, type = \"i32\"}, {block = 5 : i32, def = \"arith.andi\", id = 99 : i32, operands = array<i32: 98, 97>, reg = 15 : i32, type = \"i32\"}, {block = 5 : i32, def = \"arith.xori\", id = 100 : i32, operands = array<i32: 91, 99>, reg = 14 : i32, type = \"i32\"}, {block = 5 : i32, constant = 127 : i32, def = \"arith.constant\", id = 101 : i32, operands = array<i32>, reg = 0 : i32, type = \"i32\"}, {block = 5 : i32, constant = 127 : i32, def = \"arith.constant\", id = 102 : i32, operands = array<i32>, reg = 0 : i32, type = \"i32\"}, {block = 5 : i32, def = \"arith.cmpi\", id = 103 : i32, operands = array<i32: 102, 100>, predicate = 2 : i32, reg = 15 : i32, type = \"i1\"}, {block = 5 : i32, def = \"arith.extui\", id = 104 : i32, operands = array<i32: 103>, reg = 16 : i32, type = \"i32\"}, {block = 5 : i32, constant = 0 : i32, def = \"arith.constant\", id = 105 : i32, operands = array<i32>, reg = 17 : i32, type = \"i32\"}, {block = 5 : i32, def = \"arith.subi\", id = 106 : i32, operands = array<i32: 105, 104>, reg = 15 : i32, type = \"i32\"}, {block = 5 : i32, def = \"arith.xori\", id = 107 : i32, operands = array<i32: 101, 100>, reg = 17 : i32, type = \"i32\"}, {block = 5 : i32, def = \"arith.andi\", id = 108 : i32, operands = array<i32: 107, 106>, reg = 16 : i32, type = \"i32\"}, {block = 5 : i32, def = \"arith.xori\", id = 109 : i32, operands = array<i32: 100, 108>, reg = 15 : i32, type = \"i32\"}, {block = 5 : i32, constant = 127 : i32, def = \"arith.constant\", id = 110 : i32, operands = array<i32>, reg = 0 : i32, type = \"i32\"}, {block = 5 : i32, def = \"arith.addi\", id = 111 : i32, operands = array<i32: 109, 110>, reg = 14 : i32, type = \"i32\"}, {block = 5 : i32, constant = 0 : i32, def = \"arith.constant\", id = 112 : i32, operands = array<i32>, reg = 15 : i32, type = \"i32\"}, {block = 6 : i32, def = \"argument\", id = 113 : i32, operands = array<i32>, reg = 15 : i32, type = \"i32\"}, {block = 6 : i32, constant = 1 : i32, def = \"arith.constant\", id = 114 : i32, operands = array<i32>, reg = 0 : i32, type = \"i32\"}, {block = 6 : i32, def = \"arith.cmpi\", id = 115 : i32, operands = array<i32: 113, 114>, predicate = 6 : i32, reg = 16 : i32, type = \"i1\"}, {block = 7 : i32, constant = 0 : i32, def = \"arith.constant\", id = 116 : i32, operands = array<i32>, reg = 13 : i32, type = \"i32\"}, {block = 8 : i32, def = \"argument\", id = 117 : i32, operands = array<i32>, reg = 17 : i32, type = \"i32\"}, {block = 8 : i32, def = \"argument\", id = 118 : i32, operands = array<i32>, reg = 15 : i32, type = \"i32\"}, {block = 8 : i32, def = \"argument\", id = 119 : i32, operands = array<i32>, reg = 13 : i32, type = \"i32\"}, {block = 8 : i32, constant = 4 : i32, def = \"arith.constant\", id = 120 : i32, operands = array<i32>, reg = 0 : i32, type = \"i32\"}, {block = 8 : i32, def = \"arith.cmpi\", id = 121 : i32, operands = array<i32: 117, 120>, predicate = 6 : i32, reg = 16 : i32, type = \"i1\"}, {block = 9 : i32, constant = 1 : i32, def = \"arith.constant\", id = 122 : i32, operands = array<i32>, reg = 0 : i32, type = \"i32\"}, {block = 9 : i32, def = \"arith.addi\", id = 123 : i32, operands = array<i32: 6, 122>, reg = 13 : i32, type = \"i32\"}, {block = 9 : i32, constant = 8192 : i32, def = \"arith.constant\", id = 124 : i32, operands = array<i32>, reg = 14 : i32, type = \"i32\"}, {block = 9 : i32, def = \"arith.addi\", id = 125 : i32, operands = array<i32: 7, 124>, reg = 12 : i32, type = \"i32\"}, {block = 9 : i32, constant = 4096 : i32, def = \"arith.constant\", id = 126 : i32, operands = array<i32>, reg = 11 : i32, type = \"i32\"}, {block = 9 : i32, def = \"arith.addi\", id = 127 : i32, operands = array<i32: 8, 126>, reg = 14 : i32, type = \"i32\"}, {block = 10 : i32, def = \"atlas.virtual_dma_load_bf16\", id = 128 : i32, operands = array<i32: 118>, reg = 32 : i32, type = \"bf16\"}, {block = 10 : i32, constant = 1 : i32, def = \"arith.constant\", id = 129 : i32, operands = array<i32>, reg = 0 : i32, type = \"i32\"}, {block = 10 : i32, constant = 2048 : i32, def = \"arith.constant\", id = 130 : i32, operands = array<i32>, reg = 18 : i32, type = \"i32\"}, {block = 10 : i32, constant = 1024 : i32, def = \"arith.constant\", id = 131 : i32, operands = array<i32>, reg = 0 : i32, type = \"i32\"}, {block = 10 : i32, def = \"arith.addi\", id = 132 : i32, operands = array<i32: 117, 129>, reg = 16 : i32, type = \"i32\"}, {block = 10 : i32, def = \"arith.addi\", id = 133 : i32, operands = array<i32: 118, 130>, reg = 17 : i32, type = \"i32\"}, {block = 10 : i32, def = \"arith.addi\", id = 134 : i32, operands = array<i32: 119, 131>, reg = 15 : i32, type = \"i32\"}, {block = 10 : i32, def = \"atlas.virtual_raw_pack_fp8\", id = 135 : i32, operands = array<i32: 128, 111>, reg = 0 : i32, type = \"fp8\"}, {block = 11 : i32, constant = 0 : i32, def = \"arith.constant\", id = 136 : i32, operands = array<i32>, reg = 0 : i32, type = \"i32\"}, {block = 11 : i32, def = \"arith.addi\", id = 137 : i32, operands = array<i32: 136, 6>, reg = 17 : i32, type = \"i32\"}, {block = 11 : i32, def = \"arith.addi\", id = 138 : i32, operands = array<i32: 137, 113>, reg = 16 : i32, type = \"i32\"}, {block = 11 : i32, constant = 255 : i32, def = \"arith.constant\", id = 139 : i32, operands = array<i32>, reg = 0 : i32, type = \"i32\"}, {block = 11 : i32, def = \"arith.andi\", id = 140 : i32, operands = array<i32: 138, 139>, reg = 17 : i32, type = \"i32\"}, {block = 11 : i32, constant = 1 : i32, def = \"arith.constant\", id = 141 : i32, operands = array<i32>, reg = 0 : i32, type = \"i32\"}, {block = 11 : i32, def = \"arith.addi\", id = 142 : i32, operands = array<i32: 113, 141>, reg = 16 : i32, type = \"i32\"}, {block = 12 : i32, def = \"atlas.virtual_dma_load_bf16\", id = 143 : i32, operands = array<i32: 16>, reg = 32 : i32, type = \"bf16\"}, {block = 12 : i32, def = \"atlas.virtual_vpu_reduce\", id = 144 : i32, kind = \"row_max\", operands = array<i32: 143>, reg = 34 : i32, type = \"bf16\"}, {block = 12 : i32, def = \"atlas.virtual_vpu_reduce\", id = 145 : i32, kind = \"col_max\", operands = array<i32: 144>, reg = 36 : i32, type = \"bf16\"}, {block = 12 : i32, def = \"atlas.virtual_slot_load\", id = 146 : i32, kind = \"lhu\", operands = array<i32>, reg = 17 : i32, type = \"i32\"}, {block = 12 : i32, def = \"atlas.virtual_vpu_reduce\", id = 147 : i32, kind = \"row_min\", operands = array<i32: 143>, reg = 34 : i32, type = \"bf16\"}, {block = 12 : i32, def = \"atlas.virtual_vpu_reduce\", id = 148 : i32, kind = \"col_min\", operands = array<i32: 147>, reg = 36 : i32, type = \"bf16\"}, {block = 12 : i32, def = \"atlas.virtual_slot_load\", id = 149 : i32, kind = \"lhu\", operands = array<i32>, reg = 18 : i32, type = \"i32\"}, {block = 12 : i32, constant = 32767 : i32, def = \"arith.constant\", id = 150 : i32, operands = array<i32>, reg = 19 : i32, type = \"i32\"}, {block = 12 : i32, def = \"arith.andi\", id = 151 : i32, operands = array<i32: 146, 150>, reg = 16 : i32, type = \"i32\"}, {block = 12 : i32, constant = 32767 : i32, def = \"arith.constant\", id = 152 : i32, operands = array<i32>, reg = 19 : i32, type = \"i32\"}, {block = 12 : i32, def = \"arith.andi\", id = 153 : i32, operands = array<i32: 149, 152>, reg = 17 : i32, type = \"i32\"}, {block = 12 : i32, def = \"arith.cmpi\", id = 154 : i32, operands = array<i32: 151, 153>, predicate = 6 : i32, reg = 18 : i32, type = \"i1\"}, {block = 12 : i32, def = \"arith.extui\", id = 155 : i32, operands = array<i32: 154>, reg = 19 : i32, type = \"i32\"}, {block = 12 : i32, constant = 0 : i32, def = \"arith.constant\", id = 156 : i32, operands = array<i32>, reg = 20 : i32, type = \"i32\"}, {block = 12 : i32, def = \"arith.subi\", id = 157 : i32, operands = array<i32: 156, 155>, reg = 18 : i32, type = \"i32\"}, {block = 12 : i32, def = \"arith.xori\", id = 158 : i32, operands = array<i32: 153, 151>, reg = 19 : i32, type = \"i32\"}, {block = 12 : i32, def = \"arith.andi\", id = 159 : i32, operands = array<i32: 158, 157>, reg = 20 : i32, type = \"i32\"}, {block = 12 : i32, def = \"arith.xori\", id = 160 : i32, operands = array<i32: 151, 159>, reg = 17 : i32, type = \"i32\"}, {block = 12 : i32, constant = 32640 : i32, def = \"arith.constant\", id = 161 : i32, operands = array<i32>, reg = 16 : i32, type = \"i32\"}, {block = 12 : i32, def = \"arith.cmpi\", id = 162 : i32, operands = array<i32: 160, 161>, predicate = 9 : i32, reg = 18 : i32, type = \"i1\"}, {block = 13 : i32, def = \"arith.cmpi\", id = 163 : i32, operands = array<i32: 15, 160>, predicate = 6 : i32, reg = 16 : i32, type = \"i1\"}, {block = 13 : i32, def = \"arith.extui\", id = 164 : i32, operands = array<i32: 163>, reg = 18 : i32, type = \"i32\"}, {block = 13 : i32, constant = 0 : i32, def = \"arith.constant\", id = 165 : i32, operands = array<i32>, reg = 19 : i32, type = \"i32\"}, {block = 13 : i32, def = \"arith.subi\", id = 166 : i32, operands = array<i32: 165, 164>, reg = 16 : i32, type = \"i32\"}, {block = 13 : i32, def = \"arith.xori\", id = 167 : i32, operands = array<i32: 160, 15>, reg = 18 : i32, type = \"i32\"}, {block = 13 : i32, def = \"arith.andi\", id = 168 : i32, operands = array<i32: 167, 166>, reg = 17 : i32, type = \"i32\"}, {block = 13 : i32, def = \"arith.xori\", id = 169 : i32, operands = array<i32: 15, 168>, reg = 16 : i32, type = \"i32\"}, {block = 14 : i32, constant = 0 : i32, def = \"arith.constant\", id = 170 : i32, operands = array<i32>, reg = 16 : i32, type = \"i32\"}, {block = 15 : i32, def = \"argument\", id = 171 : i32, operands = array<i32>, reg = 15 : i32, type = \"i32\"}, {block = 15 : i32, def = \"argument\", id = 172 : i32, operands = array<i32>, reg = 16 : i32, type = \"i32\"}, {block = 15 : i32, constant = 1024 : i32, def = \"arith.constant\", id = 173 : i32, operands = array<i32>, reg = 0 : i32, type = \"i32\"}, {block = 15 : i32, def = \"arith.cmpi\", id = 174 : i32, operands = array<i32: 171, 173>, predicate = 6 : i32, reg = 17 : i32, type = \"i1\"}, {block = 16 : i32, def = \"argument\", id = 175 : i32, operands = array<i32>, reg = 15 : i32, type = \"i32\"}, {block = 16 : i32, constant = 1 : i32, def = \"arith.constant\", id = 176 : i32, operands = array<i32>, reg = 0 : i32, type = \"i32\"}, {block = 16 : i32, def = \"arith.addi\", id = 177 : i32, operands = array<i32: 14, 176>, reg = 16 : i32, type = \"i32\"}, {block = 16 : i32, constant = 2048 : i32, def = \"arith.constant\", id = 178 : i32, operands = array<i32>, reg = 14 : i32, type = \"i32\"}, {block = 16 : i32, def = \"arith.addi\", id = 179 : i32, operands = array<i32: 16, 178>, reg = 17 : i32, type = \"i32\"}, {block = 17 : i32, def = \"atlas.virtual_slot_load\", id = 180 : i32, kind = \"lhu\", operands = array<i32: 171>, reg = 18 : i32, type = \"i32\"}, {block = 17 : i32, constant = 32767 : i32, def = \"arith.constant\", id = 181 : i32, operands = array<i32>, reg = 19 : i32, type = \"i32\"}, {block = 17 : i32, def = \"arith.andi\", id = 182 : i32, operands = array<i32: 180, 181>, reg = 17 : i32, type = \"i32\"}, {block = 17 : i32, def = \"arith.cmpi\", id = 183 : i32, operands = array<i32: 172, 182>, predicate = 6 : i32, reg = 19 : i32, type = \"i1\"}, {block = 17 : i32, def = \"arith.extui\", id = 184 : i32, operands = array<i32: 183>, reg = 18 : i32, type = \"i32\"}, {block = 17 : i32, constant = 32640 : i32, def = \"arith.constant\", id = 185 : i32, operands = array<i32>, reg = 20 : i32, type = \"i32\"}, {block = 17 : i32, def = \"arith.cmpi\", id = 186 : i32, operands = array<i32: 182, 185>, predicate = 6 : i32, reg = 19 : i32, type = \"i1\"}, {block = 17 : i32, def = \"arith.extui\", id = 187 : i32, operands = array<i32: 186>, reg = 20 : i32, type = \"i32\"}, {block = 17 : i32, def = \"arith.andi\", id = 188 : i32, operands = array<i32: 184, 187>, reg = 19 : i32, type = \"i32\"}, {block = 17 : i32, constant = 0 : i32, def = \"arith.constant\", id = 189 : i32, operands = array<i32>, reg = 20 : i32, type = \"i32\"}, {block = 17 : i32, def = \"arith.subi\", id = 190 : i32, operands = array<i32: 189, 188>, reg = 18 : i32, type = \"i32\"}, {block = 17 : i32, def = \"arith.xori\", id = 191 : i32, operands = array<i32: 182, 172>, reg = 19 : i32, type = \"i32\"}, {block = 17 : i32, def = \"arith.andi\", id = 192 : i32, operands = array<i32: 191, 190>, reg = 17 : i32, type = \"i32\"}, {block = 17 : i32, def = \"arith.xori\", id = 193 : i32, operands = array<i32: 172, 192>, reg = 18 : i32, type = \"i32\"}, {block = 17 : i32, constant = 1 : i32, def = \"arith.constant\", id = 194 : i32, operands = array<i32>, reg = 0 : i32, type = \"i32\"}, {block = 17 : i32, def = \"arith.addi\", id = 195 : i32, operands = array<i32: 171, 194>, reg = 16 : i32, type = \"i32\"}]}",
+  "program": {
+    "instructions": [
+      {
+        "word_index": 0,
+        "fields": {
+          "atlas.virtual_cfg_block": 0
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 1,
+        "fields": {
+          "atlas.virtual_cfg_block": 0
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 2,
+        "fields": {
+          "atlas.virtual_cfg_block": 0,
+          "atlas.virtual_cfg_operation": 1,
+          "atlas.virtual_cfg_source": 1
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 3,
+        "fields": {
+          "atlas.virtual_cfg_block": 0,
+          "atlas.virtual_cfg_operation": 2,
+          "atlas.virtual_cfg_source": 2
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 4,
+        "fields": {
+          "atlas.virtual_cfg_block": 0,
+          "atlas.virtual_cfg_source": 5
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 5,
+        "fields": {
+          "atlas.virtual_cfg_block": 0,
+          "atlas.virtual_cfg_source": 5
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 6,
+        "fields": {
+          "atlas.virtual_cfg_block": 0,
+          "atlas.virtual_cfg_source": 5
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 7,
+        "fields": {
+          "atlas.virtual_cfg_block": 0
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 8,
+        "fields": {
+          "atlas.virtual_cfg_block": 0,
+          "atlas.virtual_cfg_operation": 5,
+          "atlas.virtual_cfg_source": 5
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 9,
+        "fields": {
+          "atlas.virtual_cfg_block": 0,
+          "atlas.virtual_cfg_source": 6
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 10,
+        "fields": {
+          "atlas.virtual_cfg_block": 0,
+          "atlas.virtual_cfg_source": 6
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 11,
+        "fields": {
+          "atlas.virtual_cfg_block": 0
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 12,
+        "fields": {
+          "atlas.virtual_cfg_block": 0,
+          "atlas.virtual_cfg_operation": 6,
+          "atlas.virtual_cfg_source": 6
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 13,
+        "fields": {
+          "atlas.virtual_cfg_block": 0,
+          "atlas.virtual_cfg_operation": 7,
+          "atlas.virtual_cfg_source": 7
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 14,
+        "fields": {
+          "atlas.virtual_cfg_block": 0,
+          "atlas.virtual_cfg_operation": 8,
+          "atlas.virtual_cfg_source": 8
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 15,
+        "fields": {
+          "atlas.virtual_cfg_block": 0,
+          "atlas.virtual_cfg_operation": 9,
+          "atlas.virtual_cfg_source": 9
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 16,
+        "fields": {
+          "atlas.virtual_cfg_block": 0,
+          "atlas.virtual_cfg_edge": 0
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 17,
+        "fields": {
+          "atlas.virtual_cfg_block": 0,
+          "atlas.virtual_cfg_edge": 0
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 18,
+        "fields": {
+          "atlas.virtual_cfg_block": 0,
+          "atlas.virtual_cfg_edge": 0
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 19,
+        "fields": {
+          "atlas.virtual_cfg_block": 0,
+          "atlas.virtual_cfg_edge": 0
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 20,
+        "fields": {
+          "atlas.virtual_cfg_block": 0,
+          "atlas.virtual_cfg_edge": 0
+        },
+        "control": {
+          "delay_slot_word_index": 21,
+          "kind": "jump_direct",
+          "target_word_index": 22
+        }
+      },
+      {
+        "word_index": 21,
+        "fields": {
+          "atlas.virtual_cfg_block": 0,
+          "atlas.virtual_cfg_edge": 0
+        },
+        "control": {
+          "kind": "sequential"
+        },
+        "delay_slot_for_word_index": 20
+      },
+      {
+        "word_index": 22,
+        "fields": {
+          "atlas.virtual_cfg_block": 1,
+          "atlas.virtual_cfg_operation": 12,
+          "atlas.virtual_cfg_source": 12
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 23,
+        "fields": {
+          "atlas.virtual_cfg_block": 1,
+          "atlas.virtual_cfg_branch": 1
+        },
+        "control": {
+          "delay_slot_word_index": 24,
+          "fallthrough_word_index": 25,
+          "kind": "conditional_direct",
+          "target_word_index": 27
+        }
+      },
+      {
+        "word_index": 24,
+        "fields": {
+          "atlas.virtual_cfg_block": 1
+        },
+        "control": {
+          "kind": "sequential"
+        },
+        "delay_slot_for_word_index": 23
+      },
+      {
+        "word_index": 25,
+        "fields": {
+          "atlas.virtual_cfg_block": 1,
+          "atlas.virtual_cfg_edge": 2
+        },
+        "control": {
+          "delay_slot_word_index": 26,
+          "kind": "jump_direct",
+          "target_word_index": 29
+        }
+      },
+      {
+        "word_index": 26,
+        "fields": {
+          "atlas.virtual_cfg_block": 1,
+          "atlas.virtual_cfg_edge": 2
+        },
+        "control": {
+          "kind": "sequential"
+        },
+        "delay_slot_for_word_index": 25
+      },
+      {
+        "word_index": 27,
+        "fields": {
+          "atlas.virtual_cfg_block": 1,
+          "atlas.virtual_cfg_edge": 1
+        },
+        "control": {
+          "delay_slot_word_index": 28,
+          "kind": "jump_direct",
+          "target_word_index": 44
+        }
+      },
+      {
+        "word_index": 28,
+        "fields": {
+          "atlas.virtual_cfg_block": 1,
+          "atlas.virtual_cfg_edge": 1
+        },
+        "control": {
+          "kind": "sequential"
+        },
+        "delay_slot_for_word_index": 27
+      },
+      {
+        "word_index": 29,
+        "fields": {
+          "atlas.virtual_cfg_block": 2,
+          "atlas.virtual_cfg_source": 14
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 30,
+        "fields": {
+          "atlas.virtual_cfg_block": 2,
+          "atlas.virtual_cfg_source": 14
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 31,
+        "fields": {
+          "atlas.virtual_cfg_block": 2,
+          "atlas.virtual_cfg_operation": 14,
+          "atlas.virtual_cfg_source": 14
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 32,
+        "fields": {
+          "atlas.virtual_cfg_block": 2,
+          "atlas.virtual_cfg_source": 17
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 33,
+        "fields": {
+          "atlas.virtual_cfg_block": 2,
+          "atlas.virtual_cfg_source": 17
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 34,
+        "fields": {
+          "atlas.virtual_cfg_block": 2,
+          "atlas.virtual_cfg_source": 17
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 35,
+        "fields": {
+          "atlas.virtual_cfg_block": 2
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 36,
+        "fields": {
+          "atlas.virtual_cfg_block": 2,
+          "atlas.virtual_cfg_source": 17
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 37,
+        "fields": {
+          "atlas.virtual_cfg_block": 2
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 38,
+        "fields": {
+          "atlas.virtual_cfg_block": 2,
+          "atlas.virtual_cfg_operation": 17,
+          "atlas.virtual_cfg_source": 17
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 39,
+        "fields": {
+          "atlas.virtual_cfg_block": 2
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 40,
+        "fields": {
+          "atlas.virtual_cfg_block": 2,
+          "atlas.virtual_cfg_source": 17
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 41,
+        "fields": {
+          "atlas.virtual_cfg_block": 2
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 42,
+        "fields": {
+          "atlas.virtual_cfg_block": 2
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 43,
+        "fields": {
+          "atlas.virtual_cfg_block": 2
+        },
+        "control": {
+          "kind": "trap"
+        }
+      },
+      {
+        "word_index": 44,
+        "fields": {
+          "atlas.virtual_cfg_block": 3,
+          "atlas.virtual_cfg_operation": 19,
+          "atlas.virtual_cfg_source": 19
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 45,
+        "fields": {
+          "atlas.virtual_cfg_block": 3,
+          "atlas.virtual_cfg_operation": 20,
+          "atlas.virtual_cfg_source": 20
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 46,
+        "fields": {
+          "atlas.virtual_cfg_block": 3,
+          "atlas.virtual_cfg_edge": 3
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 47,
+        "fields": {
+          "atlas.virtual_cfg_block": 3,
+          "atlas.virtual_cfg_edge": 3
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 48,
+        "fields": {
+          "atlas.virtual_cfg_block": 3,
+          "atlas.virtual_cfg_edge": 3
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 49,
+        "fields": {
+          "atlas.virtual_cfg_block": 3,
+          "atlas.virtual_cfg_edge": 3
+        },
+        "control": {
+          "delay_slot_word_index": 50,
+          "kind": "jump_direct",
+          "target_word_index": 51
+        }
+      },
+      {
+        "word_index": 50,
+        "fields": {
+          "atlas.virtual_cfg_block": 3,
+          "atlas.virtual_cfg_edge": 3
+        },
+        "control": {
+          "kind": "sequential"
+        },
+        "delay_slot_for_word_index": 49
+      },
+      {
+        "word_index": 51,
+        "fields": {
+          "atlas.virtual_cfg_block": 4,
+          "atlas.virtual_cfg_operation": 23,
+          "atlas.virtual_cfg_source": 23
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 52,
+        "fields": {
+          "atlas.virtual_cfg_block": 4,
+          "atlas.virtual_cfg_branch": 4
+        },
+        "control": {
+          "delay_slot_word_index": 53,
+          "fallthrough_word_index": 54,
+          "kind": "conditional_direct",
+          "target_word_index": 57
+        }
+      },
+      {
+        "word_index": 53,
+        "fields": {
+          "atlas.virtual_cfg_block": 4
+        },
+        "control": {
+          "kind": "sequential"
+        },
+        "delay_slot_for_word_index": 52
+      },
+      {
+        "word_index": 54,
+        "fields": {
+          "atlas.virtual_cfg_block": 4,
+          "atlas.virtual_cfg_edge": 5
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 55,
+        "fields": {
+          "atlas.virtual_cfg_block": 4,
+          "atlas.virtual_cfg_edge": 5
+        },
+        "control": {
+          "delay_slot_word_index": 56,
+          "kind": "jump_direct",
+          "target_word_index": 59
+        }
+      },
+      {
+        "word_index": 56,
+        "fields": {
+          "atlas.virtual_cfg_block": 4,
+          "atlas.virtual_cfg_edge": 5
+        },
+        "control": {
+          "kind": "sequential"
+        },
+        "delay_slot_for_word_index": 55
+      },
+      {
+        "word_index": 57,
+        "fields": {
+          "atlas.virtual_cfg_block": 4,
+          "atlas.virtual_cfg_edge": 4
+        },
+        "control": {
+          "delay_slot_word_index": 58,
+          "kind": "jump_direct",
+          "target_word_index": 224
+        }
+      },
+      {
+        "word_index": 58,
+        "fields": {
+          "atlas.virtual_cfg_block": 4,
+          "atlas.virtual_cfg_edge": 4
+        },
+        "control": {
+          "kind": "sequential"
+        },
+        "delay_slot_for_word_index": 57
+      },
+      {
+        "word_index": 59,
+        "fields": {
+          "atlas.virtual_cfg_block": 5,
+          "atlas.virtual_cfg_operation": 27,
+          "atlas.virtual_cfg_source": 27
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 60,
+        "fields": {
+          "atlas.virtual_cfg_block": 5,
+          "atlas.virtual_cfg_operation": 28,
+          "atlas.virtual_cfg_source": 28
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 61,
+        "fields": {
+          "atlas.virtual_cfg_block": 5,
+          "atlas.virtual_cfg_operation": 29,
+          "atlas.virtual_cfg_source": 29
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 62,
+        "fields": {
+          "atlas.virtual_cfg_block": 5,
+          "atlas.virtual_cfg_source": 31
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 63,
+        "fields": {
+          "atlas.virtual_cfg_block": 5,
+          "atlas.virtual_cfg_operation": 31,
+          "atlas.virtual_cfg_source": 31
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 64,
+        "fields": {
+          "atlas.virtual_cfg_block": 5,
+          "atlas.virtual_cfg_operation": 32,
+          "atlas.virtual_cfg_source": 32
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 65,
+        "fields": {
+          "atlas.virtual_cfg_block": 5,
+          "atlas.virtual_cfg_operation": 34,
+          "atlas.virtual_cfg_source": 34
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 66,
+        "fields": {
+          "atlas.virtual_cfg_block": 5,
+          "atlas.virtual_cfg_operation": 35,
+          "atlas.virtual_cfg_source": 35
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 67,
+        "fields": {
+          "atlas.virtual_cfg_block": 5,
+          "atlas.virtual_cfg_operation": 36,
+          "atlas.virtual_cfg_source": 36
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 68,
+        "fields": {
+          "atlas.virtual_cfg_block": 5,
+          "atlas.virtual_cfg_operation": 37,
+          "atlas.virtual_cfg_source": 37
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 69,
+        "fields": {
+          "atlas.virtual_cfg_block": 5,
+          "atlas.virtual_cfg_operation": 38,
+          "atlas.virtual_cfg_source": 38
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 70,
+        "fields": {
+          "atlas.virtual_cfg_block": 5,
+          "atlas.virtual_cfg_operation": 39,
+          "atlas.virtual_cfg_source": 39
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 71,
+        "fields": {
+          "atlas.virtual_cfg_block": 5,
+          "atlas.virtual_cfg_operation": 40,
+          "atlas.virtual_cfg_source": 40
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 72,
+        "fields": {
+          "atlas.virtual_cfg_block": 5,
+          "atlas.virtual_cfg_operation": 41,
+          "atlas.virtual_cfg_source": 41
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 73,
+        "fields": {
+          "atlas.virtual_cfg_block": 5,
+          "atlas.virtual_cfg_operation": 42,
+          "atlas.virtual_cfg_source": 42
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 74,
+        "fields": {
+          "atlas.virtual_cfg_block": 5,
+          "atlas.virtual_cfg_operation": 43,
+          "atlas.virtual_cfg_source": 43
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 75,
+        "fields": {
+          "atlas.virtual_cfg_block": 5,
+          "atlas.virtual_cfg_operation": 44,
+          "atlas.virtual_cfg_source": 44
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 76,
+        "fields": {
+          "atlas.virtual_cfg_block": 5,
+          "atlas.virtual_cfg_operation": 45,
+          "atlas.virtual_cfg_source": 45
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 77,
+        "fields": {
+          "atlas.virtual_cfg_block": 5,
+          "atlas.virtual_cfg_operation": 46,
+          "atlas.virtual_cfg_source": 46
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 78,
+        "fields": {
+          "atlas.virtual_cfg_block": 5,
+          "atlas.virtual_cfg_source": 48
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 79,
+        "fields": {
+          "atlas.virtual_cfg_block": 5,
+          "atlas.virtual_cfg_operation": 48,
+          "atlas.virtual_cfg_source": 48
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 80,
+        "fields": {
+          "atlas.virtual_cfg_block": 5,
+          "atlas.virtual_cfg_operation": 49,
+          "atlas.virtual_cfg_source": 49
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 81,
+        "fields": {
+          "atlas.virtual_cfg_block": 5,
+          "atlas.virtual_cfg_operation": 51,
+          "atlas.virtual_cfg_source": 51
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 82,
+        "fields": {
+          "atlas.virtual_cfg_block": 5,
+          "atlas.virtual_cfg_operation": 52,
+          "atlas.virtual_cfg_source": 52
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 83,
+        "fields": {
+          "atlas.virtual_cfg_block": 5,
+          "atlas.virtual_cfg_operation": 53,
+          "atlas.virtual_cfg_source": 53
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 84,
+        "fields": {
+          "atlas.virtual_cfg_block": 5,
+          "atlas.virtual_cfg_operation": 54,
+          "atlas.virtual_cfg_source": 54
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 85,
+        "fields": {
+          "atlas.virtual_cfg_block": 5,
+          "atlas.virtual_cfg_operation": 55,
+          "atlas.virtual_cfg_source": 55
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 86,
+        "fields": {
+          "atlas.virtual_cfg_block": 5,
+          "atlas.virtual_cfg_operation": 56,
+          "atlas.virtual_cfg_source": 56
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 87,
+        "fields": {
+          "atlas.virtual_cfg_block": 5,
+          "atlas.virtual_cfg_operation": 57,
+          "atlas.virtual_cfg_source": 57
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 88,
+        "fields": {
+          "atlas.virtual_cfg_block": 5,
+          "atlas.virtual_cfg_operation": 58,
+          "atlas.virtual_cfg_source": 58
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 89,
+        "fields": {
+          "atlas.virtual_cfg_block": 5,
+          "atlas.virtual_cfg_operation": 59,
+          "atlas.virtual_cfg_source": 59
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 90,
+        "fields": {
+          "atlas.virtual_cfg_block": 5,
+          "atlas.virtual_cfg_operation": 60,
+          "atlas.virtual_cfg_source": 60
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 91,
+        "fields": {
+          "atlas.virtual_cfg_block": 5,
+          "atlas.virtual_cfg_operation": 61,
+          "atlas.virtual_cfg_source": 61
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 92,
+        "fields": {
+          "atlas.virtual_cfg_block": 5,
+          "atlas.virtual_cfg_operation": 62,
+          "atlas.virtual_cfg_source": 62
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 93,
+        "fields": {
+          "atlas.virtual_cfg_block": 5,
+          "atlas.virtual_cfg_operation": 63,
+          "atlas.virtual_cfg_source": 63
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 94,
+        "fields": {
+          "atlas.virtual_cfg_block": 5,
+          "atlas.virtual_cfg_source": 65
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 95,
+        "fields": {
+          "atlas.virtual_cfg_block": 5,
+          "atlas.virtual_cfg_operation": 65,
+          "atlas.virtual_cfg_source": 65
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 96,
+        "fields": {
+          "atlas.virtual_cfg_block": 5,
+          "atlas.virtual_cfg_operation": 66,
+          "atlas.virtual_cfg_source": 66
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 97,
+        "fields": {
+          "atlas.virtual_cfg_block": 5,
+          "atlas.virtual_cfg_operation": 68,
+          "atlas.virtual_cfg_source": 68
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 98,
+        "fields": {
+          "atlas.virtual_cfg_block": 5,
+          "atlas.virtual_cfg_operation": 69,
+          "atlas.virtual_cfg_source": 69
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 99,
+        "fields": {
+          "atlas.virtual_cfg_block": 5,
+          "atlas.virtual_cfg_operation": 70,
+          "atlas.virtual_cfg_source": 70
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 100,
+        "fields": {
+          "atlas.virtual_cfg_block": 5,
+          "atlas.virtual_cfg_operation": 71,
+          "atlas.virtual_cfg_source": 71
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 101,
+        "fields": {
+          "atlas.virtual_cfg_block": 5,
+          "atlas.virtual_cfg_operation": 72,
+          "atlas.virtual_cfg_source": 72
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 102,
+        "fields": {
+          "atlas.virtual_cfg_block": 5,
+          "atlas.virtual_cfg_operation": 73,
+          "atlas.virtual_cfg_source": 73
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 103,
+        "fields": {
+          "atlas.virtual_cfg_block": 5,
+          "atlas.virtual_cfg_operation": 74,
+          "atlas.virtual_cfg_source": 74
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 104,
+        "fields": {
+          "atlas.virtual_cfg_block": 5,
+          "atlas.virtual_cfg_operation": 75,
+          "atlas.virtual_cfg_source": 75
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 105,
+        "fields": {
+          "atlas.virtual_cfg_block": 5,
+          "atlas.virtual_cfg_operation": 76,
+          "atlas.virtual_cfg_source": 76
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 106,
+        "fields": {
+          "atlas.virtual_cfg_block": 5,
+          "atlas.virtual_cfg_operation": 77,
+          "atlas.virtual_cfg_source": 77
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 107,
+        "fields": {
+          "atlas.virtual_cfg_block": 5,
+          "atlas.virtual_cfg_operation": 78,
+          "atlas.virtual_cfg_source": 78
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 108,
+        "fields": {
+          "atlas.virtual_cfg_block": 5,
+          "atlas.virtual_cfg_operation": 79,
+          "atlas.virtual_cfg_source": 79
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 109,
+        "fields": {
+          "atlas.virtual_cfg_block": 5,
+          "atlas.virtual_cfg_operation": 80,
+          "atlas.virtual_cfg_source": 80
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 110,
+        "fields": {
+          "atlas.virtual_cfg_block": 5,
+          "atlas.virtual_cfg_operation": 81,
+          "atlas.virtual_cfg_source": 81
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 111,
+        "fields": {
+          "atlas.virtual_cfg_block": 5,
+          "atlas.virtual_cfg_operation": 82,
+          "atlas.virtual_cfg_source": 82
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 112,
+        "fields": {
+          "atlas.virtual_cfg_block": 5,
+          "atlas.virtual_cfg_source": 83
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 113,
+        "fields": {
+          "atlas.virtual_cfg_block": 5,
+          "atlas.virtual_cfg_operation": 83,
+          "atlas.virtual_cfg_source": 83
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 114,
+        "fields": {
+          "atlas.virtual_cfg_block": 5,
+          "atlas.virtual_cfg_operation": 84,
+          "atlas.virtual_cfg_source": 84
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 115,
+        "fields": {
+          "atlas.virtual_cfg_block": 5,
+          "atlas.virtual_cfg_operation": 85,
+          "atlas.virtual_cfg_source": 85
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 116,
+        "fields": {
+          "atlas.virtual_cfg_block": 5,
+          "atlas.virtual_cfg_operation": 86,
+          "atlas.virtual_cfg_source": 86
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 117,
+        "fields": {
+          "atlas.virtual_cfg_block": 5,
+          "atlas.virtual_cfg_operation": 87,
+          "atlas.virtual_cfg_source": 87
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 118,
+        "fields": {
+          "atlas.virtual_cfg_block": 5,
+          "atlas.virtual_cfg_operation": 88,
+          "atlas.virtual_cfg_source": 88
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 119,
+        "fields": {
+          "atlas.virtual_cfg_block": 5,
+          "atlas.virtual_cfg_operation": 89,
+          "atlas.virtual_cfg_source": 89
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 120,
+        "fields": {
+          "atlas.virtual_cfg_block": 5,
+          "atlas.virtual_cfg_source": 90
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 121,
+        "fields": {
+          "atlas.virtual_cfg_block": 5,
+          "atlas.virtual_cfg_operation": 90,
+          "atlas.virtual_cfg_source": 90
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 122,
+        "fields": {
+          "atlas.virtual_cfg_block": 5,
+          "atlas.virtual_cfg_operation": 91,
+          "atlas.virtual_cfg_source": 91
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 123,
+        "fields": {
+          "atlas.virtual_cfg_block": 5,
+          "atlas.virtual_cfg_operation": 92,
+          "atlas.virtual_cfg_source": 92
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 124,
+        "fields": {
+          "atlas.virtual_cfg_block": 5,
+          "atlas.virtual_cfg_operation": 93,
+          "atlas.virtual_cfg_source": 93
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 125,
+        "fields": {
+          "atlas.virtual_cfg_block": 5,
+          "atlas.virtual_cfg_operation": 94,
+          "atlas.virtual_cfg_source": 94
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 126,
+        "fields": {
+          "atlas.virtual_cfg_block": 5,
+          "atlas.virtual_cfg_operation": 95,
+          "atlas.virtual_cfg_source": 95
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 127,
+        "fields": {
+          "atlas.virtual_cfg_block": 5,
+          "atlas.virtual_cfg_operation": 96,
+          "atlas.virtual_cfg_source": 96
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 128,
+        "fields": {
+          "atlas.virtual_cfg_block": 5,
+          "atlas.virtual_cfg_operation": 99,
+          "atlas.virtual_cfg_source": 99
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 129,
+        "fields": {
+          "atlas.virtual_cfg_block": 5,
+          "atlas.virtual_cfg_operation": 100,
+          "atlas.virtual_cfg_source": 100
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 130,
+        "fields": {
+          "atlas.virtual_cfg_block": 5,
+          "atlas.virtual_cfg_operation": 101,
+          "atlas.virtual_cfg_source": 101
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 131,
+        "fields": {
+          "atlas.virtual_cfg_block": 5,
+          "atlas.virtual_cfg_operation": 102,
+          "atlas.virtual_cfg_source": 102
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 132,
+        "fields": {
+          "atlas.virtual_cfg_block": 5,
+          "atlas.virtual_cfg_operation": 103,
+          "atlas.virtual_cfg_source": 103
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 133,
+        "fields": {
+          "atlas.virtual_cfg_block": 5,
+          "atlas.virtual_cfg_operation": 104,
+          "atlas.virtual_cfg_source": 104
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 134,
+        "fields": {
+          "atlas.virtual_cfg_block": 5,
+          "atlas.virtual_cfg_operation": 105,
+          "atlas.virtual_cfg_source": 105
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 135,
+        "fields": {
+          "atlas.virtual_cfg_block": 5,
+          "atlas.virtual_cfg_source": 108
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 136,
+        "fields": {
+          "atlas.virtual_cfg_block": 5,
+          "atlas.virtual_cfg_operation": 108,
+          "atlas.virtual_cfg_source": 108
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 137,
+        "fields": {
+          "atlas.virtual_cfg_block": 5,
+          "atlas.virtual_cfg_operation": 109,
+          "atlas.virtual_cfg_source": 109
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 138,
+        "fields": {
+          "atlas.virtual_cfg_block": 5,
+          "atlas.virtual_cfg_operation": 110,
+          "atlas.virtual_cfg_source": 110
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 139,
+        "fields": {
+          "atlas.virtual_cfg_block": 5,
+          "atlas.virtual_cfg_operation": 111,
+          "atlas.virtual_cfg_source": 111
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 140,
+        "fields": {
+          "atlas.virtual_cfg_block": 5,
+          "atlas.virtual_cfg_operation": 112,
+          "atlas.virtual_cfg_source": 112
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 141,
+        "fields": {
+          "atlas.virtual_cfg_block": 5,
+          "atlas.virtual_cfg_operation": 113,
+          "atlas.virtual_cfg_source": 113
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 142,
+        "fields": {
+          "atlas.virtual_cfg_block": 5,
+          "atlas.virtual_cfg_operation": 114,
+          "atlas.virtual_cfg_source": 114
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 143,
+        "fields": {
+          "atlas.virtual_cfg_block": 5,
+          "atlas.virtual_cfg_operation": 116,
+          "atlas.virtual_cfg_source": 116
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 144,
+        "fields": {
+          "atlas.virtual_cfg_block": 5,
+          "atlas.virtual_cfg_operation": 117,
+          "atlas.virtual_cfg_source": 117
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 145,
+        "fields": {
+          "atlas.virtual_cfg_block": 5,
+          "atlas.virtual_cfg_edge": 6
+        },
+        "control": {
+          "delay_slot_word_index": 146,
+          "kind": "jump_direct",
+          "target_word_index": 147
+        }
+      },
+      {
+        "word_index": 146,
+        "fields": {
+          "atlas.virtual_cfg_block": 5,
+          "atlas.virtual_cfg_edge": 6
+        },
+        "control": {
+          "kind": "sequential"
+        },
+        "delay_slot_for_word_index": 145
+      },
+      {
+        "word_index": 147,
+        "fields": {
+          "atlas.virtual_cfg_block": 6,
+          "atlas.virtual_cfg_operation": 120,
+          "atlas.virtual_cfg_source": 120
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 148,
+        "fields": {
+          "atlas.virtual_cfg_block": 6,
+          "atlas.virtual_cfg_branch": 6
+        },
+        "control": {
+          "delay_slot_word_index": 149,
+          "fallthrough_word_index": 150,
+          "kind": "conditional_direct",
+          "target_word_index": 152
+        }
+      },
+      {
+        "word_index": 149,
+        "fields": {
+          "atlas.virtual_cfg_block": 6
+        },
+        "control": {
+          "kind": "sequential"
+        },
+        "delay_slot_for_word_index": 148
+      },
+      {
+        "word_index": 150,
+        "fields": {
+          "atlas.virtual_cfg_block": 6,
+          "atlas.virtual_cfg_edge": 8
+        },
+        "control": {
+          "delay_slot_word_index": 151,
+          "kind": "jump_direct",
+          "target_word_index": 154
+        }
+      },
+      {
+        "word_index": 151,
+        "fields": {
+          "atlas.virtual_cfg_block": 6,
+          "atlas.virtual_cfg_edge": 8
+        },
+        "control": {
+          "kind": "sequential"
+        },
+        "delay_slot_for_word_index": 150
+      },
+      {
+        "word_index": 152,
+        "fields": {
+          "atlas.virtual_cfg_block": 6,
+          "atlas.virtual_cfg_edge": 7
+        },
+        "control": {
+          "delay_slot_word_index": 153,
+          "kind": "jump_direct",
+          "target_word_index": 212
+        }
+      },
+      {
+        "word_index": 153,
+        "fields": {
+          "atlas.virtual_cfg_block": 6,
+          "atlas.virtual_cfg_edge": 7
+        },
+        "control": {
+          "kind": "sequential"
+        },
+        "delay_slot_for_word_index": 152
+      },
+      {
+        "word_index": 154,
+        "fields": {
+          "atlas.virtual_cfg_block": 7,
+          "atlas.virtual_cfg_operation": 122,
+          "atlas.virtual_cfg_source": 122
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 155,
+        "fields": {
+          "atlas.virtual_cfg_block": 7,
+          "atlas.virtual_cfg_edge": 9
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 156,
+        "fields": {
+          "atlas.virtual_cfg_block": 7,
+          "atlas.virtual_cfg_edge": 9
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 157,
+        "fields": {
+          "atlas.virtual_cfg_block": 7,
+          "atlas.virtual_cfg_edge": 9
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 158,
+        "fields": {
+          "atlas.virtual_cfg_block": 7,
+          "atlas.virtual_cfg_edge": 9
+        },
+        "control": {
+          "delay_slot_word_index": 159,
+          "kind": "jump_direct",
+          "target_word_index": 160
+        }
+      },
+      {
+        "word_index": 159,
+        "fields": {
+          "atlas.virtual_cfg_block": 7,
+          "atlas.virtual_cfg_edge": 9
+        },
+        "control": {
+          "kind": "sequential"
+        },
+        "delay_slot_for_word_index": 158
+      },
+      {
+        "word_index": 160,
+        "fields": {
+          "atlas.virtual_cfg_block": 8,
+          "atlas.virtual_cfg_operation": 125,
+          "atlas.virtual_cfg_source": 125
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 161,
+        "fields": {
+          "atlas.virtual_cfg_block": 8,
+          "atlas.virtual_cfg_branch": 8
+        },
+        "control": {
+          "delay_slot_word_index": 162,
+          "fallthrough_word_index": 163,
+          "kind": "conditional_direct",
+          "target_word_index": 165
+        }
+      },
+      {
+        "word_index": 162,
+        "fields": {
+          "atlas.virtual_cfg_block": 8
+        },
+        "control": {
+          "kind": "sequential"
+        },
+        "delay_slot_for_word_index": 161
+      },
+      {
+        "word_index": 163,
+        "fields": {
+          "atlas.virtual_cfg_block": 8,
+          "atlas.virtual_cfg_edge": 11
+        },
+        "control": {
+          "delay_slot_word_index": 164,
+          "kind": "jump_direct",
+          "target_word_index": 167
+        }
+      },
+      {
+        "word_index": 164,
+        "fields": {
+          "atlas.virtual_cfg_block": 8,
+          "atlas.virtual_cfg_edge": 11
+        },
+        "control": {
+          "kind": "sequential"
+        },
+        "delay_slot_for_word_index": 163
+      },
+      {
+        "word_index": 165,
+        "fields": {
+          "atlas.virtual_cfg_block": 8,
+          "atlas.virtual_cfg_edge": 10
+        },
+        "control": {
+          "delay_slot_word_index": 166,
+          "kind": "jump_direct",
+          "target_word_index": 177
+        }
+      },
+      {
+        "word_index": 166,
+        "fields": {
+          "atlas.virtual_cfg_block": 8,
+          "atlas.virtual_cfg_edge": 10
+        },
+        "control": {
+          "kind": "sequential"
+        },
+        "delay_slot_for_word_index": 165
+      },
+      {
+        "word_index": 167,
+        "fields": {
+          "atlas.virtual_cfg_block": 9,
+          "atlas.virtual_cfg_operation": 128,
+          "atlas.virtual_cfg_source": 128
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 168,
+        "fields": {
+          "atlas.virtual_cfg_block": 9,
+          "atlas.virtual_cfg_operation": 129,
+          "atlas.virtual_cfg_source": 129
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 169,
+        "fields": {
+          "atlas.virtual_cfg_block": 9,
+          "atlas.virtual_cfg_operation": 130,
+          "atlas.virtual_cfg_source": 130
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 170,
+        "fields": {
+          "atlas.virtual_cfg_block": 9,
+          "atlas.virtual_cfg_operation": 131,
+          "atlas.virtual_cfg_source": 131
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 171,
+        "fields": {
+          "atlas.virtual_cfg_block": 9,
+          "atlas.virtual_cfg_operation": 132,
+          "atlas.virtual_cfg_source": 132
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 172,
+        "fields": {
+          "atlas.virtual_cfg_block": 9,
+          "atlas.virtual_cfg_edge": 12
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 173,
+        "fields": {
+          "atlas.virtual_cfg_block": 9,
+          "atlas.virtual_cfg_edge": 12
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 174,
+        "fields": {
+          "atlas.virtual_cfg_block": 9,
+          "atlas.virtual_cfg_edge": 12
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 175,
+        "fields": {
+          "atlas.virtual_cfg_block": 9,
+          "atlas.virtual_cfg_edge": 12
+        },
+        "control": {
+          "delay_slot_word_index": 176,
+          "kind": "jump_direct",
+          "target_word_index": 22
+        }
+      },
+      {
+        "word_index": 176,
+        "fields": {
+          "atlas.virtual_cfg_block": 9,
+          "atlas.virtual_cfg_edge": 12
+        },
+        "control": {
+          "kind": "sequential"
+        },
+        "delay_slot_for_word_index": 175
+      },
+      {
+        "word_index": 177,
+        "fields": {
+          "atlas.virtual_cfg_block": 10,
+          "atlas.virtual_cfg_source": 135
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 178,
+        "fields": {
+          "atlas.virtual_cfg_block": 10,
+          "atlas.virtual_cfg_source": 135
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 179,
+        "fields": {
+          "atlas.virtual_cfg_block": 10,
+          "atlas.virtual_cfg_source": 135
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 180,
+        "fields": {
+          "atlas.virtual_cfg_block": 10,
+          "atlas.virtual_cfg_source": 135
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 181,
+        "fields": {
+          "atlas.virtual_cfg_block": 10,
+          "atlas.virtual_cfg_operation": 135,
+          "atlas.virtual_cfg_source": 135
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 182,
+        "fields": {
+          "atlas.virtual_cfg_block": 10,
+          "atlas.virtual_cfg_source": 138
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 183,
+        "fields": {
+          "atlas.virtual_cfg_block": 10,
+          "atlas.virtual_cfg_operation": 138,
+          "atlas.virtual_cfg_source": 138
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 184,
+        "fields": {
+          "atlas.virtual_cfg_block": 10,
+          "atlas.virtual_cfg_operation": 140,
+          "atlas.virtual_cfg_source": 140
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 185,
+        "fields": {
+          "atlas.virtual_cfg_block": 10,
+          "atlas.virtual_cfg_operation": 141,
+          "atlas.virtual_cfg_source": 141
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 186,
+        "fields": {
+          "atlas.virtual_cfg_block": 10,
+          "atlas.virtual_cfg_operation": 142,
+          "atlas.virtual_cfg_source": 142
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 187,
+        "fields": {
+          "atlas.virtual_cfg_block": 10,
+          "atlas.virtual_cfg_source": 135
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 188,
+        "fields": {
+          "atlas.virtual_cfg_block": 10,
+          "atlas.virtual_cfg_source": 135
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 189,
+        "fields": {
+          "atlas.virtual_cfg_block": 10,
+          "atlas.virtual_cfg_source": 135
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 190,
+        "fields": {
+          "atlas.virtual_cfg_block": 10,
+          "atlas.virtual_cfg_source": 135
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 191,
+        "fields": {
+          "atlas.virtual_cfg_block": 10,
+          "atlas.virtual_cfg_source": 135
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 192,
+        "fields": {
+          "atlas.virtual_cfg_block": 10
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 193,
+        "fields": {
+          "atlas.virtual_cfg_block": 10,
+          "atlas.virtual_cfg_source": 135
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 194,
+        "fields": {
+          "atlas.virtual_cfg_block": 10,
+          "atlas.virtual_cfg_source": 143
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 195,
+        "fields": {
+          "atlas.virtual_cfg_block": 10,
+          "atlas.virtual_cfg_source": 143
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 196,
+        "fields": {
+          "atlas.virtual_cfg_block": 10,
+          "atlas.virtual_cfg_source": 143
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 197,
+        "fields": {
+          "atlas.virtual_cfg_block": 10
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 198,
+        "fields": {
+          "atlas.virtual_cfg_block": 10,
+          "atlas.virtual_cfg_operation": 143,
+          "atlas.virtual_cfg_source": 143
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 199,
+        "fields": {
+          "atlas.virtual_cfg_block": 10,
+          "atlas.virtual_cfg_source": 144
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 200,
+        "fields": {
+          "atlas.virtual_cfg_block": 10,
+          "atlas.virtual_cfg_source": 144
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 201,
+        "fields": {
+          "atlas.virtual_cfg_block": 10,
+          "atlas.virtual_cfg_source": 144
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 202,
+        "fields": {
+          "atlas.virtual_cfg_block": 10
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 203,
+        "fields": {
+          "atlas.virtual_cfg_block": 10,
+          "atlas.virtual_cfg_source": 144
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 204,
+        "fields": {
+          "atlas.virtual_cfg_block": 10
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 205,
+        "fields": {
+          "atlas.virtual_cfg_block": 10,
+          "atlas.virtual_cfg_operation": 144,
+          "atlas.virtual_cfg_source": 144
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 206,
+        "fields": {
+          "atlas.virtual_cfg_block": 10,
+          "atlas.virtual_cfg_edge": 13
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 207,
+        "fields": {
+          "atlas.virtual_cfg_block": 10,
+          "atlas.virtual_cfg_edge": 13
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 208,
+        "fields": {
+          "atlas.virtual_cfg_block": 10,
+          "atlas.virtual_cfg_edge": 13
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 209,
+        "fields": {
+          "atlas.virtual_cfg_block": 10,
+          "atlas.virtual_cfg_source": 144
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 210,
+        "fields": {
+          "atlas.virtual_cfg_block": 10,
+          "atlas.virtual_cfg_edge": 13
+        },
+        "control": {
+          "delay_slot_word_index": 211,
+          "kind": "jump_direct",
+          "target_word_index": 160
+        }
+      },
+      {
+        "word_index": 211,
+        "fields": {
+          "atlas.virtual_cfg_block": 10,
+          "atlas.virtual_cfg_edge": 13
+        },
+        "control": {
+          "kind": "sequential"
+        },
+        "delay_slot_for_word_index": 210
+      },
+      {
+        "word_index": 212,
+        "fields": {
+          "atlas.virtual_cfg_block": 11,
+          "atlas.virtual_cfg_operation": 147,
+          "atlas.virtual_cfg_source": 147
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 213,
+        "fields": {
+          "atlas.virtual_cfg_block": 11,
+          "atlas.virtual_cfg_operation": 148,
+          "atlas.virtual_cfg_source": 148
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 214,
+        "fields": {
+          "atlas.virtual_cfg_block": 11,
+          "atlas.virtual_cfg_operation": 150,
+          "atlas.virtual_cfg_source": 150
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 215,
+        "fields": {
+          "atlas.virtual_cfg_block": 11,
+          "atlas.virtual_cfg_source": 151
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 216,
+        "fields": {
+          "atlas.virtual_cfg_block": 11,
+          "atlas.virtual_cfg_source": 151
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 217,
+        "fields": {
+          "atlas.virtual_cfg_block": 11,
+          "atlas.virtual_cfg_source": 151
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 218,
+        "fields": {
+          "atlas.virtual_cfg_block": 11,
+          "atlas.virtual_cfg_source": 151
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 219,
+        "fields": {
+          "atlas.virtual_cfg_block": 11,
+          "atlas.virtual_cfg_operation": 151,
+          "atlas.virtual_cfg_source": 151
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 220,
+        "fields": {
+          "atlas.virtual_cfg_block": 11,
+          "atlas.virtual_cfg_operation": 153,
+          "atlas.virtual_cfg_source": 153
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 221,
+        "fields": {
+          "atlas.virtual_cfg_block": 11,
+          "atlas.virtual_cfg_edge": 14
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 222,
+        "fields": {
+          "atlas.virtual_cfg_block": 11,
+          "atlas.virtual_cfg_edge": 14
+        },
+        "control": {
+          "delay_slot_word_index": 223,
+          "kind": "jump_direct",
+          "target_word_index": 147
+        }
+      },
+      {
+        "word_index": 223,
+        "fields": {
+          "atlas.virtual_cfg_block": 11,
+          "atlas.virtual_cfg_edge": 14
+        },
+        "control": {
+          "kind": "sequential"
+        },
+        "delay_slot_for_word_index": 222
+      },
+      {
+        "word_index": 224,
+        "fields": {
+          "atlas.virtual_cfg_block": 12,
+          "atlas.virtual_cfg_source": 156
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 225,
+        "fields": {
+          "atlas.virtual_cfg_block": 12,
+          "atlas.virtual_cfg_source": 156
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 226,
+        "fields": {
+          "atlas.virtual_cfg_block": 12,
+          "atlas.virtual_cfg_source": 156
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 227,
+        "fields": {
+          "atlas.virtual_cfg_block": 12,
+          "atlas.virtual_cfg_source": 156
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 228,
+        "fields": {
+          "atlas.virtual_cfg_block": 12,
+          "atlas.virtual_cfg_operation": 156,
+          "atlas.virtual_cfg_source": 156
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 229,
+        "fields": {
+          "atlas.virtual_cfg_block": 12,
+          "atlas.virtual_cfg_source": 156
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 230,
+        "fields": {
+          "atlas.virtual_cfg_block": 12,
+          "atlas.virtual_cfg_source": 156
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 231,
+        "fields": {
+          "atlas.virtual_cfg_block": 12,
+          "atlas.virtual_cfg_source": 156
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 232,
+        "fields": {
+          "atlas.virtual_cfg_block": 12,
+          "atlas.virtual_cfg_source": 156
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 233,
+        "fields": {
+          "atlas.virtual_cfg_block": 12,
+          "atlas.virtual_cfg_source": 156
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 234,
+        "fields": {
+          "atlas.virtual_cfg_block": 12
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 235,
+        "fields": {
+          "atlas.virtual_cfg_block": 12,
+          "atlas.virtual_cfg_source": 156
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 236,
+        "fields": {
+          "atlas.virtual_cfg_block": 12
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 237,
+        "fields": {
+          "atlas.virtual_cfg_block": 12,
+          "atlas.virtual_cfg_operation": 157,
+          "atlas.virtual_cfg_source": 157
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 238,
+        "fields": {
+          "atlas.virtual_cfg_block": 12
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 239,
+        "fields": {
+          "atlas.virtual_cfg_block": 12,
+          "atlas.virtual_cfg_operation": 158,
+          "atlas.virtual_cfg_source": 158
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 240,
+        "fields": {
+          "atlas.virtual_cfg_block": 12,
+          "atlas.virtual_cfg_source": 159
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 241,
+        "fields": {
+          "atlas.virtual_cfg_block": 12
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 242,
+        "fields": {
+          "atlas.virtual_cfg_block": 12,
+          "atlas.virtual_cfg_source": 159
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 243,
+        "fields": {
+          "atlas.virtual_cfg_block": 12,
+          "atlas.virtual_cfg_source": 159
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 244,
+        "fields": {
+          "atlas.virtual_cfg_block": 12,
+          "atlas.virtual_cfg_source": 159
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 245,
+        "fields": {
+          "atlas.virtual_cfg_block": 12
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 246,
+        "fields": {
+          "atlas.virtual_cfg_block": 12,
+          "atlas.virtual_cfg_operation": 159,
+          "atlas.virtual_cfg_source": 159
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 247,
+        "fields": {
+          "atlas.virtual_cfg_block": 12,
+          "atlas.virtual_cfg_source": 160
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 248,
+        "fields": {
+          "atlas.virtual_cfg_block": 12
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 249,
+        "fields": {
+          "atlas.virtual_cfg_block": 12,
+          "atlas.virtual_cfg_operation": 160,
+          "atlas.virtual_cfg_source": 160
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 250,
+        "fields": {
+          "atlas.virtual_cfg_block": 12,
+          "atlas.virtual_cfg_operation": 161,
+          "atlas.virtual_cfg_source": 161
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 251,
+        "fields": {
+          "atlas.virtual_cfg_block": 12
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 252,
+        "fields": {
+          "atlas.virtual_cfg_block": 12,
+          "atlas.virtual_cfg_operation": 162,
+          "atlas.virtual_cfg_source": 162
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 253,
+        "fields": {
+          "atlas.virtual_cfg_block": 12,
+          "atlas.virtual_cfg_source": 163
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 254,
+        "fields": {
+          "atlas.virtual_cfg_block": 12
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 255,
+        "fields": {
+          "atlas.virtual_cfg_block": 12,
+          "atlas.virtual_cfg_source": 163
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 256,
+        "fields": {
+          "atlas.virtual_cfg_block": 12,
+          "atlas.virtual_cfg_source": 163
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 257,
+        "fields": {
+          "atlas.virtual_cfg_block": 12,
+          "atlas.virtual_cfg_source": 163
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 258,
+        "fields": {
+          "atlas.virtual_cfg_block": 12
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 259,
+        "fields": {
+          "atlas.virtual_cfg_block": 12,
+          "atlas.virtual_cfg_operation": 163,
+          "atlas.virtual_cfg_source": 163
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 260,
+        "fields": {
+          "atlas.virtual_cfg_block": 12,
+          "atlas.virtual_cfg_source": 164
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 261,
+        "fields": {
+          "atlas.virtual_cfg_block": 12
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 262,
+        "fields": {
+          "atlas.virtual_cfg_block": 12,
+          "atlas.virtual_cfg_operation": 164,
+          "atlas.virtual_cfg_source": 164
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 263,
+        "fields": {
+          "atlas.virtual_cfg_block": 12,
+          "atlas.virtual_cfg_source": 165
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 264,
+        "fields": {
+          "atlas.virtual_cfg_block": 12,
+          "atlas.virtual_cfg_operation": 165,
+          "atlas.virtual_cfg_source": 165
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 265,
+        "fields": {
+          "atlas.virtual_cfg_block": 12
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 266,
+        "fields": {
+          "atlas.virtual_cfg_block": 12,
+          "atlas.virtual_cfg_operation": 166,
+          "atlas.virtual_cfg_source": 166
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 267,
+        "fields": {
+          "atlas.virtual_cfg_block": 12,
+          "atlas.virtual_cfg_source": 167
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 268,
+        "fields": {
+          "atlas.virtual_cfg_block": 12,
+          "atlas.virtual_cfg_operation": 167,
+          "atlas.virtual_cfg_source": 167
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 269,
+        "fields": {
+          "atlas.virtual_cfg_block": 12,
+          "atlas.virtual_cfg_operation": 168,
+          "atlas.virtual_cfg_source": 168
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 270,
+        "fields": {
+          "atlas.virtual_cfg_block": 12,
+          "atlas.virtual_cfg_operation": 169,
+          "atlas.virtual_cfg_source": 169
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 271,
+        "fields": {
+          "atlas.virtual_cfg_block": 12,
+          "atlas.virtual_cfg_operation": 170,
+          "atlas.virtual_cfg_source": 170
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 272,
+        "fields": {
+          "atlas.virtual_cfg_block": 12,
+          "atlas.virtual_cfg_operation": 171,
+          "atlas.virtual_cfg_source": 171
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 273,
+        "fields": {
+          "atlas.virtual_cfg_block": 12,
+          "atlas.virtual_cfg_operation": 172,
+          "atlas.virtual_cfg_source": 172
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 274,
+        "fields": {
+          "atlas.virtual_cfg_block": 12,
+          "atlas.virtual_cfg_operation": 173,
+          "atlas.virtual_cfg_source": 173
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 275,
+        "fields": {
+          "atlas.virtual_cfg_block": 12,
+          "atlas.virtual_cfg_operation": 174,
+          "atlas.virtual_cfg_source": 174
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 276,
+        "fields": {
+          "atlas.virtual_cfg_block": 12,
+          "atlas.virtual_cfg_operation": 175,
+          "atlas.virtual_cfg_source": 175
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 277,
+        "fields": {
+          "atlas.virtual_cfg_block": 12,
+          "atlas.virtual_cfg_source": 176
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 278,
+        "fields": {
+          "atlas.virtual_cfg_block": 12,
+          "atlas.virtual_cfg_operation": 176,
+          "atlas.virtual_cfg_source": 176
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 279,
+        "fields": {
+          "atlas.virtual_cfg_block": 12,
+          "atlas.virtual_cfg_source": 177
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 280,
+        "fields": {
+          "atlas.virtual_cfg_block": 12,
+          "atlas.virtual_cfg_operation": 177,
+          "atlas.virtual_cfg_source": 177
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 281,
+        "fields": {
+          "atlas.virtual_cfg_block": 12,
+          "atlas.virtual_cfg_branch": 12
+        },
+        "control": {
+          "delay_slot_word_index": 282,
+          "fallthrough_word_index": 283,
+          "kind": "conditional_direct",
+          "target_word_index": 285
+        }
+      },
+      {
+        "word_index": 282,
+        "fields": {
+          "atlas.virtual_cfg_block": 12
+        },
+        "control": {
+          "kind": "sequential"
+        },
+        "delay_slot_for_word_index": 281
+      },
+      {
+        "word_index": 283,
+        "fields": {
+          "atlas.virtual_cfg_block": 12,
+          "atlas.virtual_cfg_edge": 16
+        },
+        "control": {
+          "delay_slot_word_index": 284,
+          "kind": "jump_direct",
+          "target_word_index": 287
+        }
+      },
+      {
+        "word_index": 284,
+        "fields": {
+          "atlas.virtual_cfg_block": 12,
+          "atlas.virtual_cfg_edge": 16
+        },
+        "control": {
+          "kind": "sequential"
+        },
+        "delay_slot_for_word_index": 283
+      },
+      {
+        "word_index": 285,
+        "fields": {
+          "atlas.virtual_cfg_block": 12,
+          "atlas.virtual_cfg_edge": 15
+        },
+        "control": {
+          "delay_slot_word_index": 286,
+          "kind": "jump_direct",
+          "target_word_index": 297
+        }
+      },
+      {
+        "word_index": 286,
+        "fields": {
+          "atlas.virtual_cfg_block": 12,
+          "atlas.virtual_cfg_edge": 15
+        },
+        "control": {
+          "kind": "sequential"
+        },
+        "delay_slot_for_word_index": 285
+      },
+      {
+        "word_index": 287,
+        "fields": {
+          "atlas.virtual_cfg_block": 13,
+          "atlas.virtual_cfg_operation": 179,
+          "atlas.virtual_cfg_source": 179
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 288,
+        "fields": {
+          "atlas.virtual_cfg_block": 13,
+          "atlas.virtual_cfg_operation": 180,
+          "atlas.virtual_cfg_source": 180
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 289,
+        "fields": {
+          "atlas.virtual_cfg_block": 13,
+          "atlas.virtual_cfg_operation": 181,
+          "atlas.virtual_cfg_source": 181
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 290,
+        "fields": {
+          "atlas.virtual_cfg_block": 13,
+          "atlas.virtual_cfg_operation": 182,
+          "atlas.virtual_cfg_source": 182
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 291,
+        "fields": {
+          "atlas.virtual_cfg_block": 13,
+          "atlas.virtual_cfg_operation": 183,
+          "atlas.virtual_cfg_source": 183
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 292,
+        "fields": {
+          "atlas.virtual_cfg_block": 13,
+          "atlas.virtual_cfg_operation": 184,
+          "atlas.virtual_cfg_source": 184
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 293,
+        "fields": {
+          "atlas.virtual_cfg_block": 13,
+          "atlas.virtual_cfg_operation": 185,
+          "atlas.virtual_cfg_source": 185
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 294,
+        "fields": {
+          "atlas.virtual_cfg_block": 13,
+          "atlas.virtual_cfg_edge": 17
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 295,
+        "fields": {
+          "atlas.virtual_cfg_block": 13,
+          "atlas.virtual_cfg_edge": 17
+        },
+        "control": {
+          "delay_slot_word_index": 296,
+          "kind": "jump_direct",
+          "target_word_index": 318
+        }
+      },
+      {
+        "word_index": 296,
+        "fields": {
+          "atlas.virtual_cfg_block": 13,
+          "atlas.virtual_cfg_edge": 17
+        },
+        "control": {
+          "kind": "sequential"
+        },
+        "delay_slot_for_word_index": 295
+      },
+      {
+        "word_index": 297,
+        "fields": {
+          "atlas.virtual_cfg_block": 14,
+          "atlas.virtual_cfg_source": 187
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 298,
+        "fields": {
+          "atlas.virtual_cfg_block": 14,
+          "atlas.virtual_cfg_source": 187
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 299,
+        "fields": {
+          "atlas.virtual_cfg_block": 14,
+          "atlas.virtual_cfg_source": 187
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 300,
+        "fields": {
+          "atlas.virtual_cfg_block": 14,
+          "atlas.virtual_cfg_source": 187
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 301,
+        "fields": {
+          "atlas.virtual_cfg_block": 14
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 302,
+        "fields": {
+          "atlas.virtual_cfg_block": 14,
+          "atlas.virtual_cfg_operation": 187,
+          "atlas.virtual_cfg_source": 187
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 303,
+        "fields": {
+          "atlas.virtual_cfg_block": 14,
+          "atlas.virtual_cfg_operation": 188,
+          "atlas.virtual_cfg_source": 188
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 304,
+        "fields": {
+          "atlas.virtual_cfg_block": 14,
+          "atlas.virtual_cfg_edge": 18
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 305,
+        "fields": {
+          "atlas.virtual_cfg_block": 14,
+          "atlas.virtual_cfg_edge": 18
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 306,
+        "fields": {
+          "atlas.virtual_cfg_block": 14,
+          "atlas.virtual_cfg_edge": 18
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 307,
+        "fields": {
+          "atlas.virtual_cfg_block": 14,
+          "atlas.virtual_cfg_edge": 18
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 308,
+        "fields": {
+          "atlas.virtual_cfg_block": 14,
+          "atlas.virtual_cfg_edge": 18
+        },
+        "control": {
+          "delay_slot_word_index": 309,
+          "kind": "jump_direct",
+          "target_word_index": 310
+        }
+      },
+      {
+        "word_index": 309,
+        "fields": {
+          "atlas.virtual_cfg_block": 14,
+          "atlas.virtual_cfg_edge": 18
+        },
+        "control": {
+          "kind": "sequential"
+        },
+        "delay_slot_for_word_index": 308
+      },
+      {
+        "word_index": 310,
+        "fields": {
+          "atlas.virtual_cfg_block": 15,
+          "atlas.virtual_cfg_operation": 191,
+          "atlas.virtual_cfg_source": 191
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 311,
+        "fields": {
+          "atlas.virtual_cfg_block": 15,
+          "atlas.virtual_cfg_branch": 15
+        },
+        "control": {
+          "delay_slot_word_index": 312,
+          "fallthrough_word_index": 313,
+          "kind": "conditional_direct",
+          "target_word_index": 316
+        }
+      },
+      {
+        "word_index": 312,
+        "fields": {
+          "atlas.virtual_cfg_block": 15
+        },
+        "control": {
+          "kind": "sequential"
+        },
+        "delay_slot_for_word_index": 311
+      },
+      {
+        "word_index": 313,
+        "fields": {
+          "atlas.virtual_cfg_block": 15,
+          "atlas.virtual_cfg_edge": 20
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 314,
+        "fields": {
+          "atlas.virtual_cfg_block": 15,
+          "atlas.virtual_cfg_edge": 20
+        },
+        "control": {
+          "delay_slot_word_index": 315,
+          "kind": "jump_direct",
+          "target_word_index": 318
+        }
+      },
+      {
+        "word_index": 315,
+        "fields": {
+          "atlas.virtual_cfg_block": 15,
+          "atlas.virtual_cfg_edge": 20
+        },
+        "control": {
+          "kind": "sequential"
+        },
+        "delay_slot_for_word_index": 314
+      },
+      {
+        "word_index": 316,
+        "fields": {
+          "atlas.virtual_cfg_block": 15,
+          "atlas.virtual_cfg_edge": 19
+        },
+        "control": {
+          "delay_slot_word_index": 317,
+          "kind": "jump_direct",
+          "target_word_index": 326
+        }
+      },
+      {
+        "word_index": 317,
+        "fields": {
+          "atlas.virtual_cfg_block": 15,
+          "atlas.virtual_cfg_edge": 19
+        },
+        "control": {
+          "kind": "sequential"
+        },
+        "delay_slot_for_word_index": 316
+      },
+      {
+        "word_index": 318,
+        "fields": {
+          "atlas.virtual_cfg_block": 16,
+          "atlas.virtual_cfg_operation": 194,
+          "atlas.virtual_cfg_source": 194
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 319,
+        "fields": {
+          "atlas.virtual_cfg_block": 16,
+          "atlas.virtual_cfg_source": 195
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 320,
+        "fields": {
+          "atlas.virtual_cfg_block": 16,
+          "atlas.virtual_cfg_operation": 195,
+          "atlas.virtual_cfg_source": 195
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 321,
+        "fields": {
+          "atlas.virtual_cfg_block": 16,
+          "atlas.virtual_cfg_operation": 196,
+          "atlas.virtual_cfg_source": 196
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 322,
+        "fields": {
+          "atlas.virtual_cfg_block": 16,
+          "atlas.virtual_cfg_edge": 21
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 323,
+        "fields": {
+          "atlas.virtual_cfg_block": 16,
+          "atlas.virtual_cfg_edge": 21
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 324,
+        "fields": {
+          "atlas.virtual_cfg_block": 16,
+          "atlas.virtual_cfg_edge": 21
+        },
+        "control": {
+          "delay_slot_word_index": 325,
+          "kind": "jump_direct",
+          "target_word_index": 51
+        }
+      },
+      {
+        "word_index": 325,
+        "fields": {
+          "atlas.virtual_cfg_block": 16,
+          "atlas.virtual_cfg_edge": 21
+        },
+        "control": {
+          "kind": "sequential"
+        },
+        "delay_slot_for_word_index": 324
+      },
+      {
+        "word_index": 326,
+        "fields": {
+          "atlas.virtual_cfg_block": 17,
+          "atlas.virtual_cfg_source": 198
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 327,
+        "fields": {
+          "atlas.virtual_cfg_block": 17,
+          "atlas.virtual_cfg_source": 198
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 328,
+        "fields": {
+          "atlas.virtual_cfg_block": 17,
+          "atlas.virtual_cfg_source": 198
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 329,
+        "fields": {
+          "atlas.virtual_cfg_block": 17,
+          "atlas.virtual_cfg_operation": 198,
+          "atlas.virtual_cfg_source": 198
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 330,
+        "fields": {
+          "atlas.virtual_cfg_block": 17,
+          "atlas.virtual_cfg_source": 199
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 331,
+        "fields": {
+          "atlas.virtual_cfg_block": 17,
+          "atlas.virtual_cfg_operation": 199,
+          "atlas.virtual_cfg_source": 199
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 332,
+        "fields": {
+          "atlas.virtual_cfg_block": 17
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 333,
+        "fields": {
+          "atlas.virtual_cfg_block": 17,
+          "atlas.virtual_cfg_operation": 200,
+          "atlas.virtual_cfg_source": 200
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 334,
+        "fields": {
+          "atlas.virtual_cfg_block": 17,
+          "atlas.virtual_cfg_operation": 201,
+          "atlas.virtual_cfg_source": 201
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 335,
+        "fields": {
+          "atlas.virtual_cfg_block": 17,
+          "atlas.virtual_cfg_operation": 202,
+          "atlas.virtual_cfg_source": 202
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 336,
+        "fields": {
+          "atlas.virtual_cfg_block": 17,
+          "atlas.virtual_cfg_source": 203
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 337,
+        "fields": {
+          "atlas.virtual_cfg_block": 17,
+          "atlas.virtual_cfg_operation": 203,
+          "atlas.virtual_cfg_source": 203
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 338,
+        "fields": {
+          "atlas.virtual_cfg_block": 17,
+          "atlas.virtual_cfg_operation": 204,
+          "atlas.virtual_cfg_source": 204
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 339,
+        "fields": {
+          "atlas.virtual_cfg_block": 17,
+          "atlas.virtual_cfg_operation": 205,
+          "atlas.virtual_cfg_source": 205
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 340,
+        "fields": {
+          "atlas.virtual_cfg_block": 17,
+          "atlas.virtual_cfg_operation": 206,
+          "atlas.virtual_cfg_source": 206
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 341,
+        "fields": {
+          "atlas.virtual_cfg_block": 17,
+          "atlas.virtual_cfg_operation": 207,
+          "atlas.virtual_cfg_source": 207
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 342,
+        "fields": {
+          "atlas.virtual_cfg_block": 17,
+          "atlas.virtual_cfg_operation": 208,
+          "atlas.virtual_cfg_source": 208
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 343,
+        "fields": {
+          "atlas.virtual_cfg_block": 17,
+          "atlas.virtual_cfg_operation": 209,
+          "atlas.virtual_cfg_source": 209
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 344,
+        "fields": {
+          "atlas.virtual_cfg_block": 17,
+          "atlas.virtual_cfg_operation": 210,
+          "atlas.virtual_cfg_source": 210
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 345,
+        "fields": {
+          "atlas.virtual_cfg_block": 17,
+          "atlas.virtual_cfg_operation": 211,
+          "atlas.virtual_cfg_source": 211
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 346,
+        "fields": {
+          "atlas.virtual_cfg_block": 17,
+          "atlas.virtual_cfg_operation": 213,
+          "atlas.virtual_cfg_source": 213
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 347,
+        "fields": {
+          "atlas.virtual_cfg_block": 17,
+          "atlas.virtual_cfg_edge": 22
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 348,
+        "fields": {
+          "atlas.virtual_cfg_block": 17,
+          "atlas.virtual_cfg_edge": 22
+        },
+        "control": {
+          "kind": "sequential"
+        }
+      },
+      {
+        "word_index": 349,
+        "fields": {
+          "atlas.virtual_cfg_block": 17,
+          "atlas.virtual_cfg_edge": 22
+        },
+        "control": {
+          "delay_slot_word_index": 350,
+          "kind": "jump_direct",
+          "target_word_index": 310
+        }
+      },
+      {
+        "word_index": 350,
+        "fields": {
+          "atlas.virtual_cfg_block": 17,
+          "atlas.virtual_cfg_edge": 22
+        },
+        "control": {
+          "kind": "sequential"
+        },
+        "delay_slot_for_word_index": 349
+      }
+    ]
+  }
+}

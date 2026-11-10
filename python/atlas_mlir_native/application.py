@@ -148,8 +148,8 @@ class AtlasApplicationAdapter:
         # Other kinds retain their complete original compilation path until
         # their own binding contract and byte-equality gates are available.
         return dict(alternative.metadata)["kind"] in {
-            "exact_float_device", "layout_device", "activation_quantize_device", "pointwise", "pointwise_math", "reduction",
-            "masked_softmax", "already_quantized"}
+            "exact_float_device", "layout_device", "pointwise", "pointwise_math", "reduction",
+            "masked_softmax", "already_quantized", "activation_quantize_device"}
 
     def materialize_region(self, snapshot, canonical, alternative, name, segments, target_source, limits):
         if not self.supports_region_materialization(canonical, alternative):

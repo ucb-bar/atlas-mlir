@@ -142,6 +142,14 @@ def prepare_precision_c_package(precision, compiled, name, *, target_source, run
     replayed = json.loads(_run([str(tools / "atlas-emit"), "--program-json", "-"], input_text=machine))
     if binary != b"".join(row["word_u32"].to_bytes(4, "little") for row in replayed["instructions"]):
         raise ValueError("pointwise encoded program differs from source lowering")
+    from .restoration_budget import instruction_bound
+    from .limits import functional_instruction_limit
+    from types import SimpleNamespace
+    saved_bound = json.loads((compiled / "pointwise-instruction-bound.json").read_text())
+    cap = functional_instruction_limit(SimpleNamespace(functional_instruction_limit=saved_bound["max_instructions"]))
+    bound = instruction_bound(virtual_program(plan, addresses, output, descriptor), machine, replayed, max_instructions=cap)
+    if not bound["admitted"] or saved_bound != bound:
+        raise ValueError("pointwise instruction bound differs or exceeds default")
     elements = [prod(node.type.shape) for node in request.nodes]
     source_dtype = source.nodes[-1].type.dtype
     encode = render_bf16_codes_c if source_dtype == "bf16" else render_f32_array_c
