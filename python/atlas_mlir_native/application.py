@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 from pathlib import Path
 
@@ -137,6 +138,119 @@ class AtlasApplicationAdapter:
 
     # Analysis parameters only; neither attribute is removed from compilation.
     region_loop_parameters = ("static_exp", "tag")
+    # Provider capability only. Both caller reuse options default to False.
+    supports_materialization_cache = True
+
+    @staticmethod
+    def supports_region_materialization(region, alternative):
+        # Other kinds retain their complete original compilation path until
+        # their own binding contract and byte-equality gates are available.
+        return dict(alternative.metadata)["kind"] in {
+            "exact_float_device", "layout_device", "activation_quantize_device", "pointwise", "pointwise_math", "reduction",
+            "masked_softmax", "already_quantized"}
+
+    def materialize_region(self, snapshot, canonical, alternative, name, segments, target_source, limits):
+        if not self.supports_region_materialization(canonical, alternative):
+            raise ValueError("Atlas region materialization kind is unsupported")
+        kind = dict(alternative.metadata)["kind"]
+        if kind in {"pointwise", "pointwise_math", "reduction", "masked_softmax", "already_quantized"}:
+            from .selection_materialization import SelectionCapture, supports_captured_tile
+
+            capture = SelectionCapture(snapshot)
+            self.compile_region(capture, canonical, alternative, name, segments, target_source, limits)
+            if kind == "already_quantized":
+                manifest = segments / name / "manifest.json"
+                if (not manifest.is_file()
+                        or json.loads(manifest.read_bytes()).get("schema") != "atlas.quantized_loop_compilation.v1"):
+                    return None
+            elif not supports_captured_tile(segments / name / "body", capture):
+                # A staged body has checked selections for its substages, not
+                # one complete tile proof. Preserve its normal original compile.
+                return None
+            return canonical, segments / name, capture
+        self.compile_region(snapshot, canonical, alternative, name, segments, target_source, limits)
+        return canonical, segments / name
+
+    def bind_materialization(self, materialized, region, alternative, name, segments, target_source):
+        from .application_materialization import bind_exact_float, bind_layout, bind_quantizer
+
+        if not self.supports_region_materialization(region, alternative):
+            raise ValueError("Atlas region materialization binding kind is unsupported")
+        kind = dict(alternative.metadata)["kind"]
+        canonical, compiled = materialized[:2]
+        if kind == "already_quantized":
+            from .selection_materialization import bind_counted
+
+            bind_counted(region, canonical, compiled, segments / name, materialized[2], target_source=target_source)
+        elif kind in {"pointwise", "pointwise_math", "reduction", "masked_softmax"}:
+            from .selection_materialization import bind_pointwise, bind_row_loop
+
+            def prepared(source):
+                if kind == "reduction":
+                    from .reduction import prepare_source
+                    return prepare_source(source, reduction_policy=self.reduction_policy).request
+                if kind == "masked_softmax":
+                    return lower_semantic_softmax(source, allow_masked=True, allow_guarded=False,
+                        score_domain=self.already_quantized_score_domain).request
+                from .pointwise import prepare_source
+                return prepare_source(source, allow_math=kind == "pointwise_math", bf16_policy=self.bf16_pointwise,
+                    exp_policy=self.source_exp_policy,
+                    rne_add_policy=self.qualified_rne_add if source.nodes[-1].op in {"f32_add", "bf16_add"} else None).request
+            if kind == "masked_softmax":
+                bind_row_loop(prepared(region), prepared(canonical), compiled, segments / name, materialized[2], target_source=target_source)
+            else:
+                bind_pointwise(prepared(region), prepared(canonical), compiled, segments / name,
+                               materialized[2], reduction=kind == "reduction")
+        else:
+            binder = {"exact_float_device": bind_exact_float, "layout_device": bind_layout,
+                      "activation_quantize_device": bind_quantizer}[kind]
+            binder(region, canonical, compiled, segments / name)
+        # The ordinary exporter checks complete original source correspondence,
+        # emitted machine/binary replay, bounds, ABI ports and C publication.
+        return self.export_region(region, alternative, name, segments, target_source)
+
+    def materialization_identity(self, region, alternative):
+        """Approve only provenance erasure; retain every provider policy choice.
+
+        Plan-local IDs and source node names do not affect pure tool behavior.
+        Original source identity and publication metadata are regenerated by
+        compile_region, export_region and the existing source replay checks.
+        """
+        from . import binding
+        from .application_materialization import provider_sources
+        from .binding import _native_pipeline
+
+        names = {node.id: f"node_{i}" for i, node in enumerate(region.nodes)}
+        choice = alternative.to_dict()
+        choice.pop("id")
+        choice.pop("nodes")
+        for side in ("inputs", "outputs"):
+            for port in choice[side]:
+                port["buffer"] = names.get(port["buffer"], port["buffer"])
+        for side in ("resident_inputs", "resident_outputs"):
+            choice[side] = [names.get(name, name) for name in choice[side]]
+        policy = {key: value for key, value in vars(self).items() if key != "original_source_sha256"}
+        tools = Path(os.environ.get("ATLAS_OOT_BIN_DIR", Path(__file__).resolve().parents[2] / "build/bin"))
+        tool_identities = {}
+        for tool in (tools / "atlas-opt", tools / "atlas-emit"):
+            if tool.is_file():
+                stat = tool.stat()
+                tool_identities[str(tool.resolve())] = binding._tool_digest(
+                    str(tool.resolve()), stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
+        return {
+            "target_choice": choice,
+            "source_identity_policy": "provenance",
+            "compilation_identity": {
+                "schema": "atlas.region_tool_partition.v1",
+                "policy": policy,
+                "application_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+                "binding_sha256": hashlib.sha256(Path(binding.__file__).read_bytes()).hexdigest(),
+                "materialization_sources": provider_sources(),
+                "tools": tool_identities,
+                "pipeline": _native_pipeline(),
+                "capture_postspill": os.environ.get("ATLAS_CAPTURE_POSTSPILL") == "1",
+            },
+        }
 
     @staticmethod
     def application_binding(name, regions, interface):
