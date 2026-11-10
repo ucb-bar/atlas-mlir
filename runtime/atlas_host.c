@@ -1,6 +1,7 @@
 #include "atlas_host.h"
 
 #include <limits.h>
+#include <string.h>
 
 enum { ATLAS_HALTED = 1, ATLAS_HALT_REASON_SHIFT = 1, ATLAS_ECALL = 2 };
 
@@ -24,6 +25,26 @@ void atlas_host_direct_write32(void *context, uintptr_t address, uint32_t word) 
   (void)context;
   *(volatile uint32_t *)address = word;
   atlas_host_fence();
+}
+
+int atlas_host_direct_memory_write(void *context, uintptr_t address,
+                                   const uint8_t *source, size_t bytes) {
+  (void)context;
+  if (bytes && (!address || !source || bytes > UINTPTR_MAX - address)) return -1;
+  atlas_host_fence();
+  if (bytes) memcpy((void *)address, source, bytes);
+  atlas_host_fence();
+  return 0;
+}
+
+int atlas_host_direct_memory_read(void *context, uintptr_t address,
+                                  uint8_t *destination, size_t bytes) {
+  (void)context;
+  if (bytes && (!address || !destination || bytes > UINTPTR_MAX - address)) return -1;
+  atlas_host_fence();
+  if (bytes) memcpy(destination, (const void *)address, bytes);
+  atlas_host_fence();
+  return 0;
 }
 
 atlas_host_result atlas_host_init(atlas_host *host, atlas_host_map map, atlas_host_mmio mmio,

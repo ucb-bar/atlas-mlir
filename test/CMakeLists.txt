@@ -122,3 +122,8 @@ foreach(suite buffer-contract cfg-contract dma-allocation dma-helper mxu-allocat
     pack-loop source-memory-contract tile-contract timing-provider)
   add_test(NAME atlas-${suite} COMMAND atlas-verification-test ${suite})
 endforeach()
+
+add_executable(atlas-direct-memory-test direct-memory-test.c)
+target_link_libraries(atlas-direct-memory-test PRIVATE atlas-host)
+set_target_properties(atlas-direct-memory-test PROPERTIES C_STANDARD 11)
+add_test(NAME atlas-direct-memory COMMAND atlas-direct-memory-test)

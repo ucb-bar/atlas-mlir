@@ -143,6 +143,11 @@ atlas_host_result atlas_host_wait(atlas_host *host, size_t max_polls);
 uint32_t atlas_host_direct_read32(void *context, uintptr_t address);
 void atlas_host_direct_write32(void *context, uintptr_t address, uint32_t word);
 
+/* Coherent directly mapped DRAM only. Noncoherent platforms supply callbacks
+ * with their own cache maintenance. Source and destination must not overlap. */
+int atlas_host_direct_memory_write(void *, uintptr_t, const uint8_t *, size_t);
+int atlas_host_direct_memory_read(void *, uintptr_t, uint8_t *, size_t);
+
 #ifdef __cplusplus
 }
 #endif
