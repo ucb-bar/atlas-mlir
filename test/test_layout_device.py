@@ -12,6 +12,7 @@ import unittest
 
 from atlas_mlir_native.binding import DRAM_BASE, TARGET_IDENTITY, _run
 from atlas_mlir_native.layout_device import compile_source, prepare_c_package, prepare_source, virtual_program
+from merlin.semantic_compiler.target_binding import NativeCompilationError
 from merlin.semantic_compiler.model import ConstantBinding, IndexMap, KernelRequest, SemanticNode, TensorType, pointwise_identity_maps
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -93,6 +94,18 @@ class LayoutDeviceRecognitionTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 prepare_source(region)
 
+    def test_relocated_window_rejects_invalid_bases(self):
+        source = cases()["dense_dma"]
+        for base in (True, -32, 1, 0x100000000, 0xffffffe0, 0x40000, 0x07ffffe0, 0x08010000, 0x0800ffe0):
+            with self.subTest(base=base), self.assertRaises(ValueError):
+                prepare_source(source, io_memory_base=base)
+
+    def test_zero_byte_layout_refused_without_tools(self):
+        for shapes in (((0,),), ((1,),)):
+            with self.assertRaisesRegex(ValueError, "positive static dimensions"):
+                source = request(shapes=shapes, shape=(0,))
+                prepare_source(source, io_memory_base=0x08000000)
+
     def test_large_ragged_transpose_rejects_default_budget(self):
         source = request("transpose", ((513, 64),), (64, 513), dtype="i8", mapping=IndexMap(2, ((0, 1), (1, 0)), (0, 0)))
         with self.assertRaisesRegex(ValueError, "default proof work budget"):
@@ -134,6 +147,23 @@ class LayoutDeviceCompilationTest(unittest.TestCase):
                     (compiled / "manifest.json").write_text(json.dumps(manifest))
                     with self.assertRaisesRegex(ValueError, "source or execution plan"):
                         prepare_c_package(source, compiled, "layout_" + label, target_source=ROOT)
+
+    def test_scratchpad_compile_and_memory_holes(self):
+        source = cases()["dense_dma"]
+        with tempfile.TemporaryDirectory(prefix="atlas-layout-base-") as directory:
+            compiled = Path(directory) / "compiled"
+            compile_source(None, source, target_source=ROOT, destination=compiled,
+                           limits=None, io_memory_base=0x0800e800)
+            record, _ = prepare_c_package(source, compiled, "relocated", target_source=ROOT,
+                                           io_memory_base=0x0800e800)
+            self.assertEqual(record["layout_device_plan"]["input_addresses"], [0x0800e800])
+            with self.assertRaises(ValueError):
+                prepare_c_package(source, compiled, "relocated", target_source=ROOT)
+            for base in (0x40000, 0x07ffffe0, 0x08010000, 0x0800ffe0):
+                with self.subTest(base=base), self.assertRaises(ValueError):
+                    compile_source(None, source, target_source=ROOT,
+                                   destination=Path(directory) / str(base), limits=None,
+                                   io_memory_base=base)
 
     def test_malformed_scalar_slot_accesses_reject_before_lowering(self):
         virtual = virtual_program(prepare_source(cases()["reverse_bytes"]))

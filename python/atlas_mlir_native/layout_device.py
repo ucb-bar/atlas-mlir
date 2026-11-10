@@ -39,6 +39,7 @@ class LayoutPlan:
     output: object
     width: int
     segments: tuple
+    io_memory_base: int = DRAM_BASE
 
     @property
     def input_bytes(self):
@@ -47,7 +48,7 @@ class LayoutPlan:
     @property
     def input_addresses(self):
         sizes = self.input_bytes
-        return tuple(DRAM_BASE + sum(_aligned(n) for n in sizes[:i]) for i in range(len(sizes)))
+        return tuple(self.io_memory_base + sum(_aligned(n) for n in sizes[:i]) for i in range(len(sizes)))
 
     @property
     def output_bytes(self):
@@ -55,7 +56,7 @@ class LayoutPlan:
 
     @property
     def output_address(self):
-        return DRAM_BASE + sum(_aligned(n) for n in self.input_bytes)
+        return self.io_memory_base + sum(_aligned(n) for n in self.input_bytes)
 
     @property
     def physical_bytes(self):
@@ -63,7 +64,7 @@ class LayoutPlan:
 
     @property
     def workspace_bytes(self):
-        return self.output_address - DRAM_BASE + self.physical_bytes
+        return self.output_address - self.io_memory_base + self.physical_bytes
 
     def record(self):
         return dict(schema="atlas.layout_device.v1", source_request_digest=self.source.digest(),
@@ -107,7 +108,11 @@ def _segment(index, shape, source_strides, output_strides, source_offset, output
                 source_row_bytes=0, output_row_bytes=0)
 
 
-def prepare_source(source):
+def prepare_source(source, *, io_memory_base=DRAM_BASE):
+    """Plan byte transport in an explicitly selected device I/O window."""
+    if (type(io_memory_base) is not int or io_memory_base < 0 or io_memory_base % 32
+            or io_memory_base + dram_slots() * TILE_BYTES > 1 << 32):
+        raise ValueError("device I/O window must be 32-byte aligned within the 32-bit buffer ABI")
     if (source.target_identity != TARGET_IDENTITY or source.lowering_policy != "diagnostic"
             or source.physical_extents or source.boundary_layouts or source.output_layouts
             or source.output_storages != ("external",)):
@@ -186,9 +191,13 @@ def prepare_source(source):
             raise ValueError("ragged segmented scalar scatter is outside selected layout contract")
         if prod(segments[0]["counts"]) > 16384:
             raise ValueError("ragged scalar layout exceeds default proof work budget; aligned DMA/XLU needed")
-    plan = LayoutPlan(source, operands, output, width, tuple(segments))
-    if plan.workspace_bytes > dram_slots() * TILE_BYTES or DRAM_BASE + plan.workspace_bytes > 1 << 32:
+    plan = LayoutPlan(source, operands, output, width, tuple(segments), io_memory_base)
+    if plan.workspace_bytes > dram_slots() * TILE_BYTES or plan.io_memory_base + plan.workspace_bytes > 1 << 32:
         raise ValueError("device layout buffers exceed selected I/O window")
+    if not (plan.io_memory_base >= 0x80000000 or
+            0x08000000 <= plan.io_memory_base and
+            plan.io_memory_base + plan.workspace_bytes <= 0x08010000):
+        raise ValueError("device layout buffers leave selected DMA memory windows")
     return plan
 
 
@@ -203,7 +212,7 @@ def virtual_program(plan, *, size_limit=None):
     state, tile, spill = "!atlas.virtual_state", "!atlas.virtual_fp8", "!atlas.virtual_spill"
     signed = lambda n: n if n < 2**31 else n - 2**32
     budget = f"atlas.program_size_limit_bytes = {size_limit} : i64, " if size_limit is not None else ""
-    lines = ["module {", f" func.func @layout() -> {state} attributes {{{budget}atlas.input_dram_base = {DRAM_BASE} : i64, atlas.output_dram_base = {plan.output_address} : i64, atlas.output_dram_bytes = {plan.physical_bytes} : i64}} {{",
+    lines = ["module {", f" func.func @layout() -> {state} attributes {{{budget}atlas.input_dram_base = {plan.io_memory_base} : i64, atlas.output_dram_base = {plan.output_address} : i64, atlas.output_dram_bytes = {plan.physical_bytes} : i64}} {{",
              f'  %s0 = "atlas.virtual_start"() : () -> {state}']
     current = "%s0"
     serial = 0
@@ -402,11 +411,13 @@ def virtual_program(plan, *, size_limit=None):
     lines.extend((f"  return {current} : {state}", " }", "}", ""))
     return "\n".join(lines)
 
-def compile_source(snapshot, source, *, target_source, destination, limits):
-    plan = prepare_source(source)
+def compile_source(snapshot, source, *, target_source, destination, limits, io_memory_base=DRAM_BASE):
+    plan = prepare_source(source, io_memory_base=io_memory_base)
     from . import layout_prefix_application
     schedule = layout_prefix_application.prepare_plan(plan)
     if schedule is not None:
+        if io_memory_base != DRAM_BASE:
+            raise ValueError("custom I/O base is unsupported for layout prefix schedules")
         return layout_prefix_application.compile_source(snapshot, source, schedule,
             target_source=target_source, destination=destination, limits=limits)
     from merlin.semantic_compiler.codegen import current_codegen_options
@@ -450,12 +461,14 @@ def compile_source(snapshot, source, *, target_source, destination, limits):
     return manifest
 
 
-def prepare_c_package(source, compiled, name, *, target_source, runtime_linkage="separate"):
+def prepare_c_package(source, compiled, name, *, target_source, runtime_linkage="separate", io_memory_base=DRAM_BASE):
     from merlin.compile.c_sources import c_source_pair
     from .c_runtime import program_array, runtime_headers, runtime_members
-    plan = prepare_source(source)
+    plan = prepare_source(source, io_memory_base=io_memory_base)
     compiled, target_source = Path(compiled), Path(target_source)
     if (compiled / "layout-prefix-manifest.json").exists():
+        if io_memory_base != DRAM_BASE:
+            raise ValueError("custom I/O base is unsupported for layout prefix schedules")
         from .layout_prefix_application import prepare_c_package as prepare_prefix
         return prepare_prefix(source, compiled, name, target_source=target_source, runtime_linkage=runtime_linkage)
     manifest = json.loads((compiled / "manifest.json").read_text())
