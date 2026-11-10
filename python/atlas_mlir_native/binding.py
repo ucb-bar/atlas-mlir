@@ -944,6 +944,14 @@ def _sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+from functools import lru_cache
+
+
+@lru_cache(maxsize=32)
+def _tool_digest(path, device, inode, size, modified, changed):
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
 def _run(command: list[str], *, input_text: str, diagnostics: list[str] | None = None) -> str:
     from merlin.semantic_compiler.codegen import current_codegen_options
 
@@ -955,17 +963,38 @@ def _run(command: list[str], *, input_text: str, diagnostics: list[str] | None =
             else arg
             for arg in command
         ]
-    try:
-        result = subprocess.run(command, input=input_text, text=True, capture_output=True, timeout=30, check=False)
-    except subprocess.TimeoutExpired as exc:
-        raise NativeCompilationError("search_timeout", f"Atlas tool timed out: {exc}") from exc
-    except OSError as exc:
-        raise NativeCompilationError("tool_unavailable", f"Atlas tool failed: {exc}") from exc
+    def invoke():
+        try:
+            result = subprocess.run(command, input=input_text, text=True, capture_output=True, timeout=30, check=False)
+        except subprocess.TimeoutExpired as exc:
+            raise NativeCompilationError("search_timeout", f"Atlas tool timed out: {exc}") from exc
+        except OSError as exc:
+            raise NativeCompilationError("tool_unavailable", f"Atlas tool failed: {exc}") from exc
+        if result.returncode:
+            if diagnostics is not None:
+                diagnostics.append(result.stderr)
+            raise NativeCompilationError("compile_error", f"Atlas tool rejected selected program: {result.stderr.strip()}")
+        return json.dumps([result.stdout, result.stderr]).encode()
+
+    # Cache only pure stdin/stdout tools. Original request publications and
+    # their complete source replay are regenerated on every region invocation.
+    from merlin.semantic_compiler.materialization import cached_tool_output
+    tool = Path(command[0])
+    pure = tool.name in {"atlas-opt", "atlas-emit"} and command[-1:] == ["-"] and not any(
+        arg == "-o" or arg.startswith(("-o=", "--output")) for arg in command[1:])
+    if pure and tool.is_file():
+        stat = tool.stat()
+        identity = dict(command=command, executable_sha256=_tool_digest(
+            str(tool.resolve()), stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns),
+            timeout_seconds=30)
+        payload = cached_tool_output(namespace="atlas.pure_tool.v1", input_bytes=input_text.encode(),
+                                     compilation_identity=identity, invoke=invoke)
+    else:
+        payload = invoke()
+    stdout, stderr = json.loads(payload)
     if diagnostics is not None:
-        diagnostics.append(result.stderr)
-    if result.returncode:
-        raise NativeCompilationError("compile_error", f"Atlas tool rejected selected program: {result.stderr.strip()}")
-    return result.stdout
+        diagnostics.append(stderr)
+    return stdout
 
 
 def _virtual_from_selected(graph, order: tuple[int, ...], names: list[str | None],

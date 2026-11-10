@@ -135,6 +135,9 @@ class AtlasApplicationAdapter:
     no implicit host arithmetic fallback or model-name/shape-list selection.
     """
 
+    # Analysis parameters only; neither attribute is removed from compilation.
+    region_loop_parameters = ("static_exp", "tag")
+
     @staticmethod
     def application_binding(name, regions, interface):
         if regions and all(row["placement"] == "host" for row in regions):
