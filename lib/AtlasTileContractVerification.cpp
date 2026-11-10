@@ -3,6 +3,7 @@
 #include "Atlas/AtlasAddressAnalysis.h"
 #include "Atlas/AtlasContractAttr.h"
 #include "Atlas/AtlasDMAContractVerification.h"
+#include "Atlas/AtlasBoundaryABI.h"
 #include "Atlas/AtlasGeneratedArtifact.h"
 #include "Atlas/AtlasOps.h"
 #include "Atlas/AtlasSpilling.h"
@@ -279,17 +280,22 @@ FailureOr<ArrayAttr> mlir::atlas::buildAtlasTileContract(
     auto record = cast<DictionaryAttr>(attr);
     dmaRecords[uint32_t(record.getAs<IntegerAttr>("id").getInt())] = record;
   }
-  auto sourceBase = [&](StringRef name) -> std::optional<uint64_t> {
+  auto boundary = AtlasBoundaryABI::read(function);
+  if (failed(boundary))
+    return failure();
+  auto sourceBase = [&](StringRef name, uint64_t bytes) -> std::optional<uint64_t> {
     auto attr = function->getAttrOfType<IntegerAttr>(name);
     if (!attr || attr.getValue().isNegative() || attr.getValue().getActiveBits() > 32)
       return std::nullopt;
     uint64_t value = attr.getValue().getZExtValue();
-    if (value < 0x80000000u || value % 32)
+    if (!atlasDMAMemorySpan(value, bytes) || value % 32)
       return std::nullopt;
     return value;
   };
-  auto inputBase = sourceBase("atlas.input_dram_base");
-  auto outputBase = sourceBase("atlas.output_dram_base");
+  auto inputBase = sourceBase("atlas.input_dram_base",
+                              boundary->inputSlots ? boundary->inputEnd() - boundary->inputBase : 1);
+  auto outputBase = sourceBase("atlas.output_dram_base",
+                               boundary->outputEnd() - boundary->outputBase);
   if (!inputBase || !outputBase)
     return function.emitOpError("tile contract requires aligned 32-bit boundary DRAM bases");
   SmallVector<Record> records;
@@ -314,7 +320,7 @@ FailureOr<ArrayAttr> mlir::atlas::buildAtlasTileContract(
   if (scalarArgumentRegs.size() != function.getNumArguments())
     return function.emitOpError("tile contract requires one scalar register claim per entry argument");
   if (function.getNumArguments()) {
-    auto controlBase = sourceBase("atlas.control_dram_base");
+    auto controlBase = sourceBase("atlas.control_dram_base", kAtlasRegisterBytes);
     if (!controlBase || function.getNumArguments() > 256)
       return function.emitOpError("tile contract requires an aligned bounded scalar mailbox");
     auto launch = add("dma_load", -1, uint64_t(fixed.mailboxWord) * 4,

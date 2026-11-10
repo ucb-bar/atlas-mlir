@@ -233,11 +233,13 @@ static LogicalResult verifyVirtualDMATransfer(Operation *op, Value dramByte,
   if (!*size || *size > tileBytes || *size % 32)
     return op->emitOpError("byte length must be a positive 32-byte multiple no larger than tile size ")
            << tileBytes;
-  if (address->first < 0x80000000u || address->first % 32 || address->last % 32)
+  if (!atlasDMAMemorySpan(address->first, 1) || address->first % 32 || address->last % 32)
     return op->emitOpError(
         "DRAM address must be a 32-byte-aligned selected-memory address");
   if (static_cast<uint64_t>(address->last) + *size > (1ULL << 32))
     return op->emitOpError("DRAM transfer span exceeds the 32-bit address space");
+  if (!atlasDMAMemorySpan(address->first, uint64_t(address->last) - address->first + *size))
+    return op->emitOpError("DRAM transfer span leaves selected memory");
   return success();
 }
 

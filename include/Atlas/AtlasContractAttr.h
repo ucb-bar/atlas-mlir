@@ -2,6 +2,7 @@
 #define ATLAS_CONTRACT_ATTR_H
 
 #include "Atlas/AtlasTiming.h"
+#include "Atlas/AtlasTarget.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinAttributes.h"
@@ -69,7 +70,7 @@ inline LogicalResult checkCaptured(Operation *op, StringRef prefix, StringRef fi
 // 32-byte beats. Full FP8/BF16 tiles are 1/2 KiB in selected VMEM.
 inline bool validDMATileGeometry(uint64_t vmemByte, uint64_t dramByte, uint64_t bytes) {
   return bytes > 0 && bytes <= kAtlasBF16TileBytes && bytes % 32 == 0 && vmemByte % kAtlasRegisterBytes == 0 &&
-         vmemByte + bytes <= kAtlasVmemBytes && dramByte >= 0x80000000u &&
+         vmemByte + bytes <= kAtlasVmemBytes && atlasDMAMemorySpan(dramByte, bytes) &&
          dramByte % 32 == 0 && dramByte + bytes <= (uint64_t(1) << 32);
 }
 

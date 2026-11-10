@@ -119,6 +119,16 @@ void testSourceContract(MLIRContext &context, bool multipleBlocks) {
     invalid.outputWindowWords = words;
     fails("output index requires a nonempty sufficient VMEM window", registers, transfers, invalid, scalarRegs);
   }
+  for (StringRef name : {"atlas.input_dram_base", "atlas.output_dram_base",
+                         "atlas.control_dram_base"}) {
+    auto original = function->getAttr(name);
+    for (uint64_t address : {0x40000ULL, 0x07ffffe0ULL, 0x0800ffe0ULL}) {
+      function->setAttr(name, IntegerAttr::get(IntegerType::get(&context, 64), address));
+      fails("boundary and mailbox full spans must stay in selected memory",
+            registers, transfers, fixed, scalarRegs);
+    }
+    function->setAttr(name, original);
+  }
   auto foreign = parseSourceString<ModuleOp>(source, &context);
   Value foreignTensor;
   firstFunction(*foreign).walk([&](VirtualInputFP8Op op) { foreignTensor = op.getValue(); });

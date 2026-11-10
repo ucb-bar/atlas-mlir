@@ -1,5 +1,6 @@
 #include "Atlas/AtlasBoundaryABI.h"
 #include "Atlas/AtlasOps.h"
+#include "Atlas/AtlasTarget.h"
 #include <algorithm>
 
 using namespace mlir;
@@ -34,7 +35,7 @@ FailureOr<AtlasBoundaryABI> AtlasBoundaryABI::read(func::FuncOp function,
   int64_t in = input.getValue().getSExtValue();
   int64_t out = output.getValue().getSExtValue();
   auto aligned32 = [](int64_t base) {
-    return base >= 0x80000000LL && base < (1LL << 32) &&
+    return base >= 0 && atlasDMAMemorySpan(uint64_t(base), 1) &&
            base % 32 == 0;
   };
   if (!aligned32(in) || !aligned32(out))
@@ -63,7 +64,9 @@ FailureOr<AtlasBoundaryABI> AtlasBoundaryABI::read(func::FuncOp function,
 
 LogicalResult AtlasBoundaryABI::verifySpans(func::FuncOp function,
                                             bool diagnose) const {
-  if (inputEnd() <= (1ULL << 32) && outputEnd() <= (1ULL << 32) &&
+  if ((!inputSlots || atlasDMAMemorySpan(inputBase, inputEnd() - inputBase)) &&
+      atlasDMAMemorySpan(outputBase, outputEnd() - outputBase) &&
+      inputEnd() <= (1ULL << 32) && outputEnd() <= (1ULL << 32) &&
       (inputBase >= outputEnd() || outputBase >= inputEnd()))
     return success();
   if (diagnose)

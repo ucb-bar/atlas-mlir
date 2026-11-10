@@ -427,7 +427,7 @@ private:
         return function.emitOpError(
             "scalar arguments require atlas.control_dram_base mailbox binding");
       int64_t address = control.getValue().getSExtValue();
-      if (address < 0x80000000LL ||
+      if (!atlasDMAMemorySpan(uint64_t(address), kAtlasRegisterBytes) ||
           address > std::numeric_limits<uint32_t>::max() ||
           address % kAtlasRegisterBytes)
         return function.emitOpError(

@@ -327,7 +327,7 @@ bool argumentMailbox(const AtlasVerificationContext &ctx, DMAOp dma) {
   auto control = ctx.module->getAttrOfType<IntegerAttr>("atlas.control_dram_base");
   auto records = ctx.module->getAttrOfType<ArrayAttr>(kAtlasTileContract);
   if (!control || !control.getType().isSignlessInteger(64) ||
-      control.getInt() < 0x80000000LL || control.getInt() % 32 ||
+      !atlasDMAMemorySpan(uint64_t(control.getInt()), kAtlasRegisterBytes) || control.getInt() % 32 ||
       uint64_t(control.getInt()) + kAtlasRegisterBytes > (1ULL << 32) ||
       !records || records.empty() || !ctx.stream)
     return false;
@@ -539,7 +539,7 @@ LogicalResult mlir::atlas::verifyAtlasBoundedDMAAddresses(const AtlasVerificatio
     auto bytes = output ? output.getAs<IntegerAttr>("bytes") : IntegerAttr{};
     if (!output || output.size() != 2 || !base || !bytes ||
         !base.getType().isSignlessInteger(64) || !bytes.getType().isSignlessInteger(64) ||
-        base.getInt() < 0x80000000LL || base.getInt() > UINT32_MAX || bytes.getInt() <= 0 ||
+        !atlasDMAMemorySpan(uint64_t(base.getInt()), uint64_t(bytes.getInt())) || base.getInt() > UINT32_MAX || bytes.getInt() <= 0 ||
         base.getInt() % 32 || bytes.getInt() % 32 ||
         uint64_t(base.getInt())+uint64_t(bytes.getInt()) > (1ULL << 32) ||
         module->getAttr("atlas.output_dram_base") != base ||

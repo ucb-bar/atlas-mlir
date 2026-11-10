@@ -1,6 +1,7 @@
 #include "Atlas/AtlasProofWork.h"
 #include "Atlas/AtlasAddressAnalysis.h"
 #include "Atlas/AtlasOps.h"
+#include "Atlas/AtlasTarget.h"
 #include "Atlas/AtlasSpilling.h"
 #include "Atlas/AtlasVirtualVerification.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
@@ -257,7 +258,7 @@ LogicalResult mlir::atlas::verifyAtlasOutputBuffer(Operation *operation) {
   auto valid = [](IntegerAttr value) {
     return value && value.getType().isSignlessInteger(64) && value.getInt() > 0;
   };
-  if (!valid(size) || !valid(base) || base.getInt() < 0x80000000LL ||
+  if (!valid(size) || !valid(base) || !atlasDMAMemorySpan(uint64_t(base.getInt()), uint64_t(size.getInt())) ||
       base.getInt() > UINT32_MAX || base.getInt() % 32 || size.getInt() % 32 ||
       uint64_t(base.getInt()) + uint64_t(size.getInt()) > (1ULL << 32))
     return function.emitOpError("explicit output buffer requires aligned i64 base/bytes within selected DRAM");

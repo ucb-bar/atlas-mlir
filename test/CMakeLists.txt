@@ -127,3 +127,7 @@ add_executable(atlas-direct-memory-test direct-memory-test.c)
 target_link_libraries(atlas-direct-memory-test PRIVATE atlas-host)
 set_target_properties(atlas-direct-memory-test PROPERTIES C_STANDARD 11)
 add_test(NAME atlas-direct-memory COMMAND atlas-direct-memory-test)
+
+add_executable(atlas-dma-memory-span-test dma-memory-span-test.cpp)
+target_include_directories(atlas-dma-memory-span-test PRIVATE ${PROJECT_SOURCE_DIR}/include)
+add_test(NAME atlas-dma-memory-span COMMAND atlas-dma-memory-span-test)

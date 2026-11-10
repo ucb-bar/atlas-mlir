@@ -1,11 +1,23 @@
 #ifndef ATLAS_TARGET_H
 #define ATLAS_TARGET_H
 
+#include <cstdint>
+
 namespace mlir::atlas {
 
 // Facts of the selected Atlas RTL that more than one pass or checker relies
 // on. Where a pass places things (which registers, windows or slots) is its
 // own policy and stays with it.
+
+// Selected EE290 system-memory windows reachable by the Atlas SBUS master.
+// Keep MMIO holes excluded and require a nonempty transfer in one window.
+// An absent boundary input is handled by the ABI, not a zero-byte DMA span.
+inline bool atlasDMAMemorySpan(uint64_t address, uint64_t bytes) {
+  constexpr uint64_t limit = uint64_t(1) << 32;
+  if (!bytes || address >= limit || bytes > limit - address) return false;
+  return address >= 0x80000000ULL ||
+         (address >= 0x08000000ULL && address + bytes <= 0x08010000ULL);
+}
 
 // VMEM (ScalarCore.scala AtlasMemMap). DMA addresses it in 4-byte words.
 constexpr int kAtlasVmemBytes = 1536 * 1024;
