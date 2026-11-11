@@ -90,7 +90,7 @@ Use these compatible baselines:
 
 | Component | Revision |
 | --- | --- |
-| Merlin before the local changes | `04ed0ae2533f484c2bcca8ecb50e8d5746012099` |
+| Merlin before the local changes | `d56133b168bbee3d73cb8b4304d3622d4191fc6a` |
 | Atlas MLIR before the local changes | `c9f50c3310a68d9eb8fa318e68492896a5a45737` |
 | `npu_model` for execution | `47b8599d8ffbe5ddd96059ffe2b5be2427a410f5` |
 | RTL identity selected by Atlas MLIR | `0079c0541111197741a231c002e3843fa6f545b2` |
@@ -105,7 +105,7 @@ From this Atlas worktree, using the Merlin environment (tested with xDSL 0.73.0)
 ```sh
 export MERLIN_ROOT=/home/jeremy/Projects/merlin-atlas-target
 export MERLIN_PYTHON=/home/jeremy/Projects/merlin/.venv/bin/python
-export ATLAS_BIN=/home/jeremy/Projects/atlas-mlir/build/bin
+export ATLAS_BIN="$PWD/out/build/atlas-ready/compiler/bin"
 export MODEL_ROOT=/home/jeremy/Projects/npu-model-atlas-target
 export MODEL_PYTHON=/home/jeremy/Projects/npu_model/.venv/bin/python
 export PYTHONPATH="$MERLIN_ROOT/src:$PWD/python:$PWD"
@@ -145,11 +145,41 @@ reference in both modes. The driver also tests direct Atlas matmul→ReLU and
 matmul→ReLU→PACK→matmul with an observable intermediate output. These reference
 chains establish the baseline; they do not yet implement shared floating fusion.
 
-This is an initial integration checkpoint, not a generated backend or a repair
-of the older native binding. Merlin's new timing/overlap checker is not yet
-connected to Atlas physical timing effects. Shared floating sequence fusion,
-tails, final target qualification and a reviewed shared-SDK release remain.
-FP4/FP6 codec work in Merlin does not grant those formats to Atlas hardware.
+The main-based shared graph path now also lowers standalone BF16 ReLU,
+matmul→ReLU and matmul→ReLU→PACK→matmul, preserving intermediate outputs.
+`tools/check_shared_graph.py` exercises these at 32×32 and 64×64 in both modes.
+Its PACK witnesses establish the declared seven-code intermediate domain;
+arbitrary BF16 truncation remains unqualified. The graph adapter retains all
+source domain premises in its manifest. Add/subtract/multiply source recognition
+exists in Merlin, but this initial Atlas graph adapter does not lower those forms.
+
+Rebuild this branch's tools before using either driver: `atlas-emit` now exports
+`--issue-timing-json`. Every shared compilation binds its actual machine words to
+Merlin `schedule.time_annotation` / `schedule.overlap` decisions and checks the
+existing timing provider's pair issue distances. The OOT verifier still checks
+physical reservations, DMA completion and control flow. No second latency model
+is introduced; block-relative fixed-latency annotations are not end-to-end cycles.
+
+```sh
+"$MERLIN_PYTHON" tools/check_shared_graph.py \
+  --output-dir out/build/shared-graph-preflight \
+  --atlas-bin-dir "$ATLAS_BIN" --model-root "$MODEL_ROOT" \
+  --model-python "$MODEL_PYTHON"
+```
+
+The 32×32 two-layer chain uses 111 words / 6,792 cycles in source order and
+120 words / 5,090 cycles optimized. The 64×64 chain uses 456 / 27,131 and
+491 / 20,186 respectively. Both retain hidden and final outputs. These are model
+measurements of the shared diagnostic adapter with existing Atlas physical
+lowering, not generated-backend performance. The direct 32×32 Atlas comparator
+matches those counts.
+
+The companion Merlin `examples/atlas/shared-passes.md` documents a standalone
+40-member compiler library, the reproducible preflight and existing generation
+admission gates. It runs without capture, reference compiler or grader imports.
+Tails, arbitrary graph-domain qualification, reductions and final RTL qualification
+remain outside the initial scope. FP4/FP6 grouped storage and scalar codecs in
+Merlin do not grant those formats to Atlas hardware. No generation loop is run.
 
 ## Read next
 

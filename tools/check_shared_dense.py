@@ -55,8 +55,8 @@ def witness(m, k, n, kind, phase):
         # units of 2^-18. Round to eight significant bits after each FMA.
         # This never calls the compiler's or model's numerical helpers.
         legal = (0, *range(8, 127), *range(136, 255))
-        lhs = bytes(legal[(i*19+r*13) % len(legal)] for i in range(m) for r in range(k))
-        rhs = bytes(legal[(j*23+r*17+7) % len(legal)] for j in range(n) for r in range(k))
+        lhs = bytes(legal[(i*19+r*13+phase) % len(legal)] for i in range(m) for r in range(k))
+        rhs = bytes(legal[(j*23+r*17+7+phase*3) % len(legal)] for j in range(n) for r in range(k))
         def units(code):
             return 0 if code == 0 else (-1 if code & 128 else 1) * ((8+(code & 7)) << (((code >> 3) & 15)-1))
         expected = []
@@ -112,12 +112,18 @@ def run_case(root, directory, selected, *, shape, kind, phase, model_python, mod
         offsets = [(((5*c+3) % 32)//16)*1024+r*32+(((5*c+3) % 32) % 16)*2
                    for half in range(2) for r in range(32) for c in range(half*16, half*16+16)]
         tiles.append(b"".join(h[offset:offset+2] for offset in offsets))
+    return execute_bytes(root, directory, f"{kind}-{phase}", inputs, tiles,
+                         model_python=model_python, model_root=model_root)
+
+
+def execute_bytes(root, directory, name, inputs, tiles, *, model_python, model_root):
+    """Run test-only runtime bytes after compilation; compare exact outputs and guards."""
     outputs = [(OUTPUT_BASE-INPUT_BASE+i*2048, data) for i, data in enumerate(tiles)]
-    guards = [(offset+1024, b"G"*1024) for offset, _ in inputs]
+    guards = [(offset+len(data), b"G"*(2048-len(data))) for offset, data in inputs if len(data) < 2048]
     guards += [(OUTPUT_BASE-INPUT_BASE-64, b"L"*64), (OUTPUT_BASE-INPUT_BASE+len(tiles)*2048, b"R"*64)]
     initial = [*inputs, *guards, *((offset, b"?"*len(data)) for offset, data in outputs)]
     encode = lambda rows: [(offset, data.hex()) for offset, data in rows]
-    case = directory / f"{kind}-{phase}.json"
+    case = directory / f"{name}.json"
     case.write_text(json.dumps(dict(dram_base=INPUT_BASE, initial=encode(initial), expected=encode(outputs),
                                     preserved=encode([*inputs, *guards]))) + "\n")
     env = {**os.environ, "PYTHONPATH": os.pathsep.join((str(model_root), str(root)))}

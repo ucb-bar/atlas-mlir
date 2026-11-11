@@ -15,19 +15,76 @@
 using namespace mlir;
 using namespace mlir::atlas;
 
+// Export the existing provider's pair rules, not a second timing model. This is
+// block-relative fixed-latency evidence; DMA, reservations and CFG remain checked
+// by verifyAtlasTimedStream and are deliberately not represented as fixed ages.
+static LogicalResult emitIssueTiming(ModuleOp module,
+                                     llvm::ArrayRef<uint32_t> words) {
+  auto stream = readAtlasStream(module, AtlasStreamReadMode::Verification);
+  auto provider = selectAtlasTimingProvider(module);
+  if (failed(stream) || failed(provider) ||
+      failed(verifyAtlasTimedStream(*stream, *provider)))
+    return failure();
+  llvm::json::Array blocks;
+  for (size_t b = 0; b < stream->starts.size(); ++b) {
+    timing::RegValues regs = stream->entry[b];
+    std::vector<timing::Footprint> footprints;
+    llvm::json::Array instructions, distances;
+    int64_t cycle = 0;
+    size_t begin = stream->starts[b], end = stream->blockEnd(b);
+    for (size_t i = begin; i < end; ++i) {
+      const auto &in = stream->instrs[i];
+      auto footprint = provider->footprint(in, regs);
+      auto gap = provider->issueGap(in);
+      if (!footprint.error.empty() || !gap.error.empty() ||
+          footprint.doneAge < 0 || gap.value <= 0)
+        return module.emitError("incomplete issue timing export");
+      instructions.push_back(llvm::json::Object{
+          {"word_index", static_cast<int64_t>(i)},
+          {"word_u32", static_cast<int64_t>(words[i])},
+          {"issue", cycle}, {"complete_age", footprint.doneAge + 1},
+          {"issue_gap", gap.value}});
+      for (size_t j = begin; j < i; ++j) {
+        auto rule = provider->dependence(stream->instrs[j], footprints[j-begin], in, footprint);
+        if (!rule.error.empty() || rule.value.distance < 0)
+          return module.emitError("incomplete pair distance export");
+        // A missing sparse entry means zero only because every pair is checked.
+        if (rule.value.distance)
+          distances.push_back(llvm::json::Array{static_cast<int64_t>(j-begin),
+              static_cast<int64_t>(i-begin), rule.value.distance});
+      }
+      footprints.push_back(std::move(footprint));
+      timing::applyScalar(in, regs);
+      cycle += gap.value;
+    }
+    blocks.push_back(llvm::json::Object{
+        {"instructions", std::move(instructions)}, {"distances", std::move(distances)},
+        {"covered_pairs", static_cast<int64_t>((end-begin)*(end-begin-1)/2)}});
+  }
+  llvm::json::Object root{
+      {"schema", "atlas.issue_timing.v1"}, {"provider", provider->id},
+      {"selected_rtl_revision", kSelectedRTLRevision},
+      {"clock", "block-relative-fixed-latency"},
+      {"scope", "pair issue spacing; OOT separately verifies DMA, reservations and CFG"},
+      {"blocks", std::move(blocks)}};
+  llvm::outs() << llvm::formatv("{0:2}\n", llvm::json::Value(std::move(root)));
+  return success();
+}
+
 int main(int argc, char **argv) {
-  bool mapJson = false, programJson = false, allowUntimed = false, invalid = false;
+  bool mapJson = false, programJson = false, timingJson = false, allowUntimed = false, invalid = false;
   const char *input = nullptr;
   for (int i = 1; i < argc; ++i) {
     StringRef arg(argv[i]);
     if (arg == "--map-json") mapJson = true;
     else if (arg == "--program-json") programJson = true;
+    else if (arg == "--issue-timing-json") timingJson = true;
     else if (arg == "--allow-untimed") allowUntimed = true;
     else if (arg.starts_with("--") || input) invalid = true;
     else input = argv[i];
   }
-  if (invalid || !input || (mapJson && programJson)) {
-    llvm::errs() << "usage: atlas-emit [--allow-untimed] [--map-json|--program-json] <flat-mlir-module>\n";
+  if (invalid || !input || (mapJson + programJson + timingJson > 1) || (timingJson && allowUntimed)) {
+    llvm::errs() << "usage: atlas-emit [--allow-untimed] [--map-json|--program-json|--issue-timing-json] <flat-mlir-module>\n";
     return 2;
   }
   DialectRegistry registry;
@@ -38,7 +95,8 @@ int main(int argc, char **argv) {
 
   llvm::SmallVector<uint32_t> words;
   if (failed(verifyAtlasTimingState(*module, !allowUntimed))) return 1;
-  if (failed(verifyAtlasArtifact(*module, mapJson || programJson, words))) return 1;
+  if (failed(verifyAtlasArtifact(*module, mapJson || programJson || timingJson, words))) return 1;
+  if (timingJson) return failed(emitIssueTiming(*module, words));
   // An untimed stream may still lack its delay slots.
   bool slots = atlasHasDelaySlots(*module);
   if (programJson) {

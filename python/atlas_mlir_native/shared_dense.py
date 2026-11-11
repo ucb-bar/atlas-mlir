@@ -34,6 +34,12 @@ MAX_TILE_PRODUCTS = 64
 
 def plan(source, *, entry):
     selected = read_ordered_float_dense(source, entry=entry, policy=POLICY)
+    return selected, schedule_dense(selected)
+
+
+def schedule_dense(selected):
+    if selected.policy != POLICY:
+        raise ValueError("unqualified Atlas dense numerical policy")
     if any(d % 32 for d in (selected.m, selected.k, selected.n)):
         raise ValueError("initial Atlas dense path requires full 32x32 tiles; padding is not admitted")
     mt, kt, nt = selected.m // 32, selected.k // 32, selected.n // 32
@@ -56,10 +62,10 @@ def plan(source, *, entry):
     )
     if scheduled is None:
         raise ValueError("no legal shared dense schedule")
-    return selected, scheduled
+    return scheduled
 
 
-def virtual_program(selected, scheduled):
+def expand_dense(selected, scheduled, builder, input_tile, output_tile):
     """Expand the actual checked calls into existing Atlas virtual SSA."""
     scheduled.revalidate()
     if (selected.policy != POLICY or tuple((a.name, a.shape, a.dtype) for a in scheduled.kernel.args) != (
@@ -67,23 +73,9 @@ def virtual_program(selected, scheduled):
             ("rhs", (selected.k, selected.n), "fp8_e4m3"),
             ("output", (selected.m, selected.n), "bf16"))):
         raise ValueError("Atlas source selection differs from the checked logical schedule")
-    kt, nt = selected.k // 32, selected.n // 32
-    rhs_base = selected.m // 32 * kt
-    lines = ["module {", "  func.func @ordered_dense() -> !atlas.virtual_state attributes {"
-             f"atlas.input_dram_base = {INPUT_BASE} : i64, atlas.output_dram_base = {OUTPUT_BASE} : i64" + "} {"]
-    state, serial = "%s0", 0
-    lines.append(f'    {state} = "atlas.virtual_start"() : () -> !atlas.virtual_state')
+    kt = selected.k // 32
     lhs = rhs = weight = accumulator = pending = readout_value = None
-    def emit(op, operands, types, result_type=None, attrs=""):
-        nonlocal serial, state
-        serial += 1
-        new_state, value = f"%s{serial}", f"%v{serial}"
-        names = new_state if result_type is None else f"{new_state}, {value}"
-        result = "!atlas.virtual_state" if result_type is None else f"(!atlas.virtual_state, {result_type})"
-        lines.append(f'    {names} = "atlas.{op}"({", ".join([state, *operands])}){attrs} : '
-                     f'({", ".join(["!atlas.virtual_state", *types])}) -> {result}')
-        state = new_state
-        return value
+    emit = builder.emit
     fp8, bf16 = "!atlas.virtual_fp8", "!atlas.virtual_bf16"
     wt, acc = "!atlas.virtual_mxu_weight<0>", "!atlas.virtual_mxu_acc<0>"
     for call, env in instances(scheduled.kernel):
@@ -95,13 +87,11 @@ def virtual_program(selected, scheduled):
             if call.instr == "dense.load_lhs":
                 if a["dst"] != 0:
                     raise ValueError("Atlas lhs assignment differs")
-                index = (a["src_row"] // 32) * kt + a["src_col"] // 32
-                lhs = emit("virtual_input_fp8", [], [], fp8, f" {{index = {index} : i32}}")
+                lhs = input_tile("lhs", a["src_row"] // 32, a["src_col"] // 32)
             else:
                 if a["dst"] != 32:
                     raise ValueError("Atlas rhs assignment differs")
-                index = rhs_base + (a["src_row"] // 32) * nt + a["src_col"] // 32
-                rhs = emit("virtual_input_fp8", [], [], fp8, f" {{index = {index} : i32}}")
+                rhs = input_tile("rhs", a["src_row"] // 32, a["src_col"] // 32)
         elif call.instr == "dense.preload":
             if rhs is None or (a["weight"], a["acc"], a["rows"], a["cols"], a["depth"]) != (32, 0, 32, 32, 32):
                 raise ValueError("Atlas preload assignment differs")
@@ -116,10 +106,8 @@ def virtual_program(selected, scheduled):
             if kt == 1:
                 if pending or accumulator is not None:
                     raise ValueError("combined Atlas matmul requires one complete reset")
-                serial += 1
-                readout_value = f"%v{serial}"
-                lines.append(f'    {readout_value} = "atlas.virtual_mxu_matmul"({lhs}, {weight}) '
-                             f'{{unit = 0 : i32}} : ({fp8}, {fp8}) -> {bf16}')
+                readout_value = builder.pure("virtual_mxu_matmul", [lhs, weight], [fp8, fp8], bf16,
+                                             " {unit = 0 : i32}")
                 accumulator = readout_value
             elif pending:
                 if accumulator is None:
@@ -134,13 +122,27 @@ def virtual_program(selected, scheduled):
             if accumulator is None or (a["acc"], a["rows"], a["cols"]) != (0, 32, 32):
                 raise ValueError("Atlas readout assignment differs")
             value = readout_value if kt == 1 else emit("virtual_mxu_readout_bf16", [accumulator], [acc], bf16)
-            index = (a["row"] // 32) * nt + a["col"] // 32
-            emit("virtual_output_bf16", [value], [bf16], attrs=f" {{index = {index} : i32}}")
+            output_tile(a["row"] // 32, a["col"] // 32, value)
             accumulator = None
     if accumulator is not None or pending is not None:
         raise ValueError("Atlas dense expansion left live state")
-    lines.extend((f"    return {state} : !atlas.virtual_state", "  }", "}"))
-    return "\n".join(lines) + "\n"
+
+
+def virtual_program(selected, scheduled):
+    """Expand the checked dense schedule using the standalone tile ABI."""
+    from .virtual_builder import VirtualBuilder
+
+    builder = VirtualBuilder(INPUT_BASE, OUTPUT_BASE)
+    kt, nt = selected.k // 32, selected.n // 32
+    rhs_base = selected.m // 32 * kt
+    def input_tile(role, row, col):
+        index = row * kt + col if role == "lhs" else rhs_base + row * nt + col
+        return builder.emit("virtual_input_fp8", [], [], "!atlas.virtual_fp8", f" {{index = {index} : i32}}")
+    def output_tile(row, col, value):
+        builder.emit("virtual_output_bf16", [value], ["!atlas.virtual_bf16"],
+                     attrs=f" {{index = {row * nt + col} : i32}}")
+    expand_dense(selected, scheduled, builder, input_tile, output_tile)
+    return builder.text()
 
 
 def pack_inputs(selected, lhs: bytes, rhs: bytes):
@@ -165,10 +167,21 @@ def compile_dense(source, *, entry, destination, atlas_bin_dir, pipeline="source
         raise ValueError("choose source-order or optimized pipeline")
     selected, scheduled = plan(source, entry=entry)
     virtual = virtual_program(selected, scheduled)
+    manifest = compile_virtual(source, virtual, destination=destination, atlas_bin_dir=atlas_bin_dir, pipeline=pipeline)
+    (Path(destination) / "schedule.mk").write_text(scheduled.kernel.text())
+    manifest.update(source=asdict(selected), kernel_sha256=scheduled.kernel.digest(),
+                    shared_realization=scheduled.realization,
+                    input_guard="pack_inputs requires finite-normal E4M3 or positive zero")
+    (Path(destination) / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
+    return manifest
+
+
+def compile_virtual(source, virtual, *, destination, atlas_bin_dir, pipeline):
+    if pipeline not in ("source-order", "optimized"):
+        raise ValueError("choose source-order or optimized pipeline")
     destination, bins = Path(destination), Path(atlas_bin_dir)
     destination.mkdir(parents=True, exist_ok=False)
     (destination / "source.mlir").write_text(source)
-    (destination / "schedule.mk").write_text(scheduled.kernel.text())
     (destination / "virtual.mlir").write_text(virtual)
     command = [str(bins / "atlas-opt"), str(destination / "virtual.mlir"),
                "--atlas-compile-unscheduled" if pipeline == "source-order" else "--atlas-compile",
@@ -184,12 +197,15 @@ def compile_dense(source, *, entry, destination, atlas_bin_dir, pipeline="source
     raw = b"".join(struct.pack("<I", int(word, 16)) for word in words.split())
     (destination / "program.bin").write_bytes(raw)
     (destination / "program.json").write_text(program)
-    manifest = {"schema": "atlas.shared-dense-diagnostic.v1", "source": asdict(selected),
+    from .shared_timing import write_issue_checks
+    timing = subprocess.run([str(bins / "atlas-emit"), "--issue-timing-json", str(destination / "machine.mlir")],
+                            check=True, capture_output=True, text=True).stdout
+    timing_check = write_issue_checks(json.loads(timing), json.loads(program), destination)
+    manifest = {"schema": "atlas.shared-dense-diagnostic.v1", "source_sha256": sha256(source.encode()).hexdigest(),
                 "pipeline": pipeline, "words": len(raw)//4, "binary_sha256": sha256(raw).hexdigest(),
-                "kernel_sha256": scheduled.kernel.digest(), "shared_realization": scheduled.realization,
                 "reference_model_revision": MODEL_REVISION,
+                "shared_issue_timing": timing_check,
                 "scope": "shared logical schedule; Atlas delegated physical lowering; execution required",
-                "input_guard": "pack_inputs requires finite-normal E4M3 or positive zero",
                 "tools": {name: sha256((bins/name).read_bytes()).hexdigest() for name in ("atlas-opt", "atlas-emit")}}
     (destination / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
     return manifest
