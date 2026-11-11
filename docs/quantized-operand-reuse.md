@@ -51,6 +51,8 @@ the optional multiply epilogue and its status behavior.
 The policy participates in the application materialization identity. Counted
 image sizing also hashes the complete emitted virtual source, so changing the
 policy cannot reuse an ordered image as a cached one or vice versa.
+Keep the same setting during compilation, source verification, and C export;
+the generated runtime itself does not read this environment variable.
 
 This extension is restricted to the quantized MXU1 path. It adds no MXU0 operand
 cache, PACK repair, compiler cache, or program residency implementation; those
