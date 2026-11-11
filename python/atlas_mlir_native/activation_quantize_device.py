@@ -23,6 +23,7 @@ class QuantizePlan:
     head_elements: int
     row_elements: int
     engine: str = "vector"
+    io_memory_base: int = DRAM_BASE
 
     @property
     def input_bytes(self):
@@ -31,7 +32,7 @@ class QuantizePlan:
 
     @property
     def code_address(self):
-        return DRAM_BASE + self.input_bytes
+        return self.io_memory_base + self.input_bytes
 
     @property
     def exponent_address(self):
@@ -43,20 +44,20 @@ class QuantizePlan:
 
     @property
     def workspace_bytes(self):
-        return self.exponent_address + self.exponent_bytes - DRAM_BASE
+        return self.exponent_address + self.exponent_bytes - self.io_memory_base
 
     def record(self):
         result = dict(schema='atlas.activation_quantize_vector_plan.v1',
                     source_request_digest=self.source.digest(), count=self.count,
                     input_dtype=self.x.type.dtype, mode=self.attrs['mode'],
                     group_elements=self.group_elements, head_elements=self.head_elements,
-                    row_elements=self.row_elements, input_address=DRAM_BASE,
+                    row_elements=self.row_elements, input_address=self.io_memory_base,
                     input_bytes=self.input_bytes, code_address=self.code_address,
                     code_bytes=_aligned(self.count), exponent_address=self.exponent_address,
                     exponent_bytes=self.exponent_bytes, workspace_bytes=self.workspace_bytes,
                     launch_count=1, weight_conversion='none',
                     qualification='ordinary virtual pipeline and six source contracts',
-                    input_addresses=[DRAM_BASE], input_payload_bytes=[self.input_bytes],
+                    input_addresses=[self.io_memory_base], input_payload_bytes=[self.input_bytes],
                     output_addresses=[self.code_address], output_bytes=self.workspace_bytes-self.input_bytes)
         if self.engine == 'vector':
             vector_path=self.width==2 and not any(n%32 for n in (self.count,self.group_elements,self.head_elements))
@@ -78,7 +79,9 @@ class QuantizePlan:
         return result
 
 
-def prepare_plan(source):
+def prepare_plan(source, *, io_memory_base=DRAM_BASE):
+    if type(io_memory_base) is not int or io_memory_base % 32:
+        raise ValueError("I/O memory base requires an aligned integer address")
     from .binding import TARGET_IDENTITY, TILE_BYTES, dram_slots
     from .static_quantize import prepare_source as static
     from .dynamic_quantize import prepare_source as dynamic
@@ -103,8 +106,11 @@ def prepare_plan(source):
     group = count if attrs['mode'] == 'static' or reduce == 'tensor' else k * m if reduce == 'head' else k if reduce == 'token' else k * attrs['rows']
     head = k * m if reduce == 'head_block' else count
     plan = QuantizePlan(source, x, codes, exponents, attrs, count,
-                        2 if x.type.dtype == 'bf16' else 4, min(group, head, count), head, k)
-    if plan.workspace_bytes > dram_slots()*TILE_BYTES or DRAM_BASE+plan.workspace_bytes > 1 << 32:
+                        2 if x.type.dtype == 'bf16' else 4, min(group, head, count), head, k, io_memory_base=io_memory_base)
+    from .memory_windows import dma_span_in_window
+    if (type(io_memory_base) is not int or io_memory_base % 32 or
+        plan.workspace_bytes > dram_slots()*TILE_BYTES or
+        not dma_span_in_window(io_memory_base, plan.workspace_bytes)):
         raise ValueError('activation quantizer buffers exceed the selected I/O window')
     return plan
 
@@ -114,7 +120,7 @@ def virtual_program(plan):
     return program(plan)
 
 
-def compile_source(snapshot, region, *, target_source, destination, limits, _plan=None):
+def compile_source(snapshot, region, *, target_source, destination, limits, io_memory_base=DRAM_BASE, _plan=None):
     import hashlib
     import json
     import os
@@ -122,7 +128,7 @@ def compile_source(snapshot, region, *, target_source, destination, limits, _pla
     from merlin.semantic_compiler.codegen import current_codegen_options
     from merlin.semantic_compiler.target_binding import verify_native_publication
     from .binding import NATIVE_CHECKS, RTL_REVISION, _run, _native_pipeline, _scheduled_virtual_pipeline
-    plan=_plan or prepare_plan(region)
+    plan=_plan or prepare_plan(region, io_memory_base=io_memory_base)
     destination=Path(destination)
     destination.mkdir(parents=True, exist_ok=False)
     tools=Path(os.environ.get('ATLAS_OOT_BIN_DIR', Path(target_source)/'build/bin'))
@@ -166,7 +172,7 @@ def compile_source(snapshot, region, *, target_source, destination, limits, _pla
     return manifest
 
 
-def prepare_c_package(region, compiled, name, *, target_source, runtime_linkage='separate', _plan=None):
+def prepare_c_package(region, compiled, name, *, target_source, runtime_linkage='separate', io_memory_base=DRAM_BASE, _plan=None):
     import hashlib
     import json
     import os
@@ -178,7 +184,7 @@ def prepare_c_package(region, compiled, name, *, target_source, runtime_linkage=
     from .c_runtime import RUNTIME_SHARED_FILES, program_array, runtime_headers, runtime_members
     if runtime_linkage != 'separate':
         raise ValueError('activation quantizer exports require shared runtime linkage')
-    plan=_plan or prepare_plan(region)
+    plan=_plan or prepare_plan(region, io_memory_base=io_memory_base)
     compiled,target_source=Path(compiled),Path(target_source)
     manifest=json.loads((compiled/'manifest.json').read_text())
     verify_native_publication(compiled,manifest,engine='merlin_native',request_digest=region.digest(),target_identity=region.target_identity)
@@ -211,7 +217,7 @@ def prepare_c_package(region, compiled, name, *, target_source, runtime_linkage=
     input_bytes=plan.count*plan.width
     exponent_bytes=prod(plan.exponents.type.shape)*4
     sizes={plan.codes.id:plan.count,plan.exponents.id:exponent_bytes}
-    offsets={plan.codes.id:plan.code_address-DRAM_BASE,plan.exponents.id:plan.exponent_address-DRAM_BASE}
+    offsets={plan.codes.id:plan.code_address-plan.io_memory_base,plan.exponents.id:plan.exponent_address-plan.io_memory_base}
     # These checks mirror the existing region wrappers' full-span ABI rules.
     # In particular, table entries are read only after the complete tables and
     # mutable runtime state have been checked for aliasing.
@@ -253,7 +259,7 @@ static int {name}_overlap(const void *a,size_t an,const void *b,size_t bn) {{ re
       {name}_overlap(host,sizeof(*host),workspace,{plan.workspace_bytes}u) ||
       host->active || !host->mmio.read32 || !host->mmio.write32 || !io.read || !io.write || !polls) return {upper}_INVALID;
   *ctx=({name}_context){{host,io,workspace,polls,{{
-    {{2415919104u,{plan.input_bytes}u,ATLAS_HOST_DEVICE_READ}},
+    {{{plan.io_memory_base}u,{plan.input_bytes}u,ATLAS_HOST_DEVICE_READ}},
     {{{plan.code_address}u,{_aligned(plan.count)}u,ATLAS_HOST_DEVICE_WRITE}},
     {{{plan.exponent_address}u,{plan.exponent_bytes}u,ATLAS_HOST_DEVICE_WRITE}}
   }}}}; return {upper}_OK;
@@ -277,12 +283,12 @@ int {name}_source_dispatch(void *opaque,const void *const *inputs,void *const *o
   __builtin_memset(region->workspace+{input_bytes}u,0,{plan.input_bytes-input_bytes}u);
   atlas_host_result result=atlas_host_ensure_loaded(region->host,{name}_words,{len(binary)//4}u);
   if (result!=ATLAS_HOST_OK) return {upper}_DEVICE_ERROR;
-  if (region->io.write(region->io.context,2415919104u,region->workspace,{plan.input_bytes}u)) return {upper}_MEMORY_ERROR;
+  if (region->io.write(region->io.context,{plan.io_memory_base}u,region->workspace,{plan.input_bytes}u)) return {upper}_MEMORY_ERROR;
   result=atlas_host_start(region->host,region->buffers,3u);
   if (result==ATLAS_HOST_OK) result=atlas_host_wait(region->host,region->max_polls);
   if (result!=ATLAS_HOST_OK) return {upper}_DEVICE_ERROR;
-  if (region->io.read(region->io.context,{plan.code_address}u,region->workspace+{plan.code_address-DRAM_BASE}u,{_aligned(plan.count)}u) ||
-      region->io.read(region->io.context,{plan.exponent_address}u,region->workspace+{plan.exponent_address-DRAM_BASE}u,{plan.exponent_bytes}u)) return {upper}_MEMORY_ERROR;
+  if (region->io.read(region->io.context,{plan.code_address}u,region->workspace+{plan.code_address-plan.io_memory_base}u,{_aligned(plan.count)}u) ||
+      region->io.read(region->io.context,{plan.exponent_address}u,region->workspace+{plan.exponent_address-plan.io_memory_base}u,{plan.exponent_bytes}u)) return {upper}_MEMORY_ERROR;
 {copies}
   return {upper}_OK;
 }}

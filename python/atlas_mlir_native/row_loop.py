@@ -45,6 +45,7 @@ class RowLoopPlan:
     readonly_bytes: int
     output_bytes: int
     scratch_bytes: int
+    io_memory_base: int = DRAM_BASE
 
     @property
     def groups(self):
@@ -75,7 +76,7 @@ class RowLoopPlan:
 
     @property
     def writable_base(self):
-        return DRAM_BASE + self.groups * self.readonly_bytes
+        return self.io_memory_base + self.groups * self.readonly_bytes
 
     @property
     def scratch_base(self):
@@ -96,7 +97,7 @@ class RowLoopPlan:
         if not 0 <= offset < self.readonly_bytes + self.output_bytes + self.scratch_bytes:
             raise ValueError("row-body address is outside its selected frame")
         if offset < self.readonly_bytes:
-            return original + group * self.readonly_bytes
+            return self.io_memory_base + offset + group * self.readonly_bytes
         return self.writable_base + group * self.writable_bytes + offset - self.readonly_bytes
 
     def record(self):
@@ -105,7 +106,7 @@ class RowLoopPlan:
             "source_request_digest": self.tiling.source.digest(),
             "body_request_digest": self.tiling.regions[0].request.digest(),
             "groups": self.groups,
-            "readonly_base": DRAM_BASE,
+            "readonly_base": self.io_memory_base,
             "readonly_stride_bytes": self.readonly_bytes,
             "output_base": self.writable_base,
             "output_stride_bytes": self.writable_bytes,
@@ -117,7 +118,9 @@ class RowLoopPlan:
         }
 
 
-def prepare_plan(source):
+def prepare_plan(source, *, io_memory_base=DRAM_BASE):
+    if type(io_memory_base) is not int or io_memory_base % 32:
+        raise ValueError("I/O memory base requires an aligned integer address")
     if source.nodes[-1].op == "rmsnorm":
         from .rmsnorm import prepare_rmsnorm
 
@@ -138,8 +141,11 @@ def prepare_plan(source):
     if is_staged_bf16(body):
         _, slots, _, _ = staged_memory_plan(body)
         total = max(slots.values()) + 1
-    plan = RowLoopPlan(tiling, readonly * TILE_BYTES, outputs * TILE_BYTES, (total - readonly - outputs) * TILE_BYTES)
-    if plan.end > DRAM_BASE + dram_slots() * TILE_BYTES:
+    plan = RowLoopPlan(tiling, readonly * TILE_BYTES, outputs * TILE_BYTES, (total - readonly - outputs) * TILE_BYTES, io_memory_base)
+    from .memory_windows import dma_span_in_window
+    if (type(io_memory_base) is not int or io_memory_base % 32 or
+        plan.end - io_memory_base > dram_slots() * TILE_BYTES or
+        not dma_span_in_window(io_memory_base, plan.end - io_memory_base)):
         raise NativeCompilationError("resource_limit", "complete row loop exceeds the selected I/O window")
     return plan
 
@@ -198,6 +204,8 @@ def virtual_program(plan, body_text):
         accesses += 1
     if not accesses:
         raise ValueError("row body contains no explicit DMA accesses")
+    if plan.io_memory_base != DRAM_BASE:
+        function.attributes["atlas.input_dram_base"] = IntegerAttr(plan.io_memory_base, 64)
     function.attributes["atlas.output_dram_base"] = IntegerAttr(plan.writable_base, 64)
     function.attributes["atlas.output_dram_bytes"] = IntegerAttr(plan.end - plan.writable_base, 64)
     simplify_state_cfg(function)
@@ -207,10 +215,10 @@ def virtual_program(plan, body_text):
     return stream.getvalue()
 
 
-def compile_row_loop(snapshot, source, *, target_source, destination, limits):
+def compile_row_loop(snapshot, source, *, target_source, destination, limits, io_memory_base=DRAM_BASE):
     from .region_composition import compile_virtual_with_receipt
 
-    plan = prepare_plan(source)
+    plan = prepare_plan(source, io_memory_base=io_memory_base)
     body = plan.tiling.regions[0].request
     abi = AtlasNativeBinding.plan_boundary_abi(body)
     destination.mkdir(parents=True, exist_ok=False)
@@ -296,15 +304,15 @@ def compile_row_loop(snapshot, source, *, target_source, destination, limits):
         },
     }
     (destination / "manifest.json").write_bytes(_json(result))
-    verify_row_loop(source, destination, target_source=target_source)
+    verify_row_loop(source, destination, target_source=target_source, io_memory_base=io_memory_base)
     return result
 
 
-def verify_row_loop(source, compiled, *, target_source):
+def verify_row_loop(source, compiled, *, target_source, io_memory_base=DRAM_BASE):
     """Reconstruct the frame and check its original captured physical lowering."""
     from .binding import check_io_memory_manifest
 
-    plan = prepare_plan(source)
+    plan = prepare_plan(source, io_memory_base=io_memory_base)
     manifest = json.loads((compiled / "manifest.json").read_text())
     check_io_memory_manifest(manifest)
     if manifest.get("schema") != "atlas.row_loop_compilation.v1":

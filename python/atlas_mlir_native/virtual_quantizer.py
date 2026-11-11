@@ -6,7 +6,6 @@ The standard compiler owns resource placement, waits, scheduling and contracts.
 """
 from math import gcd
 
-from .binding import DRAM_BASE
 from .scalar_ssa import ScalarBuilder
 
 STATE = '!atlas.virtual_state'
@@ -93,7 +92,7 @@ def program(p):
     exponent_zero = b.op('virtual_vpu_splat', [], [], [BF16], 'bits = 0 : i32')
     zeros = b.op('virtual_raw_pack_fp8', [exponent_zero, c(127)], [BF16, 'i32'], [FP8])
     state = b.save(state, exponent_slot, zeros, FP8)
-    b.emit(f'cf.br ^group({state}, {c(0)}, {c(DRAM_BASE)}, {c(p.code_address)} : {STATE}, i32, i32, i32)')
+    b.emit(f'cf.br ^group({state}, {c(0)}, {c(p.io_memory_base)}, {c(p.code_address)} : {STATE}, i32, i32, i32)')
     b.emit(f'^group(%gs: {STATE}, %gi: i32, %gip: i32, %gop: i32):')
     more = b.cmp('ult', '%gi', c(groups))
     b.emit(f'cf.cond_br {more}, ^group_body(%gs : {STATE}), ^finish(%gs : {STATE})')
@@ -180,6 +179,6 @@ def program(p):
     state = b.op('virtual_dma_store_fp8', [state, exptile, c(p.exponent_address), c(p.exponent_bytes)],
                  [STATE, FP8, 'i32', 'i32'], [STATE])
     b.emit(f'return {state} : {STATE}')
-    attrs = (f'atlas.input_dram_base = {DRAM_BASE} : i64, atlas.output_dram_base = {p.code_address} : i64, '
+    attrs = (f'atlas.input_dram_base = {p.io_memory_base} : i64, atlas.output_dram_base = {p.code_address} : i64, '
              f'atlas.output_dram_bytes = {p.workspace_bytes - p.input_bytes} : i64')
     return 'module {\n  func.func @activation_quantizer() -> ' + STATE + ' attributes {' + attrs + '} {\n' + '\n'.join(b.lines) + '\n  }\n}\n'
