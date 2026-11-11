@@ -92,6 +92,12 @@ def test_materialization_identity_uses_effective_inputs_and_receipt_mode(tmp_pat
     working.mkdir()
     monkeypatch.chdir(working)
     assert adapter.materialization_identity(source, choice) == original
+    monkeypatch.setenv("ATLAS_QUANTIZED_OPERAND_REUSE", "row-cache")
+    changed = adapter.materialization_identity(source, choice)
+    assert changed != original
+    assert changed["compilation_identity"]["quantized_operand_reuse"] == "row-cache"
+    monkeypatch.setenv("ATLAS_QUANTIZED_OPERAND_REUSE", "ordered")
+    assert adapter.materialization_identity(source, choice) == original
     with adapter.publication_options(deterministic_receipts=True):
         changed = adapter.materialization_identity(source, choice)
         assert changed != original

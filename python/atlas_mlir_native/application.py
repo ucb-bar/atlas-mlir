@@ -222,6 +222,7 @@ class AtlasApplicationAdapter:
         from .application_materialization import provider_sources
         from .binding import _native_pipeline
         from .publication_options import deterministic_receipts_enabled
+        from .quantized_operand_reuse import reuse_policy
 
         names = {node.id: f"node_{i}" for i, node in enumerate(region.nodes)}
         choice = alternative.to_dict()
@@ -253,6 +254,7 @@ class AtlasApplicationAdapter:
                 "pipeline": _native_pipeline(),
                 "capture_postspill": os.environ.get("ATLAS_CAPTURE_POSTSPILL") == "1",
                 "deterministic_receipts": deterministic_receipts_enabled(),
+                "quantized_operand_reuse": reuse_policy(),
             },
         }
 

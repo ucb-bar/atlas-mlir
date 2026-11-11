@@ -85,6 +85,7 @@ def virtual_source(plan, layout):
         tile_bytes = (1024, 1024, 2048)
         buffer_bytes = (layout['input_buffer_bytes'][0], layout['input_buffer_bytes'][1], layout['output_bytes'])
     from .region_composition import rematerialize_scalar_constants
+    from .quantized_operand_reuse import activation_residency
 
     restoration = Restoration(plan, layout, scalar_fallback=bool(fallback_tiles(plan)))
     virtual = _virtual(Geometry(), tuple(layout['input_addresses'][:2]), layout['output_addresses'][0],
@@ -92,7 +93,8 @@ def virtual_source(plan, layout):
                        batch_count=prod(plan.batch_shape),
                        shared_weight=not plan.source.node(plan.operand_ids[1]).type.shape[:-2],
                        exponent_pages=restoration.pages(), restoration=restoration,
-                       output_window_bytes=layout['output_bytes']+layout['status_bytes'])
+                       output_window_bytes=layout['output_bytes']+layout['status_bytes'],
+                       cache_a=activation_residency(plan) is not None)
     return rematerialize_scalar_constants(virtual)
 
 
