@@ -80,6 +80,26 @@ class VmemWindowTest(unittest.TestCase):
                                     limits='limits', io_memory_base=VMEM_WINDOW)
         self.assertEqual(_tile_io_base.get(), DRAM_BASE)
 
+    def test_reduction_refuses_bases_before_tools(self):
+        from atlas_mlir_native import reduction
+        request = reduction.request_for((1, 2048), (1,))
+        abi = reduction.plan_abi(request)
+        with codegen_options(CodegenOptions(io_memory_bytes=67108864)), \
+             patch('atlas_mlir_native.binding.AtlasNativeBinding.compile', side_effect=AssertionError('compiled')), \
+             tempfile.TemporaryDirectory(prefix='atlas-vmem-reduction-') as directory:
+            # 0x2017F000 starts in the window, but the complete reduction frame leaves it.
+            for base in (True, 1.0, VMEM_WINDOW + 32, 0x20000000, 0x200B0000, 0x2017F000, 0x0800F000):
+                with self.subTest(base=base), self.assertRaises(NativeCompilationError):
+                    reduction.compile_reduction('snapshot', request, fixed_inputs=abi['fixed_inputs'],
+                        fixed_outputs=tuple(abi['fixed_outputs']), target_source=ROOT,
+                        destination=Path(directory)/'x', limits='limits', io_memory_base=base)
+            self.assertFalse((Path(directory)/'x').exists())
+            # A complete frame inside the window passes the address checks and reaches the body compile.
+            with self.assertRaisesRegex(AssertionError, 'compiled'):
+                reduction.compile_reduction('snapshot', request, fixed_inputs=abi['fixed_inputs'],
+                    fixed_outputs=tuple(abi['fixed_outputs']), target_source=ROOT,
+                    destination=Path(directory)/'y', limits='limits', io_memory_base=VMEM_WINDOW)
+
 
 if __name__ == '__main__':
     unittest.main()

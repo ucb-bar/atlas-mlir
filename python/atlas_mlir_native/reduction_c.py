@@ -32,11 +32,14 @@ from .reduction import (
     selected_body_descriptors,
     virtual_program,
 )
+from .memory_windows import dma_span_in_window
 from .tile_io_c import render_tile_io_package
 
 
 def prepare_c_package(source, compiled, name, *, target_source, runtime_linkage="separate",
-                      reduction_policy=REDUCTION_POLICY):
+                      reduction_policy=REDUCTION_POLICY, io_memory_base=DRAM_BASE):
+    if type(io_memory_base) is not int or io_memory_base % TILE_BYTES or not dma_span_in_window(io_memory_base, 1):
+        raise ValueError("reduction I/O base must be tile-aligned within a DMA window")
     precision = prepare_source(source, reduction_policy=reduction_policy)
     request = precision.request
     plan = prepare_plan(request)
@@ -77,12 +80,15 @@ def prepare_c_package(source, compiled, name, *, target_source, runtime_linkage=
     for address, size in zip([*addresses, *outputs], plan.packed_sizes, strict=True):
         if (
             type(address) is not int
-            or address < DRAM_BASE
-            or (address - DRAM_BASE) % TILE_BYTES
-            or address + size > DRAM_BASE + dram_slots() * TILE_BYTES
+            or address < io_memory_base
+            or (address - io_memory_base) % TILE_BYTES
+            or address + size > io_memory_base + dram_slots() * TILE_BYTES
+            or not dma_span_in_window(address, size)
         ):
             raise ValueError("reduction address is unaligned or outside the selected window")
         ranges.append((address, address + size))
+    if not dma_span_in_window(io_memory_base, max(end for _, end in ranges) - io_memory_base):
+        raise ValueError("complete reduction span must fit one DMA memory window")
     if any(a < d and c < b for i, (a, b) in enumerate(ranges) for c, d in ranges[i + 1 :]):
         raise ValueError("reduction physical buffers overlap")
     expected = {

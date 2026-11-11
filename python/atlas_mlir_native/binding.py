@@ -2819,7 +2819,8 @@ def _with_tile_io_base(function):
             raise NativeCompilationError("compile_error", "I/O slots must be nonnegative integers")
         if not slots or not dma_span_in_window(io_memory_base, (max(slots)+1)*TILE_BYTES):
             raise NativeCompilationError("compile_error", "complete I/O span must fit one DMA window")
-        if io_memory_base != DRAM_BASE and any(node.type.shape != (32,32) for node in request.nodes):
+        if (io_memory_base != DRAM_BASE and any(node.type.shape != (32,32) for node in request.nodes)
+                and request.nodes[-1].op != "reduce_sum"):
             raise NativeCompilationError("compile_error", "custom I/O base requires native 32x32 tiles")
         token = _tile_io_base.set(io_memory_base)
         try:
@@ -3628,11 +3629,10 @@ class AtlasNativeBinding:
 
         if request.nodes[-1].op == "reduce_sum":
             from .reduction import compile_reduction
-            if _tile_io_base.get() != DRAM_BASE:
-                raise NativeCompilationError("compile_error", "reduction dispatch does not support a custom tile I/O base")
             return compile_reduction(snapshot, request, fixed_inputs=fixed_inputs,
                                      fixed_outputs=fixed_outputs, target_source=target_source,
-                                     destination=destination, limits=limits)
+                                     destination=destination, limits=limits,
+                                     io_memory_base=_tile_io_base.get())
         if is_pointwise_request(request):
             return compile_pointwise(snapshot, request, fixed_inputs=fixed_inputs,
                                      fixed_outputs=fixed_outputs, target_source=target_source,

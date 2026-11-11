@@ -388,8 +388,13 @@ def compile_reduction(
     target_source,
     destination,
     limits,
+    io_memory_base=DRAM_BASE,
 ):
+    from .memory_windows import dma_span_in_window
+
     plan = prepare_plan(request)
+    if type(io_memory_base) is not int or io_memory_base < 0 or io_memory_base % TILE_BYTES:
+        raise NativeCompilationError("compile_error", "reduction I/O base must be a tile-aligned integer")
     if set(fixed_inputs) != {request.nodes[0].id, request.nodes[1].id} or len(fixed_outputs) != 1:
         raise NativeCompilationError("compile_error", "reduction ABI must bind data, seed and output")
     slots = tuple(fixed_inputs[n.id] for n in request.nodes[:2]) + tuple(fixed_outputs)
@@ -398,8 +403,10 @@ def compile_reduction(
         for slot, size in zip(slots, plan.packed_sizes, strict=True)
     ):
         raise NativeCompilationError("resource_limit", "reduction bindings exceed the selected byte window")
-    addresses = tuple(DRAM_BASE + slot * TILE_BYTES for slot in slots)
+    addresses = tuple(io_memory_base + slot * TILE_BYTES for slot in slots)
     ranges = [(address, address + size) for address, size in zip(addresses, plan.packed_sizes, strict=True)]
+    if not dma_span_in_window(io_memory_base, max(end for _, end in ranges) - io_memory_base):
+        raise NativeCompilationError("compile_error", "complete reduction span must fit one DMA memory window")
     if any(a < d and c < b for i, (a, b) in enumerate(ranges) for c, d in ranges[i + 1 :]):
         raise NativeCompilationError("infeasible_candidate", "reduction physical buffers overlap")
     destination.mkdir(parents=True, exist_ok=False)

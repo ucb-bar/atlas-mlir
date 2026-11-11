@@ -23,7 +23,7 @@ class TileIOBaseTest(unittest.TestCase):
         with self.assertRaises(NativeCompilationError):
             emit(None,request,io_memory_base=0x0800b000,fixed_inputs={'a':10},fixed_outputs=(2,))
         with self.assertRaises(NativeCompilationError):
-            emit(None,SimpleNamespace(nodes=[SimpleNamespace(type=SimpleNamespace(shape=(64,32)))]),io_memory_base=0x0800b000,**args)
+            emit(None,SimpleNamespace(nodes=[SimpleNamespace(op="input", type=SimpleNamespace(shape=(64,32)))]),io_memory_base=0x0800b000,**args)
         @_with_tile_io_base
         def fail(*args,**kwargs):raise RuntimeError('test')
         with self.assertRaises(RuntimeError):fail(None,request,io_memory_base=0x0800b000,**args)
