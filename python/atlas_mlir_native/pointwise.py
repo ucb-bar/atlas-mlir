@@ -14,6 +14,7 @@ from merlin.semantic_compiler.pointwise_tiling import PointwiseTiling
 from merlin.semantic_compiler.precision_values import FloatBoundarySpec
 from merlin.semantic_compiler.target_binding import NativeCompilationError
 
+from .memory_windows import dma_span_in_window
 from .binding import (
     BF16_BINARY_ATTRS,
     BF16_EXP_ATTRS,
@@ -538,6 +539,7 @@ def compile_pointwise(
     target_source,
     destination,
     limits,
+    io_memory_base=None,
 ):
     from .binding import (
         DRAM_BASE,
@@ -562,9 +564,14 @@ def compile_pointwise(
         for slot, size in zip(slots, sizes, strict=True)
     ):
         raise NativeCompilationError("resource_limit", "pointwise buffers exceed the selected memory window")
-    addresses = [DRAM_BASE + fixed_inputs[node.id] * TILE_BYTES for node in request.nodes[:-1]]
-    output = DRAM_BASE + fixed_outputs[0] * TILE_BYTES
+    base = DRAM_BASE if io_memory_base is None else io_memory_base
+    if type(base) is not int or base % 32:
+        raise NativeCompilationError("resource_limit", "pointwise buffers leave selected DMA memory windows")
+    addresses = [base + fixed_inputs[node.id] * TILE_BYTES for node in request.nodes[:-1]]
+    output = base + fixed_outputs[0] * TILE_BYTES
     ranges = [(address, address + size) for address, size in zip([*addresses, output], sizes, strict=True)]
+    if any(not dma_span_in_window(a, b - a) for a, b in ranges):
+        raise NativeCompilationError("resource_limit", "pointwise buffers leave selected DMA memory windows")
     if any(a < d and c < b for i, (a, b) in enumerate(ranges) for c, d in ranges[i + 1 :]):
         raise NativeCompilationError("infeasible_candidate", "pointwise physical buffers overlap")
     destination.mkdir(parents=True, exist_ok=False)

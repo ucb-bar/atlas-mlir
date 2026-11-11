@@ -90,7 +90,7 @@ def qualified_vector(b,p):
 
 def virtual_program(p):
     from .exact_float_device import _valid,_compute
-    lines=['module {',f'  func.func @exact_float() -> {S} attributes {{atlas.input_dram_base = {DRAM_BASE} : i64, atlas.input_dram_bytes = {len(p.operands)*p.input_bytes} : i64, atlas.output_dram_base = {p.output_address} : i64, atlas.output_dram_bytes = {p.output_bytes+32} : i64}} {{',f'    %start = "atlas.virtual_start"() : () -> {S}']
+    lines=['module {',f'  func.func @exact_float() -> {S} attributes {{atlas.input_dram_base = {p.io_memory_base} : i64, atlas.input_dram_bytes = {len(p.operands)*p.input_bytes} : i64, atlas.output_dram_base = {p.output_address} : i64, atlas.output_dram_bytes = {p.output_bytes+32} : i64}} {{',f'    %start = "atlas.virtual_start"() : () -> {S}']
     b=Builder(lines);c=b.constant;op=b.binary;cmp=b.compare
     for slot in ('left','right','result','pairs','status'):b.slot(slot)
     zero=b.splat(0)
@@ -99,7 +99,7 @@ def virtual_program(p):
     binary=p.op in ('bf16_add','bf16_sub');flag=c(0)
     phases=('check','compute') if not p.op.endswith('_neg') else ('compute',)
     for phase in phases:
-        pointers=[c(DRAM_BASE),c(DRAM_BASE+[n.id for n in p.operands].index(p.node.inputs[-1])*p.input_bytes),c(p.output_address)]
+        pointers=[c(p.io_memory_base),c(p.io_memory_base+[n.id for n in p.operands].index(p.node.inputs[-1])*p.input_bytes),c(p.output_address)]
         def tile_body(tile,values):
             bad,ap,bp,out=values
             a=b.dma_load(ap,lanes*p.width);b.save('left',a)

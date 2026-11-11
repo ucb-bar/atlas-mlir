@@ -7,6 +7,7 @@ writes. Sign flips accept all encodings and preserve NaN payloads.
 from dataclasses import dataclass
 from math import prod
 from .binding import DRAM_BASE
+from .memory_windows import dma_span_in_window
 from .activation_quantize_device import _aligned
 
 OPS = {"bf16_to_f32": (2,4,"bf16-to-f32-exact-v1"),
@@ -42,6 +43,7 @@ class FloatPlan:
     count: int
     width: int
     output_width: int
+    io_memory_base: int = DRAM_BASE
     @property
     def op(self): return self.node.op
     @property
@@ -49,20 +51,20 @@ class FloatPlan:
     @property
     def input_bytes(self): return _aligned(self.count,self.tile_lanes)*self.width
     @property
-    def output_address(self): return DRAM_BASE+len(self.operands)*self.input_bytes
+    def output_address(self): return self.io_memory_base+len(self.operands)*self.input_bytes
     @property
     def output_bytes(self): return _aligned(self.count,self.tile_lanes)*self.output_width
     @property
     def status_address(self): return self.output_address+self.output_bytes
     @property
-    def workspace_bytes(self): return self.status_address+32-DRAM_BASE
+    def workspace_bytes(self): return self.status_address+32-self.io_memory_base
     def descriptor(self):
         from .binding import TILE_BYTES,dram_slots
         return dict(operation=self.op,count=self.count,input_count=len(self.operands),right_input=[n.id for n in self.operands].index(self.node.inputs[-1]),source_request_digest=self.source.digest(),io_memory_bytes=dram_slots()*TILE_BYTES)
     def record(self):
         return dict(schema="atlas.exact_float.v1",source_request_digest=self.source.digest(),operation=self.op,
                     input_node_ids=[n.id for n in self.operands],output_node_ids=[self.node.id],
-                    input_addresses=[DRAM_BASE+i*self.input_bytes for i in range(len(self.operands))],
+                    input_addresses=[self.io_memory_base+i*self.input_bytes for i in range(len(self.operands))],
                     input_payload_bytes=[self.input_bytes]*len(self.operands),output_addresses=[self.output_address],
                     output_bytes=self.output_bytes+32,result_buffer_bytes=self.output_bytes,status_address=self.status_address,workspace_bytes=self.workspace_bytes,
                     logical_output_bytes=self.count*self.output_width,runtime_arithmetic="none",launches_per_invocation=1,
@@ -72,7 +74,7 @@ class FloatPlan:
                     vector_admission={"qualified":"signed-zero or abs-code2f80..4f80",
                                       "pair":"normal-or-signed-zero inputs except both-negative-zero; private result must be normal or provably exact zero"} if self.op in ("bf16_add","bf16_sub") else None)
 
-def prepare_plan(source):
+def prepare_plan(source, *, io_memory_base=DRAM_BASE):
     from .binding import TARGET_IDENTITY,TILE_BYTES,dram_slots
     from merlin.semantic_compiler.model import TensorType,pointwise_identity_maps
     pure=[n for n in source.nodes if n.effect=="pure"]
@@ -92,7 +94,10 @@ def prepare_plan(source):
         any(v.op!="input" or v.effect!="input" or v.inputs or v.attrs or v.index_maps or
             v.type!=TensorType(n.type.shape,"bf16" if width==2 else "f32","raw-bit-pattern") for v in operands)):
         raise ValueError("exact float source types, maps, domain, or boundaries differ")
-    plan=FloatPlan(source,n,operands,prod(n.type.shape),width,ow)
+    plan=FloatPlan(source,n,operands,prod(n.type.shape),width,ow,io_memory_base)
+    if (type(io_memory_base) is not int or io_memory_base % 32 or
+        not dma_span_in_window(io_memory_base, plan.workspace_bytes)):
+        raise ValueError("exact float buffers leave selected DMA memory windows")
     return plan
 
 def virtual_program(p):
@@ -172,13 +177,13 @@ def machine_program(p):
     return _run([str(tools/"atlas-opt"),*_scheduled_virtual_pipeline(),"-"],input_text=virtual_program(p))
 
 
-def compile_source(snapshot,region,*,target_source,destination,limits):
+def compile_source(snapshot,region,*,target_source,destination,limits,io_memory_base=DRAM_BASE):
     import hashlib,json,os
     from pathlib import Path
     from merlin.semantic_compiler.codegen import current_codegen_options
     from merlin.semantic_compiler.target_binding import verify_native_publication
     from .binding import NATIVE_CHECKS,RTL_REVISION,_run
-    p=prepare_plan(region)
+    p=prepare_plan(region,io_memory_base=io_memory_base)
     maximum=MAX_LEAF_ELEMENTS[p.op]
     if p.count>maximum: raise ValueError(f"exact float leaf requires at most {maximum} elements")
     if p.workspace_bytes>p.descriptor()["io_memory_bytes"]: raise ValueError("exact float exceeds selected I/O window")
@@ -217,7 +222,7 @@ def compile_source(snapshot,region,*,target_source,destination,limits):
     return manifest
 
 
-def prepare_c_package(region,compiled,name,*,target_source,runtime_linkage="separate"):
+def prepare_c_package(region,compiled,name,*,target_source,runtime_linkage="separate",io_memory_base=DRAM_BASE):
     import hashlib,json,os
     from pathlib import Path
     from merlin.compile.c_sources import c_source_pair
@@ -226,7 +231,7 @@ def prepare_c_package(region,compiled,name,*,target_source,runtime_linkage="sepa
     from .binding import NATIVE_CHECKS,_run
     from .c_runtime import RUNTIME_SHARED_FILES,program_array,runtime_headers,runtime_members
     if runtime_linkage!="separate":raise ValueError("exact float requires shared runtime linkage")
-    p=prepare_plan(region);compiled,target_source=Path(compiled),Path(target_source)
+    p=prepare_plan(region,io_memory_base=io_memory_base);compiled,target_source=Path(compiled),Path(target_source)
     manifest=json.loads((compiled/"manifest.json").read_text())
     verify_native_publication(compiled,manifest,engine="merlin_native",request_digest=region.digest(),target_identity=region.target_identity)
     if (json.loads((compiled/"source-request.json").read_text())!=region.record() or
@@ -258,7 +263,7 @@ def prepare_c_package(region,compiled,name,*,target_source,runtime_linkage="sepa
         # Source operands may alias each other, as permitted by the source ABI.
         if ptr.startswith("outputs"):
             for other,osize in values[:i]:checks.append(f"  if ({name}_overlap({ptr},{size}u,{other},{osize}u)) return {upper}_INVALID;")
-    buffers=[f"{{{DRAM_BASE+i*p.input_bytes}u,{p.input_bytes}u,ATLAS_HOST_DEVICE_READ}}" for i in range(n)]
+    buffers=[f"{{{p.io_memory_base+i*p.input_bytes}u,{p.input_bytes}u,ATLAS_HOST_DEVICE_READ}}" for i in range(n)]
     buffers += [f"{{{p.output_address}u,{p.output_bytes+32}u,ATLAS_HOST_DEVICE_WRITE}}"]
     declarations=f'''
 #define {upper}_WORKSPACE_BYTES {p.workspace_bytes}u
@@ -275,7 +280,7 @@ int {name}_source_dispatch(void *,const void *const *,void *const *);
         at=i*p.input_bytes
         copies.append(f'''  __builtin_memcpy(region->workspace+{at}u,inputs[{i}],{logical}u);
   __builtin_memset(region->workspace+{at+logical}u,0,{p.input_bytes-logical}u);
-  if (region->io.write(region->io.context,{DRAM_BASE+at}u,region->workspace+{at}u,{p.input_bytes}u)) return {upper}_MEMORY_ERROR;''')
+  if (region->io.write(region->io.context,{p.io_memory_base+at}u,region->workspace+{at}u,{p.input_bytes}u)) return {upper}_MEMORY_ERROR;''')
     implementation=program_array(name+"_words",binary)+f'''
 static int {name}_range(const void *p,size_t n) {{ return p && n && n<=UINTPTR_MAX-(uintptr_t)p; }}
 static int {name}_overlap(const void *a,size_t an,const void *b,size_t bn) {{ return (uintptr_t)a<(uintptr_t)b+bn && (uintptr_t)b<(uintptr_t)a+an; }}
@@ -303,10 +308,10 @@ int {name}_source_dispatch(void *opaque,const void *const *inputs,void *const *o
   if (status==ATLAS_HOST_OK) status=atlas_host_start(region->host,region->buffers,{n+1}u);
   if (status==ATLAS_HOST_OK) status=atlas_host_wait(region->host,region->max_polls);
   if (status!=ATLAS_HOST_OK) return {upper}_DEVICE_ERROR;
-  if (region->io.read(region->io.context,{p.status_address}u,region->workspace+{p.status_address-DRAM_BASE}u,32u)) return {upper}_MEMORY_ERROR;
-  if (region->workspace[{p.status_address-DRAM_BASE}u] || region->workspace[{p.status_address-DRAM_BASE+1}u] || region->workspace[{p.status_address-DRAM_BASE+2}u] || region->workspace[{p.status_address-DRAM_BASE+3}u]) return {upper}_DOMAIN;
-  if (region->io.read(region->io.context,{p.output_address}u,region->workspace+{p.output_address-DRAM_BASE}u,{p.output_bytes}u)) return {upper}_MEMORY_ERROR;
-  __builtin_memcpy(outputs[0],region->workspace+{p.output_address-DRAM_BASE}u,{obytes}u);
+  if (region->io.read(region->io.context,{p.status_address}u,region->workspace+{p.status_address-p.io_memory_base}u,32u)) return {upper}_MEMORY_ERROR;
+  if (region->workspace[{p.status_address-p.io_memory_base}u] || region->workspace[{p.status_address-p.io_memory_base+1}u] || region->workspace[{p.status_address-p.io_memory_base+2}u] || region->workspace[{p.status_address-p.io_memory_base+3}u]) return {upper}_DOMAIN;
+  if (region->io.read(region->io.context,{p.output_address}u,region->workspace+{p.output_address-p.io_memory_base}u,{p.output_bytes}u)) return {upper}_MEMORY_ERROR;
+  __builtin_memcpy(outputs[0],region->workspace+{p.output_address-p.io_memory_base}u,{obytes}u);
   return {upper}_OK;
 }}
 '''

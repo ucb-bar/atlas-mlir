@@ -14,6 +14,7 @@ import os
 from merlin.compile.layout_c import _element_bytes, _flat_map
 from merlin.semantic_compiler.model import IndexMap, pointwise_identity_maps
 from merlin.semantic_compiler.target_binding import NativeCompilationError, verify_native_publication
+from .memory_windows import dma_span_in_window
 from .binding import DRAM_BASE, TARGET_IDENTITY, TILE_BYTES, RTL_REVISION, NATIVE_CHECKS, _native_pipeline, _scheduled_virtual_pipeline, _run, dram_slots
 
 
@@ -194,9 +195,7 @@ def prepare_source(source, *, io_memory_base=DRAM_BASE):
     plan = LayoutPlan(source, operands, output, width, tuple(segments), io_memory_base)
     if plan.workspace_bytes > dram_slots() * TILE_BYTES or plan.io_memory_base + plan.workspace_bytes > 1 << 32:
         raise ValueError("device layout buffers exceed selected I/O window")
-    if not (plan.io_memory_base >= 0x80000000 or
-            0x08000000 <= plan.io_memory_base and
-            plan.io_memory_base + plan.workspace_bytes <= 0x08010000):
+    if not dma_span_in_window(plan.io_memory_base, plan.workspace_bytes):
         raise ValueError("device layout buffers leave selected DMA memory windows")
     return plan
 

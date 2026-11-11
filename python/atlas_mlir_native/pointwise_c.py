@@ -13,7 +13,6 @@ from merlin.compile.c_pointwise import render_pointwise_c
 from merlin.semantic_compiler.target_binding import verify_native_publication
 
 from .binding import (
-    DRAM_BASE,
     NATIVE_CHECKS,
     NATIVE_PIPELINES,
     RTL_REVISION,
@@ -22,6 +21,7 @@ from .binding import (
     check_io_memory_manifest,
     dram_slots,
 )
+from .memory_windows import dma_span_in_window
 from .pointwise import (
     prepare_execution_plan,
     prepare_source,
@@ -95,12 +95,13 @@ def prepare_precision_c_package(precision, compiled, name, *, target_source, run
     for address, size in zip([*addresses, output], sizes, strict=True):
         if (
             type(address) is not int
-            or address < DRAM_BASE
-            or (address - DRAM_BASE) % TILE_BYTES
-            or address + size > DRAM_BASE + dram_slots() * TILE_BYTES
+            or address % TILE_BYTES
+            or not dma_span_in_window(address, size)
         ):
             raise ValueError("pointwise byte address is unaligned or outside the selected window")
         ranges.append((address, address + size))
+    if max(b for a, b in ranges) - min(a for a, b in ranges) > dram_slots() * TILE_BYTES:
+        raise ValueError("pointwise buffers exceed the selected memory window")
     if any(a < d and c < b for i, (a, b) in enumerate(ranges) for c, d in ranges[i + 1 :]):
         raise ValueError("pointwise input/output ranges overlap")
     expected = {
