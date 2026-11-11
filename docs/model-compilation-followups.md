@@ -38,8 +38,10 @@ See [exact float regions](exact-float-device.md) and
 
 ## Validation status
 
-The implementation commits are complete, but the full-layer replay audit remains
-open. Do not treat the provisional timing below as an error-free benchmark.
+The implementation commits are complete and ready for code review. The full-layer
+replay audit remains unresolved; further debugging was stopped at the user's
+request after reproducing host-side corruption independently of the NPU. Do not
+treat the provisional timing below as an error-free benchmark.
 
 The final Atlas source passed 53 focused tests and 19 subtests, all 28 native
 CTests, and 14 additional quantized integration tests with 15 subtests under
@@ -77,8 +79,19 @@ replay and retains both original failures. The baseline also has an unresolved
 replay anomaly. These observations do not establish a root cause or prove that
 the failures are harmless. A mixed-state diagnostic replay also failed its input
 snapshot SHA256 assertion before starting the simulator (state 307, repeat 1).
-That failure narrows the investigation to include snapshot preparation and the
-host runtime; it does not explain the earlier failures. Diagnostics are ongoing.
+An independent Python-standard-library reproducer then performed 2,975 snapshot
+checks without importing Torch, Merlin, Atlas or the NPU model. One check captured
+a single changed byte at offset 8,265,811 (`0xdd` became `0xdf`) in a 64 MiB
+snapshot. Both retained copies consistently hashed to the changed value; a fresh
+decode of the original file matched the expected hash. This establishes that
+host-side corruption can occur independently of these compiler changes. The
+specific host fault and the earlier replay failures are not individually resolved.
+
+Before debugging was stopped, the mixed-state diagnostics retained 1,187 results
+(one pre-simulation snapshot-hash failure), and a separate mixed-kernel diagnostic
+retained 86 passing results. These partial runs are not presented as completed
+suites. No simulator, arithmetic, memory guard or verification check was relaxed
+to obtain a passing result.
 
 Local evidence is under the companion Merlin worktree's
 `out/artifacts/followup-audit/` (`results.json`, the original progress/error logs,
