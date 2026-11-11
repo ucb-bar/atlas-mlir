@@ -98,7 +98,7 @@ def untimed_bound(source, report):
     return bound
 
 
-def _identity(plan, virtual, target_source, tools, limits):
+def _identity(plan, virtual, target_source, tools, limits, operand_reuse):
     options = current_codegen_options()
     pipeline = _native_pipeline()
     arguments = list(NATIVE_PIPELINES[pipeline])
@@ -110,7 +110,7 @@ def _identity(plan, virtual, target_source, tools, limits):
                      '--mlir-print-ir-module-scope',*arguments]
     return dict(source_request_digest=plan.source.digest(), target_identity=plan.source.target_identity,
         virtual_sha256=sha256(virtual.encode()).hexdigest(), pipeline=pipeline,
-        pipeline_arguments=list(NATIVE_PIPELINES[pipeline]), codegen=asdict(options),
+        pipeline_arguments=list(NATIVE_PIPELINES[pipeline]), codegen=options.identity_record(),
         effective_pipeline_arguments=arguments,
         selected_io_memory_bytes=dram_slots()*TILE_BYTES,
         allocation_timeout_ms=current_allocation_wall_budget_ms(), search_limits=asdict(limits),
@@ -119,7 +119,8 @@ def _identity(plan, virtual, target_source, tools, limits):
         profile_sha256=AtlasNativeBinding.profile().digest(),
         target_inventory_sha256=_digest(target_source/'docs/selected-variant-inventory.json'),
         tool_sha256={name: _digest(tools/name) for name in ('atlas-opt','atlas-emit')},
-        capture_postspill=capture)
+        capture_postspill=capture,
+        **({"operand_reuse_requested": operand_reuse} if operand_reuse != "ordered" else {}))
 
 
 def _retain_checked(directory, record):
@@ -136,13 +137,15 @@ def _retain_checked(directory, record):
     return Sizing(directory,payload,files)
 
 
-def size_counted(plan, *, target_source=None, limits=None):
+def size_counted(plan, *, target_source=None, limits=None, operand_reuse=None):
     """Return a retained, checked route decision at the current exact settings."""
     from .quantized_loop import _execution_geometry, execution_layout, virtual_source
     from .region_composition import compile_virtual_with_receipt
 
     target_source = Path(target_source or os.environ.get('ATLAS_ROOT', Path(__file__).resolve().parents[2]))
     limits = SearchLimits() if limits is None else limits
+    from .quantized_operand_reuse import reuse_policy
+    operand_reuse = reuse_policy() if operand_reuse is None else operand_reuse
     geometry, end = _execution_geometry(plan)
     window = dram_slots()*TILE_BYTES
     io_base = _tile_io_base.get()
@@ -152,11 +155,14 @@ def size_counted(plan, *, target_source=None, limits=None):
                 native_publication=False)
     if io_base != DRAM_BASE:
         base['io_memory_base'] = io_base
+    if operand_reuse != 'ordered':
+        base['operand_reuse_requested'] = operand_reuse
     if end > io_base+window:
         return Sizing(None,_json(dict(base,route='k32_tiles',reason='selected_dram_window')))
-    virtual = virtual_source(plan,execution_layout(plan))
+    layout = execution_layout(plan, operand_reuse=operand_reuse)
+    virtual = virtual_source(plan,layout)
     tools = Path(os.environ.get('ATLAS_OOT_BIN_DIR',target_source/'build/bin'))
-    identity = _identity(plan,virtual,target_source,tools,limits)
+    identity = _identity(plan,virtual,target_source,tools,limits,operand_reuse)
     key = sha256(_json(identity)).hexdigest()
     if key in _CACHE:
         result = _CACHE[key]
@@ -199,7 +205,7 @@ def size_counted(plan, *, target_source=None, limits=None):
             raise
         # Static IMEM capacity needs no loop/helper interpretation. This is
         # not a claim about the one-million dynamic instruction bound.
-        if _identity(plan,virtual,target_source,tools,limits) != identity:
+        if _identity(plan,virtual,target_source,tools,limits,operand_reuse) != identity:
             raise ValueError('resource planning tools or settings changed')
         (directory/'resource-stderr.log').write_text(''.join(diagnostics))
         result = _retain_checked(directory,dict(base,identity=identity,resource_command=command,
@@ -216,7 +222,7 @@ def size_counted(plan, *, target_source=None, limits=None):
                   resource_prepared_virtual_sha256=sha256(prepared.encode()).hexdigest(),
                   untimed_instruction_bound=bound['instruction_bound'])
     if bound['exceeds_physical_instruction_limit']:
-        if _identity(plan,virtual,target_source,tools,limits) != identity:
+        if _identity(plan,virtual,target_source,tools,limits,operand_reuse) != identity:
             raise ValueError('resource planning tools or settings changed')
         result = _retain_checked(directory,dict(record,route='k32_tiles',reason='untimed_instruction_bound'))
         _CACHE.setdefault(key, result)
@@ -257,7 +263,7 @@ def size_counted(plan, *, target_source=None, limits=None):
     if type(word_limit) is not int or not 0 < word_limit <= 32768:
         raise ValueError('resource plan lacks the selected instruction memory limit')
     if len(program['instructions']) > word_limit:
-        if _identity(plan,virtual,target_source,tools,limits) != identity:
+        if _identity(plan,virtual,target_source,tools,limits,operand_reuse) != identity:
             raise ValueError('sizing tools or settings changed during compilation')
         (checked/'atlas-machine.mlir').write_text(machine)
         (checked/'physical-program.json').write_bytes(_json(program))
@@ -268,7 +274,7 @@ def size_counted(plan, *, target_source=None, limits=None):
     final = instruction_bound(virtual,machine,program)
     if final['instruction_bound'] < bound['instruction_bound']:
         raise NativeCompilationError('compile_error','resource plan is not a lower bound of the checked pipeline')
-    if _identity(plan,virtual,target_source,tools,limits) != identity:
+    if _identity(plan,virtual,target_source,tools,limits,operand_reuse) != identity:
         raise ValueError('sizing tools or settings changed during compilation')
     (checked/'atlas-machine.mlir').write_text(machine)
     (checked/'physical-program.json').write_bytes(_json(program))
@@ -317,13 +323,14 @@ def _check_construction_evidence(plan, compiled, sizing, route, role, manifest):
             raise ValueError('quantized construction evidence changed while reading')
     if not names:
         return
-    virtual = virtual_source(plan,execution_layout(plan))
+    layout = execution_layout(plan, operand_reuse=sizing.get('operand_reuse_requested', 'ordered'))
+    virtual = virtual_source(plan,layout)
     identity = sizing.get('identity',{})
     if (payloads['source-virtual.mlir'] != virtual.encode()
             or identity.get('virtual_sha256') != sha256(virtual.encode()).hexdigest()
             or identity.get('source_request_digest') != plan.source.digest()
             or identity.get('target_identity') != plan.source.target_identity
-            or identity.get('codegen') != asdict(current_codegen_options())
+            or identity.get('codegen') != current_codegen_options().identity_record()
             or identity.get('profile_sha256') != AtlasNativeBinding.profile().digest()
             or identity.get('allocation_timeout_ms') != current_allocation_wall_budget_ms()
             or identity.get('search_limits') != asdict(SearchLimits())
@@ -388,7 +395,7 @@ def publish_route(plan, compiled, sizing, *, target_source=None):
     identity = record.get('identity')
     if identity is not None and (identity['tool_sha256'] != tool_hashes
             or identity['profile_sha256'] != AtlasNativeBinding.profile().digest()
-            or identity['codegen'] != asdict(current_codegen_options())
+            or identity['codegen'] != current_codegen_options().identity_record()
             or identity['allocation_timeout_ms'] != current_allocation_wall_budget_ms()):
         raise ValueError('sizing context changed before native publication')
     programs = []
@@ -532,8 +539,12 @@ def selected_route(plan, compiled):
             (compiled/'atlas-machine.mlir').read_text(),
             json.loads((compiled/'physical-program.json').read_text()), schema=bound['schema'])
         actual['scalar_fallback_tile_budget'] = fallback_tiles(plan)
-        from .quantized_loop import execution_layout
-        actual['restoration_admission'] = execution_layout(plan)['restoration_admission']
+        from .quantized_loop import execution_layout, virtual_source
+        execution = json.loads((compiled/'execution_plan.json').read_text())
+        layout = execution_layout(plan, operand_reuse=sizing.get('operand_reuse_requested', 'ordered'))
+        if execution != layout or (compiled/'atlas-virtual.mlir').read_text() != virtual_source(plan, layout):
+            raise ValueError('counted publication execution schedule differs')
+        actual['restoration_admission'] = layout['restoration_admission']
         if actual != bound or not actual['admitted']:
             raise ValueError('counted publication physical instruction proof differs')
         expected = [dict(path='.',binary_sha256=manifest['binary_sha256'])]

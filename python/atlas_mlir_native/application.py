@@ -223,7 +223,9 @@ class AtlasApplicationAdapter:
         from .binding import _native_pipeline
         from .publication_options import deterministic_receipts_enabled
         from .quantized_operand_reuse import reuse_policy
+        from merlin.semantic_compiler.codegen import current_codegen_options
 
+        operand_reuse = reuse_policy()
         names = {node.id: f"node_{i}" for i, node in enumerate(region.nodes)}
         choice = alternative.to_dict()
         choice.pop("id")
@@ -254,7 +256,8 @@ class AtlasApplicationAdapter:
                 "pipeline": _native_pipeline(),
                 "capture_postspill": os.environ.get("ATLAS_CAPTURE_POSTSPILL") == "1",
                 "deterministic_receipts": deterministic_receipts_enabled(),
-                "quantized_operand_reuse": reuse_policy(),
+                **({"exact_float_unroll": True} if current_codegen_options().exact_float_unroll else {}),
+                **({"quantized_operand_reuse": operand_reuse} if operand_reuse != "ordered" else {}),
             },
         }
 

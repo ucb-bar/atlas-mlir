@@ -8,6 +8,26 @@ from test_exact_float_device import BIN, host_reference, request, scalar_execute
 
 
 class UnaryTileTest(unittest.TestCase):
+    def setUp(self):
+        from merlin.semantic_compiler.codegen import CodegenOptions, codegen_options
+        from float_isa_c import executor
+        executor.cache_clear()
+        options = codegen_options(CodegenOptions(exact_float_unroll=True))
+        options.__enter__()
+        self.addCleanup(options.__exit__, None, None, None)
+        self.addCleanup(executor.cache_clear)
+
+    def test_expansion_requires_explicit_option_independently_of_image_cap(self):
+        from atlas_mlir_native.exact_float_device import prepare_plan, virtual_program
+        from merlin.semantic_compiler.codegen import CodegenOptions, codegen_options
+        for operation in ('bf16_to_f32', 'f32_to_bf16', 'bf16_neg', 'f32_neg'):
+            plan = prepare_plan(request(operation, 35))
+            for cap in (None, 131072):
+                with codegen_options(CodegenOptions(program_size_limit_bytes=cap)):
+                    self.assertIn('^scalar_lane(', virtual_program(plan))
+                with codegen_options(CodegenOptions(program_size_limit_bytes=cap, exact_float_unroll=True)):
+                    self.assertNotIn('^scalar_lane(', virtual_program(plan))
+
     def test_explicit_image_cap_retains_compact_counted_kernels(self):
         from atlas_mlir_native.exact_float_device import prepare_plan, machine_program, virtual_program
         from merlin.semantic_compiler.codegen import CodegenOptions, codegen_options
@@ -70,7 +90,7 @@ class UnaryTileTest(unittest.TestCase):
 
         for operation in ('bf16_to_f32', 'f32_to_bf16', 'bf16_neg', 'f32_neg'):
             with tempfile.TemporaryDirectory(prefix='atlas-expanded-unary-') as directory, \
-                    codegen_options(CodegenOptions(io_memory_bytes=67108864)):
+                    codegen_options(CodegenOptions(io_memory_bytes=67108864, exact_float_unroll=True)):
                 destination = Path(directory) / 'compiled'
                 source = request(operation, MAX_LEAF_ELEMENTS[operation])
                 manifest = compile_source(None, source, target_source=ROOT,

@@ -396,21 +396,52 @@ def _virtual(
         c("seed_bytes", ob)
         effect("dma_load_bf16", "nb", "seed_loaded", ["seed_tile", "seed_bytes"], ["i32", "i32"], ("seed_value", bf16))
         tile_product("first", "seed_loaded", a_row, w_row, "seed_value", cached=0 if cache_a else None)
-    if cache_a:
-        current, value = "first_result_s", "first_result"
-        # Static slot identities require a bounded unrolled K body. Stage
-        # weights in groups of four while consuming K strictly in order.
-        for first in range(1, kc, 4):
+    def ordered_steps(prefix, count, before, ap, wp, value, cached_start=None):
+        # Stage at most four tile pairs before consuming them. Eight
+        # transfers fit the generic DMA staging windows. Their first
+        # uses still govern waits, so later operand transfers can run
+        # while earlier ordered BF16 contractions execute.
+        prior_right = wp
+        for first in range(0, count, 4):
             steps = []
-            for index in range(first, min(first + 4, kc)):
-                prefix = f"cached_step{index}"
-                c(prefix + "_offset", index * wb)
-                lines.append(f"    %{prefix}_wp = arith.addi %{w_row}, %{prefix}_offset : i32")
-                current = tile_operands(prefix, current, None, prefix + "_wp", index)
-                steps.append(prefix)
-            for prefix in steps:
-                tile_product(prefix, current, None, None, value, loaded=True)
-                current, value = prefix + "_result_s", prefix + "_result"
+            prior_left = ap
+            if cached_start is None:
+                prior_right = wp
+            for index in range(first, min(first + 4, count)):
+                step = f"{prefix}_{index}"
+                left, right = ap, wp
+                if cached_start is not None and index:
+                    c(step + "_w_offset", wb)
+                    lines.append(f"    %{step}_wp = arith.addi %{prior_right}, %{step}_w_offset : i32")
+                    right = step + "_wp"
+                elif index:
+                    # Consecutive operands in one DMA staging group use
+                    # one tile-sized increment. This keeps the constants
+                    # in RV32's immediate range and shortens pointer lives.
+                    increment = index != first
+                    c(step + "_a_offset", ab if increment else index * ab)
+                    c(step + "_w_offset", wb if increment else index * wb)
+                    lines.extend(
+                        (
+                            f"    %{step}_ap = arith.addi %{prior_left if increment else ap}, %{step}_a_offset : i32",
+                            f"    %{step}_wp = arith.addi %{prior_right if increment else wp}, %{step}_w_offset : i32",
+                        )
+                    )
+                    left, right = step + "_ap", step + "_wp"
+                before = tile_operands(step, before, left, right,
+                                       None if cached_start is None else cached_start + index)
+                prior_left, prior_right = left, right
+                steps.append(step)
+            for step in steps:
+                tile_product(step, before, None, None, value, loaded=True)
+                before, value = step + "_result_s", step + "_result"
+        return before, value
+
+    if cache_a:
+        c("cached_w_step", wb)
+        lines.append(f"    %cached_wfirst = arith.addi %{w_row}, %cached_w_step : i32")
+        current, value = ordered_steps("cached_step", kc - 1, "first_result_s", None,
+                                       "cached_wfirst", "first_result", cached_start=1)
         lines.append(f"    cf.br ^store(%{current}, %{value} : {state}, {bf16})")
     elif kc > 1 and k_unroll > 1:
         # Replicate complete, ordered tile steps. The reset remains first, and
@@ -434,39 +465,6 @@ def _virtual(
             f"    cf.cond_br %ku_more, ^ku_body(%kus : {state}), ^ku_tail(%kus, %ku_value : {state}, {bf16})",
             f"  ^ku_body(%kub: {state}):",
         ]
-
-        def ordered_steps(prefix, count, before, ap, wp, value):
-            # Stage at most four tile pairs before consuming them. Eight
-            # transfers fit the generic DMA staging windows. Their first
-            # uses still govern waits, so later operand transfers can run
-            # while earlier ordered BF16 contractions execute.
-            for first in range(0, count, 4):
-                steps = []
-                prior_left, prior_right = ap, wp
-                for index in range(first, min(first + 4, count)):
-                    step = f"{prefix}_{index}"
-                    left, right = ap, wp
-                    if index:
-                        # Consecutive operands in one DMA staging group use
-                        # one tile-sized increment. This keeps the constants
-                        # in RV32's immediate range and shortens pointer lives.
-                        increment = index != first
-                        c(step + "_a_offset", ab if increment else index * ab)
-                        c(step + "_w_offset", wb if increment else index * wb)
-                        lines.extend(
-                            (
-                                f"    %{step}_ap = arith.addi %{prior_left if increment else ap}, %{step}_a_offset : i32",
-                                f"    %{step}_wp = arith.addi %{prior_right if increment else wp}, %{step}_w_offset : i32",
-                            )
-                        )
-                        left, right = step + "_ap", step + "_wp"
-                    before = tile_operands(step, before, left, right)
-                    prior_left, prior_right = left, right
-                    steps.append(step)
-                for step in steps:
-                    tile_product(step, before, None, None, value, loaded=True)
-                    before, value = step + "_result_s", step + "_result"
-            return before, value
 
         current, value = ordered_steps("ku_step", factor, "kub", "ku_ap", "ku_wp", "ku_value")
         c("ku_stride", 1)

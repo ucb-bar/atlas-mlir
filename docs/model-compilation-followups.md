@@ -1,25 +1,19 @@
 # Additional model compilation optimizations
 
-These changes are stacked on Atlas PR #50 at
-`db72637b61145aa0ab241a1138010ffa9ff78050`. The companion Merlin branch is
-`perf/model-compilation-followups`, based on PR #63 at
-`66703436231ab0d27c4e39b64bb1307e0ca4c9bc`. Both branches contain only the
-additional commits above those bases. Retarget to `feat/atlas-model-compilation`
-after the prerequisite PRs merge; squash merges require rebasing the additional
-commits onto the new target first.
+These changes are part of Atlas PR #50 and Merlin PR #63.
 
 | Additional feature | Owner | Selection |
 | --- | --- | --- |
 | Share identical pure values, preserving provider groups and public outputs | Merlin | `--application-common-values` |
 | Compose adjacent exact dense reshapes | Merlin | `--application-compose-reshapes` |
-| Bound invariant operand residency by caller-supplied storage and expansion limits | Merlin | Target API |
-| Remove per-element loop/address overhead in exact casts and sign flips | Atlas | Default; an explicit program-size cap retains compact loops |
+| Bound invariant operand residency by caller-supplied storage and expansion limits | Atlas | Target-local API |
+| Remove per-element loop/address overhead in exact casts and sign flips | Atlas | `--exact-float-unroll` (off by default) |
 | Reuse quantized activation rows across output columns, with ordered K arithmetic and exponent restoration | Atlas MXU1 | `ATLAS_QUANTIZED_OPERAND_REUSE=row-cache` |
 
 The Merlin flags apply to `native-compile --application` and the corresponding
 source verification. Both source transforms are off by default and preserve
-replayable receipts. MXU1 row caching is also off by default and requires the
-companion Merlin operand planner. The default ordered path and the cast changes
+replayable receipts. MXU1 row caching is also off by default and uses the
+target-local operand planner. The default ordered path and the cast changes
 remain usable without that planner.
 
 The existing MXU0 A/W cache, PACK repair, compiler materialization cache, counted
@@ -30,7 +24,7 @@ or cross-launch residency.
 
 The cast change preserves exact source arithmetic and complete input validation.
 BF16 add/sub and their exceptional scalar fallback are unchanged. Expanded unary
-images cost more instruction bytes; an explicit image cap selects compact kernels.
+images cost more instruction bytes; the default keeps compact kernels regardless of the image cap.
 No model instruction or memory limit is raised.
 
 See [exact float regions](exact-float-device.md) and
@@ -38,15 +32,14 @@ See [exact float regions](exact-float-device.md) and
 
 ## Validation status
 
-The implementation commits are complete and ready for code review. The full-layer
-replay audit remains unresolved; further debugging was stopped at the user's
-request after reproducing host-side corruption independently of the NPU. Do not
-treat the provisional timing below as an error-free benchmark.
+The implementation commits are ready for code review. The historical full-layer
+replay audit remains unresolved after reproducing host-side corruption
+independently of the NPU. Do not treat the provisional timing below as an error-free benchmark.
 
-The final Atlas source passed 53 focused tests and 19 subtests, all 28 native
+The historical Atlas source passed 53 focused tests and 19 subtests, all 28 native
 CTests, and 14 additional quantized integration tests with 15 subtests under
 `row-cache`. Two MXU0 integration tests also passed with their required legacy
-model pin (20 subtests). Merlin passed 194 focused tests and 14 subtests, structure,
+model pin (20 subtests). The historical Merlin source passed 194 focused tests and 14 subtests, structure,
 lint, dependency, source-layout, artifact-layout and documentation checks.
 The access-registry bwrap test and 18 wiring-gate findings reproduce unchanged on
 the unmodified Merlin #63 base; they are not claimed as passing.
@@ -87,14 +80,12 @@ decode of the original file matched the expected hash. This establishes that
 host-side corruption can occur independently of these compiler changes. The
 specific host fault and the earlier replay failures are not individually resolved.
 
-Before debugging was stopped, the mixed-state diagnostics retained 1,187 results
+The mixed-state diagnostics retained 1,187 results
 (one pre-simulation snapshot-hash failure), and a separate mixed-kernel diagnostic
 retained 86 passing results. These partial runs are not presented as completed
 suites. No simulator, arithmetic, memory guard or verification check was relaxed
 to obtain a passing result.
 
-Local evidence is under the companion Merlin worktree's
-`out/artifacts/followup-audit/` (`results.json`, the original progress/error logs,
-final compilation equivalence, and focused-test logs), with Atlas build/test
-logs under `out/followup-audit/`. Generated model data and binary artifacts are
-not included in the source commits.
+Historical evidence consists of results, original progress/error logs, final
+compilation equivalence, and focused-test and build logs. That local evidence,
+generated model data, and binary artifacts are not included in the source commits.

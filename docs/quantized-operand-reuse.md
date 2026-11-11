@@ -6,13 +6,10 @@ tiles. The default, `ordered`, keeps the existing counted schedule. Unknown
 values are errors. The option selects a transport schedule; it does not select
 a different precision policy or recode weights.
 
-Merlin's `semantic_compiler.operand_reuse.plan_operand_reuse` decides whether a
-complete immutable operand fits the caller's capacity and expansion limits and
-has multiple consumers. Its byte accounting is independent of target geometry.
-The Atlas provider establishes invariance across the N loop and supplies tile
-sizes and limits. The provider requires the Merlin change
-`perf(compiler): plan bounded invariant operand reuse` on the companion
-`perf/model-compilation-followups` branch based on Merlin PR #63.
+Atlas's `quantized_operand_reuse.activation_residency` decides whether a
+complete immutable operand fits the target's capacity and expansion limits and
+has multiple consumers. The Atlas provider establishes invariance across the N
+loop and supplies tile sizes and limits. The capacity bound lives in the Atlas provider and needs no companion Merlin module.
 
 The initial target policy admits at most 64 K32 tiles / 64 KiB of activation
 cache and requires at least two output-column tiles. This bounds static code
@@ -51,8 +48,10 @@ the optional multiply epilogue and its status behavior.
 The policy participates in the application materialization identity. Counted
 image sizing also hashes the complete emitted virtual source, so changing the
 policy cannot reuse an ordered image as a cached one or vice versa.
-Keep the same setting during compilation, source verification, and C export;
-the generated runtime itself does not read this environment variable.
+A row-cache request is recorded in the execution plan, which is unchanged for
+the default ordered policy, and replayed during sizing,
+binding, source verification, and C export; those replays and the generated runtime
+do not read this environment variable.
 
 This extension is restricted to the quantized MXU1 path. It adds no MXU0 operand
 cache, PACK repair, compiler cache, or program residency implementation; those

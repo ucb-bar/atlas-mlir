@@ -119,10 +119,8 @@ def qualified_vector(b,p):
 def virtual_program(p):
     from .exact_float_device import _valid,_compute
     from merlin.semantic_compiler.codegen import current_codegen_options
-    # Retain the compact route under an explicitly selected image-size cap.
-    # Fixed-offset expansion is bounded by one physical tile, but may exceed
-    # a caller's smaller cap even when the original counted kernel fits.
-    expand_unary=current_codegen_options().program_size_limit_bytes is None
+    # Preserve qualified compact images unless expansion is explicitly selected.
+    expand_unary=current_codegen_options().exact_float_unroll
     lines=['module {',f'  func.func @exact_float() -> {S} attributes {{atlas.input_dram_base = {p.io_memory_base} : i64, atlas.input_dram_bytes = {len(p.operands)*p.input_bytes} : i64, atlas.output_dram_base = {p.output_address} : i64, atlas.output_dram_bytes = {p.output_bytes+32} : i64}} {{',f'    %start = "atlas.virtual_start"() : () -> {S}']
     b=Builder(lines);c=b.constant;op=b.binary;cmp=b.compare
     for slot in ('left','right','result','pairs','status'):b.slot(slot)

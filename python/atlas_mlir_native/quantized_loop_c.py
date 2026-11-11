@@ -42,7 +42,7 @@ def prepare_c_package(source, compiled, name, *, target_source):
     if KernelRequest.from_record(json.loads((compiled/"source-request.json").read_text())).digest() != source.digest():
         raise ValueError("already-quantized native source differs from its publication")
     execution = json.loads((compiled/"execution_plan.json").read_text())
-    if execution != execution_layout(plan):
+    if execution != execution_layout(plan, operand_reuse=execution.get("operand_reuse_requested", "ordered")):
         raise ValueError("already-quantized loop execution ABI differs from its publication")
     if sha256((target_source/"docs/selected-variant-inventory.json").read_bytes()).hexdigest() != manifest["target_inventory_sha256"]:
         raise ValueError("already-quantized runtime differs from its checked target inventory")

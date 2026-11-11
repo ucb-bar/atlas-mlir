@@ -65,12 +65,13 @@ def _execution_geometry(plan):
                 status_address=status, status_bytes=2048, **extra), end
 
 
-def execution_layout(plan):
+def execution_layout(plan, *, operand_reuse=None):
+    from .quantized_operand_reuse import schedule_record
     geometry, end = _execution_geometry(plan)
     if end > _tile_io_base.get() + dram_slots()*TILE_BYTES:
         raise NativeCompilationError("resource_limit", "quantized loop buffers exceed selected DRAM window")
     return dict(schema="atlas.quantized_loop_execution.v1", operation="mxu1_cap448_looped_ordered",
-                **geometry,
+                **geometry, **schedule_record(plan, operand_reuse),
                 status_encoding='little-endian u32: 0=admitted; 1=exponent, readout, or fallback resource/domain refusal',
                 restoration_admission=dict(scalar_fallback_tile_budget=fallback_tiles(plan),
                     successful_exponent_domain=('full_scalar_admission' if fallback_tiles(plan) else 'vector_domain_only'),
@@ -86,8 +87,11 @@ def virtual_source(plan, layout):
         tile_bytes = (1024, 1024, 2048)
         buffer_bytes = (layout['input_buffer_bytes'][0], layout['input_buffer_bytes'][1], layout['output_bytes'])
     from .region_composition import rematerialize_scalar_constants
-    from .quantized_operand_reuse import activation_residency
+    from .quantized_operand_reuse import schedule_record
 
+    schedule = schedule_record(plan, layout.get('operand_reuse_requested', 'ordered'))
+    if any(layout.get(key) != schedule.get(key) for key in ('operand_reuse_requested', 'operand_reuse')):
+        raise ValueError('recorded quantized operand reuse schedule differs')
     restoration = Restoration(plan, layout, scalar_fallback=bool(fallback_tiles(plan)))
     virtual = _virtual(Geometry(), tuple(layout['input_addresses'][:2]), layout['output_addresses'][0],
                        unit=1, k_unroll=8 if prod(plan.batch_shape) == 1 else 1,
@@ -95,7 +99,7 @@ def virtual_source(plan, layout):
                        shared_weight=not plan.source.node(plan.operand_ids[1]).type.shape[:-2],
                        exponent_pages=restoration.pages(), restoration=restoration,
                        output_window_bytes=layout['output_bytes']+layout['status_bytes'],
-                       cache_a=activation_residency(plan) is not None)
+                       cache_a=schedule.get('operand_reuse', 'ordered') == 'row-cache')
     return rematerialize_scalar_constants(virtual)
 
 
@@ -141,7 +145,8 @@ def _compile_source(snapshot, source, plan, *, target_source, destination, limit
         publish_route(plan,Path(destination),sizing,target_source=target_source)
         (Path(destination)/'row-block-refusals.json').write_text(json.dumps(row_refusals,sort_keys=True,indent=2)+'\n')
         return result
-    layout = execution_layout(plan)
+    policy = sizing.record().get('operand_reuse_requested', 'ordered')
+    layout = execution_layout(plan, operand_reuse=policy)
     selections = {}
     for role, body in (("reset", plan.reset), ("continue", plan.continuation)):
         selected = snapshot.select(body, limits=limits)
@@ -177,7 +182,7 @@ def _compile_source(snapshot, source, plan, *, target_source, destination, limit
     destination.mkdir(parents=True, exist_ok=False)
     # Sizing is not native publication: semantic body selection above and
     # source attestation below still run for this exact request and snapshot.
-    sizing = size_counted(plan,target_source=target_source,limits=limits)
+    sizing = size_counted(plan,target_source=target_source,limits=limits,operand_reuse=policy)
     if sizing.record()['route'] != 'counted':
         raise NativeCompilationError('resource_limit','counted sizing changed during semantic selection')
     machine = sizing.read('checked/atlas-machine.mlir').decode()
