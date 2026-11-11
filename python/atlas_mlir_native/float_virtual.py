@@ -8,7 +8,14 @@ P='!atlas.virtual_spill'
 
 class Builder(ScalarBuilder):
     def __init__(self,lines):
-        super().__init__(lines); self.state='%start'
+        super().__init__(lines); self.state='%start'; self.lane_constants=None
+    def constant(self,number):
+        if self.lane_constants is None:
+            return super().constant(number)
+        number &= 0xffffffff
+        if number not in self.lane_constants:
+            self.lane_constants[number]=super().constant(number)
+        return self.lane_constants[number]
     def names(self,count):
         result=[f'%scalar{self.serial+i}' for i in range(count)]; self.serial+=count; return result
     def slot(self,name):
@@ -21,10 +28,31 @@ class Builder(ScalarBuilder):
         self.state=state; return tile
     def load(self,slot,index,width):
         state,value=self.names(2)
-        self.lines.append(f'    {state}, {value} = "atlas.virtual_slot_load"({self.state},%{slot},{index}) {{kind = "{"lhu" if width==2 else "lw"}", byte_offset = 0 : i32}} : ({S},{P},i32) -> ({S},i32)')
+        operand='' if isinstance(index,int) else f',{index}'
+        type_='' if isinstance(index,int) else ',i32'
+        offset=index*width if isinstance(index,int) else 0
+        self.lines.append(f'    {state}, {value} = "atlas.virtual_slot_load"({self.state},%{slot}{operand}) {{kind = "{"lhu" if width==2 else "lw"}", byte_offset = {offset} : i32}} : ({S},{P}{type_}) -> ({S},i32)')
         self.state=state; return value
     def store(self,slot,index,value,width):
-        self.state=self.value(f'"atlas.virtual_slot_store"({self.state},%{slot},{value},{index}) {{kind = "{"sh" if width==2 else "sw"}", byte_offset = 0 : i32}} : ({S},{P},i32,i32) -> {S}')
+        operand='' if isinstance(index,int) else f',{index}'
+        type_='' if isinstance(index,int) else ',i32'
+        offset=index*width if isinstance(index,int) else 0
+        self.state=self.value(f'"atlas.virtual_slot_store"({self.state},%{slot},{value}{operand}) {{kind = "{"sh" if width==2 else "sw"}", byte_offset = {offset} : i32}} : ({S},{P},i32{type_}) -> {S}')
+    def unary_lanes(self,count,accumulators,body):
+        """Use immediate slot offsets within one bounded unary tile.
+
+        Constants are shared only within this straight-line block. The outer
+        counted DMA loop and the complete preflight/publication barrier stay
+        intact; scalar live ranges cannot cross a CFG boundary here.
+        """
+        assert self.lane_constants is None
+        self.lane_constants={}
+        try:
+            for index in range(count):
+                accumulators=body(index,accumulators)
+            return accumulators
+        finally:
+            self.lane_constants=None
     def splat(self,bits): return self.value(f'"atlas.virtual_vpu_splat"() {{bits = {bits} : i32}} : () -> {T}')
     def vector_binary(self,kind,a,b): return self.value(f'"atlas.virtual_vpu_binary"({a},{b}) {{kind = "{kind}"}} : ({T},{T}) -> {T}')
     def dma_load(self,address,bytes_):
@@ -90,6 +118,11 @@ def qualified_vector(b,p):
 
 def virtual_program(p):
     from .exact_float_device import _valid,_compute
+    from merlin.semantic_compiler.codegen import current_codegen_options
+    # Retain the compact route under an explicitly selected image-size cap.
+    # Fixed-offset expansion is bounded by one physical tile, but may exceed
+    # a caller's smaller cap even when the original counted kernel fits.
+    expand_unary=current_codegen_options().program_size_limit_bytes is None
     lines=['module {',f'  func.func @exact_float() -> {S} attributes {{atlas.input_dram_base = {p.io_memory_base} : i64, atlas.input_dram_bytes = {len(p.operands)*p.input_bytes} : i64, atlas.output_dram_base = {p.output_address} : i64, atlas.output_dram_bytes = {p.output_bytes+32} : i64}} {{',f'    %start = "atlas.virtual_start"() : () -> {S}']
     b=Builder(lines);c=b.constant;op=b.binary;cmp=b.compare
     for slot in ('left','right','result','pairs','status'):b.slot(slot)
@@ -108,7 +141,8 @@ def virtual_program(p):
                 def validate(index,acc):
                     a,d=b.inputs(p,index)
                     return [op('or',acc[0],_valid(b,p,a,d))]
-                bad,=b.loop('preflight_lane',lanes,[bad],validate)
+                bad,=(b.loop('preflight_lane',lanes,[bad],validate) if binary or not expand_unary
+                      else b.unary_lanes(lanes,[bad],validate))
             else:
                 if binary:
                     def classify(index,acc):
@@ -156,7 +190,10 @@ def virtual_program(p):
                 def calculate(index,unused):
                     a,d=b.inputs(p,index);b.store('result',index,_compute(b,p,a,d),p.output_width)
                     return []
-                b.loop('scalar_lane',lanes,[],calculate)
+                if binary or not expand_unary:
+                    b.loop('scalar_lane',lanes,[],calculate)
+                else:
+                    b.unary_lanes(lanes,[],calculate)
                 if binary:
                     lines.append(f'    cf.br ^publish({b.state} : {S})')
                     lines.append(f'  ^publish(%publish_state: {S}):');b.state='%publish_state'
