@@ -15,6 +15,7 @@ Start with the [repository README](../README.md) for the build, and the
 | [Baremetal-IDE integration](baremetal-c-integration.md) | Generated C/H, embedded program/data, platform callbacks and the host build. |
 | [Instruction memory](instruction-memory.md) | Final image size, branch ranges, reduction unrolling and profiling. |
 | [Quantized operand reuse](quantized-operand-reuse.md) | Optional MXU1 activation residency, shared Merlin planning, limits, and validation. |
+| [Model compilation followups](model-compilation-followups.md) | Additional optimizations, prerequisite PRs, and feature switches. |
 | [Single-program profiling](single-program-profiling.md) | Connected graphs in one image, model execution and measurement scope. |
 | [Hardware status](hardware-status.md) | Per-instruction status, RTL/model differences, and how to rerun the RTL core tests. |
 | [`selected-variant-inventory.json`](selected-variant-inventory.json) | Machine-readable list of decoder modes; read by the build and tests. |
