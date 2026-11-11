@@ -11,7 +11,7 @@ from pathlib import Path
 from merlin.semantic_compiler.target_binding import NativeCompilationError
 from .already_quantized import prepare_source
 from .binding import (DRAM_BASE, TILE_BYTES, MXU1_CAP448_POLICY, NATIVE_CHECKS,
-                      RTL_REVISION, _native_pipeline, dram_slots, _run)
+                      RTL_REVISION, _native_pipeline, _tile_io_base, dram_slots, _run)
 from .looped_tiling import _virtual
 from .exponent_restoration import exponent_geometry, Restoration, fast_factor_range
 from .restoration_budget import fallback_tiles, instruction_bound
@@ -39,7 +39,8 @@ def _execution_geometry(plan):
     rhs = plan.source.node(plan.operand_ids[1])
     sizes = [batch*mc*kc*1024, (batch if rhs.type.shape[:-2] else 1)*nc*kc*1024]
     output_bytes = batch*mc*nc*2048
-    addresses = [DRAM_BASE, DRAM_BASE + ((sizes[0]+2047)//2048)*2048]
+    base = _tile_io_base.get()
+    addresses = [base, base + ((sizes[0]+2047)//2048)*2048]
     cursor = addresses[1] + ((sizes[1]+2047)//2048)*2048
     exponents = exponent_geometry(plan)
     exponent_bytes = [geometry['bytes'] for geometry in exponents]
@@ -66,7 +67,7 @@ def _execution_geometry(plan):
 
 def execution_layout(plan):
     geometry, end = _execution_geometry(plan)
-    if end > DRAM_BASE + dram_slots()*TILE_BYTES:
+    if end > _tile_io_base.get() + dram_slots()*TILE_BYTES:
         raise NativeCompilationError("resource_limit", "quantized loop buffers exceed selected DRAM window")
     return dict(schema="atlas.quantized_loop_execution.v1", operation="mxu1_cap448_looped_ordered",
                 **geometry,
@@ -96,11 +97,29 @@ def virtual_source(plan, layout):
     return rematerialize_scalar_constants(virtual)
 
 
-def compile_source(snapshot, source, *, target_source, destination, limits):
+def compile_source(snapshot, source, *, target_source, destination, limits, io_memory_base=DRAM_BASE):
+    """Compile with the counted frame at io_memory_base; only the counted route relocates."""
+    from .memory_windows import dma_span_in_window
+
+    if type(io_memory_base) is not int or io_memory_base % TILE_BYTES:
+        raise NativeCompilationError('compile_error', 'I/O base must be an aligned integer')
+    token = _tile_io_base.set(io_memory_base)
+    try:
+        plan = prepare_source(source)
+        if io_memory_base != DRAM_BASE and not dma_span_in_window(io_memory_base, _execution_geometry(plan)[1]-io_memory_base):
+            raise NativeCompilationError('compile_error', 'complete quantized loop frame must fit one DMA window')
+        return _compile_source(snapshot, source, plan, target_source=target_source,
+                               destination=destination, limits=limits)
+    finally:
+        _tile_io_base.reset(token)
+
+
+def _compile_source(snapshot, source, plan, *, target_source, destination, limits):
     from .quantized_loop_sizing import size_counted, publish_route
 
-    plan = prepare_source(source)
     sizing = size_counted(plan,target_source=target_source,limits=limits)
+    if sizing.record()['route'] != 'counted' and _tile_io_base.get() != DRAM_BASE:
+        raise NativeCompilationError('compile_error', 'custom I/O base requires the counted quantized loop route')
     if sizing.record()['route'] == 'k32_tiles':
         if getattr(plan, 'epilogue_precision', None) is not None:
             raise NativeCompilationError('resource_limit', 'overlarge contraction must retain its separate epilogue')

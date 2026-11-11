@@ -18,7 +18,7 @@ from merlin.semantic_compiler.search import SearchLimits
 from merlin.semantic_compiler.target_binding import NativeCompilationError, verify_native_publication
 
 from .binding import (AtlasNativeBinding, DRAM_BASE, TILE_BYTES, NATIVE_CHECKS,
-                      NATIVE_PIPELINES, RTL_REVISION, _native_pipeline, _run, dram_slots)
+                      NATIVE_PIPELINES, RTL_REVISION, _native_pipeline, _run, _tile_io_base, dram_slots)
 from .restoration_budget import MAX_INSTRUCTIONS, instruction_bound, fallback_tiles
 
 # Process-local decisions avoid repeating expensive planning for the same
@@ -145,11 +145,14 @@ def size_counted(plan, *, target_source=None, limits=None):
     limits = SearchLimits() if limits is None else limits
     geometry, end = _execution_geometry(plan)
     window = dram_slots()*TILE_BYTES
+    io_base = _tile_io_base.get()
     base = dict(schema='atlas.quantized_counted_sizing.v1', source_request_digest=plan.source.digest(),
                 target_identity=plan.source.target_identity, selected_io_memory_bytes=window,
-                counted_frame_bytes=end-DRAM_BASE, physical_instruction_limit=MAX_INSTRUCTIONS,
+                counted_frame_bytes=end-io_base, physical_instruction_limit=MAX_INSTRUCTIONS,
                 native_publication=False)
-    if end > DRAM_BASE+window:
+    if io_base != DRAM_BASE:
+        base['io_memory_base'] = io_base
+    if end > io_base+window:
         return Sizing(None,_json(dict(base,route='k32_tiles',reason='selected_dram_window')))
     virtual = virtual_source(plan,execution_layout(plan))
     tools = Path(os.environ.get('ATLAS_OOT_BIN_DIR',target_source/'build/bin'))
@@ -509,7 +512,8 @@ def selected_route(plan, compiled):
             or route.get('restoration_placement') != ('device' if route['route']=='counted' else 'host')):
         raise ValueError('quantized route launch or restoration publication differs')
     _,end = _execution_geometry(plan)
-    if sizing.get('counted_frame_bytes') != end-DRAM_BASE:
+    io_base = _tile_io_base.get()
+    if sizing.get('counted_frame_bytes') != end-io_base or sizing.get('io_memory_base', DRAM_BASE) != io_base:
         raise ValueError('quantized publication frame geometry differs')
     if route['route'] == 'counted':
         bound = json.loads((compiled/'restoration-instruction-bound.json').read_text())
@@ -536,7 +540,7 @@ def selected_route(plan, compiled):
     else:
         reason = route['reason']
         if reason == 'selected_dram_window':
-            admitted = end > DRAM_BASE+dram_slots()*TILE_BYTES
+            admitted = end > io_base+dram_slots()*TILE_BYTES
         elif reason in {'untimed_instruction_bound','physical_instruction_bound'}:
             key = 'untimed_instruction_bound' if reason.startswith('untimed') else 'physical_instruction_bound'
             value = sizing.get(key)

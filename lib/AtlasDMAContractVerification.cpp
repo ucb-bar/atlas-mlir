@@ -7,6 +7,7 @@
 #include "Atlas/AtlasStream.h"
 #include "Atlas/AtlasTarget.h"
 #include "Atlas/AtlasVerificationContext.h"
+#include "Atlas/AtlasVirtualAllocation.h"
 #include "Atlas/AtlasVirtualVerification.h"
 #include "mlir/IR/Builders.h"
 #include "llvm/ADT/DenseMap.h"
@@ -260,6 +261,25 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedDMAMemory(
   // analyzed loop (AtlasStream::dmaMayCross), so this block's pending transfers
   // are the ones the block before it ended with.
   std::vector<Transfer> pending;
+  // A DMA window in VMEM banks 3-5 aliases the program's own memory, so a
+  // program using it must keep every VMEM access in banks 0-2. DMA and vector
+  // accesses must be proven there. A scalar access with an unknown address is
+  // a spill-slot access, which the buffer contract bounds to the fixed spill
+  // frame, so that frame must end in bank 2.
+  bool vmemBusWindow = false;
+  auto busBase = [&](Operation *op) {
+    for (StringRef name : {"atlas.input_dram_base", "atlas.output_dram_base", "atlas.control_dram_base"})
+      if (auto value = op->getAttrOfType<IntegerAttr>(name))
+        vmemBusWindow |= value.getInt() >= 0 && atlasVmemBusSpan(uint64_t(value.getInt()), 1);
+  };
+  ModuleOp module = ctx.module;
+  busBase(module);
+  module.walk([&](func::FuncOp function) { busBase(function); });
+  Operation *highVmem = nullptr;
+  auto programVmem = [&](Operation *op, const Span &span) {
+    if (!highVmem && (!span.start || !span.bytes || *span.start + *span.bytes > kAtlasProgramVmemBytes))
+      highVmem = op;
+  };
   for (size_t block = 0; block < s.starts.size(); ++block) {
     RegValues regs = s.entry[block];
     auto base = bases[block];
@@ -276,6 +296,8 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedDMAMemory(
           if (!range.empty())
             accesses.push_back({range.begin, uint32_t(range.end - range.begin), write});
       }
+      for (const Span &access : accesses)
+        programVmem(s.ops[loop->begin], access);
       for (const Span &access : accesses)
         for (Transfer &other : pending)
           if (failed(compare(s.ops[loop->begin], access, other.vmem, "VMEM", other.launch)))
@@ -310,6 +332,9 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedDMAMemory(
         if (transfer.vmem.start && transfer.vmem.bytes &&
             *transfer.vmem.start + *transfer.vmem.bytes > kAtlasVmemBytes)
           return op->emitOpError("DMA memory transfer exceeds VMEM capacity");
+        if (transfer.dram.start)
+          vmemBusWindow |= atlasVmemBusSpan(*transfer.dram.start, 1);
+        programVmem(op, transfer.vmem);
         for (Transfer &other : pending)
           if (failed(compare(op, transfer.vmem, other.vmem, "VMEM", other.launch)) ||
               failed(compare(op, transfer.dram, other.dram, "DRAM", other.launch)))
@@ -337,9 +362,17 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedDMAMemory(
                   (*access.start + kAtlasRegisterBytes - 1) / kVmemBankBytes)
             return op->emitOpError("vector DMA memory access has invalid VMEM span");
         }
+        programVmem(op, access);
         for (Transfer &other : pending)
           if (failed(compare(op, access, other.vmem, "VMEM", other.launch)))
             return failure();
+      }
+      OpClass kind = s.instrs[i].op->opClass;
+      if (kind == OpClass::ScalarLoad || kind == OpClass::ScalarStore) {
+        ScalarAccess touched = scalarAccess(s.instrs[i], regs);
+        if (touched.first)
+          programVmem(op, {*touched.first >= 0 ? std::optional<uint64_t>(*touched.first) : std::nullopt,
+                           uint32_t(touched.bytes), touched.write});
       }
       // Only scalar ALU operations yield constants. Loads, AUIPC and link
       // results conservatively become unknown; SELI leaves scalar regs alone.
@@ -349,5 +382,12 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedDMAMemory(
       return pending.front().launch.emitOpError(
           "DMA memory transfer crosses a basic-block boundary");
   }
+  if (vmemBusWindow && highVmem)
+    return highVmem->emitOpError("program VMEM access must be proven below ")
+           << kAtlasProgramVmemBytes << " bytes when DMA uses the VMEM bank 3-5 window";
+  const FixedResourcePlacement fixed = VirtualAllocationPlan().fixed();
+  if (vmemBusWindow && uint64_t(fixed.spillWord) + fixed.spillWindowWords > kAtlasProgramVmemBytes / 4)
+    return module.emitOpError("spill frame must end below ")
+           << kAtlasProgramVmemBytes << " bytes when DMA uses the VMEM bank 3-5 window";
   return success();
 }
