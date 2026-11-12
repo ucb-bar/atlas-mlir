@@ -175,6 +175,7 @@ def _virtual(
     output_window_bytes=None,
     cache_a=False,
     cache_a_tiles=None,
+    wide_cache_a=False,
 ) -> str:
     """Emit only typed operations; scheduling and physical placement stay downstream."""
     if type(batch_count) is not int or batch_count < 1 or type(shared_weight) is not bool:
@@ -187,12 +188,16 @@ def _virtual(
         raise ValueError("K unroll factor must be an integer in [1,64]")
     if type(cache_a) is not bool:
         raise ValueError("activation residency must be boolean")
+    if type(wide_cache_a) is not bool or (wide_cache_a and not cache_a):
+        raise ValueError("wide activation residency requires an explicit active cache")
     mc, nc, kc = plan.counts
     cached_tiles = kc if cache_a_tiles is None else cache_a_tiles
     if cache_a_tiles is not None and (not cache_a or type(cache_a_tiles) is not int):
         raise ValueError("a cached prefix requires activation residency and an integer tile count")
-    if cache_a and (unit != 1 or not 1 <= cached_tiles <= min(kc, 64)):
-        raise ValueError("quantized activation residency requires MXU1 and at most 64 K tiles")
+    from .quantized_operand_reuse import WIDE_CACHE_TILES
+    cache_limit = WIDE_CACHE_TILES if wide_cache_a else 64
+    if cache_a and (unit != 1 or not 1 <= cached_tiles <= min(kc, cache_limit)):
+        raise ValueError("quantized activation residency requires MXU1 and a bounded tile count")
     ab, wb, ob = plan.tile_bytes
     a, w = addresses
     state, fp8, bf16 = "!atlas.virtual_state", "!atlas.virtual_fp8", "!atlas.virtual_bf16"

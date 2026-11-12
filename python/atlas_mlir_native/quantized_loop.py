@@ -100,7 +100,9 @@ def virtual_source(plan, layout):
                        exponent_pages=restoration.pages(), restoration=restoration,
                        output_window_bytes=layout['output_bytes']+layout['status_bytes'],
                        cache_a=schedule.get('operand_reuse', 'ordered') in ('row-cache', 'prefix-cache'),
-                       cache_a_tiles=schedule.get('operand_reuse_cached_tiles'))
+                       cache_a_tiles=schedule.get('operand_reuse_cached_tiles'),
+                       wide_cache_a=(schedule.get('operand_reuse_requested') == 'wide-cache'
+                                     and 'operand_reuse_cached_tiles' in schedule))
     return rematerialize_scalar_constants(virtual)
 
 

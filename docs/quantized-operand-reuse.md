@@ -86,3 +86,22 @@ or weight reuse across token rows.
 and tails, K=5632, M/N padding, batches, varied scales, exponent rejection, full
 protected-memory equality, exact DMA-byte savings, instruction bounds and
 native sizing/binding/export with a changed environment policy.
+
+## Wider bounded activation rows
+
+`ATLAS_QUANTIZED_OPERAND_REUSE=wide-cache` admits up to 192 resident K32
+activation tiles (192 KiB). This covers the whole K=5632 down-projection row;
+longer reductions cache a bounded prefix and stream the remainder in order.
+The original `ordered`, `row-cache`, and `prefix-cache` policies are unchanged.
+
+The 192-tile cap is a construction limit, not a larger hardware budget. Native
+allocation, instruction-count, timing and program-size checks still apply to
+every candidate. The existing 240 KiB spill frame is unchanged. The explicit
+wide policy and exact cache count are recorded and checked when replaying an
+execution plan. Generated code expands only the capped resident prefix.
+
+`test_quantized_wide_reuse.py` covers full rows, the first streamed tile after
+192 resident tiles, M/N padding, multiple batches, nonuniform scales, refusal,
+protected memory, exact read savings and native export/rebinding. Twenty-four
+legacy virtual programs were also checked byte-identical across MXU0/MXU1,
+cached/streamed schedules and K unrolling.

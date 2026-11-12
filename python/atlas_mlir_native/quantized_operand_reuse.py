@@ -4,13 +4,16 @@ import os
 
 from merlin.semantic_compiler.target_binding import NativeCompilationError
 
+POLICIES = ('ordered', 'row-cache', 'prefix-cache', 'wide-cache')
+WIDE_CACHE_TILES = 192
+
 
 def reuse_policy():
     """Validate the selected policy before generating or caching target code."""
     policy = os.environ.get('ATLAS_QUANTIZED_OPERAND_REUSE', 'ordered')
-    if policy not in ('ordered', 'row-cache', 'prefix-cache'):
+    if policy not in POLICIES:
         raise NativeCompilationError('unsupported_semantics',
-                                     'ATLAS_QUANTIZED_OPERAND_REUSE must be ordered, row-cache, or prefix-cache')
+                                     'ATLAS_QUANTIZED_OPERAND_REUSE must be one of ' + ', '.join(POLICIES))
     return policy
 
 
@@ -31,20 +34,20 @@ class ActivationResidency:
 
 def activation_residency(plan, policy=None):
     policy = reuse_policy() if policy is None else policy
-    if policy not in ('ordered', 'row-cache', 'prefix-cache'):
+    if policy not in POLICIES:
         raise ValueError('unsupported recorded quantized operand reuse policy')
     if policy == 'ordered':
         return None
 
-    # This schedule expands one static slot per K tile. Bound code expansion
-    # to 64 tiles and cache storage to 64 KiB, leaving the rest of the selected
-    # 240 KiB spill frame for exponent restoration and ordinary allocation.
-    # These are candidate limits, not allocation or instruction-budget proofs.
+    # Static slots bound both storage and code expansion. The wider opt-in
+    # leaves 48 KiB of the selected 240 KiB frame for ordinary allocation.
+    # These candidate limits never replace native allocation/image proofs.
+    limit = WIDE_CACHE_TILES if policy == 'wide-cache' else 64
     tiles = (plan.k + 31) // 32
-    if policy == 'prefix-cache':
-        tiles = min(tiles, 64)
+    if policy in ('prefix-cache', 'wide-cache'):
+        tiles = min(tiles, limit)
     residency = ActivationResidency(tiles, 1024, (plan.n + 31) // 32)
-    if residency.consumers < 2 or residency.tile_count > 64 or residency.resident_bytes > 65536:
+    if residency.consumers < 2 or residency.tile_count > limit:
         return None
     return residency
 
@@ -54,6 +57,10 @@ def schedule_record(plan, policy=None):
     residency = activation_residency(plan, requested)
     if requested == 'ordered':
         return {}
+    if requested == 'wide-cache' and residency is not None:
+        return dict(operand_reuse_requested=requested,
+                    operand_reuse='row-cache' if residency.tile_count == (plan.k + 31) // 32 else 'prefix-cache',
+                    operand_reuse_cached_tiles=residency.tile_count)
     if residency is not None and residency.tile_count < (plan.k + 31) // 32:
         return dict(operand_reuse_requested=requested, operand_reuse='prefix-cache',
                     operand_reuse_cached_tiles=residency.tile_count)
