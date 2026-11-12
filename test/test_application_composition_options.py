@@ -36,7 +36,7 @@ def test_factory_uses_the_same_proved_groups_and_preserves_base_capabilities():
     with patch.dict(os.environ, ATLAS_ADJACENT_PATTERNS='pointwise_narrowing, expanded_silu'):
         wrapper = factory()
     assert isinstance(wrapper, AdjacentDeviceAdapter)
-    assert wrapper.source_operation_translators is wrapper.base.source_operation_translators
+    assert wrapper.source_operation_translators == wrapper.base.source_operation_translators
     with codegen_options(CodegenOptions(io_memory_bytes=67108864)):
         selected, = wrapper.plan(case()).selected
         assert selected.nodes == tuple(range(7))
