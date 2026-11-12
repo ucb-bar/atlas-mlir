@@ -236,3 +236,40 @@ instruction execution. Consequently, this table is not a full end-to-end hardwar
 latency estimate. NPU active counts differ slightly from independent fresh-launch
 runs because the host model uses its persistent restart/completion timeline.
 The paired-cache layer has not been included in this host comparison.
+
+## Vector preflight for qualified binary tiles
+
+`ATLAS_EXACT_BINARY_VECTOR_PREFLIGHT=1` adds a sufficient-domain test before
+BF16 add/sub's existing scalar input classification. VPU min/max reductions
+across both absolute operands prove that every lane is nonzero and has magnitude
+between `2**-32` and `2**32`. A successful proof selects the unchanged qualified
+arithmetic. Zeros, subnormals, NaNs and other values outside that interval use the
+existing classification and fallback. The whole-input validation barrier still
+precedes every output store. The option defaults to off and participates in the
+compilation/materialization identity.
+
+| Paired-cache layer | Scalar preflight | Vector preflight |
+| --- | ---: | ---: |
+| Device cycles | 138,103,943 | 125,179,302 |
+| Executed instructions | 31,530,988 | 18,251,147 |
+| Dispatches | 95 | 95 |
+
+This saves **12,924,641 cycles (9.36%)** on the fixed layer, and all 131,072
+output words remain identical to the independent FX reference. Together with the
+previous changes, cycles are 44.79% below the retained 226,725,080-cycle package.
+The fresh native compilation/source replay took 161 seconds; Rust instruction
+simulation took 4.2 seconds and the generated-C run took 5.0 seconds.
+
+On uniform BF16 `1.0 + 0.5`, a 1,024-element kernel drops from 50,295 to 11,047
+cycles; a 131,072-element kernel drops from 6,761,628 to 1,737,884. The latter
+image is 6,552 bytes, with a proved worst-case instruction bound of 77,408,404.
+Fallback tiles pay for the additional vector test; these are measured improvements
+for the stated inputs, not universal speedups.
+
+Validation exhaustively checks the stronger-domain predicate for all 65,536
+BF16 encodings against the pinned arithmetic oracle. Directed Rust execution
+covers add/sub, short padded tails, mixed fast/fallback tiles, signed zero,
+subnormals, domain endpoints, infinities, overflow and late NaNs in either
+operand, with immutable-input and rejection-before-publication checks. The
+focused gate passed 14 tests and six subtests; the related arithmetic/application
+regression gate passed 27 tests with two optional runtime checks skipped.

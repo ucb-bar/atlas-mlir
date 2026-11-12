@@ -148,6 +148,40 @@ def binary_lane_groups():
     return value == '1'
 
 
+def binary_vector_preflight():
+    """Opt into a vector proof for nonzero operands in the qualified domain."""
+    from merlin.semantic_compiler.target_binding import NativeCompilationError
+    value = os.environ.get('ATLAS_EXACT_BINARY_VECTOR_PREFLIGHT', '0')
+    if value not in ('0', '1'):
+        raise NativeCompilationError('unsupported_semantics', 'ATLAS_EXACT_BINARY_VECTOR_PREFLIGHT must be 0 or 1')
+    return value == '1'
+
+
+def binary_vector_refusal(b):
+    """Min/max of both absolute operands proves a stronger nonzero domain.
+
+    Selected RTL min/max compares ordered BF16 bits, including NaNs. For every
+    encoding x, max(x, x * -1) is in [0x2f80, 0x4f80] exactly when abs(x) is.
+    The two reductions preserve extrema across all lanes. Zeros and everything
+    outside this interval decline to the existing scalar classification.
+    """
+    negative_one = b.splat(0xbf80)
+    absolute = []
+    for slot in ('left', 'right'):
+        value = b.restore(slot)
+        absolute.append(b.vector_binary('max', value, b.vector_binary('mul', value, negative_one)))
+    extrema = []
+    for kind in ('min', 'max'):
+        value = b.vector_binary(kind, *absolute)
+        for axis in ('col', 'row'):
+            value = b.value(f'"atlas.virtual_vpu_reduce"({value}) {{kind = "{axis}_{kind}"}} : ({T}) -> {T}')
+        b.save('pairs', value)
+        extrema.append(b.load('pairs', 0, 2))
+    minimum, maximum = extrema
+    return b.binary('or', b.compare('ult', minimum, b.constant(0x2f80)),
+                    b.compare('ult', b.constant(0x4f80), maximum))
+
+
 def binary_qualified_refusal(b, left, right):
     """The qualified vector domain implies valid input arithmetic."""
     c, op, cmp = b.constant, b.binary, b.compare
@@ -194,6 +228,7 @@ def virtual_program(p):
     # Preserve qualified compact images unless expansion is explicitly selected.
     expand_unary=current_codegen_options().exact_float_unroll
     group_binary=binary_lane_groups()
+    vector_preflight=binary_vector_preflight()
     lines=['module {',f'  func.func @exact_float() -> {S} attributes {{atlas.input_dram_base = {p.io_memory_base} : i64, atlas.input_dram_bytes = {len(p.operands)*p.input_bytes} : i64, atlas.output_dram_base = {p.output_address} : i64, atlas.output_dram_bytes = {p.output_bytes+32} : i64}} {{',f'    %start = "atlas.virtual_start"() : () -> {S}']
     b=Builder(lines);c=b.constant;op=b.binary;cmp=b.compare
     lanes=p.tile_lanes;tiles=p.input_bytes//(lanes*p.width)
@@ -218,6 +253,12 @@ def virtual_program(p):
                 b.save('right',b.dma_load(bp,lanes*p.width) if len(p.operands)>1 else a)
             if phase=='check':
                 if binary:
+                    if vector_preflight:
+                        outside = binary_vector_refusal(b)
+                        admitted = b.value(f'arith.cmpi eq, {outside}, {c(0)} : i32')
+                        lines.append(f'    cf.cond_br {admitted}, ^binary_checked({b.state},{c(0)} : {S},i32), ^scalar_qualified_check({b.state} : {S})')
+                        lines.append(f'  ^scalar_qualified_check(%scalar_check_state: {S}):')
+                        b.state = '%scalar_check_state'
                     lane_loop=b.checked_lane_groups if group_binary else b.loop
                     def qualified_lane(index,acc):
                         a,d=b.inputs(p,index)
