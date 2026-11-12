@@ -166,6 +166,107 @@ def _native_name(node):
     return None
 
 
+def _emit_like(graph, node, target, operands):
+    """Insert ``target(*operands)`` before ``node`` with fake-tensor metadata and node provenance."""
+    from torch._guards import detect_fake_mode
+    from torch.fx.passes.shape_prop import _extract_tensor_metadata
+
+    values = [item.meta["val"] if isinstance(item, torch.fx.Node) else item for item in operands]
+    with detect_fake_mode([node.meta["val"]]):
+        value = target(*values)
+    with graph.inserting_before(node):
+        result = graph.call_function(target, tuple(operands))
+    result.meta.update({key: item for key, item in node.meta.items() if key not in {"val", "tensor_meta"}},
+                       val=value, tensor_meta=_extract_tensor_metadata(value))
+    return result
+
+
+def _patch_im2col(graph, node):
+    """Non-overlapping patch im2col (stride = kernel, no padding or dilation) is a pure layout.
+
+    unfold(x)[b, (c, i, j), (p, q)] = x[b, c, p*kh + i, q*kw + j], which is
+    reshape(b, c, oh, kh, ow, kw), permute(0, 1, 3, 5, 2, 4), reshape(b, c*kh*kw, oh*ow).
+    """
+    x, kernel, dilation, padding, stride = node.args
+    value = x.meta["val"]
+    if (node.kwargs or list(dilation) != [1, 1] or list(padding) != [0, 0] or list(stride) != list(kernel)
+            or value.dim() != 4 or value.shape[2] % kernel[0] or value.shape[3] % kernel[1]):
+        return []
+    batch, channels, height, width = value.shape
+    kh, kw = kernel
+    oh, ow = height // kh, width // kw
+    current = _emit_like(graph, node, torch.ops.aten.reshape.default, [x, [batch, channels, oh, kh, ow, kw]])
+    current = _emit_like(graph, node, torch.ops.aten.permute.default, [current, [0, 1, 3, 5, 2, 4]])
+    current = _emit_like(graph, node, torch.ops.aten.reshape.default, [current, [batch, channels * kh * kw, oh * ow]])
+    if current.meta["val"].shape != node.meta["val"].shape or current.meta["val"].dtype != node.meta["val"].dtype:
+        raise ValueError(f"patch im2col layout changed the result ABI: {node.name}")
+    node.replace_all_uses_with(current)
+    graph.erase_node(node)
+    return [{"node": node.name, "operator": "im2col", "layout": "non-overlapping patches"}]
+
+
+def _split_native_tails(program):
+    """Rewrite bias and convolution tails of native contractions into their ordinary source nodes.
+
+    ``atlas::qlinear`` with a bias is the bias-free contraction followed by ``y + bias`` in the
+    layer dtype, and ``atlas::qconv2d`` is the same contraction on im2col codes followed by
+    ``RefQuantConv2d.forward``'s reshape, permute, reshape, and bias addition (atlas_fx_ops
+    defines both bodies this way). Codes, exponents, and bias tensors are passed unchanged.
+    """
+    from torch._guards import detect_fake_mode
+    from torch.fx.passes.shape_prop import _extract_tensor_metadata
+
+    graph, rewrites = program.graph, []
+    for node in list(graph.nodes):
+        if node.op == "call_function" and node.target is torch.ops.aten.im2col.default:
+            rewrites.extend(_patch_im2col(graph, node))
+            continue
+        name = _native_name(node)
+        if name not in {"qlinear", "qconv2d"}:
+            continue
+        args = dict(_bound_arguments(node))
+        bias = args["bias"]
+        if name == "qlinear" and bias is None:
+            continue
+        dtype = getattr(torch, args["out_dtype"])
+        if bias is not None and bias.meta["val"].dtype != dtype:
+            raise ValueError(f"native bias dtype differs from its layer dtype: {node.name}")
+        fake = detect_fake_mode([node.meta["val"]])
+        meta = {key: value for key, value in node.meta.items() if key not in {"val", "tensor_meta"}}
+
+        def emit(target, operands):
+            values = [item.meta["val"] if isinstance(item, torch.fx.Node) else item for item in operands]
+            with fake:
+                value = target(*values)
+            result = graph.call_function(target, tuple(operands))
+            result.meta.update(meta, val=value, tensor_meta=_extract_tensor_metadata(value))
+            return result
+
+        with graph.inserting_before(node):
+            current = emit(torch.ops.atlas.qlinear.default,
+                           [args["x_codes"], args["x_exp"], args["w_codes"], args["w_exp"], None,
+                            args["out_dtype"], args["weight_format"]])
+            if name == "qconv2d":
+                batch, height, width = args["batch"], args["out_h"], args["out_w"]
+                channels = args["w_codes"].meta["val"].shape[0]
+                current = emit(torch.ops.aten.reshape.default, [current, [batch, height * width, channels]])
+                current = emit(torch.ops.aten.permute.default, [current, [0, 2, 1]])
+                current = emit(torch.ops.aten.reshape.default, [current, [batch, channels, height, width]])
+                if bias is not None:
+                    bias = emit(torch.ops.aten.view.default, [bias, [1, -1, 1, 1]])
+            if bias is not None:
+                current = emit(torch.ops.aten.add.Tensor, [current, bias])
+        if current.meta["val"].shape != node.meta["val"].shape or current.meta["val"].dtype != node.meta["val"].dtype:
+            raise ValueError(f"native tail rewrite changed the result ABI: {node.name}")
+        node.replace_all_uses_with(current)
+        graph.erase_node(node)
+        rewrites.append({"node": node.name, "operator": name, "bias": bias is not None})
+    if rewrites:
+        graph.lint()
+        program.graph_module.recompile()
+    return rewrites
+
+
 def _calls(program, policy, buffers, *, allow_no_native_calls=False):
     from m2m.capture.trace import _literal, snapshot_exported_program
 
@@ -329,6 +430,7 @@ def atlas_fp8_adapter(model, example_inputs, *, contract_bytes, policy_bytes,
     required = {name for name, record in before.items() if record["source_name"].endswith((".weight_codes", ".weight_scale_exp"))}
     if not required <= set(buffers):
         raise ValueError("capture dropped declared raw codes or exponents")
+    tails = _split_native_tails(program)
     calls = _calls(program, policy, buffers, allow_no_native_calls=saved)
     native_sites = {call["site_id"] for call in calls}
     site_records = []
@@ -349,6 +451,7 @@ def atlas_fp8_adapter(model, example_inputs, *, contract_bytes, policy_bytes,
                           "bf16_opt_out": policy.get("bf16_opt_out", []),
                           "source_provenance": contract.get("provenance", {}),
                           "source_recipe": contract.get("recipe", {}),
+                          "native_tail_rewrites": tails,
                           "weight_conversion_performed": False, "pack_fold_performed": False}}
     if saved:
         manifest["atlas"]["saved_native_program"] = {

@@ -89,12 +89,17 @@ def test_repeated_calls_keep_bytes_roles_literals_and_node_ids(replay, tmp_path)
     linear = [call for call in calls if call["target"] == "atlas.qlinear.default"]
     assert [call["invocation"] for call in linear] == [0, 1]
     for call in linear:
-        assert [operand["role"] for operand in call["operands"]] == ["x_codes", "x_exp", "w_codes", "w_exp", "bias"]
+        # The bias is rewritten into a separate source addition after the bias-free contraction.
+        assert [operand["role"] for operand in call["operands"]] == ["x_codes", "x_exp", "w_codes", "w_exp"]
         assert call["operands"][0]["node_id"] == call["operands"][1]["node_id"]
         assert [operand["result_index"] for operand in call["operands"][:2]] == [0, 1]
         assert call["operands"][2]["buffer"] == "proj.weight_codes"
-        assert call["literals"] == {"out_dtype": "bfloat16", "weight_format": "atlas_e4m3"}
+        assert call["literals"] == {"bias": None, "out_dtype": "bfloat16", "weight_format": "atlas_e4m3"}
         assert call["results"] == [{"index": 0, "shape": [2, 3, 4], "dtype": "bfloat16"}]
+    assert manifest["atlas"]["native_tail_rewrites"] == [
+        {"node": node, "operator": "qlinear", "bias": True} for node in ("qlinear", "qlinear_1")]
+    adds = [node for node in program.graph.nodes if node.target is torch.ops.aten.add.Tensor]
+    assert len(adds) == 2 and all(str(node.args[0].target) == "atlas.qlinear.default" for node in adds)
     quantizers = [call for call in calls if call["target"] == "atlas.quantize_act.default"]
     assert all(call["literals"]["rows"] == 32 and call["literals"]["code_dtype"] == "uint8" for call in quantizers)
     assert manifest["atlas"]["buffers"]["proj.weight_codes"]["dtype"] == "uint8"
@@ -427,3 +432,30 @@ def test_mutations_fail_closed(replay, tmp_path, case, error):
             apply_external_quantization(model, inputs, config)
         else:
             invoke(replay)
+
+
+def test_native_conv_tail_and_patch_im2col_rewrite_exactly():
+    """qconv2d with a bias and its patch im2col become a bias-free qlinear and ordinary layout/add nodes."""
+    from atlas_m2m_adapter.adapter import _split_native_tails
+
+    class Patch(torch.nn.Module):
+        def forward(self, image, codes, exponent, bias):
+            columns = torch.ops.aten.im2col.default(image, [4, 4], [1, 1], [0, 0], [4, 4]).permute(0, 2, 1)
+            x_codes, x_exp = torch.ops.atlas.quantize_act(columns.reshape(16, -1), "static", "tensor", "ref", -2,
+                                                           "uint8")
+            return torch.ops.atlas.qconv2d(x_codes, x_exp, codes, exponent, bias, "bfloat16", "atlas_e4m3", 1, 4, 4)
+
+    torch.manual_seed(3)
+    image = torch.randn(1, 3, 16, 16).bfloat16()
+    codes = torch.randint(0, 0x7e, (8, 48), dtype=torch.uint8)
+    exponent = torch.full((8, 1), -6, dtype=torch.int32)
+    bias = torch.randn(8).bfloat16()
+    program = torch.export.export(Patch(), (image, codes, exponent, bias), strict=True)
+    expected = program.module()(image, codes, exponent, bias)
+    rewrites = _split_native_tails(program)
+    assert [row["operator"] for row in rewrites] == ["im2col", "qconv2d"]
+    targets = [str(node.target) for node in program.graph.nodes if node.op == "call_function"]
+    assert "aten.im2col.default" not in targets and "atlas.qconv2d.default" not in targets
+    assert targets.count("atlas.qlinear.default") == 1 and "aten.add.Tensor" in targets
+    actual = program.module()(image, codes, exponent, bias)
+    assert actual.dtype == expected.dtype and torch.equal(actual.view(torch.int16), expected.view(torch.int16))
