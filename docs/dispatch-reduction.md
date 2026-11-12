@@ -377,3 +377,26 @@ partial tiles, multiple row pairs, signed-zero operands, late rejected exponents
 immutable extra operands and whole-memory equality. Both routes retain ordinary
 native instruction/image proofs. The complete generated-C layer also passes all
 per-launch memory permissions and immutable-weight checks.
+
+## Avoid scanning padding at composed boundaries
+
+Device boundary checks now visit only the rows that can contain logical values.
+Column-to-row transitions inspect the packed logical column, and column broadcasts
+validate each source value once before copying its bits across the destination
+row. Destinations are still initialized to admitted padding; logical tails,
+negative-zero canonicalization, sticky rejection and atomic publication retain
+their original behavior. No intermediate input guard is removed.
+
+Directed small-column probes improve from 148,671 to 12,671 cycles for identity,
+145,629 to 12,829 for column-to-row, and 139,485 to 15,511 for broadcast. On the
+complete layer, the improvement is smaller: **114,955,518 to 114,427,634 cycles**,
+with **85 dispatches** and all 131,072 output words exact. Instructions fall from
+14,468,548 to 13,944,764. Compilation/source replay takes 161 seconds and Rust
+simulation takes 3.8 seconds.
+
+The directed Rust suite passes 33 tests and 11 subtests, with one legacy Python
+model gate skipped. Thirteen composition regressions and two subtests also pass,
+with one optional gate skipped. Coverage includes all three layouts, partial and
+multiple pages, non-power-of-two row counts, signed zero, raw NaN payloads when
+admitted, rejected logical values versus padding, immutable bytes, and sticky
+status across composed transitions.

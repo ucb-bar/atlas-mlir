@@ -123,22 +123,41 @@ def virtual_transition(*, source_address, destination_address, status_address,
     e.effect('save',['boundary_source',tile],[SLOT,BF16])
     e.effect('save',['boundary_destination','boundary_pad_tile'],[SLOT,BF16])
     invalid = e.load('boundary_status',zero)
+    # The destination is already padded. Visit only potentially logical rows
+    # for identity views, only row zero for column-to-row, and one source value
+    # per row for broadcasts. A power-of-two row span keeps indexing affine in
+    # bit operations while retaining the original logical-lane guard.
+    scan_rows = min(32, 1 << (rows - 1).bit_length())
+    scan_words = (16 * scan_rows if kind == 'identity' else
+                  (min(rows, 32) + 1) // 2 if kind == 'column_to_row' else min(rows, 32))
     e.emit(f'cf.br ^boundary_words(%{e.state}, %{zero}, %{invalid} : {STATE}, i32, i32)')
     e.lines.append(f'  ^boundary_words(%boundary_ws: {STATE}, %boundary_i: i32, %boundary_invalid: i32):')
-    more = e.cmp('ult','boundary_i',e.const(512))
+    more = e.cmp('ult','boundary_i',e.const(scan_words))
     e.emit(f'cf.cond_br %{more}, ^boundary_word_body(%boundary_ws : {STATE}), ^boundary_word_done(%boundary_ws, %boundary_invalid : {STATE}, i32)')
     e.lines.append(f'  ^boundary_word_body(%boundary_wb: {STATE}):')
     e.state = 'boundary_wb'
     invalid = 'boundary_invalid'
+    word_index = 'boundary_i'
+    if kind == 'identity' and scan_rows < 32:
+        # Each BF16 register holds 16 columns; keep both register halves.
+        half_words = scan_rows * 8
+        word_index = e.binary('ori', e.binary('andi', 'boundary_i', e.const(half_words - 1)),
+            e.binary('shli', e.binary('shrui', 'boundary_i', e.const(half_words.bit_length() - 1)), e.const(8)))
+    elif kind == 'column_to_row':
+        word_index = e.binary('ori', e.binary('andi', 'boundary_i', e.const(7)),
+            e.binary('shli', e.binary('shrui', 'boundary_i', e.const(3)), e.const(8)))
+    source_word = e.load('boundary_source', word_index) if kind == 'identity' else None
     result = []
-    for lane in range(2):
-        row = e.binary('shrui',e.binary('andi','boundary_i',e.const(255)),e.const(3))
-        column = e.binary('addi',e.binary('shli',e.binary('andi','boundary_i',e.const(7)),e.const(1)),
-                          e.binary('shli',e.binary('shrui','boundary_i',e.const(8)),e.const(4)))
-        if lane:
-            column = e.binary('addi',column,e.const(1))
+    for lane in range(1 if kind == 'broadcast_column' else 2):
+        row = 'boundary_i'
+        if kind != 'broadcast_column':
+            row = e.binary('shrui',e.binary('andi',word_index,e.const(255)),e.const(3))
+            column = e.binary('addi',e.binary('shli',e.binary('andi',word_index,e.const(7)),e.const(1)),
+                              e.binary('shli',e.binary('shrui',word_index,e.const(8)),e.const(4)))
+            if lane:
+                column = e.binary('addi',column,e.const(1))
         if kind == 'identity':
-            word = e.load('boundary_source','boundary_i')
+            word = source_word
             if lane:
                 word = e.binary('shrui',word,e.const(16))
             global_row = e.binary('addi',e.binary('shli','boundary_rt',e.const(5)),row)
@@ -162,8 +181,19 @@ def virtual_transition(*, source_address, destination_address, status_address,
         take = e.binary('subi',zero,e.flag(e.combine('andi',logical,admitted)))
         difference = e.binary('xori',code,e.const(pad))
         result.append(e.binary('xori',e.const(pad),e.binary('andi',difference,take)))
+    if kind == 'broadcast_column':
+        result *= 2
     packed = e.binary('ori',result[0],e.binary('shli',result[1],e.const(16)))
-    e.store('boundary_destination','boundary_i',packed)
+    if kind == 'broadcast_column':
+        # Replicate the checked raw bits, preserving signed zero and payloads.
+        # The row index is below 32, so all 16 immediate stores stay in the slot.
+        word_base = e.binary('shli', 'boundary_i', e.const(3))
+        for half in (0, 256):
+            for word in range(8):
+                e.effect('slot_store', ['boundary_destination', packed, word_base], [SLOT, 'i32', 'i32'],
+                    attrs=f' {{kind = "sw", byte_offset = {4 * (half + word)} : i32}}')
+    else:
+        e.store('boundary_destination',word_index,packed)
     index = e.binary('addi','boundary_i',e.const(1))
     e.emit(f'cf.br ^boundary_words(%{e.state}, %{index}, %{invalid} : {STATE}, i32, i32)')
     e.lines.append(f'  ^boundary_word_done(%boundary_wd: {STATE}, %boundary_bad: i32):')
