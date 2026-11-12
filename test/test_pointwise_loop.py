@@ -17,7 +17,7 @@ from test_looped_mnk import ROOT, build_snapshot
 
 def check_source_c_call(
     self, package, initial, binary, execute, values, wanted_bytes, invalid_values=(), *, source_dtype="f32",
-    output_dtype=None,
+    output_dtype=None, expected_status=0,
 ):
     from atlas_mlir_native.binding import DRAM_BASE
 
@@ -141,10 +141,11 @@ def check_source_c_call(
                 inputs,
                 ctypes.addressof(result) + 16,
             ),
-            0,
+            expected_status,
         )
         self.assertEqual(errors, [])
-        self.assertEqual(result.raw[16 : 16 + len(wanted_bytes)], wanted_bytes)
+        self.assertEqual(result.raw[16 : 16 + len(wanted_bytes)],
+                         wanted_bytes if expected_status == 0 else bytes([0xA7]) * len(wanted_bytes))
         self.assertEqual(result.raw[:16], bytes([0xA7]) * 16)
         self.assertEqual(
             result.raw[16 + len(wanted_bytes) : -1],

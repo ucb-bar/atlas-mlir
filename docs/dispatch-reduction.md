@@ -302,3 +302,29 @@ A separate all-pattern fusion experiment is exact but slower: 135,377,274 cycles
 and 87 dispatches before the widening change. Some larger groups reintroduce
 private casts or prevent the faster paired operand-cache schedule. It is not the
 recommended configuration; reducing launch count alone is insufficient.
+
+## Preserve narrowing when selecting a longer pointwise chain
+
+`adjacent_pointwise_chain` now also recognizes three selected pointwise
+operations followed by a private exact FP32-to-BF16 cast. It reuses the single
+pointwise narrowing proof, preserves every intermediate admission/canonicalization
+step, and publishes the final BF16 result directly. A cast with different
+rounding, layout, input, or escaping FP32 result is refused. The generated mixed
+input/output ABI retains its byte-range and alias checks.
+
+Directed generated-C execution through Rust covers rsqrt and division chains,
+compact column broadcasts, padded tails, signed zero, late invalid outer inputs,
+internal denominator rejection, immutable input bytes and atomic output
+publication. Three focused tests and two subtests pass; 26 composition/narrowing
+regression tests and six subtests pass, with one optional model gate skipped.
+
+For the full layer, select `adjacent_square_reduce`, `adjacent_reduction_scale`,
+`adjacent_pointwise_chain`, `pointwise_narrowing`, and `quantized_narrowing` in the
+adapter, with the preceding cache, unroll and vector-preflight options. This
+compiles 78 regions and runs exactly in **87 dispatches and 120,664,430 cycles**.
+It saves eight dispatches versus narrowing alone, with a **0.69% device-cycle
+increase** from internal device boundary checks. Those checks remain necessary;
+the tradeoff is explicit rather than treating every larger region as faster.
+The uncached compile/source replay takes 153 seconds; Rust simulation takes
+3.9 seconds. Quantized epilogues are excluded from this configuration because
+their current schedule disables paired operand reuse.
