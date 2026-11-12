@@ -107,6 +107,7 @@ class QuantizedPlan:
     epilogue_contract_operand: int | None = None
     epilogue_other_id: str | None = None
     epilogue_other_dtype: str | None = None
+    narrowing_input_id: str | None = None
 
     @property
     def output_id(self):
@@ -129,6 +130,11 @@ class QuantizedPlan:
                 arithmetic_order="unchanged ordered K chain, signed-exponent restoration, then original BF16 RNE multiply",
                 input_conversion="original other-operand encoder and guard; checked device admission of restored contraction",
                 physical_layout="contraction batch/M-tile/N-tile BF16 pair halves; positive-zero padding"))
+        if self.narrowing_input_id is not None:
+            record.update(schema="atlas.already_quantized_narrowing.v1", narrowing=dict(
+                input_id=self.narrowing_input_id, source_dtype="f32", output_dtype="bf16",
+                admission="restored finite normal BF16 or signed zero; exact FP32 widening",
+                arithmetic="unchanged ordered K and exponent restoration; omit widening then narrowing"))
         return record
 
 
@@ -150,6 +156,9 @@ def prepare_source(source):
             and pure[1].op in ("f32_mul", "bf16_mul")):
         from .quantized_epilogue import prepare_source as prepare_epilogue
         return prepare_epilogue(source)
+    if len(pure) == 2 and pure[0].op in OPS and pure[1].op == "f32_to_bf16":
+        from .quantized_narrowing import prepare_source as prepare_narrowing
+        return prepare_narrowing(source)
     from .source_translation import lower_already_quantized_contraction
     intake = lower_already_quantized_contraction(source)
     result = source.node(intake.output_id)

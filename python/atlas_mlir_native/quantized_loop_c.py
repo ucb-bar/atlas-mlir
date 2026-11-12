@@ -24,6 +24,8 @@ def prepare_c_package(source, compiled, name, *, target_source):
     from .c_runtime import program_array, runtime_headers, runtime_members
     plan = prepare_source(source)
     if selected_route(plan,compiled) == 'k32_tiles':
+        if plan.narrowing_input_id is not None:
+            raise ValueError('overlarge contraction must retain its separate narrowing cast')
         if getattr(plan, 'epilogue_precision', None) is not None:
             raise ValueError('overlarge contraction must retain its separate epilogue')
         from .already_quantized import prepare_c_package as prepare_tiles
@@ -239,4 +241,7 @@ int {name}_source_dispatch(void *context,const void *const *inputs,void *const *
                           extra_address=execution['input_addresses'][2],extra_bytes=extra_bytes,
                           extra_layout='contraction batch/M-tile/N-tile BF16 pair halves; positive-zero padding',
                           failure_output='unchanged; shared device status checked before output transfer'))
+    if plan.narrowing_input_id is not None:
+        record.update(kind='quantized_narrowing', schema='atlas.quantized_narrowing_c_package.v1',
+                      narrowing=plan.record()['narrowing'])
     return record,files

@@ -47,23 +47,30 @@ def prepare_source(source):
 
 
 def alternatives(adapter, source, choices):
+    return adjacent_alternatives(adapter, source, choices,
+                                 kind='quantized_epilogue', consumer_kind='pointwise', prepare=prepare_source)
+
+
+def adjacent_alternatives(adapter, source, choices, *, kind, consumer_kind, prepare):
+    """Offer a recognized quantized group only after counted sizing succeeds."""
     from merlin.xdsl_dialects.lowering.global_plan import CycleInterval
     from .quantized_loop_sizing import size_counted
 
     choices = list(choices)
     singles = sorted((row for row in choices if len(row.nodes) == 1), key=lambda row: row.nodes)
     pure = [node for node in source.nodes if node.effect == 'pure']
-    adapter._quantized_epilogue_groups = {}
+    groups = {}
+    setattr(adapter, "_" + kind + "_groups", groups)
     for first, last in zip(singles, singles[1:]):
         if (first.placement != 'accelerator' or last.placement != 'accelerator'
                 or last.nodes[0] != first.nodes[0] + 1
                 or dict(first.metadata).get('kind') != 'already_quantized'
-                or dict(last.metadata).get('kind') != 'pointwise'):
+                or dict(last.metadata).get('kind') != consumer_kind):
             continue
         ids = tuple(pure[row.nodes[0]].id for row in (first, last))
         try:
             region = extract_semantic_region(source, ids)
-            plan = prepare_source(region)
+            plan = prepare(region)
         except (ValueError, NativeCompilationError):
             continue
         # Only a proved construction refusal declines an otherwise supported
@@ -73,13 +80,13 @@ def alternatives(adapter, source, choices):
             continue
         arena = sizing['counted_frame_bytes']
         ports = {port.buffer: port for row in (first, last) for port in (*row.inputs, *row.outputs)}
-        adapter._quantized_epilogue_groups[region.digest()] = plan
-        choices.append(replace(first, id='quantized_epilogue_' + first.id,
-            nodes=(*first.nodes, *last.nodes), implementation='source_quantized_epilogue',
+        groups[region.digest()] = plan
+        choices.append(replace(first, id=kind + '_' + first.id,
+            nodes=(*first.nodes, *last.nodes), implementation='source_' + kind,
             inputs=tuple(ports[key] for key in plan.input_ids), outputs=tuple(ports[key] for key in region.outputs),
             demands=(), occupancy=(), scratch_bytes=arena,
             cycles=CycleInterval.unknown('checked contraction epilogue; no measured cost'),
-            metadata=(('kind', 'quantized_epilogue'),)))
+            metadata=(('kind', kind),)))
     return tuple(choices)
 
 
@@ -88,13 +95,13 @@ def compile_group(group, snapshot, *, target_source, destination, limits):
     compile_source(snapshot, group.source, target_source=target_source, destination=destination, limits=limits)
 
 
-def export_group(group, compiled, name, *, target_source):
+def export_group(group, compiled, name, *, target_source, kind='quantized_epilogue'):
     from merlin.compile.semantic_application import CompiledCRegion
     from .c_runtime import RUNTIME_SHARED_FILES
     from .quantized_loop_c import prepare_c_package
 
     record, files = prepare_c_package(group.source, Path(compiled), name, target_source=Path(target_source))
-    record.update(kind='quantized_epilogue', launches_per_invocation=1,
+    record.update(kind=kind, launches_per_invocation=1,
                   native_manifest_sha256=sha256((Path(compiled) / 'manifest.json').read_bytes()).hexdigest())
     return CompiledCRegion(name + '_source_dispatch', name + '.h', group.input_ids, (group.output_id,),
                            files, RUNTIME_SHARED_FILES, ('segments/' + name,), record)

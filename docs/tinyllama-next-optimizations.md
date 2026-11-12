@@ -73,11 +73,84 @@ execution across four geometries and native export), plus 29 regression tests
 and four subtests. The separate optional qualified-native wide functional test
 was not selected; the new cycle tests execute the unchanged model directly.
 
+The full-size down projection was subsequently replayed with the recorded layer's
+actual operands and scales: M=64, N=2048, K=5632. Both images were freshly built
+from this branch and executed on the same pinned cycle model above.
+
+| | Ordered | Prefix cache |
+| --- | ---: | ---: |
+| Cycles | 35,804,760 | 29,631,705 |
+| DRAM bytes loaded + stored | 46,925,824 | 38,668,288 |
+| DRAM service cycles | 31,771,037 | 26,180,285 |
+| Program bytes | 3,476 | 11,040 |
+
+This saves **6,173,055 cycles (17.24%)** and **8,257,536 DRAM bytes** in that
+projection. Every retained reference read matched, all protected bytes were
+checked independently, and the complete final memory hashes were identical.
+The initial memory SHA256 was
+`f67cfb760a68838810c3456ac22eaa59ebe44281d7f4bcc2ea04ec0cbdcbf29c`.
+The local replay driver and complete roofline results are
+`out/next-audit/bench_down.py` and `out/next-audit/down-benchmark.json`.
+DRAM service still dominates; the next reuse work should reduce the remaining
+weight/activation traffic before trying to increase MXU arithmetic throughput.
+This is a projection measurement, not a newly validated whole-layer total.
+
+## Publish quantized BF16 through an exact narrowing cast
+
+The existing opt-in `AdjacentDeviceAdapter` now recognizes a quantized
+contraction with an FP32 result consumed only by an adjacent exact
+`f32_to_bf16` cast. Successful Atlas restoration already produces finite BF16
+values, widened exactly for FP32 publication. Publishing the original BF16
+bits directly removes that widening and subsequent narrowing without changing
+the NPU program, ordered K arithmetic, scale admission or sticky rejection status.
+
+```python
+from atlas_mlir_native.composition_adapter import AdjacentDeviceAdapter
+
+# Wrap the existing AtlasApplicationAdapter passed to application compilation.
+adapter = AdjacentDeviceAdapter(adapter)
+```
+
+Recognition requires the original cast policy and dense identity indexing,
+matching shapes, unchanged code/exponent inputs, and a private intermediate.
+An escaping FP32 result, another rounding policy, or a host consumer retains
+the separate operations. Only a successfully sized counted contraction is
+offered; overlarge images retain the original alternatives. Native tool errors
+continue to propagate. Output publication remains atomic after device admission.
+The fused group is not opted into the application's materialization cache.
+
+The recorded TinyLlama layer's `op112r0` P.V and `op114r0_s0` narrowing pair
+selects and compiles through this adapter. For its `[1,32,64,64]` result, the
+fold removes eight cast launches at the current default chunk size and avoids
+publishing a 512 KiB FP32 intermediate. The final dense BF16 output is 256 KiB.
+The generated virtual device program is identical to the original contraction.
+No additional cycle speedup is claimed for this fold until a complete execution
+comparison is measured. Its local compilation receipt is
+`out/next-audit/pv-narrowing-compiled/package.json`.
+
+`test_quantized_narrowing.py` covers real adapter selection, escaping results,
+changed policies/ports, sizing refusal and tool failures, unchanged device
+programs, every finite BF16 encoding against Merlin's independent narrowing
+implementation, native publication/rebinding, generated C dispatch, aliases,
+late invalid inputs, and NPU execution with padded/batched outputs and a late
+exponent rejection. Run it with the existing epilogue regression gates:
+
+```
+ATLAS_RUN_NPU_MODEL=1 python -m pytest -q \
+  test/test_quantized_narrowing.py test/test_quantized_epilogue.py \
+  test/test_quantized_epilogue_lowering.py
+```
+
+All 13 tests and nine subtests passed. The broader fallback, DRAM-boundary,
+epilogue and materialization suite passed 31 tests and 21 subtests, with one
+optional test skipped. All implementation changes are in Atlas; Merlin's
+existing region selector consumes the target-proved alternative unchanged.
+
 ## Remaining work
 
 PR #44 already implements A/W caching, accumulator retention and allocation
 fallbacks in the older model-compilation path. Those changes are not duplicated
 here. The outstanding work is broader panel reuse beyond the resident prefix,
-weight reuse combined with activation reuse, and shared graph/transport changes
-for eliminating intermediate materialization. Those features are not implemented
+weight reuse combined with activation reuse, and removal of further intermediate
+buffers beyond the exact narrowing pair above. Those features are not implemented
 by these commits and need their own correctness and performance gates.
