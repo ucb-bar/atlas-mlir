@@ -132,7 +132,7 @@ class ScalarBroadcastCompilationTest(unittest.TestCase):
         import npu_model
         model_root = Path(npu_model.__file__).resolve().parents[1]
         self.assertEqual(subprocess.check_output(["git", "-C", str(model_root), "rev-parse", "HEAD"], text=True).strip(),
-                         "47b8599d8ffbe5ddd96059ffe2b5be2427a410f5")
+                         "b97b2f5a97e432141c4ef8504bec396651d77a8f")
         torch.set_num_threads(1)
         inventory = json.loads((ROOT / "docs/selected-variant-inventory.json").read_text())
         with tempfile.TemporaryDirectory(prefix="atlas-broadcast-model-") as directory:

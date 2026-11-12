@@ -309,7 +309,7 @@ from tools.check_program_decode import decode_binary
 from tools.model_instructions import model_instruction
 root, model_root, compiler_root = map(Path, sys.argv[1:])
 revision = subprocess.check_output(['git','-C',str(model_root),'rev-parse','HEAD'], text=True).strip()
-assert revision.startswith('47b8599'), revision
+assert revision.startswith('b97b2f5'), revision
 assert Path(npu_model.__file__).resolve().is_relative_to(model_root.resolve())
 torch.set_num_threads(1)
 binary = (root/'compiled/program.bin').read_bytes()

@@ -18,7 +18,7 @@ from atlas_mlir_native.rne_add import RNE_ADD_POLICY, compile_source, prepare_c_
 from merlin.semantic_compiler.model import KernelRequest, SemanticNode, TensorType, pointwise_identity_maps
 
 ROOT = Path(__file__).resolve().parents[1]
-MODEL_PIN = "47b8599d8ffbe5ddd96059ffe2b5be2427a410f5"
+MODEL_PIN = "b97b2f5a97e432141c4ef8504bec396651d77a8f"
 
 
 def source(shape=(1, 35)):

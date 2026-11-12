@@ -49,7 +49,7 @@ Set `LD_LIBRARY_PATH=/path/to/compiler/lib:$LD_LIBRARY_PATH` when it differs
 from the system runtime; check with `build/bin/atlas-opt --version`.
 
 `ATLAS_NPU_MODEL_ROOT` must name a usable `npu_model` checkout (tested at
-`47b8599` with Python 3.14). Configure checks its assembler and RTL numerics
+`b97b2f5` with Python 3.14). Configure checks its assembler and RTL numerics
 imports using `Python3_EXECUTABLE`; CTest adds that path to `PYTHONPATH`.
 Install its dependencies before configuring. Optional execution tests still
 require their explicit environment settings.

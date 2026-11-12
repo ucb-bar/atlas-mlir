@@ -182,10 +182,10 @@ _MXU1_CAP448_POLICY = "mxu1-model47-e4m3-cap448-anchor-bf16-seeded-ordered-v1"
 
 
 def mxu1_cap448_lane(lhs: tuple[int, ...], rhs: tuple[int, ...], seed: int = 0) -> int:
-    """Model47 E4M3 anchor arithmetic, including its BF16 partial.
+    """E4M3 anchor arithmetic of the functional model, including its BF16 partial.
 
-    Attributed to unmodified npu_model 47b8599 configs/rtl_math.py ipt_row,
-    including its small-integer cancellation behavior. This is a verification
+    Attributed to unmodified npu_model b97b2f5 configs/rtl_math.py ipt_row,
+    including its RTL normalization of short sums. This is a verification
     oracle, never an executable compiler or runtime fallback. Each 32-K
     contraction rounds to BF16; the seed participates in anchor selection.
     """
@@ -223,9 +223,8 @@ def mxu1_cap448_lane(lhs: tuple[int, ...], rhs: tuple[int, ...], seed: int = 0) 
     sign, magnitude = int(total < 0), abs(total)
     lead = magnitude.bit_length() - 1
     shift = max(0, lead - 7)
-    # Preserve model47 when lead < 7: it packs the low significand bits
-    # without the left normalization used by an exact real-number sum.
     sig, remainder = magnitude >> shift, magnitude & ((1 << shift) - 1)
+    sig <<= max(0, 7 - lead)  # the RTL normalizes sums shorter than eight bits
     if shift and (remainder > 1 << (shift - 1)
                   or remainder == 1 << (shift - 1) and sig & 1):
         sig += 1

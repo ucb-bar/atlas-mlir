@@ -75,7 +75,7 @@ class BoundedRowRuntimeTest(unittest.TestCase):
 
     def authenticate_model_source(self):
         root = Path(os.environ['IMPORT_MODEL_ROOT']).resolve()
-        pin = '47b8599d8ffbe5ddd96059ffe2b5be2427a410f5'
+        pin = 'b97b2f5a97e432141c4ef8504bec396651d77a8f'
         checked = 0
         for key, module in tuple(sys.modules.items()):
             filename = getattr(module, '__file__', None)

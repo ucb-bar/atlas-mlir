@@ -24,7 +24,7 @@ from merlin.semantic_compiler.model import KernelRequest, SemanticNode, TensorTy
 from merlin.semantic_compiler.reference import TensorValue, evaluate_graph
 
 ROOT = Path(__file__).resolve().parents[1]
-MODEL_PIN = '47b8599d8ffbe5ddd96059ffe2b5be2427a410f5'
+MODEL_PIN = 'b97b2f5a97e432141c4ef8504bec396651d77a8f'
 
 
 def request(*, tiles=2, seeded=False):
@@ -82,9 +82,9 @@ class MXU1Cap448ScalarTest(unittest.TestCase):
     def test_cap448_zero_ties_seed_and_old_domain(self):
         zero = (0,) * 32
         self.assertEqual(mxu1_cap448_lane(zero, zero), 0)
-        # Model47 deliberately differs from normalized exact sum (0x3c00).
+        # A sum that cancels below eight bits is normalized to the exact sum.
         self.assertEqual(mxu1_cap448_lane((0x7e, 0xfe, 0x08) + zero[3:],
-                                         (0x7e, 0x7e, 0x30) + zero[3:]), 0x3c01)
+                                         (0x7e, 0x7e, 0x30) + zero[3:]), 0x3c00)
         self.assertEqual(mxu1_cap448_lane((0x7e,)*32, (0x38,)*32), 0x4660)  # 14336
         self.assertEqual(mxu1_cap448_lane(zero, zero, 0x3f81), 0x3f81)
         a = (0x18,) + zero[1:]

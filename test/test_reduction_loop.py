@@ -43,7 +43,7 @@ class ReductionLoopTest(unittest.TestCase):
         from test_softmax_primitives import _rounded_sum
         from test_spill_model_execution import model_instruction
 
-        MODEL_REVISION = "47b8599d8ffbe5ddd96059ffe2b5be2427a410f5"
+        MODEL_REVISION = "b97b2f5a97e432141c4ef8504bec396651d77a8f"
         from test_vpu_row_sum_reference import _tree_row
         from tools.check_program_decode import decode_binary
 

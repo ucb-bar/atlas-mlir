@@ -1,4 +1,4 @@
-"""K32 partial-domain proof, including model47's small-integer packing.
+"""K32 partial-domain proof, including normalized short sums.
 
 The finite enumeration covers every BF16 seed magnitude in the inductive
 interval and every attainable anchor.  Product sums are overapproximated by
@@ -57,7 +57,7 @@ def minimum_lattice_residue(seed, anchor):
 
 
 def cancellation_chain():
-    """Reach 2^-26 from reset using admitted bytes and BF16 reseeds only."""
+    """Cancel short sums through 2^-18 and zero from reset using admitted bytes and BF16 reseeds only."""
     panels = [
         ((0x50, 0xd0, 0x09, 0x88), (0x50, 0x50, 0x09, 0x0a)),
         ((0x89, 0x08), (0x09, 0x0a)),
@@ -92,10 +92,10 @@ class QuantizedK32DomainTest(unittest.TestCase):
         self.assertEqual(gcd(*products), 1)
         self.assertEqual(len(products), 239**2)
 
-    def test_ideal_bf16_rne_grid_does_not_describe_model47_cancellation(self):
+    def test_ideal_bf16_rne_grid_describes_normalized_cancellation(self):
         # Grid values below 2^-11 have at most eight significant bits, so
-        # ordinary BF16 RNE keeps them exact. The selected anchor packing is
-        # different when its nonzero integer has fewer than eight bits.
+        # ordinary BF16 RNE keeps them exact. The selected anchor packing
+        # normalizes a nonzero integer of fewer than eight bits the same way.
         for numerator in range(129):
             value = Fraction(numerator, 2**18)
             if value:
@@ -107,10 +107,8 @@ class QuantizedK32DomainTest(unittest.TestCase):
         for a, b in cancellation_chain():
             seed = mxu1_cap448_lane(a, b, seed)
             words.append(seed)
-        self.assertEqual(words, [0x3681, 0x3300, 0xb67e, 0xb67f, 0x3280])
-        self.assertEqual(bf16_fraction(words[0]), Fraction(129, 2**25))
-        self.assertNotEqual((bf16_fraction(words[0]) * 2**18).denominator, 1)
-        self.assertEqual(bf16_fraction(words[-1]), Fraction(1, 2**26))
+        self.assertEqual(words, [0x3680, 0, 0xb680, 0xb680, 0])
+        self.assertEqual(bf16_fraction(words[0]), Fraction(1, 2**18))
 
     def test_every_seed_anchor_lattice_has_no_nonzero_total_below_2neg26(self):
         count = 0
@@ -131,9 +129,9 @@ class QuantizedK32DomainTest(unittest.TestCase):
         self.assertLess(33 * 255 * 2**17, 2**31)
         contribution = 32 * 448**2
         self.assertLess(contribution, 2**24)  # Half an upward BF16 ULP at 2^32.
-        # anchor<=39 gives q<=256. Model47's exceptional lead<7 output is
-        # strictly below 128*q*2, hence far below the upper boundary.
-        self.assertLess(128 * 256 * 2, 2**32)
+        # anchor<=39 gives q<=256. A normalized lead<7 output is strictly
+        # below 128*q, hence far below the upper boundary.
+        self.assertLess(128 * 256, 2**32)
 
 
 if __name__ == '__main__':
