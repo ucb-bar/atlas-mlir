@@ -44,6 +44,54 @@ class VectorPreflightTest(unittest.TestCase):
         expected = ((raw & 32767) >= 0x2f80) & ((raw & 32767) <= 0x4f80)
         self.assertTrue(torch.equal(actual, expected))
         self.assertEqual(int(actual.sum()), 16386)
+        # The same ordered absolute value admits every non-NaN encoding for
+        # exact widening, including signed zeros, subnormals and infinities.
+        self.assertTrue(torch.equal(bits <= 0x7f80, (raw & 32767) <= 0x7f80))
+
+    def test_widening_option_is_explicit_and_validated(self):
+        from atlas_mlir_native.float_virtual import cast_vector_preflight
+        source = device.prepare_plan(request('bf16_to_f32', 35))
+        with patch.dict(os.environ, ATLAS_EXACT_CAST_VECTOR_PREFLIGHT='0'):
+            self.assertFalse(cast_vector_preflight())
+            ordinary = device.virtual_program(source)
+        with patch.dict(os.environ, ATLAS_EXACT_CAST_VECTOR_PREFLIGHT='1'):
+            self.assertTrue(cast_vector_preflight())
+            selected = device.virtual_program(source)
+        self.assertNotIn('col_max', ordinary)
+        self.assertIn('col_max', selected)
+        with patch.dict(os.environ, ATLAS_EXACT_CAST_VECTOR_PREFLIGHT='true'), \
+                self.assertRaises(NativeCompilationError):
+            cast_vector_preflight()
+
+    @unittest.skipUnless(os.environ.get('ATLAS_RUST_NPU_MODEL') and os.environ.get('ATLAS_OOT_BIN_DIR'),
+                         'select Rust simulator and Atlas tools')
+    def test_rust_widening_every_non_nan_code_and_atomic_nan_rejection(self):
+        import numpy as np
+        runner = os.environ['ATLAS_RUST_NPU_MODEL']
+        codes = np.arange(65536, dtype='<u2')
+        codes = codes[(codes & 0x7fff) <= 0x7f80]
+        np.random.default_rng(1701).shuffle(codes)
+        with tempfile.TemporaryDirectory() as directory, codegen_options(CodegenOptions(
+                io_memory_bytes=67108864, execution_instruction_limit=128000000,
+                exact_float_unroll=True)):
+            root = Path(directory)
+            for count in (35, 512, 1025, len(codes)):
+                with self.subTest(count=count):
+                    source = request('bf16_to_f32', count)
+                    plan = device.prepare_plan(source)
+                    programs = []
+                    for enabled in ('0', '1'):
+                        compiled = root / f'widen-{count}-{enabled}'
+                        with patch.dict(os.environ, ATLAS_EXACT_CAST_VECTOR_PREFLIGHT=enabled):
+                            device.compile_source(None, source, target_source=ROOT,
+                                destination=compiled, limits=None)
+                        programs.append(compiled / 'program.bin')
+                    raw = codes[:count].tobytes()
+                    self.compare_runs(root, runner, source, plan, programs, [raw],
+                                      cycle_ratio=0.8 if count >= 512 else None)
+                    for invalid in (0x7f81, 0x7fff, 0xff81, 0xffff):
+                        self.compare_runs(root, runner, source, plan, programs,
+                            [raw[:-2] + invalid.to_bytes(2, 'little')])
 
     @unittest.skipUnless(os.environ.get('ATLAS_RUST_NPU_MODEL') and os.environ.get('ATLAS_OOT_BIN_DIR'),
                          'select Rust simulator and Atlas tools')
@@ -72,13 +120,13 @@ class VectorPreflightTest(unittest.TestCase):
                             if count == 2048:
                                 raw = [bytes.fromhex('803f') * 1024 + data[2048:] for data in raw]
                             self.compare_runs(root, runner, source, plan, programs, raw,
-                                              compare_cycles=index == 0 and count == 1024)
+                                              cycle_ratio=0.5 if index == 0 and count == 1024 else None)
                         for operand in (0, 1):
                             raw = [bytes.fromhex('803f') * count, bytes.fromhex('003f') * count]
                             raw[operand] = raw[operand][:-2] + bytes.fromhex('c1ff')
                             self.compare_runs(root, runner, source, plan, programs, raw)
 
-    def compare_runs(self, root, runner, source, plan, programs, raw, *, compare_cycles=False):
+    def compare_runs(self, root, runner, source, plan, programs, raw, *, cycle_ratio=None):
         expected, status = host_reference(source, raw)
         initial = bytearray([0xa5]) * ((plan.workspace_bytes + 4095) // 4096 * 4096)
         for index, data in enumerate(raw):
@@ -105,8 +153,8 @@ class VectorPreflightTest(unittest.TestCase):
                 self.assertEqual(memory[code + 32:], initial[code + 32:])
                 if status:
                     self.assertEqual(memory[output:code], initial[output:code])
-        if compare_cycles:
-            self.assertLess(cycles[1], cycles[0] // 2)
+        if cycle_ratio is not None:
+            self.assertLess(cycles[1], cycles[0] * cycle_ratio)
 
 
 if __name__ == '__main__':

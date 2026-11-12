@@ -223,7 +223,7 @@ class AtlasApplicationAdapter:
         from .binding import _native_pipeline
         from .publication_options import deterministic_receipts_enabled
         from .quantized_operand_reuse import reuse_policy
-        from .float_virtual import binary_lane_groups, binary_vector_preflight
+        from .float_virtual import binary_lane_groups, binary_vector_preflight, cast_vector_preflight
         from merlin.semantic_compiler.codegen import current_codegen_options
 
         operand_reuse = reuse_policy()
@@ -260,6 +260,7 @@ class AtlasApplicationAdapter:
                 **({"exact_float_unroll": True} if current_codegen_options().exact_float_unroll else {}),
                 **({"exact_binary_lane_groups": True} if binary_lane_groups() else {}),
                 **({"exact_binary_vector_preflight": True} if binary_vector_preflight() else {}),
+                **({"exact_cast_vector_preflight": True} if cast_vector_preflight() else {}),
                 **({"execution_instruction_limit": current_codegen_options().execution_instruction_limit}
                    if current_codegen_options().execution_instruction_limit is not None else {}),
                 **({"quantized_operand_reuse": operand_reuse} if operand_reuse != "ordered" else {}),

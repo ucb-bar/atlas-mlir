@@ -273,3 +273,32 @@ subnormals, domain endpoints, infinities, overflow and late NaNs in either
 operand, with immutable-input and rejection-before-publication checks. The
 focused gate passed 14 tests and six subtests; the related arithmetic/application
 regression gate passed 27 tests with two optional runtime checks skipped.
+
+## Exact vector admission for BF16 widening
+
+`ATLAS_EXACT_CAST_VECTOR_PREFLIGHT=1` replaces the per-lane scalar NaN scan in
+`bf16_to_f32` with an absolute-maximum VPU reduction. Under the selected ordered-bit
+min/max arithmetic, the reduced magnitude exceeds the infinity encoding exactly
+when an input is NaN. The conversion still shifts the original bits; subnormals,
+infinities and signed zeros retain their exact FP32 representations. Whole-input
+validation still finishes before any output store. Other casts are unchanged.
+The option defaults to off and is included in compilation identities.
+
+With the preceding binary vector check and the same paired-cache/narrowing options,
+the full layer drops from **125,179,302 to 119,843,302 cycles** (5,336,000 fewer,
+4.26%). Executed instructions drop from 18,251,147 to 13,770,379; dispatches remain
+95. Every output word matches the independent FX reference. Compilation and source
+replay took 150 seconds, Rust simulation 3.9 seconds, and the generated-C run
+4.7 seconds. The combined cycle reduction versus the retained package is 47.14%.
+
+The arithmetic predicate is checked over all BF16 encodings. Rust executes every
+non-NaN encoding, shuffled across tiles, plus padded tails and late positive and
+negative NaNs with different payloads. Both scalar and vector versions match the
+independent C reference, preserve inputs and refuse invalid output publication.
+The focused gate passes five tests and ten subtests; 22 related regression tests
+pass with two optional runtime gates skipped.
+
+A separate all-pattern fusion experiment is exact but slower: 135,377,274 cycles
+and 87 dispatches before the widening change. Some larger groups reintroduce
+private casts or prevent the faster paired operand-cache schedule. It is not the
+recommended configuration; reducing launch count alone is insufficient.

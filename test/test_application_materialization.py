@@ -104,6 +104,12 @@ def test_materialization_identity_uses_effective_inputs_and_receipt_mode(tmp_pat
     assert changed["compilation_identity"]["exact_binary_vector_preflight"] is True
     monkeypatch.setenv("ATLAS_EXACT_BINARY_VECTOR_PREFLIGHT", "0")
     assert adapter.materialization_identity(source, choice) == original
+    monkeypatch.setenv("ATLAS_EXACT_CAST_VECTOR_PREFLIGHT", "1")
+    changed = adapter.materialization_identity(source, choice)
+    assert changed != original
+    assert changed["compilation_identity"]["exact_cast_vector_preflight"] is True
+    monkeypatch.setenv("ATLAS_EXACT_CAST_VECTOR_PREFLIGHT", "0")
+    assert adapter.materialization_identity(source, choice) == original
     with adapter.publication_options(deterministic_receipts=True):
         changed = adapter.materialization_identity(source, choice)
         assert changed != original

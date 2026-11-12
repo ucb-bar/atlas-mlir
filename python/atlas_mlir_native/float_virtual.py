@@ -157,6 +157,29 @@ def binary_vector_preflight():
     return value == '1'
 
 
+def cast_vector_preflight():
+    """Opt into an exact vector NaN check before BF16-to-FP32 widening."""
+    from merlin.semantic_compiler.target_binding import NativeCompilationError
+    value = os.environ.get('ATLAS_EXACT_CAST_VECTOR_PREFLIGHT', '0')
+    if value not in ('0', '1'):
+        raise NativeCompilationError('unsupported_semantics', 'ATLAS_EXACT_CAST_VECTOR_PREFLIGHT must be 0 or 1')
+    return value == '1'
+
+
+def cast_vector_refusal(b):
+    """Ordered-bit absolute maximum exceeds infinity exactly for a NaN.
+
+    Only the admission test uses VPU arithmetic. Widening still shifts the
+    original bits, preserving subnormals, signed zeros and infinities exactly.
+    """
+    value = b.restore('left')
+    maximum = b.vector_binary('max', value, b.vector_binary('mul', value, b.splat(0xbf80)))
+    for axis in ('col', 'row'):
+        maximum = b.value(f'"atlas.virtual_vpu_reduce"({maximum}) {{kind = "{axis}_max"}} : ({T}) -> {T}')
+    b.save('pairs', maximum)
+    return b.compare('ult', b.constant(0x7f80), b.load('pairs', 0, 2))
+
+
 def binary_vector_refusal(b):
     """Min/max of both absolute operands proves a stronger nonzero domain.
 
@@ -229,6 +252,7 @@ def virtual_program(p):
     expand_unary=current_codegen_options().exact_float_unroll
     group_binary=binary_lane_groups()
     vector_preflight=binary_vector_preflight()
+    vector_cast=cast_vector_preflight() and p.op == 'bf16_to_f32'
     lines=['module {',f'  func.func @exact_float() -> {S} attributes {{atlas.input_dram_base = {p.io_memory_base} : i64, atlas.input_dram_bytes = {len(p.operands)*p.input_bytes} : i64, atlas.output_dram_base = {p.output_address} : i64, atlas.output_dram_bytes = {p.output_bytes+32} : i64}} {{',f'    %start = "atlas.virtual_start"() : () -> {S}']
     b=Builder(lines);c=b.constant;op=b.binary;cmp=b.compare
     lanes=p.tile_lanes;tiles=p.input_bytes//(lanes*p.width)
@@ -279,7 +303,9 @@ def virtual_program(p):
                 def validate(index,acc):
                     a,d=b.inputs(p,index)
                     return [op('or',acc[0],_valid(b,p,a,d))]
-                if not binary:
+                if vector_cast:
+                    bad=op('or',bad,cast_vector_refusal(b))
+                elif not binary:
                     bad,=(b.loop('preflight_lane',lanes,[bad],validate) if not expand_unary
                           else b.unary_lanes(lanes,[bad],validate))
             else:
