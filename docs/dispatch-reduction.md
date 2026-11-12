@@ -431,3 +431,34 @@ selected expansion, and run all 17,412 admitted values through generated C and
 Rust with partial tiles, immutable inputs and late invalid-value rejection.
 Thirteen related tests and 20 subtests pass; two optional legacy-model gates are
 skipped. Source replay and ordinary native instruction/image proofs remain active.
+
+## Enable these compositions in the ordinary generated application flow
+
+`AtlasNativeBinding.application_adapter`, called by Merlin's existing
+`targetgen native-compile --application`, now accepts an explicit target-owned
+pattern list. The measured configuration can use the normal CLI with:
+
+```bash
+export ATLAS_ADJACENT_PATTERNS=adjacent_square_reduce,adjacent_reduction_scale,adjacent_pointwise_chain,pointwise_narrowing,quantized_narrowing,quantized_epilogue,expanded_silu
+export ATLAS_QUANTIZED_OPERAND_REUSE=paired-cache
+export ATLAS_EXACT_BINARY_LANE_GROUPS=1
+export ATLAS_EXACT_BINARY_VECTOR_PREFLIGHT=1
+export ATLAS_EXACT_CAST_VECTOR_PREFLIGHT=1
+```
+
+Keep the explicit exact-float unroll and execution-instruction-budget options
+from the earlier recipe. An unset/empty pattern list preserves the original
+adapter. Unknown, duplicate or empty names fail; no numerical policy is inferred
+from this selection. Six factory tests verify source translators, actual region
+selection, default behavior and invalid options. This requires no Merlin source
+change or modification to Nicolas's fork.
+
+The Rust host-schedule replay of the 80-dispatch SiLU configuration also passes:
+all 12,750,848 initialized bytes in the compiler aperture match the generated-C
+run. With the previously documented uncalibrated host timings, zero preparation
+cost and contention disabled, it reports **100,445,360 active NPU cycles** and
+**107,119,470 elapsed cycles**, including **6,674,110 idle cycles**. Program uploads
+account for 1,016,232 cycles / 338,424 bytes and recorded transfers for 5,653,934
+cycles. The small active-cycle difference from standalone launches comes from
+the persistent host/device timeline. These are schedule-model estimates, not
+measured Saturn RTL timings or a complete host-computation benchmark.

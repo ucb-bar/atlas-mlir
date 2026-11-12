@@ -2846,7 +2846,13 @@ class AtlasNativeBinding:
     def application_adapter(policy, *, original_source_sha256):
         from .application import AtlasApplicationAdapter
 
-        return AtlasApplicationAdapter(policy, original_source_sha256=original_source_sha256)
+        base = AtlasApplicationAdapter(policy, original_source_sha256=original_source_sha256)
+        selected = os.environ.get("ATLAS_ADJACENT_PATTERNS", "").strip()
+        if not selected:
+            return base
+        from .composition_adapter import AdjacentDeviceAdapter
+
+        return AdjacentDeviceAdapter(base, patterns=tuple(name.strip() for name in selected.split(",")))
 
     @staticmethod
     def plan_boundary_abi(request: KernelRequest) -> dict:
