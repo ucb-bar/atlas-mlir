@@ -16,7 +16,8 @@ VMEM for computation, removing their second DMA load. Multi-tile programs keep
 loading each computation tile separately. Validation still completes before any
 result is written; a rejected input preserves the original output.
 
-This changes binary emission by default. Unary emission and its explicit
+Select `ATLAS_EXACT_BINARY_LANE_GROUPS=1` to enable both changes; default binary
+emission is unchanged. Unary emission and its explicit
 `exact_float_unroll` option are unchanged. Physical image and instruction bounds
 remain mandatory; no limits have been raised.
 
@@ -33,7 +34,7 @@ A freshly built compiler and the unchanged NPU cycle model at
 The measured kernel improvement is 21.95%; this is not a whole-layer speedup.
 Both programs matched the independent host reference and preserved protected
 DRAM. The larger image is the explicit tradeoff. Local reproduction and logs
-are in `out/next-audit/`.
+are not included in the source commits.
 
 Twenty focused tests passed, including generated C dispatch on the functional
 model, independent directed/random arithmetic comparisons, all unary encoding
@@ -90,7 +91,7 @@ checked independently, and the complete final memory hashes were identical.
 The initial memory SHA256 was
 `f67cfb760a68838810c3456ac22eaa59ebe44281d7f4bcc2ea04ec0cbdcbf29c`.
 The local replay driver and complete roofline results are
-`out/next-audit/bench_down.py` and `out/next-audit/down-benchmark.json`.
+not included in the source commits.
 DRAM service still dominates; the next reuse work should reduce the remaining
 weight/activation traffic before trying to increase MXU arithmetic throughput.
 This is a projection measurement, not a newly validated whole-layer total.
@@ -126,7 +127,7 @@ publishing a 512 KiB FP32 intermediate. The final dense BF16 output is 256 KiB.
 The generated virtual device program is identical to the original contraction.
 No additional cycle speedup is claimed for this fold until a complete execution
 comparison is measured. Its local compilation receipt is
-`out/next-audit/pv-narrowing-compiled/package.json`.
+not included in the source commits.
 
 `test_quantized_narrowing.py` covers real adapter selection, escaping results,
 changed policies/ports, sizing refusal and tool failures, unchanged device
@@ -202,9 +203,8 @@ late rejection, exact traffic and complete-memory equality on the NPU model.
 Native publication passed both mandatory and optimized pipelines, and the
 optimized paired program also passed NPU execution against the ordered reference.
 The broader regression run passed 45 tests and 30 subtests, with four optional
-tests skipped and one qualified-native test deselected. Local evidence is under
-`out/next-audit/`, including `wide-down-benchmark.json`,
-`paired-down-benchmark.json`, `reuse-image-equivalence.log` and the test logs.
+tests skipped and one qualified-native test deselected. Local evidence, including the wide and paired benchmark results, the
+image-equivalence log and the test logs, is not included in the source commits.
 
 ## Remaining work
 

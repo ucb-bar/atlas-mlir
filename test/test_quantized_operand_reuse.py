@@ -188,6 +188,11 @@ class QuantizedOperandReuseTest(unittest.TestCase):
             original = adapter.materialization_identity(source, choice)
         self.assertNotIn('quantized_operand_reuse', original['compilation_identity'])
         self.assertNotIn('exact_float_unroll', original['compilation_identity'])
+        self.assertNotIn('exact_binary_lane_groups', original['compilation_identity'])
+        with patch.dict(os.environ, ATLAS_QUANTIZED_OPERAND_REUSE='ordered', ATLAS_EXACT_BINARY_LANE_GROUPS='1'):
+            grouped = adapter.materialization_identity(source, choice)
+        self.assertIs(grouped['compilation_identity'].pop('exact_binary_lane_groups'), True)
+        self.assertEqual(grouped, original)
         from merlin.semantic_compiler.codegen import CodegenOptions, codegen_options
         with patch.dict(os.environ, ATLAS_QUANTIZED_OPERAND_REUSE='ordered'), \
                 codegen_options(CodegenOptions(exact_float_unroll=True)):

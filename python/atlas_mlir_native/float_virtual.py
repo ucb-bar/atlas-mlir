@@ -1,4 +1,5 @@
 """Exact float routes using counted tile and lane loops in common virtual IR."""
+import os
 from .scalar_ssa import ScalarBuilder
 from .binding import DRAM_BASE
 
@@ -138,11 +139,21 @@ def qualified_vector(b,p):
     return values[body.outputs[0]]
 
 
+def binary_lane_groups():
+    """Validate the opt-in before generating or caching target code."""
+    from merlin.semantic_compiler.target_binding import NativeCompilationError
+    value = os.environ.get('ATLAS_EXACT_BINARY_LANE_GROUPS', '0')
+    if value not in ('0', '1'):
+        raise NativeCompilationError('unsupported_semantics', 'ATLAS_EXACT_BINARY_LANE_GROUPS must be 0 or 1')
+    return value == '1'
+
+
 def virtual_program(p):
     from .exact_float_device import _valid,_compute
     from merlin.semantic_compiler.codegen import current_codegen_options
     # Preserve qualified compact images unless expansion is explicitly selected.
     expand_unary=current_codegen_options().exact_float_unroll
+    group_binary=binary_lane_groups()
     lines=['module {',f'  func.func @exact_float() -> {S} attributes {{atlas.input_dram_base = {p.io_memory_base} : i64, atlas.input_dram_bytes = {len(p.operands)*p.input_bytes} : i64, atlas.output_dram_base = {p.output_address} : i64, atlas.output_dram_bytes = {p.output_bytes+32} : i64}} {{',f'    %start = "atlas.virtual_start"() : () -> {S}']
     b=Builder(lines);c=b.constant;op=b.binary;cmp=b.compare
     for slot in ('left','right','result','pairs','status'):b.slot(slot)
@@ -156,17 +167,17 @@ def virtual_program(p):
         def tile_body(tile,values):
             bad,ap,bp,out=values
             # A one-tile binary preflight leaves both immutable inputs in VMEM.
-            if not (binary and tiles == 1 and phase == 'compute'):
+            if not (group_binary and binary and tiles == 1 and phase == 'compute'):
                 a=b.dma_load(ap,lanes*p.width);b.save('left',a)
                 b.save('right',b.dma_load(bp,lanes*p.width) if len(p.operands)>1 else a)
             if phase=='check':
                 def validate(index,acc):
                     a,d=b.inputs(p,index)
                     return [op('or',acc[0],_valid(b,p,a,d))]
-                if binary:
+                if binary and group_binary:
                     bad,=b.checked_lane_groups('preflight_lane',lanes,[bad],validate)
                 else:
-                    bad,=(b.loop('preflight_lane',lanes,[bad],validate) if not expand_unary
+                    bad,=(b.loop('preflight_lane',lanes,[bad],validate) if binary or not expand_unary
                           else b.unary_lanes(lanes,[bad],validate))
             else:
                 if binary:
@@ -181,7 +192,7 @@ def virtual_program(p):
                             rbad=op('or',rbad,exceptional)
                         both_negative_zero=cmp('eq',op('or',op('xor',a,c(32768)),op('xor',d,c(32768))),c(0))
                         return [qbad,op('or',rbad,both_negative_zero)]
-                    qbad,rbad=b.checked_lane_groups('classify_lane',lanes,[c(0),c(0)],classify)
+                    qbad,rbad=(b.checked_lane_groups if group_binary else b.loop)('classify_lane',lanes,[c(0),c(0)],classify)
                     qualified=b.value(f'arith.cmpi eq, {qbad}, {c(0)} : i32')
                     lines.append(f'    cf.cond_br {qualified}, ^qualified({b.state} : {S}), ^pair_test({b.state} : {S})')
                     lines.append(f'  ^qualified(%qualified_state: {S}):');b.state='%qualified_state'
