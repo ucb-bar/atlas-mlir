@@ -24,7 +24,7 @@ class BinaryLaneGroupTest(unittest.TestCase):
         os.environ.pop('ATLAS_EXACT_BINARY_LANE_GROUPS')
         self.assertEqual(virtual_program(plan), compact)
         self.assertEqual((compact.count('byte_offset = 6 '), grouped.count('byte_offset = 6 ')), (0, 4))
-        self.assertEqual(compact.count('virtual_dma_load'), grouped.count('virtual_dma_load') + 2)
+        self.assertEqual(compact.count('virtual_dma_load'), grouped.count('virtual_dma_load'))
         with patch.dict(os.environ, ATLAS_EXACT_BINARY_LANE_GROUPS='yes'), self.assertRaises(NativeCompilationError):
             virtual_program(plan)
 
@@ -48,6 +48,39 @@ class BinaryLaneGroupTest(unittest.TestCase):
         self.assertEqual((output, status), host_reference(source, raw))
         # The original counted validation/classification route exceeds 132k.
         self.assertLess(instructions, 110000)
+
+
+class BinaryPreflightTest(unittest.TestCase):
+    def setUp(self):
+        from float_isa_c import executor
+        executor.cache_clear()
+        self.addCleanup(executor.cache_clear)
+
+    def test_distinct_tile_routes_and_late_rejection(self):
+        # The small pair is outside the qualified interval; the subnormal
+        # pair needs scalar arithmetic. A later tile must keep its own route.
+        domains = ((0x3f80, 0x3b80), (0x2000, 0x1c00), (1, 127))
+        for operation in ('bf16_add', 'bf16_sub'):
+            for first, second in ((domains[0], domains[1]),
+                                  (domains[2], domains[0])):
+                source = request(operation, 2048)
+                pairs = [first] * 1024 + [second] * 1024
+                raw = [b''.join(pair[i].to_bytes(2, 'little') for pair in pairs)
+                       for i in (0, 1)]
+                self.assertEqual(scalar_execute(source, raw)[:2], host_reference(source, raw))
+                raw[1] = raw[1][:-2] + bytes.fromhex('c17f')
+                output, status, _ = scalar_execute(source, raw)
+                self.assertNotEqual(status, 0)
+                self.assertEqual(output, bytes([0xa5]) * len(output))
+
+    def test_qualified_inputs_skip_exception_checks(self):
+        with patch.dict(os.environ, ATLAS_EXACT_BINARY_LANE_GROUPS='0'):
+            source = request('bf16_add', 1024)
+            raw = [bytes.fromhex('803f') * 1024, bytes.fromhex('003f') * 1024]
+            output, status, instructions = scalar_execute(source, raw)
+            self.assertEqual((output, status), host_reference(source, raw))
+            # The prior compact implementation takes over 132k instructions.
+            self.assertLess(instructions, 80000)
 
 
 if __name__ == '__main__':
