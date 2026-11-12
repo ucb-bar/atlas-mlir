@@ -174,6 +174,7 @@ def _virtual(
     restoration=None,
     output_window_bytes=None,
     cache_a=False,
+    cache_a_tiles=None,
 ) -> str:
     """Emit only typed operations; scheduling and physical placement stay downstream."""
     if type(batch_count) is not int or batch_count < 1 or type(shared_weight) is not bool:
@@ -187,7 +188,10 @@ def _virtual(
     if type(cache_a) is not bool:
         raise ValueError("activation residency must be boolean")
     mc, nc, kc = plan.counts
-    if cache_a and (unit != 1 or kc > 64):
+    cached_tiles = kc if cache_a_tiles is None else cache_a_tiles
+    if cache_a_tiles is not None and (not cache_a or type(cache_a_tiles) is not int):
+        raise ValueError("a cached prefix requires activation residency and an integer tile count")
+    if cache_a and (unit != 1 or not 1 <= cached_tiles <= min(kc, 64)):
         raise ValueError("quantized activation residency requires MXU1 and at most 64 K tiles")
     ab, wb, ob = plan.tile_bytes
     a, w = addresses
@@ -217,7 +221,7 @@ def _virtual(
 
     slot = "!atlas.virtual_spill"
     if cache_a:
-        for index in range(kc):
+        for index in range(cached_tiles):
             lines.append(f'    %cached_a{index} = "atlas.virtual_slot"() '
                          f'{{kind = "fp8", words = {ab // 4} : i32, slot_word = -1 : i32, purpose = "scratch"}} : () -> {slot}')
 
@@ -363,7 +367,7 @@ def _virtual(
     if cache_a:
         # A row is immutable across N. Refresh every slot for each M row
         # and batch before entering the column loop; no cross-launch state.
-        for index in range(kc):
+        for index in range(cached_tiles):
             prefix = f"cache_a{index}"
             c(prefix + "_offset", index * ab)
             c(prefix + "_bytes", ab)
@@ -437,29 +441,35 @@ def _virtual(
                 before, value = step + "_result_s", step + "_result"
         return before, value
 
+    # Consume the resident prefix first, then stream the remaining K tiles
+    # through the existing ordered loop. The BF16 value crosses that boundary
+    # exactly as it does between ordinary counted groups.
+    entry_state, entry_value, k_start = "first_result_s", "first_result", 1
     if cache_a:
         c("cached_w_step", wb)
         lines.append(f"    %cached_wfirst = arith.addi %{w_row}, %cached_w_step : i32")
-        current, value = ordered_steps("cached_step", kc - 1, "first_result_s", None,
+        current, value = ordered_steps("cached_step", cached_tiles - 1, "first_result_s", None,
                                        "cached_wfirst", "first_result", cached_start=1)
-        lines.append(f"    cf.br ^store(%{current}, %{value} : {state}, {bf16})")
-    elif kc > 1 and k_unroll > 1:
+        entry_state, entry_value, k_start = current, value, cached_tiles
+    if kc == k_start:
+        lines.append(f"    cf.br ^store(%{entry_state}, %{entry_value} : {state}, {bf16})")
+    elif k_unroll > 1:
         # Replicate complete, ordered tile steps. The reset remains first, and
         # each step consumes the previous completed BF16 value. This changes
         # loop control only; it does not reassociate the reduction or extend
         # the live MXU state across iterations.
-        factor = min(k_unroll, kc - 1)
-        remainder = (kc - 1) % factor
+        factor = min(k_unroll, kc - k_start)
+        remainder = (kc - k_start) % factor
         c("zero_k", 0)
-        c("a_step", ab)
-        c("w_step", wb)
+        c("a_step", k_start * ab)
+        c("w_step", k_start * wb)
         lines += [
             f"    %afirst = arith.addi %{a_row}, %a_step : i32",
             f"    %wfirst = arith.addi %{w_row}, %w_step : i32",
-            f"    cf.br ^ku_header(%first_result_s, %zero_k, %afirst, %wfirst, %first_result : {state}, i32, i32, i32, {bf16})",
+            f"    cf.br ^ku_header(%{entry_state}, %zero_k, %afirst, %wfirst, %{entry_value} : {state}, i32, i32, i32, {bf16})",
             f"  ^ku_header(%kus: {state}, %ku: i32, %ku_ap: i32, %ku_wp: i32, %ku_value: {bf16}):",
         ]
-        c("ku_count", (kc - 1) // factor)
+        c("ku_count", (kc - k_start) // factor)
         lines += [
             "    %ku_more = arith.cmpi ult, %ku, %ku_count : i32",
             f"    cf.cond_br %ku_more, ^ku_body(%kus : {state}), ^ku_tail(%kus, %ku_value : {state}, {bf16})",
@@ -491,15 +501,15 @@ def _virtual(
         lines.append(f"    cf.br ^store(%{current}, %{value} : {state}, {bf16})")
     elif kc > 1:
         c("zero_k", 0)
-        c("a_step", ab)
-        c("w_step", wb)
+        c("a_step", k_start * ab)
+        c("w_step", k_start * wb)
         lines += [
             f"    %afirst = arith.addi %{a_row}, %a_step : i32",
             f"    %wfirst = arith.addi %{w_row}, %w_step : i32",
-            f"    cf.br ^k_header(%first_result_s, %zero_k, %afirst, %wfirst, %first_result : {state}, i32, i32, i32, {bf16})",
+            f"    cf.br ^k_header(%{entry_state}, %zero_k, %afirst, %wfirst, %{entry_value} : {state}, i32, i32, i32, {bf16})",
             f"  ^k_header(%ks: {state}, %k: i32, %ap: i32, %wp: i32, %carried: {bf16}):",
         ]
-        c("k_count", kc - 1)
+        c("k_count", kc - k_start)
         lines += [
             "    %k_more = arith.cmpi ult, %k, %k_count : i32",
             f"    cf.cond_br %k_more, ^k_body(%ks : {state}), ^store(%ks, %carried : {state}, {bf16})",

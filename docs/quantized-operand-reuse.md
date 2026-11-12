@@ -56,3 +56,33 @@ do not read this environment variable.
 This extension is restricted to the quantized MXU1 path. It adds no MXU0 operand
 cache, PACK repair, compiler cache, or program residency implementation; those
 are provided by the companion upstream work.
+
+## Bounded prefixes for wider reductions
+
+`ATLAS_QUANTIZED_OPERAND_REUSE=prefix-cache` also admits rows wider than 64 K32
+tiles. It retains the first 64 tiles (64 KiB) across output columns and streams
+the remaining tiles through the existing ordered counted loop. For shorter rows
+it selects the existing full-row schedule. A single consumer still uses the
+ordered schedule. The default and `row-cache` policies are unchanged.
+
+The prefix is refreshed for every M tile row and batch. The accumulator crosses
+the resident/streamed boundary as the same ordered BF16 value; exponent restoration
+runs only after the complete K reduction. No reduction terms are reordered and
+no extra accumulator precision is retained. Only the bounded prefix is expanded,
+so code size does not grow linearly with the entire K dimension.
+
+For a partially cached row the execution plan records `operand_reuse=prefix-cache`
+and `operand_reuse_cached_tiles`. Replay derives and checks that count from the
+source shape and requested policy before emitting code. Sizing, source binding
+and C export continue to use the recorded policy independently of the environment.
+All allocation, memory and instruction-budget checks remain in force.
+
+The avoided activation reads are
+`B * Mc * (Nc - 1) * min(Kc, 64) * 1024` bytes. Weight reads and output stores are
+unchanged. This is a bounded prefix cache, not a complete blocked-panel schedule
+or weight reuse across token rows.
+
+`test_quantized_prefix_reuse.py` covers the first streamed tile, counted groups
+and tails, K=5632, M/N padding, batches, varied scales, exponent rejection, full
+protected-memory equality, exact DMA-byte savings, instruction bounds and
+native sizing/binding/export with a changed environment policy.

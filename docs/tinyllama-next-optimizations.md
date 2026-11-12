@@ -46,11 +46,38 @@ ATLAS_RUN_NPU_MODEL=1 python -m pytest -q \
   test/test_exact_float_binary_groups.py test/test_exact_float_unary_tiles.py
 ```
 
+The same binary implementation also matched the retained independent outputs for
+all 400 BF16-add states in the recorded TinyLlama layer. A cycle replay using an
+actual layer input gave the same 145,490 to 113,555-cycle improvement above.
+
+## Bounded activation prefix reuse
+
+Select `ATLAS_QUANTIZED_OPERAND_REUSE=prefix-cache` to reuse the first 64 K32 tiles
+of a wide row across output columns, streaming the remaining tiles through the
+existing ordered loop. The cache remains capped at 64 KiB. Existing ordered and
+full-row-cache virtual programs were byte-identical in 52 compared configurations.
+See [the transport contract](quantized-operand-reuse.md#bounded-prefixes-for-wider-reductions).
+
+For an independent signed-input fixture with M=1, N=65, K=5632:
+
+| | Ordered | Prefix cache |
+| --- | ---: | ---: |
+| Cycles | 844,963 | 751,701 |
+| Bytes loaded | 1,093,632 | 962,560 |
+| Bytes stored | 8,192 | 8,192 |
+| Program bytes | 3,408 | 11,224 |
+
+Both complete output memories matched. This fixture improves by 11.04%; it is
+not the full TinyLlama down projection. Three new tests passed (including cycle
+execution across four geometries and native export), plus 29 regression tests
+and four subtests. The separate optional qualified-native wide functional test
+was not selected; the new cycle tests execute the unchanged model directly.
+
 ## Remaining work
 
 PR #44 already implements A/W caching, accumulator retention and allocation
 fallbacks in the older model-compilation path. Those changes are not duplicated
-here. The outstanding work is bounded wide-K reuse on the quantized MXU1 path,
+here. The outstanding work is broader panel reuse beyond the resident prefix,
 weight reuse combined with activation reuse, and shared graph/transport changes
 for eliminating intermediate materialization. Those features are not implemented
-by the binary-kernel commit and need their own correctness and performance gates.
+by these commits and need their own correctness and performance gates.

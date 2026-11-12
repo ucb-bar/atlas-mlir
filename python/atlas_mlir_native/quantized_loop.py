@@ -90,7 +90,7 @@ def virtual_source(plan, layout):
     from .quantized_operand_reuse import schedule_record
 
     schedule = schedule_record(plan, layout.get('operand_reuse_requested', 'ordered'))
-    if any(layout.get(key) != schedule.get(key) for key in ('operand_reuse_requested', 'operand_reuse')):
+    if any(layout.get(key) != schedule.get(key) for key in ('operand_reuse_requested', 'operand_reuse', 'operand_reuse_cached_tiles')):
         raise ValueError('recorded quantized operand reuse schedule differs')
     restoration = Restoration(plan, layout, scalar_fallback=bool(fallback_tiles(plan)))
     virtual = _virtual(Geometry(), tuple(layout['input_addresses'][:2]), layout['output_addresses'][0],
@@ -99,7 +99,8 @@ def virtual_source(plan, layout):
                        shared_weight=not plan.source.node(plan.operand_ids[1]).type.shape[:-2],
                        exponent_pages=restoration.pages(), restoration=restoration,
                        output_window_bytes=layout['output_bytes']+layout['status_bytes'],
-                       cache_a=schedule.get('operand_reuse', 'ordered') == 'row-cache')
+                       cache_a=schedule.get('operand_reuse', 'ordered') in ('row-cache', 'prefix-cache'),
+                       cache_a_tiles=schedule.get('operand_reuse_cached_tiles'))
     return rematerialize_scalar_constants(virtual)
 
 

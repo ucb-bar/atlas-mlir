@@ -8,9 +8,9 @@ from merlin.semantic_compiler.target_binding import NativeCompilationError
 def reuse_policy():
     """Validate the selected policy before generating or caching target code."""
     policy = os.environ.get('ATLAS_QUANTIZED_OPERAND_REUSE', 'ordered')
-    if policy not in ('ordered', 'row-cache'):
+    if policy not in ('ordered', 'row-cache', 'prefix-cache'):
         raise NativeCompilationError('unsupported_semantics',
-                                     'ATLAS_QUANTIZED_OPERAND_REUSE must be ordered or row-cache')
+                                     'ATLAS_QUANTIZED_OPERAND_REUSE must be ordered, row-cache, or prefix-cache')
     return policy
 
 
@@ -31,7 +31,7 @@ class ActivationResidency:
 
 def activation_residency(plan, policy=None):
     policy = reuse_policy() if policy is None else policy
-    if policy not in ('ordered', 'row-cache'):
+    if policy not in ('ordered', 'row-cache', 'prefix-cache'):
         raise ValueError('unsupported recorded quantized operand reuse policy')
     if policy == 'ordered':
         return None
@@ -40,7 +40,10 @@ def activation_residency(plan, policy=None):
     # to 64 tiles and cache storage to 64 KiB, leaving the rest of the selected
     # 240 KiB spill frame for exponent restoration and ordinary allocation.
     # These are candidate limits, not allocation or instruction-budget proofs.
-    residency = ActivationResidency((plan.k + 31) // 32, 1024, (plan.n + 31) // 32)
+    tiles = (plan.k + 31) // 32
+    if policy == 'prefix-cache':
+        tiles = min(tiles, 64)
+    residency = ActivationResidency(tiles, 1024, (plan.n + 31) // 32)
     if residency.consumers < 2 or residency.tile_count > 64 or residency.resident_bytes > 65536:
         return None
     return residency
@@ -51,5 +54,8 @@ def schedule_record(plan, policy=None):
     residency = activation_residency(plan, requested)
     if requested == 'ordered':
         return {}
+    if residency is not None and residency.tile_count < (plan.k + 31) // 32:
+        return dict(operand_reuse_requested=requested, operand_reuse='prefix-cache',
+                    operand_reuse_cached_tiles=residency.tile_count)
     return dict(operand_reuse_requested=requested,
                 operand_reuse='row-cache' if residency is not None else 'ordered')
