@@ -17,6 +17,7 @@ from test_looped_mnk import ROOT, build_snapshot
 
 def check_source_c_call(
     self, package, initial, binary, execute, values, wanted_bytes, invalid_values=(), *, source_dtype="f32",
+    output_dtype=None,
 ):
     from atlas_mlir_native.binding import DRAM_BASE
 
@@ -39,6 +40,8 @@ def check_source_c_call(
                                               "const uint8_t *const *inputs,uint8_t *output")
     elif source_dtype != "f32":
         raise ValueError("unsupported source test dtype")
+    if output_dtype == "bf16" and source_dtype == "f32":
+        client_source = client_source.replace("float *output", "uint8_t *output")
     (package / "client.c").write_text(client_source)
     subprocess.run(
         [
@@ -159,6 +162,17 @@ def check_source_c_call(
         self.assertEqual(words, {})
         self.assertEqual(memory, initial)
         self.assertEqual(result.raw[:-1], bytes([0xA7]) * (len(wanted_bytes) + 32))
+    if output_dtype == "bf16" and source_dtype == "f32":
+        # Mixed-width publication must still refuse an output inside an input.
+        memory[:] = initial
+        words.clear()
+        polls = None
+        before = [value.tobytes() for value in values]
+        inputs = (ctypes.c_void_p * len(values))(*(value.ctypes.data for value in values))
+        self.assertEqual(client.call(*callbacks, inputs, values[0].ctypes.data), 1)
+        self.assertEqual([value.tobytes() for value in values], before)
+        self.assertEqual(words, {})
+        self.assertEqual(memory, initial)
 
 
 @unittest.skipUnless(

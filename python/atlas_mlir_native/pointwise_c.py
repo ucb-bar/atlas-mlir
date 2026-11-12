@@ -49,7 +49,8 @@ def prepare_c_package(
                                        runtime_linkage=runtime_linkage)
 
 
-def prepare_precision_c_package(precision, compiled, name, *, target_source, runtime_linkage="separate"):
+def prepare_precision_c_package(precision, compiled, name, *, target_source, runtime_linkage="separate",
+                                output_dtype=None):
     """Replay a precision-owned target and render its explicit source operands."""
     source = precision.source
     request = precision.request
@@ -142,9 +143,10 @@ def prepare_precision_c_package(precision, compiled, name, *, target_source, run
     replayed = json.loads(_run([str(tools / "atlas-emit"), "--program-json", "-"], input_text=machine))
     if binary != b"".join(row["word_u32"].to_bytes(4, "little") for row in replayed["instructions"]):
         raise ValueError("pointwise encoded program differs from source lowering")
-    from .restoration_budget import instruction_bound
-    from .limits import functional_instruction_limit
     from types import SimpleNamespace
+
+    from .limits import functional_instruction_limit
+    from .restoration_budget import instruction_bound
     saved_bound = json.loads((compiled / "pointwise-instruction-bound.json").read_text())
     cap = functional_instruction_limit(SimpleNamespace(functional_instruction_limit=saved_bound["max_instructions"]))
     bound = instruction_bound(virtual_program(plan, addresses, output, descriptor), machine, replayed, max_instructions=cap)
@@ -174,6 +176,7 @@ def prepare_precision_c_package(precision, compiled, name, *, target_source, run
         tile_bytes=plan.tile_bytes,
         helpers=helpers,
         source_dtype=source_dtype,
+        output_dtype=output_dtype,
         source_input_indices=tuple(source_inputs.index(key) for key in precision.record()["inputs"]),
     )
     return {

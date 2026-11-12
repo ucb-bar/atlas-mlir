@@ -47,10 +47,11 @@ decoder layer.
 | Other regions | 83 | 83 |
 | Total | 586 | 99 |
 
-This is an **83.1% reduction in compiled launch count**, not a whole-layer
-cycle measurement. Compilation and independent source replay passed in 139
-seconds; the largest emitted image was 8,856 bytes. No
-whole-layer output-parity or new whole-layer cycle result is claimed here.
+This is an **83.1% reduction in compiled launch count**. Compilation and
+independent source replay passed in 139 seconds; the largest emitted image
+was 8,856 bytes. The full-layer Rust measurements below subsequently verified
+output parity and device cycles. Keeping existing operand-cache and unary-unroll
+options enabled matters: larger dispatches alone do not imply fewer device cycles.
 
 The kernel measurements below use `npu_model_rs` commit `0186e37`, CPU compute,
 RTL arithmetic, the default curve memory model, and idle-cycle skipping. Inputs
@@ -88,3 +89,83 @@ failure publication are covered by directed runtime tests.
 Merlin's repository-wide regex check still reports three existing
 `re.fullmatch` calls in `compile/baremetal_harness.py` (also present on the
 unmodified PR head). This branch does not change that file or its allowlist.
+
+## Full-layer Rust execution and private cast folding
+
+The same fixed 64-token layer has now run through generated host C and the Rust
+NPU simulator. All 131,072 BF16 output words match an independent replay of the
+original FX graph using the pinned Atlas arithmetic. The source checkpoint and
+quantized weight bytes are unchanged. These are device cycle measurements;
+they exclude modeled host preparation, staging, uploads and polling.
+
+| Configuration | Cycles | Dispatches |
+| --- | ---: | ---: |
+| Retained 1M-budget package (earlier cache/unroll settings) | 226,725,080 | 586 |
+| 128M budget, compact unary kernels, ordered operands | 301,262,434 | 99 |
+| 128M budget, unary unroll, binary lane groups, wide activation cache | 172,623,943 | 99 |
+| Same options, plus pointwise and quantized narrowing folds | 152,606,339 | 95 |
+
+The last comparison isolates removing four private casts: **20,017,604 fewer
+cycles (11.60%)**. Three are new pointwise folds (two norm outputs and the MLP
+division output); the fourth uses the existing quantized P.V narrowing fold.
+The total improvement versus the retained package is 32.69%, but that comparison
+combines dispatch policy, caches and arithmetic-lowering changes. The 301M row
+illustrates why we do not attribute the combined improvement to dispatch size.
+
+Rust simulation took about 5 seconds for the last row; running generated C,
+callbacks, per-launch state files and subprocesses took about 6 seconds. Timings
+are this machine's wall time, not hardware inference latency. Native compilation
+and uncached source replay of the 86-region package took 147 seconds.
+
+### Compiler/simulator ABI
+
+Compiler PR #50 targets the Python model at
+`47b8599d8ffbe5ddd96059ffe2b5be2427a410f5`. Rust port `0186e37` follows `c119e54`,
+which changed PACK/UNPACK lane ordering. The original Rust configuration produced
+incorrect layer outputs despite self-consistent timings. An explicit compatibility
+option in Rust commit `be1b521015ff54ec75699c2d5d63e567ab0ae22a` resolves that mismatch:
+
+```json
+{"numerics": "rtl", "pack_layout": "register_rows", "compute": "auto"}
+```
+
+The Rust default remains `tile_rows`. Select the layout matching the compiler's
+model revision; neither setting is a claim of equivalence to another RTL revision.
+The corrected output SHA256 is
+`9de10cb80864257a8b300b533eaafb0685d2f4f040d39010d6e1b4f7c29f7bd9`.
+The FX graph file SHA256 is
+`394740ce5dfe2a14e715824ed9383e89ee71ac41edf24b9f8a2ee89b4dc8224b`.
+
+### Enabling only the narrowing folds
+
+```python
+from atlas_mlir_native.composition_adapter import AdjacentDeviceAdapter
+adapter = AdjacentDeviceAdapter(
+    adapter, patterns=("pointwise_narrowing", "quantized_narrowing")
+)
+```
+
+Use `ATLAS_QUANTIZED_OPERAND_REUSE=wide-cache`,
+`ATLAS_EXACT_BINARY_LANE_GROUPS=1`, `exact_float_unroll=True`, and the execution
+budget shown above to reproduce the selected optimization settings. The default
+adapter is unchanged. Passing no `patterns` argument to `AdjacentDeviceAdapter`
+retains all its supported composition patterns; an explicit subset permits
+independent evaluation. Unknown or repeated pattern names are rejected.
+
+The new `pointwise_narrowing` pattern accepts an adjacent private FP32 result
+followed by the original dense `f32-to-bf16-rne-v1` cast. Supported selected
+operators are bounded BF16 multiplication, addition, subtraction, division and
+rsqrt. Their original precision policies, input admission, physical kernels,
+rounding and padding remain unchanged. The non-NaN BF16 result would have been
+widened exactly to FP32 and narrowed back to the same bits. The mixed-width C ABI
+publishes those bits directly, using FP32 input spans and BF16 output spans in
+all overlap checks. An escaping intermediate, different cast or unproved result
+policy keeps the original smaller regions. No floating-point arithmetic is moved
+to the host and no model name is used for recognition.
+
+Four focused tests cover selection/refusal, every non-NaN BF16 encoding's exact
+round trip, and generated C through Rust for multiplication/division with padding,
+signed zero, late invalid input, immutable inputs, output sentinels and alias
+rejection. The related composition/materialization suite passed 39 tests and
+17 subtests, with three optional runtime gates skipped. Native source replay
+and the complete layer reference comparison also passed.
