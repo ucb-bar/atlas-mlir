@@ -355,3 +355,25 @@ protected bytes, status, the ordinary instruction bound and the 128-KiB image
 limit. The focused suite passes three tests and three subtests, with two legacy
 Python-model gates skipped. The full-width kernel probes and complete independent
 FX comparison also pass.
+
+## Keep operand reuse when fusing a projection epilogue
+
+Paired panels now admit the already supported dense product epilogue. The existing
+restoration hook applies that product once, after the complete ordered reduction
+and exponent restoration. No multiplication moves across K accumulation, and the
+additional operand stays outside the writable output/status span. This removes
+the earlier incompatibility between paired caching and epilogue fusion.
+
+Adding `quantized_epilogue` to the preceding pattern set reduces the layer from
+**116,439,296 cycles / 87 dispatches to 114,955,518 cycles / 85 dispatches**.
+The two folded products follow the output projection and MLP up projection.
+Every output word still matches the independent FX reference. Compilation/source
+replay takes 159 seconds; Rust simulation takes 3.8 seconds, with 4.5 seconds for
+the generated-C run.
+
+Eight tests and two subtests pass, including Rust comparisons with the previous
+wide-cache epilogue for BF16/FP32 outputs, both multiplication operand orders,
+partial tiles, multiple row pairs, signed-zero operands, late rejected exponents,
+immutable extra operands and whole-memory equality. Both routes retain ordinary
+native instruction/image proofs. The complete generated-C layer also passes all
+per-launch memory permissions and immutable-weight checks.

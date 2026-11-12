@@ -25,7 +25,7 @@ def admitted(plan):
     # candidate saves bytes versus a complete activation-row cache; native
     # sizing and measured timing remain separate gates.
     return (prod(plan.batch_shape) == 1 and mc >= 2 and mc % 2 == 0 and nc >= 2
-            and MIN_K_TILES <= kc <= MAX_K_TILES and plan.epilogue_precision is None)
+            and MIN_K_TILES <= kc <= MAX_K_TILES)
 
 
 def virtual_source(plan, layout, restoration):
@@ -118,8 +118,9 @@ def virtual_source(plan, layout, restoration):
                                   offset(names[3],2048)],types)
         block(f'p{phase}_done',[f'p{phase}_done_s'],[STATE])
 
-    # Reuse the original restoration hook once, after the complete reduction.
-    # Its m/n names retain logical tail checks in the scalar fallback.
+    # Reuse the original restoration/epilogue hook once, after the complete
+    # reduction. Its m/n names retain logical tail checks in the scalar fallback;
+    # a fused product consumes restored values, never a partial K result.
     rm_types = [STATE,'i32','i32','i32']
     branch('restore_m_header',[e.state,e.const(0),'pair_y','pair_lpage'],rm_types)
     block('restore_m_header',['rm_s','rm','rm_y','restore_lpage'],rm_types)
