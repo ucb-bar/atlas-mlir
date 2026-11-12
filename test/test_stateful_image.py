@@ -17,8 +17,8 @@ from merlin.compiler.backend.stateful import CRegionABI2
 from merlin.compiler.build.contextentry import CImageContext, CImageEntry, ReservedImageInterval
 from merlin.compiler.build.image import CImageLink
 from merlin.compiler.request import CompileOptions
-from merlin.semantic_compiler.search import SearchLimits
-from merlin.semantic_compiler.snapshot import open_native_snapshot
+from merlin.compiler.semantic.search import SearchLimits
+from merlin.compiler.semantic.snapshot import open_native_snapshot
 
 
 @pytest.mark.parametrize("native", [False, True])

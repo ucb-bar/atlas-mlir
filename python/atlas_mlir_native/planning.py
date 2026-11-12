@@ -11,11 +11,11 @@ import struct
 from dataclasses import dataclass
 from pathlib import Path
 
-from merlin.semantic_compiler.model import (
+from merlin.compiler.semantic.model import (
     KernelRequest,
     pointwise_identity_maps,
 )
-from merlin.semantic_compiler.target_binding import NativeCompilationError
+from merlin.compiler.semantic.target_binding import NativeCompilationError
 
 from .admission import (
     _bf16_tile_request,

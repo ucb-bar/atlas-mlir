@@ -13,13 +13,13 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-from merlin.semantic_compiler.allocate import (
+from merlin.compiler.semantic.allocate import (
     AllocationResult,
 )
-from merlin.semantic_compiler.search import (
+from merlin.compiler.semantic.search import (
     SearchResult,
 )
-from merlin.semantic_compiler.target_binding import NativeCompilationError
+from merlin.compiler.semantic.target_binding import NativeCompilationError
 
 from .bf16_stream import (
     _check_bf16_selection,

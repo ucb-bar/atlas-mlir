@@ -30,9 +30,9 @@ class NativeMultiResultGuardTest(unittest.TestCase):
 
     def test_projection_candidate_is_refused_before_emission(self) -> None:
         from atlas_mlir_native.binding import AtlasNativeBinding
-        from merlin.semantic_compiler.model import KernelRequest
-        from merlin.semantic_compiler.search import SearchLimits
-        from merlin.semantic_compiler.snapshot import (
+        from merlin.compiler.semantic.model import KernelRequest
+        from merlin.compiler.semantic.search import SearchLimits
+        from merlin.compiler.semantic.snapshot import (
             NativeSnapshot,
             build_native_snapshot,
             packaged_egg_bridge_path,

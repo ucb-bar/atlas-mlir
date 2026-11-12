@@ -58,12 +58,12 @@ def prepare(source_path: Path, bridge_root: Path, compiled: Path, *, runtime_inc
         diagnostic_whole_graph_host_bridge,
         implementation_paths,
     )
-    from merlin.frontends.linalg_mlir import parse_mlir_text
+    from merlin.compiler.frontend.linalg_mlir import parse_mlir_text
     from merlin.compiler.quantization.contraction.codegen import (
         finite_f32_codebook,
         render_finite_f32_codebook_c,
     )
-    from merlin.semantic_compiler.target_binding import verify_native_publication
+    from merlin.compiler.semantic.target_binding import verify_native_publication
 
     runtime = Path(__file__).resolve().parents[1] / "runtime"
     include = Path(runtime_include) if runtime_include is not None else data_path("runtime", "c")

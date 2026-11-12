@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from collections import Counter
 
-from merlin.semantic_compiler.target_binding import NativeCompilationError
+from merlin.compiler.semantic.target_binding import NativeCompilationError
 
 from .policy import BF16_BINARY_MODES, BF16_ROW_REDUCTION_MODES, BF16_UNARY_MODES
 

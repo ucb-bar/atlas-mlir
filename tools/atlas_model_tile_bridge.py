@@ -174,7 +174,7 @@ def prepare(probe: Path, region_id: str, verification: Path, capsule: Path,
             or symbol not in bridge.get("external_symbols", [])
             or symbol not in bridge.get("c_interface_symbols", [])):
         raise ValueError("native region and outlined C-interface types differ")
-    from merlin.frontends.linalg_mlir import parse_mlir_file
+    from merlin.compiler.frontend.linalg_mlir import parse_mlir_file
     from xdsl.dialects import func
 
     module = parse_mlir_file(bridge_path)

@@ -16,7 +16,7 @@ from merlin.compiler.artifact import Artifact, Compilation
 from merlin.compiler.backend.cabi import CRegionABI, TensorPort
 from merlin.compiler.backend.stateful import CContext, CRegionABI2, EmbeddedPayload, render_u32_payload
 from merlin.compiler.build import process
-from merlin.semantic_compiler.target_binding import verify_native_publication
+from merlin.compiler.semantic.target_binding import verify_native_publication
 
 from .policy import BF16_DRAM_PAIR_LAYOUT, DRAM_BASE, TILE_BYTES
 

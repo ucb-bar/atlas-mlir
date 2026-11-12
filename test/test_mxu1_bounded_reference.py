@@ -46,7 +46,7 @@ class MXU1BoundedReferenceTest(unittest.TestCase):
     def test_graph_evaluator_matches_exact_rational_oracle_and_orientation(self) -> None:
         from atlas_mlir_native.binding import MXU1_POLICY
         from atlas_mlir_native.reference import evaluate_mxu1_bounded_reset
-        from merlin.semantic_compiler.reference import TensorValue, evaluate_graph
+        from merlin.compiler.semantic.reference import TensorValue, evaluate_graph
         from test_mxu1_reference import _expected
 
         request = self.request()
@@ -86,7 +86,7 @@ class MXU1BoundedReferenceTest(unittest.TestCase):
     def test_wrong_domain_or_maps_are_rejected(self) -> None:
         from atlas_mlir_native.binding import MXU1_POLICY
         from atlas_mlir_native.reference import evaluate_mxu1_bounded_reset
-        from merlin.semantic_compiler.reference import TensorValue, evaluate_graph
+        from merlin.compiler.semantic.reference import TensorValue, evaluate_graph
 
         request = self.request()
         nodes = {node.id: node for node in request.nodes}

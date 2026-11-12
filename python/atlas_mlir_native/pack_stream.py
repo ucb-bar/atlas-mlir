@@ -6,7 +6,7 @@ and evaluator authority remain separate; no hardware execution is established.
 
 from __future__ import annotations
 
-from merlin.semantic_compiler.target_binding import NativeCompilationError
+from merlin.compiler.semantic.target_binding import NativeCompilationError
 
 from .transfer import _check_atomic_dma_schedule, _check_mxu_dag_timing, _tile_effects
 

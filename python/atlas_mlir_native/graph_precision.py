@@ -13,11 +13,11 @@ import struct
 from dataclasses import dataclass, replace
 
 from merlin.common.digest import is_sha256
-from merlin.semantic_compiler.linalg_bridge import (
+from merlin.compiler.semantic.linalg_bridge import (
     LinalgBridgeError,
     translate_linalg_text,
 )
-from merlin.semantic_compiler.model import (
+from merlin.compiler.semantic.model import (
     ConstantBinding,
     IndexMap,
     KernelRequest,

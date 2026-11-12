@@ -10,8 +10,8 @@ from __future__ import annotations
 import struct
 from fractions import Fraction
 
-from merlin.semantic_compiler.model import IndexMap, pointwise_identity_maps
-from merlin.semantic_compiler.reference import TensorValue
+from merlin.compiler.semantic.model import IndexMap, pointwise_identity_maps
+from merlin.compiler.semantic.reference import TensorValue
 
 from atlas_mlir_native.exp_lane import vexp_bf16_bits
 from atlas_mlir_native.pack_lane import (

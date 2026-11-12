@@ -20,13 +20,13 @@ from merlin.compiler.backend.sourceproposal import (
 from merlin.compiler.invocation import request_identity
 from merlin.compiler.ir.region import preview_region
 from merlin.compiler.request import CompileOptions
-from merlin.frontends.linalg_bf16_relu import recognize_bf16_sign_clamp_relu
-from merlin.frontends.linalg_mlir import parse_mlir_text
-from merlin.semantic_compiler.linalg_bridge import translate_linalg_text
-from merlin.semantic_compiler.search import SearchLimits
-from merlin.semantic_compiler.snapshot import NativeSnapshot, open_native_snapshot
-from merlin.transforms.certificates import ir_text
-from merlin.xdsl_dialects.lowering.global_plan import CycleInterval, RegionAlternative
+from merlin.compiler.frontend.linalg_bf16_relu import recognize_bf16_sign_clamp_relu
+from merlin.compiler.frontend.linalg_mlir import parse_mlir_text
+from merlin.compiler.semantic.linalg_bridge import translate_linalg_text
+from merlin.compiler.semantic.search import SearchLimits
+from merlin.compiler.semantic.snapshot import NativeSnapshot, open_native_snapshot
+from merlin.compiler.transforms.certificates import ir_text
+from merlin.compiler.dialects.lowering.global_plan import CycleInterval, RegionAlternative
 
 from .admission import _bf16_tile_request
 from .binding import AtlasNativeBinding, implementation_sources, revalidate_implementation

@@ -13,7 +13,7 @@ from atlas_mlir_native.artifacts import publish_program
 
 from merlin import api
 from merlin.compiler.request import CompileOptions, Source
-from merlin.semantic_compiler.model import KernelRequest, SemanticNode, TensorType
+from merlin.compiler.semantic.model import KernelRequest, SemanticNode, TensorType
 
 
 def invocation(tmp_path, monkeypatch, *, corrupt=False):
@@ -82,13 +82,13 @@ def test_binding_stage_custody_publication_and_original_materialization_hook(tmp
 
     from atlas_mlir_native import binding, native
 
-    from merlin.semantic_compiler.allocation_types import (
+    from merlin.compiler.semantic.allocation_types import (
         AllocationResult,
         CandidateGraph,
         Value,
     )
-    from merlin.semantic_compiler.search import SearchLimits, SearchResult
-    from merlin.semantic_compiler.target_binding import NativeCompilationError
+    from merlin.compiler.semantic.search import SearchLimits, SearchResult
+    from merlin.compiler.semantic.target_binding import NativeCompilationError
 
     root = Path(binding.__file__).resolve().parents[2]
     request = KernelRequest.from_record(json.loads(
@@ -187,7 +187,7 @@ def test_binding_stage_custody_publication_and_original_materialization_hook(tmp
 def _approve_relu_source(module, entry, options):
     """Original test caller approves meaning, never backend accuracy/hardware."""
     from merlin.compiler.ir.semantics import source_semantic_attributes
-    from merlin.frontends.linalg_bf16_relu import recognize_bf16_sign_clamp_relu
+    from merlin.compiler.frontend.linalg_bf16_relu import recognize_bf16_sign_clamp_relu
 
     function = next(op for op in module.body.block.ops if op.sym_name.data == entry)
     relu = tuple(function.body.block.ops)[1]
@@ -208,7 +208,7 @@ def _system(provider, tmp_path, *, context=None, image=None):
     from merlin.compiler.components import Component
     from merlin.compiler.pipeline import RegionBackend
     from merlin.compiler.system import SystemCompiler
-    from merlin.system.topology import select_topology
+    from merlin.target.system.topology import select_topology
 
     topology = tmp_path / "topology.yaml"
     document = {
@@ -257,8 +257,8 @@ def _configured_transport(tmp_path, monkeypatch, *, plan_override=None):
 
     from atlas_mlir_native import regions
 
-    from merlin.semantic_compiler.search import SearchLimits
-    from merlin.semantic_compiler.snapshot import NativeSnapshot
+    from merlin.compiler.semantic.search import SearchLimits
+    from merlin.compiler.semantic.snapshot import NativeSnapshot
 
     root = Path(__file__).resolve().parents[1]
     target = tmp_path / "target"
@@ -332,8 +332,8 @@ def test_configured_atlas_refuses_unapproved_source_changed_tools_and_changed_co
     # Signature obligations cannot be silently dropped while outlining.
     from xdsl.dialects import builtin
 
-    from merlin.frontends.linalg_mlir import parse_mlir_text
-    from merlin.transforms.certificates import ir_text
+    from merlin.compiler.frontend.linalg_mlir import parse_mlir_text
+    from merlin.compiler.transforms.certificates import ir_text
 
     module = parse_mlir_text(source)
     module.body.block.first_op.properties["arg_attrs"] = builtin.ArrayAttr([
@@ -357,8 +357,8 @@ def test_system_atlas_real_native_tools_emit_selected_binary_without_llvm_or_loa
     import os
     from pathlib import Path
 
-    from merlin.semantic_compiler.search import SearchLimits
-    from merlin.semantic_compiler.snapshot import open_native_snapshot
+    from merlin.compiler.semantic.search import SearchLimits
+    from merlin.compiler.semantic.snapshot import open_native_snapshot
 
     selected = tuple(os.environ.get(name) for name in (
         "ATLAS_SYSTEM_SNAPSHOT", "ATLAS_SYSTEM_TARGET_SOURCE", "ATLAS_SYSTEM_TOOL_DIRECTORY"))
@@ -426,8 +426,8 @@ def test_system_atlas_bf16_call_compiles_and_runs_only_fake_transport(tmp_path, 
     from atlas_mlir_native.call import BF16Call
     from atlas_mlir_native.layout import pack_bf16_pair_halves
 
-    from merlin.semantic_compiler.search import SearchLimits
-    from merlin.semantic_compiler.snapshot import open_native_snapshot
+    from merlin.compiler.semantic.search import SearchLimits
+    from merlin.compiler.semantic.snapshot import open_native_snapshot
 
     values = tuple(os.environ.get(name) for name in (
         "ATLAS_SYSTEM_SNAPSHOT", "ATLAS_SYSTEM_TARGET_SOURCE", "ATLAS_SYSTEM_TOOL_DIRECTORY"))

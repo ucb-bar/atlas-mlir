@@ -8,23 +8,23 @@ from __future__ import annotations
 
 from dataclasses import replace
 
-from merlin.semantic_compiler.allocate import (
+from merlin.compiler.semantic.allocate import (
     StorageBank,
 )
-from merlin.semantic_compiler.model import (
+from merlin.compiler.semantic.model import (
     pointwise_identity_maps,
 )
 from merlin.compiler.quantization.contraction.transform import (
     MatmulTileProfile,
 )
 from merlin.compiler.quantization.contraction.values import FloatBoundarySpec
-from merlin.semantic_compiler.rules import (
+from merlin.compiler.semantic.rules import (
     AddressConstraint,
     AxisBound,
     InstructionDescriptor,
     IntegerAttributeBound,
 )
-from merlin.semantic_compiler.snapshot import NativeTargetProfile
+from merlin.compiler.semantic.snapshot import NativeTargetProfile
 
 from .admission import (
     _mxu0_accumulate_maps,

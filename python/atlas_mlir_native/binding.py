@@ -19,13 +19,13 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 
 from merlin.compiler.frontend.inputs import StagedCompileInputs
-from merlin.semantic_compiler.allocate import (
+from merlin.compiler.semantic.allocate import (
     AllocationResult,
     CandidateGraph,
     StorageBank,
     check_assignment,
 )
-from merlin.semantic_compiler.model import (
+from merlin.compiler.semantic.model import (
     IndexMap,
     KernelRequest,
     TensorType,
@@ -43,19 +43,19 @@ from merlin.compiler.quantization.contraction.transform import (
     build_diagnostic_matmul_tiles,
 )
 from merlin.compiler.quantization.contraction.values import FloatBoundarySpec
-from merlin.semantic_compiler.rules import (
+from merlin.compiler.semantic.rules import (
     AddressConstraint,
     AxisBound,
     InstructionDescriptor,
     IntegerAttributeBound,
 )
-from merlin.semantic_compiler.search import (
+from merlin.compiler.semantic.search import (
     MaterializationDecision,
     SearchLimits,
     SearchResult,
 )
-from merlin.semantic_compiler.snapshot import NativeSnapshot, NativeTargetProfile
-from merlin.semantic_compiler.target_binding import NativeCompilationError
+from merlin.compiler.semantic.snapshot import NativeSnapshot, NativeTargetProfile
+from merlin.compiler.semantic.target_binding import NativeCompilationError
 
 from . import native, planning, profiles, publication
 from .admission import (

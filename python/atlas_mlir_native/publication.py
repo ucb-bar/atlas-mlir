@@ -8,10 +8,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from merlin.semantic_compiler.search import (
+from merlin.compiler.semantic.search import (
     SearchResult,
 )
-from merlin.semantic_compiler.snapshot import NativeSnapshot
+from merlin.compiler.semantic.snapshot import NativeSnapshot
 
 from .native import _MaterializedCandidate, _sha256
 from .planning import TilePlan

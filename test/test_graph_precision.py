@@ -37,7 +37,7 @@ class GraphPrecisionTest(unittest.TestCase):
         sys.path.remove(str(Path(MERLIN) / "src"))
 
     def assert_source_accounting(self, source, parsed, *, semantic_nodes):
-        from merlin.frontends.linalg_mlir import parse_mlir_text
+        from merlin.compiler.frontend.linalg_mlir import parse_mlir_text
 
         module = parse_mlir_text(source)
         function = next(op for op in module.body.block.ops if op.name == "func.func")
@@ -58,7 +58,7 @@ class GraphPrecisionTest(unittest.TestCase):
 
     def test_all_source_nodes_and_two_outputs_are_accounted(self) -> None:
         from atlas_mlir_native.binding import _mxu_bf16_dag_request
-        from merlin.semantic_compiler.linalg_bridge import translate_linalg_text
+        from merlin.compiler.semantic.linalg_bridge import translate_linalg_text
 
         result = self.lower(self.source, entry="forward", policy=self.policy)
         parsed = translate_linalg_text(
@@ -77,7 +77,7 @@ class GraphPrecisionTest(unittest.TestCase):
 
     def test_residual_add_preserves_three_ordered_outputs(self) -> None:
         from atlas_mlir_native.binding import BF16_ADD_ATTRS, _mxu_bf16_dag_request
-        from merlin.semantic_compiler.linalg_bridge import translate_linalg_text
+        from merlin.compiler.semantic.linalg_bridge import translate_linalg_text
 
         source = (ROOT / "test/examples/attention_mlp_residual_add_linalg.mlir").read_text()
         result = self.lower(source, entry="forward", policy=self.policy)
@@ -109,7 +109,7 @@ class GraphPrecisionTest(unittest.TestCase):
                          tuple(node.op for node in original.request.nodes))
 
     def test_wrong_transpose_and_nonzero_initializer_fail(self) -> None:
-        from merlin.semantic_compiler.linalg_bridge import LinalgBridgeError
+        from merlin.compiler.semantic.linalg_bridge import LinalgBridgeError
 
         transpose = self.source.replace("permutation = [1, 0]", "permutation = [0, 1]", 1)
         initializer = self.source.replace(
@@ -121,7 +121,7 @@ class GraphPrecisionTest(unittest.TestCase):
                 self.lower(changed, entry="forward", policy=self.policy)
 
     def test_output_order_and_policy_identity(self) -> None:
-        from merlin.semantic_compiler.linalg_bridge import LinalgBridgeError
+        from merlin.compiler.semantic.linalg_bridge import LinalgBridgeError
 
         changed = self.source.replace("func.return %80, %90", "func.return %90, %80", 1)
         original = self.lower(self.source, entry="forward", policy=self.policy)
@@ -181,7 +181,7 @@ class GraphPrecisionTest(unittest.TestCase):
     def test_staged_source_keyword_and_policy_must_match_without_fallback(self) -> None:
         from atlas_mlir_native.binding import AtlasNativeBinding
 
-        from merlin.semantic_compiler.linalg_bridge import LinalgBridgeError
+        from merlin.compiler.semantic.linalg_bridge import LinalgBridgeError
 
         original = hashlib.sha256(b"selected original capture").hexdigest()
         for selected in (None, True, "", original.upper(), original[:-1], "0" * 64):
@@ -224,7 +224,7 @@ class GraphPrecisionTest(unittest.TestCase):
             self.skipTest("set ATLAS_OOT_BIN_DIR for physical emission")
         from atlas_mlir_native.binding import AtlasNativeBinding
         from atlas_mlir_native.graph_abi import prepare_graph_inputs
-        from merlin.semantic_compiler.snapshot import (
+        from merlin.compiler.semantic.snapshot import (
             build_native_snapshot,
             packaged_egg_bridge_path,
         )

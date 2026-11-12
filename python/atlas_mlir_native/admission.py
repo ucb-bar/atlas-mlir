@@ -6,7 +6,7 @@ and evaluator authority remain separate; no hardware execution is established.
 
 from __future__ import annotations
 
-from merlin.semantic_compiler.model import (
+from merlin.compiler.semantic.model import (
     IndexMap,
     KernelRequest,
     TensorType,

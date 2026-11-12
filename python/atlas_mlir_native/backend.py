@@ -10,11 +10,11 @@ from pathlib import Path
 
 from merlin.compiler.artifact import Artifact, Compilation
 from merlin.compiler.request import CompileRequest
-from merlin.semantic_compiler.linalg_bridge import translate_linalg_text
-from merlin.semantic_compiler.model import KernelRequest
-from merlin.semantic_compiler.search import SearchLimits
-from merlin.semantic_compiler.snapshot import open_native_snapshot
-from merlin.semantic_compiler.target_binding import verify_native_publication
+from merlin.compiler.semantic.linalg_bridge import translate_linalg_text
+from merlin.compiler.semantic.model import KernelRequest
+from merlin.compiler.semantic.search import SearchLimits
+from merlin.compiler.semantic.snapshot import open_native_snapshot
+from merlin.compiler.semantic.target_binding import verify_native_publication
 
 from .binding import AtlasNativeBinding
 

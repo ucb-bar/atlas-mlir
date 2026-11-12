@@ -59,7 +59,7 @@ else
 fi
 compile_defs+=("-DATLAS_MAX_POLLS=$max_polls")
 
-"$python_bin" -m merlin.targetgen.cli native-bridge-graph \
+"$python_bin" -m merlin.development.targetgen.cli native-bridge-graph \
   --linalg "$source_linalg" --entry forward \
   --compiled "$compiled_native" --device-symbol merlin_native_graph \
   --out "$out/host-bridge"
@@ -67,7 +67,7 @@ compile_defs+=("-DATLAS_MAX_POLLS=$max_polls")
   --linalg "$source_linalg" --host-bridge "$out/host-bridge" \
   --compiled "$compiled_native" --out "$out/graph-wrapper" \
   --runtime-include "$merlin_root/merlin/runtime/c"
-"$python_bin" -m merlin.llvmlower.cli \
+"$python_bin" -m merlin.compiler.lower.model.cli \
   "$out/host-bridge/host-bridge.mlir" --target riscv --out "$out/host-lowered"
 
 "$llvm_bin/clang" --target=riscv64-unknown-elf -march=rv64gcv \

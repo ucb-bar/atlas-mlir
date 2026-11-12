@@ -6,10 +6,10 @@ and evaluator authority remain separate; no hardware execution is established.
 
 from __future__ import annotations
 
-from merlin.semantic_compiler.allocate import (
+from merlin.compiler.semantic.allocate import (
     CandidateGraph,
 )
-from merlin.semantic_compiler.target_binding import NativeCompilationError
+from merlin.compiler.semantic.target_binding import NativeCompilationError
 
 from .dag_selection import _mxu_binary_selection, _mxu_dag_selection
 from .pack_lane import ROUNDED_PACK_POLICY
