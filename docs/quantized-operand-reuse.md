@@ -105,3 +105,43 @@ execution plan. Generated code expands only the capped resident prefix.
 protected memory, exact read savings and native export/rebinding. Twenty-four
 legacy virtual programs were also checked byte-identical across MXU0/MXU1,
 cached/streamed schedules and K unrolling.
+
+## Share weight panels across token rows
+
+`ATLAS_QUANTIZED_OPERAND_REUSE=paired-cache` processes pairs of M32 tile rows.
+For each panel of up to 32 K32 tiles it loads both activation rows once, then
+loads each weight column once and uses it for both rows. The resident operand
+slots occupy at most 96 KiB: 64 KiB of activations and 32 KiB of weights. Normal
+allocation still accounts for restoration, spills and staging separately.
+
+Each output follows the original ascending K sequence. A completed BF16 partial
+sum is stored in the existing output buffer between panels and loaded as the
+next panel's seed. The first panel resets the accumulator without reading that
+buffer. After the final panel, the original restoration hook applies scales and
+checks admission. No partial sum escapes through the C interface: the binding
+checks the shared status before publishing its final dense result. This uses
+the existing output permissions and allocates no extra DRAM buffer.
+
+The candidate requires one batch, an even number of M32 tiles, at least two N32
+tiles, and 32 through 192 K32 tiles. Quantized multiply epilogues retain the wide
+activation schedule. Short reductions, odd row counts, larger K and multiple
+batches also fall back to `wide-cache`; no input is rejected merely because it
+cannot use paired panels. This shape admission avoids the small-K case where
+partial-result traffic costs more than the reused weights. It is not a promise
+of lower cycles for every admitted shape.
+
+The requested policy, selected schedule, two M tiles and 32 K tiles per panel
+are recorded in the execution plan and checked during replay. Native resource,
+timing, memory and instruction proofs remain mandatory, including on fallback.
+
+For admitted shapes, compared with caching the complete activation row, weight
+reads decrease by `Mc/2 * Nc * Kc * 1024` bytes. Let `P = ceil(Kc/32)`: partial
+sum handling adds `P * Mc * Nc * 2048` bytes of reads and the same number of
+writes. The net traffic benefit must include both costs. Activation reads and
+exponent-page reads are unchanged.
+
+`test_quantized_panel_reuse.py` checks fallback, plan tampering, canonical native
+publication/rebinding, padded rows/columns, multiple row pairs, incomplete K
+panels, nonuniform exponents, late refusal, protected memory and exact traffic.
+The optimized pipeline also executes against an ordered reference on the NPU
+model. Both requested policies remain opt-in; `ordered` is still the default.

@@ -61,8 +61,8 @@ def raw_fixture(plan, layout):
     return rematerialize_scalar_constants('\n'.join(lines)+'\n')
 
 
-def compile_fixture(source):
-    result = subprocess.run([str(BIN/'atlas-opt'),*NATIVE_PIPELINES['mandatory'],'-'],input=source,
+def compile_fixture(source, *, pipeline='mandatory'):
+    result = subprocess.run([str(BIN/'atlas-opt'),*NATIVE_PIPELINES[pipeline],'-'],input=source,
                             capture_output=True,text=True,timeout=30)
     if result.returncode:
         raise AssertionError(result.stderr)

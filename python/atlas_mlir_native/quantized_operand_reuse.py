@@ -4,7 +4,7 @@ import os
 
 from merlin.semantic_compiler.target_binding import NativeCompilationError
 
-POLICIES = ('ordered', 'row-cache', 'prefix-cache', 'wide-cache')
+POLICIES = ('ordered', 'row-cache', 'prefix-cache', 'wide-cache', 'paired-cache')
 WIDE_CACHE_TILES = 192
 
 
@@ -38,6 +38,11 @@ def activation_residency(plan, policy=None):
         raise ValueError('unsupported recorded quantized operand reuse policy')
     if policy == 'ordered':
         return None
+    if policy == 'paired-cache':
+        from .quantized_panel_reuse import admitted
+        if admitted(plan):
+            return None  # Paired panels are not a single resident activation row.
+        policy = 'wide-cache'
 
     # Static slots bound both storage and code expansion. The wider opt-in
     # leaves 48 KiB of the selected 240 KiB frame for ordinary allocation.
@@ -54,6 +59,12 @@ def activation_residency(plan, policy=None):
 
 def schedule_record(plan, policy=None):
     requested = reuse_policy() if policy is None else policy
+    if requested == 'paired-cache':
+        from .quantized_panel_reuse import admitted, PANEL_K_TILES
+        if admitted(plan):
+            return dict(operand_reuse_requested=requested, operand_reuse='paired-cache',
+                        operand_reuse_panel_m_tiles=2, operand_reuse_panel_k_tiles=PANEL_K_TILES)
+        return {**schedule_record(plan, 'wide-cache'), 'operand_reuse_requested': requested}
     residency = activation_residency(plan, requested)
     if requested == 'ordered':
         return {}

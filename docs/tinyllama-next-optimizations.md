@@ -146,11 +146,71 @@ epilogue and materialization suite passed 31 tests and 21 subtests, with one
 optional test skipped. All implementation changes are in Atlas; Merlin's
 existing region selector consumes the target-proved alternative unchanged.
 
+## Wider activation reuse and shared weight panels
+
+Two further opt-in schedules extend the quantized MXU1 path. `wide-cache`
+retains up to 192 activation tiles, covering the full K=5632 row. `paired-cache`
+shares weight panels across two M32 tile rows while also reusing their activation
+panels across output columns. Its partial sums cross K-panel boundaries as
+ordered BF16 values in the existing output buffer, then undergo the original
+restoration and admission checks. See the [schedule contracts](quantized-operand-reuse.md).
+
+Fresh cycle runs on the same full down projection (M=64, N=2048, K=5632) and
+unchanged model revision gave:
+
+| Schedule | Cycles | DRAM bytes loaded + stored | Program bytes |
+| --- | ---: | ---: | ---: |
+| Ordered | 35,804,760 | 46,925,824 | 3,476 |
+| Previous 64-tile prefix | 29,631,705 | 38,668,288 | 11,040 |
+| Wide activation cache | 18,822,137 | 24,217,600 | 24,832 |
+| Paired activation/weight panels | 15,302,709 | 15,828,992 | 50,080 |
+
+Wide caching saves another **10,809,568 cycles (36.48%)** over the prefix.
+Paired weight reuse saves another **3,519,428 cycles (18.70%)** over wide caching,
+including the cost of writing and reloading partial sums. Together these two
+features save **14,328,996 cycles (48.36%)** over the previous prefix schedule,
+or **57.26%** versus ordered execution. These are down-projection results, not
+a remeasured whole-layer total.
+
+Every retained host reference read matched in both full runs. Independent
+protected-memory checks passed, and their final complete-memory SHA256 equals
+the ordered and prefix runs:
+`c6e39e07404c9af7c1984b551226550833c0c7e0c640c2727c392daf7c7ebe17`.
+Replaying the integrated policies emitted byte-identical benchmark images.
+The physical instruction bounds were 529,983 (wide) and 561,260 (paired), below
+the unchanged one-million limit; image sizes remain below 128 KiB.
+
+The paired schedule's DRAM service cost remains 10,716,974 cycles. Additional
+VMEM movement and partial-sum handling mean its cycle savings are smaller than
+the raw bandwidth savings alone would suggest. Its larger image is another
+explicit tradeoff. The schedule declines small K, odd M-tile counts, multiple
+batches and quantized multiply epilogues, using the wide-cache policy instead.
+
+Enable both opportunities for supported shapes before compilation:
+
+```bash
+export ATLAS_QUANTIZED_OPERAND_REUSE=paired-cache
+```
+
+For comparison, select `wide-cache`, `prefix-cache` or `ordered`. The default
+remains `ordered`; no hardware limits, operand codes or exponent semantics
+change. All code is in Atlas; the pinned Merlin fork checkout remains untouched.
+
+Three wide-cache tests and four paired-cache tests cover native publication,
+recorded-policy replay, fallback, tails, batches/row pairs, nonuniform scales,
+late rejection, exact traffic and complete-memory equality on the NPU model.
+Native publication passed both mandatory and optimized pipelines, and the
+optimized paired program also passed NPU execution against the ordered reference.
+The broader regression run passed 45 tests and 30 subtests, with four optional
+tests skipped and one qualified-native test deselected. Local evidence is under
+`out/next-audit/`, including `wide-down-benchmark.json`,
+`paired-down-benchmark.json`, `reuse-image-equivalence.log` and the test logs.
+
 ## Remaining work
 
 PR #44 already implements A/W caching, accumulator retention and allocation
 fallbacks in the older model-compilation path. Those changes are not duplicated
-here. The outstanding work is broader panel reuse beyond the resident prefix,
-weight reuse combined with activation reuse, and removal of further intermediate
-buffers beyond the exact narrowing pair above. Those features are not implemented
-by these commits and need their own correctness and performance gates.
+here. The new schedules apply those reuse principles to the distinct ordered
+quantized MXU1 path. Further work includes reducing partial-sum traffic, supporting
+additional panel geometries, and eliminating more intermediate buffers. A fresh
+whole-layer profile should determine their priority.
