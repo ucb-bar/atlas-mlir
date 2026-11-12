@@ -39,6 +39,8 @@ def instructions(binary):
                       es1=(word >> 13) & 63, ch=(word >> 12) & 7, imm=signed(word >> 20, 12))
         if fmt == "UType":
             values["imm"] = word >> 12
+        elif fmt == "VIType":
+            values["imm"] = word >> 16
         elif fmt == "SType":
             values["imm"] = signed(((word >> 25) << 5) | ((word >> 7) & 31), 12)
         elif fmt == "SBType":

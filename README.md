@@ -175,11 +175,46 @@ lowering, not generated-backend performance. The direct 32×32 Atlas comparator
 matches those counts.
 
 The companion Merlin `examples/atlas/shared-passes.md` documents a standalone
-40-member compiler library, the reproducible preflight and existing generation
+41-member compiler library, the reproducible preflight and existing generation
 admission gates. It runs without capture, reference compiler or grader imports.
-Tails, arbitrary graph-domain qualification, reductions and final RTL qualification
+Tails, arbitrary graph-domain qualification and final RTL qualification
 remain outside the initial scope. FP4/FP6 grouped storage and scalar codecs in
 Merlin do not grant those formats to Atlas hardware. No generation loop is run.
+
+### Shared attention and MLP
+
+`atlas_mlir_native.shared_tensor_graph.compile_tensor_graph` now consumes the
+target-independent `merlin.frontends.linalg_tensor_graph` reader and reuses the
+checked dense scheduler. The reader preserves floating types, SSA edges, shapes,
+scalar arithmetic, reductions, transpose and broadcast semantics. This Atlas
+adapter requires `precision="atlas-f32-to-bf16-e4m3-diagnostic-v1"`; its manifest
+records every target numeric replacement and unresolved domain/quality obligation.
+Atlas's BF16/FP8 arithmetic is an explicit approximation of the f32 source.
+
+```sh
+"$MERLIN_PYTHON" tools/check_shared_attention.py \
+  --output-dir out/build/shared-attention-preflight \
+  --atlas-bin-dir "$ATLAS_BIN" --model-root "$MODEL_ROOT" \
+  --model-python "$MODEL_PYTHON"
+```
+
+Use the same `PYTHONPATH` and pinned model as above. This runs Q/K/V projection,
+scaled stable softmax, attention/value multiplication and a two-layer ReLU MLP.
+It checks 32- and 64-wide projection inputs, with and without 12 retained stage
+outputs, two input sets and both scheduling modes: 16 exact byte comparisons
+against an independent reference for the selected target arithmetic. It also
+reports f32 approximation error; no application quality threshold is implied.
+
+For the final-output-only programs, the 32-wide case uses 386 words / 13,939 model
+cycles in source order and 401 / 10,591 optimized. The 64-wide projection uses
+425 / 17,292 and 449 / 12,781. These are full-program model cycles, including
+transfers and stalls, using the existing Atlas physical compiler. They are neither
+RTL timing measurements nor generated-backend benchmarks.
+
+This path supports complete 32-element row reductions and full tiles. Wider
+softmax rows, tails, arbitrary intermediate domains and BF16 physical transpose
+refuse or remain unqualified. The shared reader accepts other shapes, axes and
+f16/bf16/f32/f64 independently; these Atlas restrictions do not enter Merlin.
 
 ## Read next
 
