@@ -2164,12 +2164,8 @@ class NativeBindingTest(unittest.TestCase):
 
     def test_parsed_m64_n96_k64_linalg_compiles_six_native_tiles(self) -> None:
         from merlin.semantic_compiler.linalg_bridge import translate_linalg_text
-        from merlin.semantic_compiler.ordered_k_tiling import (
-            materialize_row_major_k_slices,
-        )
-        from merlin.semantic_compiler.ordered_mn_tiling import (
-            materialize_row_major_mn_inputs,
-        )
+        from merlin.compiler.transforms.contraction_k import materialize_row_major_k_slices
+        from merlin.compiler.transforms.contraction_mn import materialize_row_major_mn_inputs
         from merlin.semantic_compiler.search import SearchLimits
         from merlin.semantic_compiler.target_binding import verify_native_publication
 
@@ -2215,7 +2211,7 @@ class NativeBindingTest(unittest.TestCase):
     def test_parsed_m33_n31_k65_compiles_checked_mnk_tails(self) -> None:
         from atlas_mlir_native.layout import unpack_native_bf16_output
         from merlin.semantic_compiler.linalg_bridge import translate_linalg_text
-        from merlin.semantic_compiler.ordered_mnk_tiling import (
+        from merlin.compiler.transforms.contraction_mnk import (
             OrderedMNKTiling,
             assemble_row_major_mnk_outputs,
             materialize_row_major_mnk_inputs,
@@ -2282,7 +2278,7 @@ class NativeBindingTest(unittest.TestCase):
 
     def test_parsed_m31_n33_k64_uses_checked_outer_tails(self) -> None:
         from merlin.semantic_compiler.linalg_bridge import translate_linalg_text
-        from merlin.semantic_compiler.ordered_mn_tiling import (
+        from merlin.compiler.transforms.contraction_mn import (
             assemble_row_major_mn_outputs,
             materialize_row_major_mn_inputs,
         )
@@ -2672,9 +2668,7 @@ class NativeBindingTest(unittest.TestCase):
 
     def test_logical_k64_linalg_partitions_into_checked_native_chain(self) -> None:
         from merlin.semantic_compiler.linalg_bridge import translate_linalg_text
-        from merlin.semantic_compiler.ordered_k_tiling import (
-            materialize_row_major_k_slices,
-        )
+        from merlin.compiler.transforms.contraction_k import materialize_row_major_k_slices
         from merlin.semantic_compiler.search import SearchLimits
 
         from tools.check_program_decode import audit_program
@@ -3367,7 +3361,7 @@ class NativeBindingTest(unittest.TestCase):
             survey_source_f32_batched_matmuls,
         )
         from merlin.targetgen.application_graph import _program_graph
-        from merlin.targetgen.contract.model_host_bridge import diagnostic_host_bridge
+        from merlin.compiler.build.hostbridge import diagnostic_host_bridge
 
         from tools.atlas_source_mn_model_bridge import prepare as prepare_model_wrapper
 
@@ -3886,7 +3880,7 @@ class NativeBindingTest(unittest.TestCase):
 
         from merlin.frontends.linalg_mlir import parse_mlir_text
         from merlin.targetgen.application_graph import _program_graph
-        from merlin.targetgen.contract.model_host_bridge import diagnostic_host_bridge
+        from merlin.compiler.build.hostbridge import diagnostic_host_bridge
 
         from tools.atlas_source_mn_model_bridge import (
             prepare as prepare_source_model_wrapper,

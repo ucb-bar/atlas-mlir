@@ -211,7 +211,7 @@ class AtlasNativeBinding:
     @staticmethod
     def prepare_ordered_mn(request: KernelRequest, tile_m: int, tile_n: int):
         """Qualify independent MXU0 output tiles and positive-zero tail rows."""
-        from merlin.semantic_compiler.ordered_mn_tiling import (
+        from merlin.compiler.transforms.contraction_mn import (
             OrderedMNTilingError,
             partition_ordered_matmul_mn,
         )
@@ -246,10 +246,7 @@ class AtlasNativeBinding:
     @staticmethod
     def prepare_ordered_k(request: KernelRequest, tile_k: int):
         """Qualify MXU0 K windows with any short tile before real elements."""
-        from merlin.semantic_compiler.ordered_k_tiling import (
-            OrderedKTilingError,
-            partition_ordered_matmul_k,
-        )
+        from merlin.compiler.transforms.contraction_k import OrderedKTilingError, partition_ordered_matmul_k
 
         descriptor = next(item for item in AtlasNativeBinding.profile().descriptors
                           if item.name == "atlas.mxu0_reset_acc_tile")
