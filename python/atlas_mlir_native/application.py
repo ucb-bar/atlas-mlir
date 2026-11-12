@@ -259,6 +259,8 @@ class AtlasApplicationAdapter:
                 "deterministic_receipts": deterministic_receipts_enabled(),
                 **({"exact_float_unroll": True} if current_codegen_options().exact_float_unroll else {}),
                 **({"exact_binary_lane_groups": True} if binary_lane_groups() else {}),
+                **({"execution_instruction_limit": current_codegen_options().execution_instruction_limit}
+                   if current_codegen_options().execution_instruction_limit is not None else {}),
                 **({"quantized_operand_reuse": operand_reuse} if operand_reuse != "ordered" else {}),
             },
         }

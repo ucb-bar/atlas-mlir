@@ -25,6 +25,17 @@ MAX_LEAF_ELEMENTS = {"bf16_to_f32": 20480, "f32_to_bf16": 18432,
                      "bf16_add": 1024, "bf16_sub": 1024}
 
 
+def max_leaf_elements(plan):
+    """Scale the conservative slice policy; prove the actual image separately."""
+    from .limits import DEFAULT_FUNCTIONAL_INSTRUCTION_LIMIT, functional_instruction_limit
+    factor = max(1, functional_instruction_limit() // DEFAULT_FUNCTIONAL_INSTRUCTION_LIMIT)
+    maximum = MAX_LEAF_ELEMENTS[plan.op] * factor
+    if plan.op in ('bf16_add', 'bf16_sub'):
+        # One route word per tile in the private 2-KiB admission table.
+        maximum = min(maximum, 512 * plan.tile_lanes)
+    return maximum
+
+
 def chunk_elements(plan):
     """Respect both the operation policy and the selected I/O window."""
     available = plan.descriptor()["io_memory_bytes"] - 32
@@ -33,7 +44,7 @@ def chunk_elements(plan):
     capacity -= capacity % plan.tile_lanes
     if capacity <= 0:
         raise ValueError("exact float cannot fit a tile in selected I/O window")
-    return min(MAX_LEAF_ELEMENTS[plan.op], capacity)
+    return min(max_leaf_elements(plan), capacity)
 
 @dataclass(frozen=True)
 class FloatPlan:
@@ -184,7 +195,7 @@ def compile_source(snapshot,region,*,target_source,destination,limits,io_memory_
     from merlin.semantic_compiler.target_binding import verify_native_publication
     from .binding import NATIVE_CHECKS,RTL_REVISION,_run
     p=prepare_plan(region,io_memory_base=io_memory_base)
-    maximum=MAX_LEAF_ELEMENTS[p.op]
+    maximum=max_leaf_elements(p)
     if p.count>maximum: raise ValueError(f"exact float leaf requires at most {maximum} elements")
     if p.workspace_bytes>p.descriptor()["io_memory_bytes"]: raise ValueError("exact float exceeds selected I/O window")
     tools=Path(os.environ.get("ATLAS_OOT_BIN_DIR",Path(target_source)/"build/bin"))
@@ -194,13 +205,14 @@ def compile_source(snapshot,region,*,target_source,destination,limits,io_memory_
     program=json.loads(_run([str(tools/"atlas-emit"),"--program-json","-"],input_text=machine))
     if program.get("selected_rtl_revision")!=RTL_REVISION: raise ValueError("exact float emitter RTL differs")
     from .restoration_budget import instruction_bound
+    from .limits import functional_instruction_limit
     from merlin.semantic_compiler.target_binding import NativeCompilationError
     try:
-        bound=instruction_bound(virtual,machine,program)
+        bound=instruction_bound(virtual,machine,program,max_instructions=functional_instruction_limit(limits))
     except (ValueError,KeyError,IndexError) as error:
         raise NativeCompilationError("resource_limit","exact float instruction bound is unproved: "+str(error)) from error
     if not bound["admitted"]:
-        raise NativeCompilationError("resource_limit","exact float worst-case instruction bound exceeds 1000000: "+str(bound["instruction_bound"]))
+        raise NativeCompilationError("resource_limit",f"exact float worst-case instruction bound exceeds {bound['max_instructions']}: "+str(bound["instruction_bound"]))
     binary=b"".join(r["word_u32"].to_bytes(4,"little") for r in program["instructions"])
     budget=current_codegen_options().program_size_limit_bytes
     if budget is not None and len(binary)>budget: raise ValueError("exact float exceeds selected program budget")
@@ -248,9 +260,12 @@ def prepare_c_package(region,compiled,name,*,target_source,runtime_linkage="sepa
     if binary!=(compiled/"program.bin").read_bytes():raise ValueError("exact float binary differs from source replay")
     from .restoration_budget import instruction_bound
     saved_bound = json.loads((compiled / "float-instruction-bound.json").read_text())
-    bound=instruction_bound(virtual_program(p),machine,program,schema=saved_bound["schema"])
+    from .limits import functional_instruction_limit
+    from types import SimpleNamespace
+    cap=functional_instruction_limit(SimpleNamespace(functional_instruction_limit=saved_bound['max_instructions']))
+    bound=instruction_bound(virtual_program(p),machine,program,schema=saved_bound["schema"],max_instructions=cap)
     if not bound["admitted"] or json.loads((compiled/"float-instruction-bound.json").read_text())!=bound:
-        raise ValueError("exact float instruction bound differs or exceeds default")
+        raise ValueError("exact float instruction bound differs or exceeds selected budget")
     upper=name.upper();n=len(p.operands);logical=p.count*p.width;obytes=p.count*p.output_width
     states=[("ctx","sizeof(*ctx)"),("region","sizeof(*region)"),("region->host","sizeof(*region->host)"),
             ("region->workspace",f"{p.workspace_bytes}u"),("inputs",f"{n}u*sizeof(*inputs)"),("outputs","sizeof(*outputs)")]

@@ -627,6 +627,8 @@ def tuning_key(snapshot, request, fixed_inputs, fixed_outputs, limits):
         "operand_reuse": _operand_reuse_policy(),
         "search_limits": limits.record(),
         "program_size_limit_bytes": codegen.current_codegen_options().program_size_limit_bytes,
+        **({"execution_instruction_limit": codegen.current_codegen_options().execution_instruction_limit}
+           if codegen.current_codegen_options().execution_instruction_limit is not None else {}),
     }
 
 

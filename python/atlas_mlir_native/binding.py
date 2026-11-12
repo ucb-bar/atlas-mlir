@@ -2831,7 +2831,8 @@ def _with_tile_io_base(function):
 
 
 class AtlasNativeBinding:
-    codegen_capabilities = ("reduction_unroll", "tuning_profile", "program_size_limit_bytes", "io_memory_bytes")
+    codegen_capabilities = ("reduction_unroll", "tuning_profile", "program_size_limit_bytes", "io_memory_bytes",
+                           "execution_instruction_limit")
 
     @staticmethod
     def tuning_key(snapshot, request, fixed_inputs, fixed_outputs, limits):

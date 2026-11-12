@@ -19,7 +19,8 @@ from merlin.semantic_compiler.target_binding import NativeCompilationError, veri
 
 from .binding import (AtlasNativeBinding, DRAM_BASE, TILE_BYTES, NATIVE_CHECKS,
                       NATIVE_PIPELINES, RTL_REVISION, _native_pipeline, _run, _tile_io_base, dram_slots)
-from .restoration_budget import MAX_INSTRUCTIONS, instruction_bound, fallback_tiles
+from .restoration_budget import instruction_bound, fallback_tiles
+from .limits import functional_instruction_limit
 
 # Process-local decisions avoid repeating expensive planning for the same
 # exact source, tools, profile, and limits, including failed attempts.
@@ -115,7 +116,7 @@ def _identity(plan, virtual, target_source, tools, limits, operand_reuse):
         selected_io_memory_bytes=dram_slots()*TILE_BYTES,
         allocation_timeout_ms=current_allocation_wall_budget_ms(), search_limits=asdict(limits),
         compiler_proof_limits='defaults', tool_timeout_seconds=30,
-        physical_instruction_limit=MAX_INSTRUCTIONS,
+        physical_instruction_limit=functional_instruction_limit(),
         profile_sha256=AtlasNativeBinding.profile().digest(),
         target_inventory_sha256=_digest(target_source/'docs/selected-variant-inventory.json'),
         tool_sha256={name: _digest(tools/name) for name in ('atlas-opt','atlas-emit')},
@@ -151,7 +152,7 @@ def size_counted(plan, *, target_source=None, limits=None, operand_reuse=None):
     io_base = _tile_io_base.get()
     base = dict(schema='atlas.quantized_counted_sizing.v1', source_request_digest=plan.source.digest(),
                 target_identity=plan.source.target_identity, selected_io_memory_bytes=window,
-                counted_frame_bytes=end-io_base, physical_instruction_limit=MAX_INSTRUCTIONS,
+                counted_frame_bytes=end-io_base, physical_instruction_limit=functional_instruction_limit(),
                 native_publication=False)
     if io_base != DRAM_BASE:
         base['io_memory_base'] = io_base
@@ -336,7 +337,7 @@ def _check_construction_evidence(plan, compiled, sizing, route, role, manifest):
             or identity.get('search_limits') != asdict(SearchLimits())
             or identity.get('compiler_proof_limits') != 'defaults'
             or identity.get('tool_timeout_seconds') != 30
-            or identity.get('physical_instruction_limit') != MAX_INSTRUCTIONS
+            or identity.get('physical_instruction_limit') != functional_instruction_limit()
             or any(identity.get('tool_sha256',{}).get(name) != manifest.get(name.replace('-','_')+'_sha256')
                    for name in ('atlas-opt','atlas-emit'))):
         raise ValueError('quantized construction evidence source or settings differ')
@@ -443,7 +444,7 @@ def publish_route(plan, compiled, sizing, *, target_source=None):
     payload = _json(publication_record(record))
     route = dict(schema='atlas.quantized_selected_route.v1',route=record['route'],reason=record['reason'],
         source_request_digest=plan.source.digest(),target_identity=plan.source.target_identity,
-        selected_io_memory_bytes=dram_slots()*TILE_BYTES,physical_instruction_limit=MAX_INSTRUCTIONS,
+        selected_io_memory_bytes=dram_slots()*TILE_BYTES,physical_instruction_limit=functional_instruction_limit(),
         sizing_sha256=sha256(payload).hexdigest(),programs=programs,construction_evidence=evidence,
         launches_per_invocation=(1 if record['route']=='counted' else
             prod(plan.batch_shape)*((plan.m+31)//32)*((plan.n+31)//32)*((plan.k+31)//32)),
@@ -507,7 +508,7 @@ def selected_route(plan, compiled):
         raise ValueError('quantized route selection identity differs')
     for key,expected in dict(source_request_digest=plan.source.digest(),
             target_identity=plan.source.target_identity,selected_io_memory_bytes=dram_slots()*TILE_BYTES,
-            physical_instruction_limit=MAX_INSTRUCTIONS).items():
+            physical_instruction_limit=functional_instruction_limit()).items():
         if route.get(key) != expected or sizing.get(key) != expected:
             raise ValueError('quantized route differs from source or selected profile: '+key)
     if (route.get('route') not in {'counted','k32_tiles'} or route['route'] != sizing.get('route')
@@ -525,9 +526,9 @@ def selected_route(plan, compiled):
     if route['route'] == 'counted':
         bound = json.loads((compiled/'restoration-instruction-bound.json').read_text())
         if (route['reason'] != 'physical_bound_admitted' or bound.get('admitted') is not True
-                or bound.get('max_instructions') != MAX_INSTRUCTIONS
+                or bound.get('max_instructions') != functional_instruction_limit()
                 or type(bound.get('instruction_bound')) is not int
-                or not 0 < bound['instruction_bound'] <= MAX_INSTRUCTIONS
+                or not 0 < bound['instruction_bound'] <= functional_instruction_limit()
                 or sizing.get('physical_instruction_bound') != bound['instruction_bound']):
             raise ValueError('counted publication lacks its physical bound')
         manifest = json.loads((compiled/'manifest.json').read_text())
@@ -555,7 +556,7 @@ def selected_route(plan, compiled):
         elif reason in {'untimed_instruction_bound','physical_instruction_bound'}:
             key = 'untimed_instruction_bound' if reason.startswith('untimed') else 'physical_instruction_bound'
             value = sizing.get(key)
-            admitted = type(value) is int and value > MAX_INSTRUCTIONS
+            admitted = type(value) is int and value > functional_instruction_limit()
         elif reason == 'encoded_instruction_memory':
             count,limit = sizing.get('encoded_words',sizing.get('planned_words')),sizing.get('program_word_limit')
             admitted = type(count) is int and type(limit) is int and 0 < limit <= 32768 and count > limit

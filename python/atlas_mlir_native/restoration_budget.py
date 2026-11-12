@@ -260,7 +260,7 @@ def _block_path_words(instructions, successors):
     return costs, refined
 
 
-def instruction_bound(source, machine, program, *, max_instructions=MAX_INSTRUCTIONS,
+def instruction_bound(source, machine, program, *, max_instructions=None,
                       schema="atlas.restoration_instruction_bound.v2"):
     """Return a conservative physical bound or raise on an unproved image.
 
@@ -268,6 +268,9 @@ def instruction_bound(source, machine, program, *, max_instructions=MAX_INSTRUCT
     Their source contract ties every machine comparison to its captured scalar
     producer; this routine adds the stricter per-launch resource admission.
     """
+    if max_instructions is None:
+        from .limits import functional_instruction_limit
+        max_instructions = functional_instruction_limit()
     if type(max_instructions) is not int or max_instructions <= 0:
         raise ValueError('instruction bound: invalid instruction limit')
     if schema not in {'atlas.restoration_instruction_bound.v1', 'atlas.restoration_instruction_bound.v2'}:
@@ -479,7 +482,8 @@ def instruction_bound(source, machine, program, *, max_instructions=MAX_INSTRUCT
         blocks.append(record)
     bound = sum(record['instruction_bound'] for record in blocks)
     return dict(schema=schema, max_instructions=max_instructions,
-                instruction_limit_source='atlas_default_with_optional_lower_target_cap',
+                instruction_limit_source=('atlas_default_with_optional_lower_target_cap'
+                    if max_instructions <= MAX_INSTRUCTIONS else 'explicit_invocation_execution_budget'),
                 default_functional_instruction_limit=MAX_INSTRUCTIONS,
                 instruction_bound=bound, admitted=bound <= max_instructions,
                 method='sum_longest_executable_block_paths_with_counted_header_continue_and_exit_visits',
