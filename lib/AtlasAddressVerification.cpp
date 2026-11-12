@@ -7,6 +7,7 @@
 #include "Atlas/AtlasVirtualAllocation.h"
 #include "Atlas/AtlasTarget.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
+#include "llvm/ADT/BitVector.h"
 #include <algorithm>
 #include <cstdlib>
 #include <functional>
@@ -392,7 +393,10 @@ bool initializedOutputReads(const AtlasVerificationContext &ctx,
       return false;
   }
   std::map<int32_t, uint32_t> arguments;
-  std::set<uint32_t> initialized; // DMA accesses are aligned 32-byte blocks.
+  // One bit per aligned DMA beat. Copying a tree node per initialized beat
+  // made snapshots of wide output panels much larger than their payload.
+  // This retains the independent captured-CFG proof's exact beat granularity.
+  llvm::BitVector initialized((end - first) / 32);
   std::set<int> active;
   // Every scalar step and output-byte read is still checked exhaustively.
   unsigned remaining = kAtlasScalarProofWorkLimit;
@@ -429,9 +433,9 @@ bool initializedOutputReads(const AtlasVerificationContext &ctx,
     active.erase(id);
     return value;
   };
-  struct Pending { int block; std::map<int32_t, uint32_t> arguments; std::set<uint32_t> initialized; std::optional<unsigned> predecessor; };
+  struct Pending { int block; std::map<int32_t, uint32_t> arguments; llvm::BitVector initialized; std::optional<unsigned> predecessor; };
   std::deque<Pending> pending;
-  std::map<std::vector<uint64_t>, std::set<uint32_t>> entries;
+  std::map<std::vector<uint64_t>, llvm::BitVector> entries;
   std::map<std::vector<uint64_t>, unsigned> stateIDs;
   AtlasProofStateGraph graph;
   pending.push_back({0, arguments, initialized, std::nullopt});
@@ -447,8 +451,8 @@ bool initializedOutputReads(const AtlasVerificationContext &ctx,
         AtlasProofStateGraph::EdgeResult::Added) return false;
     auto [entry, fresh] = entries.emplace(key, initialized);
     if (!fresh) {
-      std::set<uint32_t> common;
-      std::set_intersection(entry->second.begin(), entry->second.end(), initialized.begin(), initialized.end(), std::inserter(common, common.end()));
+      auto common = entry->second;
+      common &= initialized;
       if (common == entry->second) continue;
       entry->second = common; initialized = std::move(common);
     }
@@ -473,10 +477,10 @@ bool initializedOutputReads(const AtlasVerificationContext &ctx,
       if (uint64_t(*address) < end && first < stop) {
         StringRef name = contractString(operations[id], "name");
         if (!name.starts_with(store ? "atlas.virtual_dma_store_" : "atlas.virtual_dma_load_")) return false;
-        for (uint64_t at = std::max(uint64_t(*address), first); at < std::min(stop, end); at += 32) {
-          if (store) initialized.insert(uint32_t(at));
-          else if (!initialized.count(uint32_t(at))) return false;
-        }
+        unsigned begin = (std::max(uint64_t(*address), first) - first) / 32;
+        unsigned limit = (std::min(stop, end) - first) / 32;
+        if (store) initialized.set(begin, limit);
+        else if (initialized.find_first_unset_in(begin, limit) != -1) return false;
       }
     }
     const auto &b = source.blocks[block];

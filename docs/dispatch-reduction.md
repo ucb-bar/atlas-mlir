@@ -169,3 +169,70 @@ signed zero, late invalid input, immutable inputs, output sentinels and alias
 rejection. The related composition/materialization suite passed 39 tests and
 17 subtests, with three optional runtime gates skipped. Native source replay
 and the complete layer reference comparison also passed.
+
+## Make shared weight panels usable within the existing proof budget
+
+The optional `paired-cache` schedule was already implemented, but full-width
+MLP projections exhausted the source initialization verifier's work allowance.
+The live-IR proof now discards dead scalar facts at each block entry using MLIR
+liveness. Facts used later, including outer values and current block arguments,
+remain available. At joins, initialized bytes still intersect across paths;
+nonterminating scalar-state cycles and exhausted work still reject compilation.
+
+The independent captured-CFG proof now stores one bit per aligned 32-byte DMA
+beat instead of one tree node per initialized beat. Its exact coverage and
+intersection rules are unchanged. This makes large output-panel snapshots cheap
+enough for the unchanged 30-second tool timeout. With only the liveness change,
+one gate-projection compile took 35.57 seconds and exceeded that timeout. With
+the bitmap it took 2.26 seconds and emitted byte-identical machine IR. Neither
+change increases the one-million-step proof allowance or any hardware limit.
+
+Using the same narrowed layer and `ATLAS_QUANTIZED_OPERAND_REUSE=paired-cache`:
+
+| | Wide activation cache | Shared weight panels |
+| --- | ---: | ---: |
+| Device cycles | 152,606,339 | 138,103,943 |
+| Executed instructions | 31,408,505 | 31,530,988 |
+| Dispatches | 95 | 95 |
+| Largest instruction image | 24,832 bytes | 50,080 bytes |
+
+This saves **14,502,396 cycles (9.50%)** despite slightly more instructions,
+because it reduces weight traffic. The existing schedule's geometry restrictions
+and fallback remain unchanged. Full-layer independent output parity passed again;
+Rust simulation took 4.5 seconds, with 5.3 seconds through the generated C harness.
+Compilation plus source replay took 157 seconds. Compared with the retained
+586-dispatch package, the combined device-cycle reduction is 39.09%.
+
+The added 512-iteration runtime-diamond regression fails the old verifier's work
+budget and passes the new verifier; removing initialization on either branch still
+fails. The memory/proof suite passed 32 tests and 119 subtests, and 12 native
+contract/allocation tests passed. The selected full-width gate and down projections
+both pass ordinary counted-image sizing and publication. No cache schedule or
+arithmetic operation is reimplemented by these proof changes.
+
+## Preliminary host-model comparison
+
+A separate Rust build combines host-model commit `1b1242b` with the PACK ABI
+compatibility fix. We recorded actual generated-C input writes, uploads, launches,
+waits and output copies, then replayed them in one persistent Rust process.
+For the 95-dispatch wide-cache/narrowing package, all 12,750,848 initialized
+final device-memory bytes agree with the original C/standalone execution.
+
+| Modeled host execution | Retained package | Wide cache plus narrowing |
+| --- | ---: | ---: |
+| Dispatches | 586 | 95 |
+| NPU active cycles | 226,709,360 | 152,603,910 |
+| Total elapsed cycles | 247,076,870 | 160,517,906 |
+| NPU idle cycles | 20,367,510 | 7,913,996 |
+| Upload cycles | 12,996,576 | 962,748 |
+| Staging/copy cycles | 7,337,146 | 6,946,566 |
+| Uploaded instruction bytes | 4,329,848 | 320,536 |
+
+These are **uncalibrated host-model estimates**, with the model's default MMIO
+and transfer costs, coherent memory, shared-link contention disabled, and host
+arithmetic preparation set to zero. Input file writes charge destination traffic;
+output copies charge both read and write traffic. There is no generated RV64/RVV
+instruction execution. Consequently, this table is not a full end-to-end hardware
+latency estimate. NPU active counts differ slightly from independent fresh-launch
+runs because the host model uses its persistent restart/completion timeline.
+The paired-cache layer has not been included in this host comparison.

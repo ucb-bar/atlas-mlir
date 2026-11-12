@@ -2,6 +2,7 @@
 #include "Atlas/AtlasProofLimits.h"
 #include "Atlas/AtlasAddressAnalysis.h"
 #include "Atlas/AtlasOps.h"
+#include "mlir/Analysis/Liveness.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -56,6 +57,7 @@ LogicalResult mlir::atlas::verifyAtlasOutputInitialization(Operation *operation,
   atlasProofInvocation(AtlasProofKind::SourceInitialization);
   auto function = dyn_cast<func::FuncOp>(operation);
   if (!function || function.isDeclaration()) return failure();
+  Liveness liveness(function);
   llvm::DenseMap<Value, uint32_t> values;
   InitializedBytes initialized;
   auto get = [&](Value v) -> std::optional<uint32_t> {
@@ -89,6 +91,16 @@ LogicalResult mlir::atlas::verifyAtlasOutputInitialization(Operation *operation,
   while (!pending.empty()) {
     auto current = std::move(pending.front()); pending.pop_front();
     block = current.block; values = std::move(current.values); initialized = std::move(current.initialized);
+    // Only facts that can be used after this block entry distinguish scalar
+    // states. Dead branch-local facts otherwise duplicate every later proof
+    // path, even after its initialized-byte sets have reached the same join.
+    const auto &liveIn = liveness.getLiveIn(block);
+    SmallVector<Value> dead;
+    for (auto [value, bits] : values) {
+      bool argument = isa<BlockArgument>(value) && cast<BlockArgument>(value).getOwner() == block;
+      if (!argument && !liveIn.contains(value)) dead.push_back(value);
+    }
+    for (Value value : dead) values.erase(value);
     std::vector<std::pair<uint64_t, uint32_t>> scalar;
     for (auto [value, bits] : values)
       scalar.emplace_back(reinterpret_cast<uintptr_t>(value.getAsOpaquePointer()), bits);

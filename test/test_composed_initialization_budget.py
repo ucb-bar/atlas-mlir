@@ -103,6 +103,42 @@ class ComposedInitializationBudgetTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('scalar-state cycle', result.stderr)
 
+    def test_dead_branch_facts_merge_without_discarding_initialization_paths(self):
+        text = source(iterations=512).replace('@proof()', '@proof(%choose: i1)').replace(
+            'atlas.input_dram_base =', 'atlas.control_dram_base = 2415925248 : i64, atlas.input_dram_base =')
+        original = '\n'.join(['%next = "atlas.virtual_dma_store_bf16"(%body_state, %tile, %out, %bytes)',
+            '        : (!atlas.virtual_state, !atlas.virtual_bf16, i32, i32) -> !atlas.virtual_state'])
+        # Each branch leaves a different historical scalar value. Neither is
+        # live after the join, so their histories must not multiply later paths.
+        diamond = '''cf.cond_br %choose, ^left(%body_state : !atlas.virtual_state), ^right(%body_state : !atlas.virtual_state)
+      ^left(%left_state: !atlas.virtual_state):
+        %left_history = arith.addi %counter, %unused1 : i32
+        %left_next = "atlas.virtual_dma_store_bf16"(%left_state, %tile, %out, %bytes)
+          : (!atlas.virtual_state, !atlas.virtual_bf16, i32, i32) -> !atlas.virtual_state
+        cf.br ^join(%left_next : !atlas.virtual_state)
+      ^right(%right_state: !atlas.virtual_state):
+        %right_history = arith.addi %counter, %unused2 : i32
+        %right_next = "atlas.virtual_dma_store_bf16"(%right_state, %tile, %out, %bytes)
+          : (!atlas.virtual_state, !atlas.virtual_bf16, i32, i32) -> !atlas.virtual_state
+        cf.br ^join(%right_next : !atlas.virtual_state)
+      ^join(%next: !atlas.virtual_state):'''
+        text = text.replace(original, diamond)
+        result = self.compile(text)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        # A value used after a join is live even when defined in an outer block.
+        # Both paths must initialize the bytes before the very first read.
+        text = text.replace('%one = arith.constant 1 : i32', '''
+        %checked, %check_tile = "atlas.virtual_dma_load_bf16"(%next, %out, %bytes)
+          : (!atlas.virtual_state, i32, i32) -> (!atlas.virtual_state, !atlas.virtual_bf16)
+        %one = arith.constant 1 : i32''').replace('cf.br ^loop(%next,%n', 'cf.br ^loop(%checked,%n')
+        for arm in ('left', 'right'):
+            with self.subTest(arm=arm):
+                changed = text.replace(f'(%{arm}_state, %tile, %out, %bytes)',
+                    f'(%{arm}_state, %tile, %end, %bytes)')
+                result = self.compile(changed)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn('before they are initialized', result.stderr)
+
     def test_captured_source_replay_rejects_nonterminating_scalar_state(self):
         # First publish a terminating loop, then change its increment in both
         # retained SSA and the final owned physical addition. Immediate folding
