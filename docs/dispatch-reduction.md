@@ -400,3 +400,34 @@ with one optional gate skipped. Coverage includes all three layouts, partial and
 multiple pages, non-power-of-two row counts, signed zero, raw NaN payloads when
 admitted, rejected logical values versus padding, immutable bytes, and sticky
 status across composed transitions.
+
+## Keep an expanded SiLU inside its native loop
+
+The opt-in `expanded_silu` pattern recognizes a closed BF16 input → exact FP32
+widen → sign flip → selected EXP → add bound literal one → selected division →
+exact BF16 narrow graph. It uses the existing five-operation native SiLU body:
+zero subtraction, EXP LUT, add, reciprocal LUT and multiply. The selected division
+already uses that reciprocal/product sequence. No IEEE source division is
+reassociated and no additional precision policy is enabled.
+
+All original operation recognizers, dense maps, source-bound literal bytes and
+private intermediate boundaries are checked. The external guard is the exact
+intersection of the original EXP and numerator domains. Existing exhaustive
+EXP-domain proof covers the removed intermediate guards. Sign flip and zero
+subtraction differ at signed zero, where both EXP results are one; the final
+product preserves the original input sign. The recognizer declines changed
+policies, constants, edges, maps, rounding or escaping intermediates. It uses no
+model names, layer numbers or fixed dimensions.
+
+With this pattern added, the unchanged layer runs in **100,447,374 cycles and
+80 dispatches**, versus **114,427,634 and 85**: **13,980,260 cycles saved (12.22%)**.
+The activation path itself falls to 1,206,701 cycles. All 131,072 output words still
+match the independent FX reference. Compilation/source replay takes 155 seconds;
+Rust simulation takes 3.6 seconds, and the generated-C run takes 4.3 seconds.
+
+Four focused tests and 19 subtests pass. They exhaust all 65,536 BF16 encodings
+for admission equivalence, compare every admitted code against the original
+selected expansion, and run all 17,412 admitted values through generated C and
+Rust with partial tiles, immutable inputs and late invalid-value rejection.
+Thirteen related tests and 20 subtests pass; two optional legacy-model gates are
+skipped. Source replay and ordinary native instruction/image proofs remain active.

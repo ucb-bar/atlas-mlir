@@ -14,6 +14,7 @@ _ADJACENT_PATTERNS = (
     ("quantized_epilogue", "_quantized_epilogue_groups"),
     ("quantized_narrowing", "_quantized_narrowing_groups"),
     ("pointwise_narrowing", "_pointwise_narrowing_groups"),
+    ("expanded_silu", "_expanded_silu_groups"),
 )
 
 
