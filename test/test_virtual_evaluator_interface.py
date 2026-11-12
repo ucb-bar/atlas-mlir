@@ -172,7 +172,7 @@ class VirtualParserInterfaceTest(unittest.TestCase):
             (FLAT.replace("atlas.virtual_vpu_unary", "atlas.virtual_invented"), "unsupported virtual operation"),
             (FLAT.replace('kind = "relu"', 'kind = "sqrt"'), "supported kinds"),
             (FLAT.replace('kind = "add"', 'kind = "div"'), "supported kinds"),
-            (example("virtual_fp8_two_layer_mlp.mlir").replace("scale_code = 127", "scale_code = 121"), "122..128"),
+            (example("virtual_fp8_two_layer_mlp.mlir").replace("scale_code = 127", "scale_code = 256"), "0..255"),
         )
         malformed = (
             (FLAT.replace("index = 0 : i32", "index = 0 : i64", 1), "index : i32"),

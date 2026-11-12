@@ -32,7 +32,6 @@ def source(producer=None, scale=127, *, before="", after="", state="%t", value="
 UNKNOWN = '%x = "atlas.virtual_vpu_unary"(%input) {kind = "mov"} : (!atlas.virtual_bf16) -> !atlas.virtual_bf16'
 
 
-@unittest.skipUnless(OPT.is_file() and EMIT.is_file(), "build atlas-opt and atlas-emit")
 class GuardedPackTests(unittest.TestCase):
     def checked(self, text, *passes, tool=OPT):
         result = run(tool, text, *passes)
@@ -182,7 +181,7 @@ class GuardedPackTests(unittest.TestCase):
         cases = [(source(scale=s), ("--lower-atlas-guarded-pack",), "") for s in (-1, 256)] + [
             (source(), ('--lower-atlas-guarded-pack=unit=2',), ""),
             (incoming, ('--lower-atlas-guarded-pack',), 'virtual entry arguments must be i1/i32 controls'),
-            (source(UNKNOWN, 0), ('--lower-atlas-guarded-pack', '--lower-atlas-virtual-to-machine'), 'scale codes 122..128 only')]
+            (source(UNKNOWN, 256), ('--lower-atlas-guarded-pack', '--lower-atlas-virtual-to-machine'), 'scale_code must be in [0, 255]')]
         for text, flags, message in cases:
             result = run(OPT, text, *flags)
             self.assertNotEqual(result.returncode, 0)

@@ -44,6 +44,15 @@ from .binding import (
 from .pack_tiling import ROUNDED_PACK_DOMAIN, ROUNDED_PACK_POLICY
 
 
+def _artifact_files(root):
+    """Yield every regular artifact; publication policy must not omit names."""
+    for directory, _, names in os.walk(root):
+        for name in names:
+            path = Path(directory) / name
+            if path.is_file():
+                yield path
+
+
 def _bf16_body_work(request):
     # Each primitive needs an instruction, each boundary a load, and each
     # distinct output a store. Staging must budget for movement as well as ALU work.
@@ -64,8 +73,197 @@ def is_staged_bf16(request):
     )
 
 
+def mixed_boundary_request(region):
+    """Declare byte-preserving completed tile transport at one primitive cut.
+
+    The source computation, maps, and arithmetic attributes remain explicit.
+    A representation policy on completed bytes is not a conversion instruction.
+    Consumer domains remain diagnostic execution premises, recorded separately.
+    """
+    from .binding import (
+        MXU1_CAP448_POLICY, MXU1_CAP448_INPUT_DOMAIN, MXU1_CAP448_SEED_DOMAIN,
+        _bf16_tile_request, _mxu1_cap448_request, _transpose_maps,
+    )
+    from merlin.semantic_compiler.model import pointwise_identity_maps
+
+    pure = [node for node in region.nodes if node.effect == "pure"]
+    if (len(pure) != 1 or region.physical_extents or region.boundary_layouts or region.output_layouts
+            or any(node.type.shape != (32, 32) for node in region.nodes)):
+        raise NativeCompilationError("unsupported_semantics", "mixed staging needs one plain 32x32 primitive")
+    operation = pure[0]
+    boundaries = [node for node in region.nodes if node.effect in {"input", "constant"}]
+    if set(operation.inputs) != {node.id for node in boundaries} or region.outputs != (operation.id,):
+        raise NativeCompilationError("unsupported_semantics", "mixed primitive cut has unaccounted boundaries")
+    bf16_policies = {"raw-bit-pattern", MXU0_POLICY, MXU1_CAP448_POLICY}
+    fp8_policies = {"raw-bit-pattern", ROUNDED_PACK_POLICY}
+    for node in boundaries:
+        policies = bf16_policies if node.type.dtype == "bf16" else fp8_policies if node.type.dtype == "fp8_e4m3" else set()
+        if node.type.numerical_policy not in policies:
+            raise NativeCompilationError("unsupported_semantics", "mixed boundary has an unsupported completed encoding policy")
+    attrs = {**BF16_BINARY_ATTRS, **BF16_UNARY_ATTRS, **BF16_ROW_REDUCTION_ATTRS, "relu": BF16_RELU_ATTRS}
+    nodes = []
+    if operation.op in {"matmul", "matmul_accumulate"}:
+        if operation.type.numerical_policy != MXU1_CAP448_POLICY:
+            raise NativeCompilationError("unsupported_semantics", "mixed contraction requires the explicit cap448 policy")
+        for node in boundaries:
+            domain = MXU1_CAP448_SEED_DOMAIN if node.type.dtype == "bf16" else MXU1_CAP448_INPUT_DOMAIN
+            nodes.append(replace(node, op="input", effect="input", inputs=(), index_maps=(),
+                                 type=replace(node.type, numerical_policy="raw-bit-pattern"),
+                                 attrs=(("input_domain", domain),)))
+    elif operation.op == "pack_fp8":
+        if (len(boundaries) != 1 or boundaries[0].type.dtype != "bf16"
+                or operation.type != TensorType((32, 32), "fp8_e4m3", ROUNDED_PACK_POLICY)
+                or operation.index_maps != pointwise_identity_maps(2, 1)):
+            raise NativeCompilationError("unsupported_semantics", "mixed pack needs completed BF16 and an explicit rounded FP8 result")
+        nodes = [replace(boundaries[0], op="input", effect="input", inputs=(), index_maps=(),
+                         type=replace(boundaries[0].type, numerical_policy="raw-bit-pattern"),
+                         attrs=(("input_domain", ROUNDED_PACK_DOMAIN),))]
+    elif operation.op == "transpose":
+        if (len(boundaries) != 1 or boundaries[0].type.dtype != "fp8_e4m3"
+                or operation.type != boundaries[0].type or operation.attrs
+                or operation.index_maps != _transpose_maps()):
+            raise NativeCompilationError("unsupported_semantics", "mixed transpose needs one byte-preserving FP8 tile")
+        nodes = [replace(boundaries[0], op="input", effect="input", inputs=(), index_maps=(), attrs=(),
+                         type=replace(boundaries[0].type, numerical_policy="raw-bit-pattern"))]
+        # The native movement primitive describes raw byte permutation. Record
+        # the unchanged packed-code policy on its published source edge below.
+        operation = replace(operation, type=replace(operation.type, numerical_policy="raw-bit-pattern"))
+    elif operation.op in attrs:
+        for node in boundaries:
+            if node.type.dtype != "bf16":
+                raise NativeCompilationError("unsupported_semantics", "mixed VPU primitive needs completed BF16 tiles")
+            nodes.append(replace(node, op="input", effect="input", inputs=(), index_maps=(),
+                                 type=replace(node.type, numerical_policy="raw-bit-pattern"), attrs=(attrs[operation.op][0],)))
+    else:
+        raise NativeCompilationError("unsupported_semantics", "mixed staging has an unsupported primitive")
+    result = replace(region, nodes=(*nodes, operation), constants=(),
+                     input_storages=tuple((node.id, "external") for node in nodes),
+                     source_identity=region.digest())
+    if operation.op in {"matmul", "matmul_accumulate"} and not _mxu1_cap448_request(result):
+        raise NativeCompilationError("unsupported_semantics", "mixed contraction changes its exact primitive contract")
+    if operation.op in attrs and not _bf16_tile_request(result):
+        raise NativeCompilationError("unsupported_semantics", "mixed VPU operation changes its exact primitive contract")
+    if operation.op == "pack_fp8":
+        from .pack_tiling import prepare_plan
+        prepare_plan(result)
+    return result
+
+
+def is_staged_mixed(request):
+    """Recognize a complete mixed tile DAG with explicit numerical policies."""
+    from .binding import MXU1_CAP448_POLICY
+
+    pure = [node for node in request.nodes if node.effect == "pure"]
+    if (request.target_identity != TARGET_IDENTITY or request.lowering_policy != "diagnostic"
+            or request.physical_extents or request.boundary_layouts or request.output_layouts
+            or len(pure) < 2 or any(request.node(key).effect != "pure" for key in request.outputs)
+            or any(node.effect not in {"input", "constant", "pure"} for node in request.nodes)
+            or any(node.type.shape != (32, 32) or node.type.dtype not in {"bf16", "fp8_e4m3"} for node in request.nodes)
+            or {node.type.dtype for node in request.nodes} != {"bf16", "fp8_e4m3"}
+            or not any(node.op == "pack_fp8" or node.type.numerical_policy == MXU1_CAP448_POLICY for node in pure)):
+        return False
+    try:
+        for node in pure:
+            mixed_boundary_request(extract_semantic_region(request, (node.id,)))
+    except (KeyError, ValueError, NativeCompilationError):
+        return False
+    return True
+
+
+def _allocate_staging_frame(buffers, original, bank, label):
+    """Check detailed staging addresses within one inherited allocation wall.
+
+    The full checker proves bank bounds, fixed addresses, views, and liveness
+    for both the shared-readonly representation and the original buffers.
+    Use the deterministic proposal when available, otherwise the generic
+    allocator with only the original deadline's remaining time.
+    """
+    from merlin.semantic_compiler.buffer_allocation import (
+        allocate_buffers, allocation_wall_budget, check_buffer_allocation,
+        current_allocation_wall_budget_ms, first_fit_buffer_assignment,
+    )
+
+    if not buffers or not original:
+        raise NativeCompilationError("unsupported_semantics", label + ": nonempty staging buffers required")
+    deadline = monotonic() + current_allocation_wall_budget_ms() / 1000
+
+    def remaining_ms():
+        remaining = int((deadline - monotonic()) * 1000)
+        if remaining <= 0:
+            raise NativeCompilationError("search_timeout", label + ": buffer allocation time budget exhausted")
+        return remaining
+
+    def check(slots):
+        try:
+            check_buffer_allocation(buffers, (bank,), slots)
+            check_buffer_allocation(original, (bank,), {buffer.name: slots[buffer.name] for buffer in original})
+        except (KeyError, ValueError) as error:
+            raise NativeCompilationError("resource_limit", label + ": invalid detailed frame: " + str(error)) from error
+        remaining_ms()
+
+    slots = first_fit_buffer_assignment(buffers, (bank,))
+    remaining_ms()
+    if slots is None:
+        # Consume only the original deadline's remainder. Never restart a fresh
+        # allowance after proposal/validation or retry an unknown result.
+        with allocation_wall_budget(remaining_ms()):
+            allocated = allocate_buffers(buffers, (bank,))
+        remaining_ms()
+        if allocated.status != "sat":
+            raise NativeCompilationError("resource_limit" if allocated.status == "unsat" else "search_timeout",
+                                         label + ": " + allocated.reason)
+        slots = dict(allocated.addresses)
+    check(slots)
+    return slots
+
+
+def mixed_memory_plan(request):
+    """Allocate immutable sources and completed intermediate tiles by liveness."""
+    from merlin.compile.semantic_regions import partition_semantic_dag, semantic_staging_buffers
+    from merlin.semantic_compiler.buffer_allocation import (
+        Buffer,
+    )
+    if not is_staged_mixed(request):
+        raise NativeCompilationError("unsupported_semantics", "mixed staging requires a completely admitted tile DAG")
+    cuts = partition_semantic_dag(request, max_nodes=1)
+    sources = [node.id for node in request.nodes if node.effect in {"input", "constant"}]
+    fixed = {key: index for index, key in enumerate((*sources, *request.outputs))}
+    bank = next(bank for bank in AtlasNativeBinding.profile().banks if bank.name == "external")
+    original = semantic_staging_buffers(request, cuts, storage=bank.name,
+        extents=dict.fromkeys((node.id for node in request.nodes), 1), fixed=fixed)
+    buffers = (Buffer("$readonly", bank.name, len(sources), 0, len(cuts)+1, fixed_start=0, persistent=True),) + tuple(
+        replace(buffer, view_of="$readonly", view_offset=fixed[buffer.name]) if buffer.name in sources else buffer
+        for buffer in original)
+    slots = _allocate_staging_frame(buffers, original, bank, "mixed tile staging allocation")
+    slots.pop("$readonly")
+    sizes = {key: 1024 if request.node(key).type.dtype == "fp8_e4m3" else TILE_BYTES for key in slots}
+    return cuts, slots, sizes, [vars(buffer) for buffer in buffers]
+
+
+def _mixed_transport_records(region, body):
+    """Bind every completed source edge to byte-identical primitive storage."""
+    result = []
+    for node in body.nodes:
+        if node.effect != "input":
+            continue
+        source = region.node(node.id)
+        if source.type.shape != node.type.shape or source.type.dtype != node.type.dtype:
+            raise NativeCompilationError("compile_error", "mixed transport changed element encoding or shape")
+        result.append({"node": node.id, "transport": "completed-tile-byte-preserving",
+                       "source_type": source.type.record(), "primitive_type": node.type.record(),
+                       "required_domain": dict(node.attrs).get("input_domain", "all-bit-patterns"),
+                       "domain_status": "caller_premise_unchecked", "conversion_instructions": 0})
+    for key in body.outputs:
+        source, native = region.node(key), body.node(key)
+        if source.type != native.type:
+            result.append({"node": key, "direction": "publish", "transport": "completed-tile-byte-preserving",
+                           "source_type": native.type.record(), "published_type": source.type.record(),
+                           "domain_status": "unchanged-by-byte-permutation", "conversion_instructions": 0})
+    return result
+
+
 def is_resident_graph(request, *, allow_staging=True):
-    return (allow_staging and is_staged_bf16(request)) or (
+    return (allow_staging and (is_staged_bf16(request) or is_staged_mixed(request))) or (
         len([n for n in request.nodes if n.op == "matmul"]) > 1
         and any(n.type.shape != (32, 32) for n in request.nodes)
     )
@@ -96,9 +294,6 @@ def staged_memory_plan(request):
     )
     from merlin.semantic_compiler.buffer_allocation import (
         Buffer,
-        allocate_buffers,
-        check_buffer_allocation,
-        first_fit_buffer_assignment,
     )
     from merlin.semantic_compiler.search import SearchLimits
 
@@ -122,15 +317,7 @@ def staged_memory_plan(request):
     buffers = (Buffer("$readonly", bank.name, readonly, 0, len(cuts) + 1, fixed_start=0, persistent=True),) + tuple(
         replace(b, view_of="$readonly", view_offset=fixed[b.name]) if b.name in sources else b for b in original
     )
-    proposal = first_fit_buffer_assignment(buffers, (bank,))
-    pinned = tuple(replace(b, fixed_start=proposal[b.name]) for b in buffers) if proposal else buffers
-    allocated = allocate_buffers(pinned, (bank,), timeout_ms=5000)
-    if allocated.status != "sat":
-        raise NativeCompilationError("resource_limit" if allocated.status == "unsat" else "search_timeout",
-                                     "staged DRAM allocation: " + allocated.reason)
-    slots = dict(allocated.addresses)
-    check_buffer_allocation(buffers, (bank,), slots)
-    check_buffer_allocation(original, (bank,), {b.name: slots[b.name] for b in original})
+    slots = _allocate_staging_frame(buffers, original, bank, "staged DRAM allocation")
     slots.pop("$readonly")
     sizes = dict.fromkeys(slots, TILE_BYTES)
     return cuts, slots, sizes, [vars(b) for b in buffers]
@@ -326,6 +513,8 @@ def memory_plan(request):
     """Allocate one immutable frame and one private frame, using the shared allocator."""
     from merlin.semantic_compiler.buffer_allocation import Buffer, allocate_buffers
 
+    if is_staged_mixed(request):
+        return mixed_memory_plan(request)[:3]
     if is_staged_bf16(request):
         return staged_memory_plan(request)[:3]
     cuts = regions(request)
@@ -464,7 +653,9 @@ def compile_resident(
     )
 
     staged_bf16 = is_staged_bf16(request)
-    deadline = monotonic() + limits.wall_timeout_s if staged_bf16 else None
+    staged_mixed = is_staged_mixed(request)
+    staged_tiles = staged_bf16 or staged_mixed
+    deadline = monotonic() + limits.wall_timeout_s if staged_tiles else None
     cuts, slots, sizes = memory_plan(request)
     abi = plan_abi(request)
     if fixed_inputs != abi["fixed_inputs"] or tuple(fixed_outputs) != tuple(
@@ -490,13 +681,13 @@ def compile_resident(
     for i, region in enumerate(cuts):
         if deadline is not None and monotonic() >= deadline:
             raise NativeCompilationError("search_timeout", "staged compilation exceeded its total time budget")
-        body = bf16_boundary_request(region) if staged_bf16 else (
+        body = mixed_boundary_request(region) if staged_mixed else bf16_boundary_request(region) if staged_bf16 else (
             boundary_request(region)
             if len([n for n in region.nodes if n.effect == "pure"]) <= 2
             else region
         )
         folder = destination / "regions" / str(i)
-        if body.nodes[-1].op == "pack_fp8":
+        if body.nodes[-1].op == "pack_fp8" and not staged_mixed:
             from .pack_tiling import compile_pack
 
             compile_region = compile_pack
@@ -551,7 +742,7 @@ def compile_resident(
         function.attributes["atlas.output_dram_bytes"] = IntegerAttr(
             (end - start) * TILE_BYTES, 64
         )
-        if staged_bf16:
+        if staged_tiles:
             readonly = len(fixed_inputs)
             function.attributes["atlas.output_dram_base"] = IntegerAttr(DRAM_BASE + readonly * TILE_BYTES, 64)
             function.attributes["atlas.output_dram_bytes"] = IntegerAttr(
@@ -571,8 +762,10 @@ def compile_resident(
                 ).hexdigest(),
             }
         )
-        if staged_bf16:
+        if staged_tiles:
             records[-1]["source_slice_digest"] = region.digest()
+            if staged_mixed:
+                records[-1]["boundary_transports"] = _mixed_transport_records(region, body)
             records[-1]["native_check_fingerprint"] = manifest["native_check_fingerprint"]
         if "reduction_extent" in body_execution:
             count = body_execution["tiling"]["loop_counts"][2]
@@ -583,16 +776,18 @@ def compile_resident(
     # workspace reads are initialized by preceding fragments, so rechecking
     # them as isolated entries would discard that context. The joined CFG is
     # checked by the normal lowering and memory-initialization passes below.
-    virtual = compose_fragments(fragments, tools=tools, boundaries_lowered=staged_bf16)
+    virtual = compose_fragments(fragments, tools=tools, boundaries_lowered=staged_tiles)
     (destination / "atlas-virtual.mlir").write_text(virtual)
     pipeline = _native_pipeline()
     machine = _run(
         [str(tools / "atlas-opt"), *NATIVE_PIPELINES[pipeline], "-"], input_text=virtual
     )
-    _run(
+    checked_machine = _run(
         [str(tools / "atlas-opt"), *NATIVE_CHECKS, "--verify-atlas-timing", "-"],
         input_text=machine,
     )
+    if staged_mixed:
+        machine = checked_machine
     program = json.loads(
         _run([str(tools / "atlas-emit"), "--program-json", "-"], input_text=machine)
     )
@@ -638,7 +833,7 @@ def compile_resident(
             "packed_mxu_input_domains_require_execution_check",
         ],
     }
-    if staged_bf16:
+    if staged_tiles:
         execution.update(
             schema="atlas.native_tile_execution_plan.v8", shape=[32, 32], dtype="bf16",
             input_addresses=[DRAM_BASE + fixed_inputs[n.id] * TILE_BYTES
@@ -650,6 +845,17 @@ def compile_resident(
             staging_workspace={"address": DRAM_BASE + len(fixed_inputs) * TILE_BYTES,
                                "bytes": (max(slots.values()) + 1 - len(fixed_inputs)) * TILE_BYTES},
             limitations=["diagnostic_primitive_domains_require_execution_check"],
+        )
+    if staged_mixed:
+        execution.update(
+            dtype=request.node(request.outputs[0]).type.dtype if len({request.node(key).type.dtype for key in request.outputs}) == 1 else "mixed",
+            input_bytes=None, input_payload_bytes=[sizes[node.id] for node in request.nodes if node.effect in {"input", "constant"}],
+            output_bytes=sizes[request.outputs[0]] if len(request.outputs) == 1 else None,
+            output_payload_bytes=[sizes[key] for key in request.outputs],
+            output_physical_layouts=["bf16_pair_halves" if request.node(key).type.dtype == "bf16" else "fp8_row_major" for key in request.outputs],
+            operation="mixed_tile_staged", backend_verification_tier="verified",
+            source_liveness_buffers=mixed_memory_plan(request)[3],
+            limitations=["diagnostic_primitive_domains_require_execution_check", "completed_tile_byte_preserving_policy_transports"],
         )
     for name, data in {
         "source-request.json": request.record(),
@@ -669,14 +875,16 @@ def compile_resident(
 
         (destination / "constants").mkdir()
         for i, binding in enumerate(request.constants):
-            if binding.encoding != "bf16-le-raw":
-                raise NativeCompilationError(
-                    "unsupported_semantics", "resident constant encoding is unsupported"
-                )
-            payload = pack_bf16_matrix(
-                bytes.fromhex(binding.data_hex),
-                request.node(binding.node_id).type.shape,
-            )
+            if staged_mixed and binding.encoding == "fp8_e4m3-raw":
+                payload = bytes.fromhex(binding.data_hex)
+                physical_layout = "fp8_row_major"
+            elif binding.encoding == "bf16-le-raw":
+                payload = pack_bf16_matrix(bytes.fromhex(binding.data_hex), request.node(binding.node_id).type.shape)
+                physical_layout = "bf16_pair_halves" if staged_tiles else "mn_tiles_bf16_pair_halves"
+            else:
+                raise NativeCompilationError("unsupported_semantics", "resident constant encoding is unsupported")
+            if len(payload) != sizes[binding.node_id]:
+                raise NativeCompilationError("unsupported_semantics", "resident constant byte extent differs from its allocated type")
             relative = f"constants/constant-{i:03}.bin"
             (destination / relative).write_bytes(payload)
             constants.append(
@@ -685,12 +893,12 @@ def compile_resident(
                     "address": DRAM_BASE + slots[binding.node_id] * TILE_BYTES,
                     "bytes": len(payload),
                     "encoding": binding.encoding,
-                    "physical_layout": "bf16_pair_halves" if staged_bf16 else "mn_tiles_bf16_pair_halves",
+                    "physical_layout": physical_layout,
                     "path": relative,
                     "sha256": sha(payload),
                 }
             )
-    if staged_bf16:
+    if staged_tiles:
         execution["constant_inputs"] = constants
         (destination / "execution_plan.json").write_text(json.dumps(execution, sort_keys=True, indent=2) + "\n")
         selection = {
@@ -728,11 +936,10 @@ def compile_resident(
         "atlas_emit_sha256": sha((tools / "atlas-emit").read_bytes()),
         "stage_artifacts": {
             p.relative_to(destination).as_posix(): sha(p.read_bytes())
-            for p in sorted(destination.rglob("*"))
-            if p.is_file()
+            for p in sorted(_artifact_files(destination))
         },
     }
-    if staged_bf16:
+    if staged_tiles:
         manifest["native_check_fingerprint"] = fingerprint
         if deadline is not None and monotonic() >= deadline:
             raise NativeCompilationError("search_timeout", "staged publication exceeded its total time budget")

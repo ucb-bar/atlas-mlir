@@ -339,8 +339,9 @@ def prepare_c_package(record: dict, generated: dict[str, str], compiled: Path,
     from merlin.compile.c_sources import c_source_pair
 
     runtime = Path(__file__).resolve().parents[1] / "runtime"
-    public = {member: _member(runtime, member).decode()
-              for member in ("atlas_host.h", "atlas_model_tile.h")}
+    from atlas_mlir_native.c_runtime import runtime_headers
+
+    public = {**runtime_headers(runtime), "atlas_model_tile.h": _member(runtime, "atlas_model_tile.h").decode()}
     private = {
         "finite_float_boundary.h": (Path(merlin_dir()) / "runtime/c/finite_float_boundary.h").read_text(),
         "atlas_graph_memref.h": _member(runtime, "atlas_graph_memref.h").decode(),

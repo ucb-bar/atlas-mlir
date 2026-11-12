@@ -1,6 +1,9 @@
+#include "Atlas/AtlasProofWork.h"
 #include "Atlas/AtlasTileContractVerification.h"
+#include "Atlas/AtlasAddressAnalysis.h"
 #include "Atlas/AtlasContractAttr.h"
 #include "Atlas/AtlasDMAContractVerification.h"
+#include "Atlas/AtlasBoundaryABI.h"
 #include "Atlas/AtlasGeneratedArtifact.h"
 #include "Atlas/AtlasOps.h"
 #include "Atlas/AtlasSpilling.h"
@@ -9,6 +12,7 @@
 #include "Atlas/AtlasVerificationContext.h"
 #include "Atlas/AtlasVirtualVerification.h"
 #include "mlir/IR/Builders.h"
+#include "mlir/Dialect/Arith/IR/Arith.h"
 #include "llvm/ADT/BitVector.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/DenseSet.h"
@@ -51,9 +55,12 @@ bool validRecord(const Record &r) {
     return r.reg >= 0 && r.reg < kAtlasTensorRegisters && r.bytes == kAtlasRegisterBytes &&
            r.vmemByte % kAtlasRegisterBytes == 0 && uint64_t(r.vmemByte) + kAtlasRegisterBytes <= kAtlasVmemBytes &&
            r.vmemByte / kVmemBankBytes == (r.vmemByte + kAtlasRegisterBytes - 1) / kVmemBankBytes;
-  return (r.kind == "mailbox_load" || r.kind == "slot_load" || r.kind == "slot_store") && r.reg > 0 && r.reg < 32 &&
-         r.transfer == -1 && r.bytes == 4 && r.vmemByte % 4 == 0 &&
-         uint64_t(r.vmemByte) + 4 <= kAtlasVmemBytes;
+  if (r.kind == "slot_index_load" || r.kind == "slot_index_store")
+    return r.reg > 0 && r.reg < 32 && r.transfer == -1 && r.bytes > 0 &&
+           uint64_t(r.vmemByte) + r.bytes <= kAtlasVmemBytes;
+  return (r.kind == "mailbox_load" || r.kind == "slot_load" || r.kind == "slot_store" || r.kind == "scale_load") && r.reg > 0 && r.reg < 32 &&
+         r.transfer == -1 && (r.bytes == 1 || r.bytes == 2 || r.bytes == 4) && r.vmemByte % r.bytes == 0 &&
+         uint64_t(r.vmemByte) + r.bytes <= kAtlasVmemBytes;
 }
 
 DictionaryAttr encodeRecord(Builder &builder, const Record &r) {
@@ -98,10 +105,11 @@ LogicalResult checkReferences(ModuleOp module, ArrayRef<Record> records) {
   if (auto cfg = module->getAttrOfType<DictionaryAttr>(kAtlasCFGContract))
     if (auto operations = cfg.getAs<ArrayAttr>("operations"))
       for (Attribute attr : operations) {
+        atlasProofRecord(AtlasProofKind::Tile);
         auto op = dyn_cast<DictionaryAttr>(attr);
         if (!op) continue;
         StringRef name = contractString(op, "name");
-        if (name == "atlas.virtual_restore" || name == "atlas.virtual_slot_copy") {
+        if (name == "atlas.virtual_restore" || name == "atlas.virtual_slot_copy" || name == "atlas.virtual_slot_load" || name == "atlas.virtual_slot_store") {
           auto commands = contractI32Array(op, "tile_commands");
           for (unsigned n = 0; n < commands.size(); n += name == "atlas.virtual_slot_copy" ? 2 : 1)
             slotReads.insert(commands[n]);
@@ -113,28 +121,25 @@ LogicalResult checkReferences(ModuleOp module, ArrayRef<Record> records) {
                uint64_t(outer.vmemByte) + outer.bytes;
   };
   for (const Record &r : records) {
+    atlasProofRecord(AtlasProofKind::Tile);
     bool valid = false;
-    if (r.kind == "dma_load" || r.kind == "vstore" || r.kind == "slot_store" ||
+    if (r.kind == "scale_load") {
+      valid = r.after.size() == 1 && records[r.after[0]].kind == "slot_store" &&
+              records[r.after[0]].vmemByte == r.vmemByte && records[r.after[0]].bytes == 4;
+    } else if (r.kind == "dma_load" || r.kind == "vstore" || r.kind == "slot_store" ||
+        ((r.kind == "slot_index_load" || r.kind == "slot_index_store") && slotReads.count(r.id)) ||
         ((r.kind == "slot_load" || r.kind == "vload") && slotReads.count(r.id))) {
       valid = r.after.empty();
     } else if (r.kind == "dma_store") {
-      valid = r.after.size() == r.bytes / kAtlasRegisterBytes;
-      unsigned covered = 0;
+      uint64_t cursor = r.vmemByte;
+      valid = !r.after.empty();
       for (int32_t id : r.after) {
         const Record &store = records[id];
         if (store.kind != "vstore" || store.transfer != r.transfer ||
-            !contains(r, store)) {
-          valid = false;
-          break;
-        }
-        unsigned half = (store.vmemByte - r.vmemByte) / kAtlasRegisterBytes;
-        if (covered & (1u << half)) {
-          valid = false;
-          break;
-        }
-        covered |= 1u << half;
+            store.vmemByte != cursor) { valid = false; break; }
+        cursor += store.bytes;
       }
-      valid &= covered == (1u << (r.bytes / kAtlasRegisterBytes)) - 1;
+      valid &= cursor >= uint64_t(r.vmemByte) + r.bytes;
     } else if (r.kind == "dma_wait") {
       if (r.after.size() == 1) {
         const Record &launch = records[r.after[0]];
@@ -153,8 +158,11 @@ LogicalResult checkReferences(ModuleOp module, ArrayRef<Record> records) {
         // Earlier records have already passed their launch-reference check.
         const Record &launch = records[predecessor.after[0]];
         valid = launch.kind == "dma_load" && r.transfer == launch.transfer &&
-                contains(launch, r) &&
-                (r.kind == "vload" || r.kind == "mailbox_load");
+                (contains(launch, r) || (r.kind == "vload" && launch.transfer >= 0 &&
+                 llvm::any_of(records, [&](const Record &prefill) {
+                   return prefill.id < launch.id && prefill.kind == "vstore" &&
+                          prefill.transfer == launch.transfer && contains(prefill, r);
+                 }))) && (r.kind == "vload" || r.kind == "mailbox_load");
       }
     }
     if (!valid)
@@ -169,9 +177,11 @@ LogicalResult checkReferences(ModuleOp module, ArrayRef<Record> records) {
 LogicalResult checkDependencies(const AtlasStream &s, ArrayRef<Record> records,
                                 const llvm::DenseMap<Operation *, int32_t> &tags) {
   auto transfer = [&](size_t block, llvm::BitVector &facts) {
-    for (size_t i = s.starts[block]; i < s.blockEnd(block); ++i)
+    for (size_t i = s.starts[block]; i < s.blockEnd(block); ++i) {
+      atlasProofTransfer(AtlasProofKind::Tile);
       if (auto found = tags.find(s.ops[i]); found != tags.end())
         facts.set(found->second);
+    }
     return success();
   };
   auto join = [](llvm::BitVector &into, const llvm::BitVector &incoming) {
@@ -184,6 +194,7 @@ LogicalResult checkDependencies(const AtlasStream &s, ArrayRef<Record> records,
   for (size_t block = 0; block < s.starts.size(); ++block) {
     llvm::BitVector facts = paths->entries[block];
     for (size_t i = s.starts[block]; i < s.blockEnd(block); ++i) {
+      atlasProofTransfer(AtlasProofKind::Tile);
       auto found = tags.find(s.ops[i]);
       if (found == tags.end())
         continue;
@@ -213,11 +224,20 @@ AtlasTileExpansion mlir::atlas::atlasTileExpansion(StringRef sourceOp) {
       .Case(VirtualSpillFP8Op::getOperationName(), {1, 0})
       .Case(VirtualReloadFP8Op::getOperationName(), {1, 0})
       .Case(VirtualPackFP8Op::getOperationName(), {2, 0})
+      .Case(VirtualRawPackFP8Op::getOperationName(), {2, 0})
       .Default({0, 0});
 }
 
 AtlasTileExpansion mlir::atlas::atlasTileExpansion(Operation *op) {
-  if (isa<VirtualControlOp>(op)) return {1, 0};
+  if (isa<VirtualControlOp, VirtualSlotLoadOp, VirtualSlotStoreOp>(op)) return {1, 0};
+  if (auto transfer = virtualDMATransfer(op); transfer && !transfer->store) {
+    auto expansion = atlasTileExpansion(op->getName().getStringRef());
+    unsigned halves = isa<VirtualBF16Type>(transfer->tile.getType()) ? 2 : 1;
+    auto constant = transfer->size->get().getDefiningOp<arith::ConstantOp>();
+    if (constant && cast<IntegerAttr>(constant.getValue()).getInt() < halves * kAtlasRegisterBytes)
+      expansion.commands += halves;
+    return expansion;
+  }
   if (isAtlasSlotAccess(op)) {
     auto slot = atlasAccessedSlot(op).getDefiningOp<VirtualSlotOp>();
     unsigned halves = slot.getWords() == 1 ? 1 : slot.getWords() / kAtlasRegisterWords;
@@ -256,20 +276,26 @@ FailureOr<ArrayAttr> mlir::atlas::buildAtlasTileContract(
   for (const VirtualDMAAssignment &assignment : dmaAssignments)
     transfers[assignment.transfer] = &assignment;
   for (Attribute attr : *sourceDMA) {
+    atlasProofRecord(AtlasProofKind::Tile);
     auto record = cast<DictionaryAttr>(attr);
     dmaRecords[uint32_t(record.getAs<IntegerAttr>("id").getInt())] = record;
   }
-  auto sourceBase = [&](StringRef name) -> std::optional<uint64_t> {
+  auto boundary = AtlasBoundaryABI::read(function);
+  if (failed(boundary))
+    return failure();
+  auto sourceBase = [&](StringRef name, uint64_t bytes) -> std::optional<uint64_t> {
     auto attr = function->getAttrOfType<IntegerAttr>(name);
     if (!attr || attr.getValue().isNegative() || attr.getValue().getActiveBits() > 32)
       return std::nullopt;
     uint64_t value = attr.getValue().getZExtValue();
-    if (value < 0x80000000u || value % kAtlasRegisterBytes)
+    if (!atlasDMAMemorySpan(value, bytes) || value % 32)
       return std::nullopt;
     return value;
   };
-  auto inputBase = sourceBase("atlas.input_dram_base");
-  auto outputBase = sourceBase("atlas.output_dram_base");
+  auto inputBase = sourceBase("atlas.input_dram_base",
+                              boundary->inputSlots ? boundary->inputEnd() - boundary->inputBase : 1);
+  auto outputBase = sourceBase("atlas.output_dram_base",
+                               boundary->outputEnd() - boundary->outputBase);
   if (!inputBase || !outputBase)
     return function.emitOpError("tile contract requires aligned 32-bit boundary DRAM bases");
   SmallVector<Record> records;
@@ -294,7 +320,7 @@ FailureOr<ArrayAttr> mlir::atlas::buildAtlasTileContract(
   if (scalarArgumentRegs.size() != function.getNumArguments())
     return function.emitOpError("tile contract requires one scalar register claim per entry argument");
   if (function.getNumArguments()) {
-    auto controlBase = sourceBase("atlas.control_dram_base");
+    auto controlBase = sourceBase("atlas.control_dram_base", kAtlasRegisterBytes);
     if (!controlBase || function.getNumArguments() > 256)
       return function.emitOpError("tile contract requires an aligned bounded scalar mailbox");
     auto launch = add("dma_load", -1, uint64_t(fixed.mailboxWord) * 4,
@@ -360,6 +386,12 @@ FailureOr<ArrayAttr> mlir::atlas::buildAtlasTileContract(
         DictionaryAttr source = dmaRecords.find(p.id)->second;
         bool store = isa<VirtualDMAStoreFP8Op, VirtualDMAStoreBF16Op>(op);
         SmallVector<int32_t, 2> after;
+        if (!store && uint32_t(source.getAs<IntegerAttr>("size_bytes").getInt()) < p.halves * kAtlasRegisterBytes) {
+          for (unsigned half = 0; half < p.halves; ++half)
+            if (failed(add("vstore", fixed.tensorTemporary + half,
+                (uint64_t(p.stagingWord) + half * kAtlasRegisterWords) * 4,
+                0, kAtlasRegisterBytes, -1, p.id))) return failure();
+        }
         if (store) {
           auto reg = tensorReg(virtualDMATransfer(&op)->tile);
           if (failed(reg))
@@ -401,6 +433,23 @@ FailureOr<ArrayAttr> mlir::atlas::buildAtlasTileContract(
         if (failed(reg) || failed(add("mailbox_load", *reg,
             (uint64_t(fixed.mailboxWord) + control.getIndex()) * 4,
             0, 4, -1, -1, {1}))) return failure();
+      } else if (isa<VirtualSlotLoadOp, VirtualSlotStoreOp>(op)) {
+        auto slot = atlasAccessedSlot(&op).getDefiningOp<VirtualSlotOp>();
+        auto reg = tensorReg(atlasSlotValue(&op));
+        StringRef kind = op.getAttrOfType<StringAttr>("kind").getValue();
+        unsigned bytes = kind == "lw" || kind == "sw" ? 4 : kind == "lhu" || kind == "sh" ? 2 : 1;
+        unsigned offset = op.getAttrOfType<IntegerAttr>("byte_offset").getInt();
+        bool indexed = bool(atlasSlotIndex(&op));
+        if (indexed) {
+          auto range = provenI32UnsignedRange(atlasSlotIndex(&op), &op);
+          if (!range) return failure();
+          bytes *= uint64_t(range->last) + 1;
+        }
+        StringRef recordKind = isa<VirtualSlotStoreOp>(op)
+            ? (indexed ? "slot_index_store" : "slot_store")
+            : (indexed ? "slot_index_load" : "slot_load");
+        if (failed(reg) || failed(add(recordKind,
+              *reg, uint64_t(slot.getSlotWord()) * 4 + offset, 0, bytes, -1, -1))) return failure();
       } else if (isAtlasSlotAccess(&op)) {
         auto slot = atlasAccessedSlot(&op).getDefiningOp<VirtualSlotOp>();
         auto copy = dyn_cast<VirtualSlotCopyOp>(op);
@@ -439,6 +488,13 @@ FailureOr<ArrayAttr> mlir::atlas::buildAtlasTileContract(
           if (failed(id)) return failure();
           if (store) spillStores[saved].push_back(*id);
         }
+      } else if (auto pack = dyn_cast<VirtualRawPackFP8Op>(op)) {
+        auto reg = tensorReg(pack.getScale());
+        if (failed(reg)) return failure();
+        auto store = add("slot_store", *reg, uint64_t(fixed.packWord) * 4, 0, 4, -1, -1);
+        if (failed(store) || failed(add("scale_load", fixed.scaleReg,
+                                       uint64_t(fixed.packWord) * 4, 0, 4, -1, -1, {*store})))
+          return failure();
       } else if (auto pack = dyn_cast<VirtualPackFP8Op>(op)) {
         auto reg = tensorReg(pack.getResult());
         if (failed(reg))
@@ -461,6 +517,7 @@ FailureOr<ArrayAttr> mlir::atlas::buildAtlasTileContract(
 
 LogicalResult mlir::atlas::verifyAtlasGeneratedTileContract(
     const AtlasVerificationContext &ctx) {
+  atlasProofInvocation(AtlasProofKind::Tile);
   ModuleOp module = ctx.module;
   if (failed(requireAtlasGeneratedArtifact(module)))
     return failure();
@@ -469,6 +526,7 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedTileContract(
     return module.emitOpError("generated resource contract requires an atlas.virtual_tile_contract array");
   SmallVector<Record> records;
   for (Attribute attr : array) {
+    atlasProofRecord(AtlasProofKind::Tile);
     auto record = parseRecord(module, attr);
     if (failed(record))
       return failure();
@@ -487,6 +545,7 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedTileContract(
   llvm::DenseMap<Operation *, int32_t> tags;
   llvm::BitVector seen(records.size());
   for (Operation &op : module.getBody()->getOperations()) {
+    atlasProofRecord(AtlasProofKind::Tile);
     Attribute attr = op.getAttr(kAtlasTagTileCommand);
     bool required = isa<VLoadOp, VStoreOp, DMAOp, DMAWaitOp>(op);
     if (!attr) {
@@ -512,10 +571,29 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedTileContract(
                 dma.getChannel() == uint32_t(r.channel);
     else if (auto wait = dyn_cast<DMAWaitOp>(op))
       matches = r.kind == "dma_wait" && wait.getChannel() == uint32_t(r.channel);
-    else if (auto load = dyn_cast<ScalarLoadOp>(op))
-      matches = (r.kind == "mailbox_load" || r.kind == "slot_load") && load.getKind() == "lw" && load.getDst() == uint32_t(r.reg);
+    else if ((r.kind == "slot_index_load" || r.kind == "slot_index_store") &&
+             isa<ScalarLoadOp, ScalarStoreOp>(op)) {
+      // The source CFG binds the width and the full dynamic address expression.
+      auto source = contractTag(&op, kAtlasTagCFGSource);
+      auto cfg = module->getAttrOfType<DictionaryAttr>(kAtlasCFGContract);
+      auto sources = cfg ? cfg.getAs<ArrayAttr>("operations") : ArrayAttr{};
+      DictionaryAttr record;
+      if (source && sources) for (Attribute a : sources) {
+        atlasProofRecord(AtlasProofKind::Tile);
+        auto d = dyn_cast<DictionaryAttr>(a);
+        if (d && contractI32(d, "id") == source) record = d;
+      }
+      if (record) {
+        if (auto load = dyn_cast<ScalarLoadOp>(op))
+          matches = r.kind == "slot_index_load" && load.getKind() == contractString(record,"kind") && load.getDst() == uint32_t(r.reg);
+        if (auto store = dyn_cast<ScalarStoreOp>(op))
+          matches = r.kind == "slot_index_store" && store.getKind() == contractString(record,"kind") && store.getSrc() == uint32_t(r.reg);
+      }
+    } else if (auto load = dyn_cast<ScalarLoadOp>(op))
+      matches = (((r.kind == "mailbox_load" || r.kind == "slot_load") && load.getKind() == (r.bytes == 4 ? "lw" : r.bytes == 2 ? "lhu" : "lbu")) ||
+                 (r.kind == "scale_load" && load.getKind() == "seld")) && load.getDst() == uint32_t(r.reg);
     else if (auto store = dyn_cast<ScalarStoreOp>(op))
-      matches = r.kind == "slot_store" && store.getKind() == "sw" && store.getSrc() == uint32_t(r.reg);
+      matches = r.kind == "slot_store" && store.getKind() == (r.bytes == 4 ? "sw" : r.bytes == 2 ? "sh" : "sb") && store.getSrc() == uint32_t(r.reg);
     if (!matches)
       return op.emitOpError("tile contract command kind, format, register, or channel mismatch");
     if (isa<DMAOp, DMAWaitOp>(op)) {
@@ -527,8 +605,10 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedTileContract(
   }
   if (auto dmas = module->getAttrOfType<ArrayAttr>(kAtlasDMAContract)) {
     for (const Record &r : records) {
+      atlasProofRecord(AtlasProofKind::Tile);
       if (!isDMA(r) || r.transfer < 0) continue;
       for (Attribute a : dmas) {
+        atlasProofRecord(AtlasProofKind::Tile);
         auto d = dyn_cast<DictionaryAttr>(a);
         if (!d || contractI32(d,"id") != r.transfer) continue;
         auto span = contractI32(d,"dram_span");
@@ -552,6 +632,7 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedTileContract(
     RegValues regs = s.entry[block];
     auto upper = bases[block];
     for (size_t i = s.starts[block]; i < s.blockEnd(block); ++i) {
+      atlasProofTransfer(AtlasProofKind::Tile);
       Operation *op = s.ops[i];
       if (auto config = dyn_cast<DMAConfigOp>(op))
         upper = regs[config.getBaseReg()];
@@ -580,6 +661,9 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedTileContract(
               (!r.dramSpan && failed(checkCaptured(op, "tile", "DRAM byte address", regs[dma.getDram()], r.dramByte))) ||
               failed(checkCaptured(op, "tile", "byte length", regs[dma.getSize()], r.bytes)))
             return failure();
+        } else if (r.kind == "slot_index_load" || r.kind == "slot_index_store") {
+          if (!module->hasAttr(kAtlasCFGContract) || !contractTag(op, kAtlasTagCFGSource))
+            return op->emitOpError("indexed slot access requires its source CFG address proof");
         } else if (r.kind == "mailbox_load" || r.kind == "slot_load" || r.kind == "slot_store") {
           auto load = dyn_cast<ScalarLoadOp>(op);
           unsigned base = load ? load.getBase() : cast<ScalarStoreOp>(op).getBase();

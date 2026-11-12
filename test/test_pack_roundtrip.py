@@ -63,7 +63,7 @@ class PackRoundTripTests(unittest.TestCase):
         return result.stdout
 
     def test_explicit_operation_compiles_all_admitted_scales(self) -> None:
-        for scale in range(122, 129):
+        for scale in range(256):
             with self.subTest(scale=scale):
                 machine = self.checked(source(scale, explicit=True), "--atlas-compile")
                 packs = [line for line in machine.splitlines() if '"atlas.vpu_pack"' in line]
@@ -77,7 +77,7 @@ class PackRoundTripTests(unittest.TestCase):
 
     def test_automatic_pipeline_removes_scalar_relayout_for_unknown_bf16(self) -> None:
         # Input BF16 carries no finiteness assumption, including at nonunit scale.
-        for scale in (122, 127, 128):
+        for scale in (0, 119, 122, 127, 128, 246, 247, 254, 255):
             with self.subTest(scale=scale):
                 virtual = self.checked(source(scale), LATE)
                 self.assertNotIn(PACK, virtual)
@@ -114,14 +114,18 @@ class PackRoundTripTests(unittest.TestCase):
         self.assertIn('"atlas.branch"', machine)
         assert_boundaries(self, machine)
 
-    def test_scale_types_ranges_and_unqualified_scale_codes_are_rejected(self) -> None:
-        cases = [(source(-1, explicit=True), ()), (source(256, explicit=True), ()),
-            (source(explicit=True).replace('scale_code = 127 : i32', 'scale_code = 127 : i64'), ()),
-            (source(explicit=True).replace('scale_code = 127 : i32', 'scale_code = "127"'), ()),]
-        for scale in (0, 121, 129, 255):
-            cases.append((source(scale, explicit=True), MACHINE))
-            # The automatic rewrite must preserve the original scale admission.
-            cases.append((source(scale), (LATE, *MACHINE)))
+    def test_scale_types_and_out_of_byte_range_codes_are_rejected(self) -> None:
+        cases = []
+        for explicit in (False, True):
+            for attribute in ('scale_code = 127 : i64', 'scale_code = "127"'):
+                cases.append((source(explicit=explicit).replace(
+                    'scale_code = 127 : i32', attribute), ()))
+            for scale in (-2147483648, -1, 256, 2147483647):
+                cases.append((source(scale, explicit=explicit), ()))
+                # Both direct lowering and automatic rewriting preserve the
+                # signed i32 attribute check before using generated accessors.
+                cases.append((source(scale, explicit=explicit), MACHINE))
+                cases.append((source(scale, explicit=explicit), (LATE, *MACHINE)))
         for index, (text, passes) in enumerate(cases):
             with self.subTest(case=index):
                 result = run("atlas-opt", text, *passes)

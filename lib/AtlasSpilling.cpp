@@ -1,4 +1,5 @@
 #include "Atlas/AtlasSpilling.h"
+#include "Atlas/AtlasAddressAnalysis.h"
 #include "Atlas/AtlasOps.h"
 #include "Atlas/AtlasTarget.h"
 #include "Atlas/AtlasVirtualAllocation.h"
@@ -44,12 +45,12 @@ StringRef mlir::atlas::atlasSlotKind(Type type) {
 }
 
 bool mlir::atlas::isAtlasSlotAccess(Operation *op) {
-  return isa<VirtualSaveOp, VirtualRestoreOp, VirtualSlotCopyOp>(op);
+  return isa<VirtualSaveOp, VirtualRestoreOp, VirtualSlotCopyOp, VirtualSlotLoadOp, VirtualSlotStoreOp>(op);
 }
 
 Value mlir::atlas::atlasAccessedSlot(Operation *op) {
   return llvm::TypeSwitch<Operation *, Value>(op)
-      .Case<VirtualSaveOp, VirtualRestoreOp>([](auto x) { return x.getSlot(); })
+      .Case<VirtualSaveOp, VirtualRestoreOp, VirtualSlotLoadOp, VirtualSlotStoreOp>([](auto x) { return x.getSlot(); })
       .Case([](VirtualSlotCopyOp copy) { return copy.getSrc(); })
       .Default([](Operation *) { return Value(); });
 }
@@ -58,7 +59,15 @@ Value mlir::atlas::atlasSlotValue(Operation *op) {
   return llvm::TypeSwitch<Operation *, Value>(op)
       .Case([](VirtualSaveOp save) { return save.getSrc(); })
       .Case([](VirtualRestoreOp restore) { return restore.getValue(); })
+      .Case([](VirtualSlotLoadOp load) { return load.getValue(); })
+      .Case([](VirtualSlotStoreOp store) { return store.getSrc(); })
       .Default([](Operation *) { return Value(); });
+}
+
+Value mlir::atlas::atlasSlotIndex(Operation *op) {
+  if (auto load = dyn_cast<VirtualSlotLoadOp>(op)) return load.getIndex();
+  if (auto store = dyn_cast<VirtualSlotStoreOp>(op)) return store.getIndex();
+  return {};
 }
 
 Value mlir::atlas::atlasSpillTile(Operation *op) {
@@ -128,6 +137,21 @@ LogicalResult mlir::atlas::verifyAtlasSlotOperation(Operation *op) {
   auto slot = atlasAccessedSlot(op).getDefiningOp<VirtualSlotOp>();
   if (!slot || slot->getParentOp() != op->getParentOp())
     return op->emitOpError("VMEM access needs a slot in the same function");
+  if (isa<VirtualSlotLoadOp, VirtualSlotStoreOp>(op)) {
+    bool load = isa<VirtualSlotLoadOp>(op);
+    StringRef kind = op->getAttrOfType<StringAttr>("kind").getValue();
+    int64_t offset = op->getAttrOfType<IntegerAttr>("byte_offset").getInt();
+    unsigned width = kind == (load ? "lbu" : "sb") ? 1 :
+        kind == (load ? "lhu" : "sh") ? 2 : kind == (load ? "lw" : "sw") ? 4 : 0;
+    if (!width || offset < 0 || offset % width || uint64_t(offset) + width > uint64_t(slot.getWords()) * 4)
+      return op->emitOpError("scalar slot access has invalid kind, alignment or byte extent");
+    if (Value index = atlasSlotIndex(op)) {
+      auto range = provenI32UnsignedRange(index, op);
+      if (!range || uint64_t(offset) + (uint64_t(range->last) + 1) * width > uint64_t(slot.getWords()) * 4)
+        return op->emitOpError("runtime slot index needs a proven unsigned range within its slot extent");
+    }
+    return success();
+  }
   if (auto copy = dyn_cast<VirtualSlotCopyOp>(op)) {
     auto destination = copy.getDst().getDefiningOp<VirtualSlotOp>();
     if (!destination || destination == slot ||
@@ -331,14 +355,17 @@ void spillEntryArguments(func::FuncOp function) {
 
 // Demote the selected block arguments together. Order each edge's memory
 // copies so no unread source is overwritten; break cycles with one temp slot.
-unsigned spillBlockArguments(func::FuncOp function, RegisterKind kind) {
+unsigned spillBlockArguments(func::FuncOp function, RegisterKind kind,
+                             const llvm::DenseSet<Value> &protectedValues = {},
+                             const llvm::DenseSet<Value> *candidates = nullptr) {
   SmallVector<BlockArgument> arguments;
   llvm::DenseMap<Value, Value> slots;
   llvm::StringMap<Value> temporaries;
   for (Block &block : function.getBody()) {
     if (&block == &function.front()) continue;
     for (BlockArgument arg : block.getArguments())
-      if (registerKindOf(arg) == kind)
+      if (registerKindOf(arg) == kind && !protectedValues.contains(arg) &&
+          (!candidates || candidates->contains(arg)))
         arguments.push_back(arg);
   }
   if (arguments.empty()) return 0;
@@ -409,6 +436,76 @@ unsigned spillBlockArguments(func::FuncOp function, RegisterKind kind) {
   }
   for (BlockArgument arg : llvm::reverse(arguments)) arg.getOwner()->eraseArgument(arg.getArgNumber());
   return arguments.size();
+}
+
+// Preserve SSA used by independent address/index proofs when choosing a spill.
+// Other scalars remain candidates under the same register and rewrite budgets.
+llvm::DenseSet<Value> addressProofScalars(func::FuncOp function) {
+  llvm::DenseSet<Value> protectedValues;
+  SmallVector<Value> work;
+  auto protect = [&](Value value) {
+    if (registerKindOf(value) == RegisterKind::Scalar && !provenI32(value) &&
+        protectedValues.insert(value).second) work.push_back(value);
+  };
+  SmallVector<Operation *> accesses;
+  function.walk([&](Operation *op) {
+    if (isa<arith::ShLIOp,arith::ShRUIOp>(op)) {
+      accesses.push_back(op);
+      protect(op->getOperand(1));
+    }
+    if (Value index = atlasSlotIndex(op)) {
+      accesses.push_back(op);
+      protect(index);
+    }
+    if (!isa<VirtualDMALoadFP8Op, VirtualDMALoadBF16Op,
+             VirtualDMAStoreFP8Op, VirtualDMAStoreBF16Op>(op)) return;
+    accesses.push_back(op);
+    bool load = isa<VirtualDMALoadFP8Op, VirtualDMALoadBF16Op>(op);
+    protect(op->getOperand(load ? 1 : 2));
+    protect(op->getOperand(load ? 2 : 3));
+  });
+  DominanceInfo dominance(function);
+  for (Block &block : function.getBody()) {
+    auto branch = dyn_cast<cf::CondBranchOp>(block.getTerminator());
+    if (!branch) continue;
+    auto compare = branch.getCondition().getDefiningOp<arith::CmpIOp>();
+    if (!compare || compare->getBlock() != &block ||
+        compare.getPredicate() != arith::CmpIPredicate::ult) continue;
+    auto counter = dyn_cast<BlockArgument>(compare.getLhs());
+    auto limit = provenI32(compare.getRhs());
+    // Only this header-owned counter/static-limit shape can guard an address
+    // induction in SourceAddressProof. A dominating data-admission condition
+    // does not make all of its arithmetic part of the DMA address proof.
+    if (!counter || counter.getOwner() != &block || !limit || !*limit) continue;
+    if (llvm::any_of(accesses, [&](Operation *op) {
+          return dominance.dominates(branch.getTrueDest(), op->getBlock());
+        })) protect(branch.getCondition());
+  }
+  while (!work.empty()) {
+    Value value = work.pop_back_val();
+    if (Operation *op = value.getDefiningOp()) {
+      // A constant mask proves the result range independently of its input.
+      // Keep the masked witness, without pinning unrelated numeric data.
+      if (auto mask = dyn_cast<arith::AndIOp>(op))
+        if (provenI32(mask.getLhs()) || provenI32(mask.getRhs())) continue;
+      for (Value operand : op->getOperands()) protect(operand);
+      continue;
+    }
+    auto argument = cast<BlockArgument>(value);
+    for (Block *pred : argument.getOwner()->getPredecessors()) {
+      auto edge = [&](Block *destination, ValueRange incoming) {
+        if (destination == argument.getOwner() && argument.getArgNumber() < incoming.size())
+          protect(incoming[argument.getArgNumber()]);
+      };
+      if (auto branch = dyn_cast<cf::BranchOp>(pred->getTerminator()))
+        edge(branch.getDest(), branch.getDestOperands());
+      if (auto branch = dyn_cast<cf::CondBranchOp>(pred->getTerminator())) {
+        edge(branch.getTrueDest(), branch.getTrueDestOperands());
+        edge(branch.getFalseDest(), branch.getFalseDestOperands());
+      }
+    }
+  }
+  return protectedValues;
 }
 
 void spill(Value value, Operation *staged) {
@@ -578,7 +675,12 @@ struct SpillAtlasVirtualPass
         if (failed(placeSlots(function, limit))) return signalPassFailure();
         continue;
       }
-      unsigned demoted = spillBlockArguments(function, scalar ? RegisterKind::Scalar : RegisterKind::BF16);
+      auto protectedScalars = scalar ? addressProofScalars(function) : llvm::DenseSet<Value>{};
+      RegisterKind pressured = scalar ? RegisterKind::Scalar : RegisterKind::BF16;
+      const auto &peak = plan.registerPressure(pressured).peakValues;
+      llvm::DenseSet<Value> peakValues(peak.begin(), peak.end());
+      unsigned demoted = spillBlockArguments(function, pressured, protectedScalars,
+                                             &peakValues);
       if (demoted) {
         count += demoted;
         if (count > maxSpills || failed(placeSlots(function, limit))) {
@@ -601,10 +703,11 @@ struct SpillAtlasVirtualPass
         for (Operation &op : block) {
           if (isAtlasSpillLoad(&op) || isAtlasSpillStore(&op) || isAtlasSlotAccess(&op))
             continue;
+          if (op.hasAttr("atlas.spill_rematerialized")) continue;
           for (Value value : op.getResults()) {
             std::optional<RegisterKind> kind = registerKindOf(value);
             bool overflowed = kind == RegisterKind::BF16 ? bf16 : kind == RegisterKind::FP8 ? fp8 : scalar;
-            if (saved.contains(value) || !kind || !overflowed)
+            if (saved.contains(value) || protectedScalars.contains(value) || !kind || !overflowed)
               continue;
             // A loaded tile holds registers from where it is staged.
             unsigned first = order.lookup(&op);

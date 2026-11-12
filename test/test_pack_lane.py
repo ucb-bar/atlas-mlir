@@ -10,6 +10,10 @@ from atlas_mlir_native.pack_lane import pack_bf16_lane
 class PackLaneTest(unittest.TestCase):
     def test_rounding_and_scale(self) -> None:
         for bits, scale, expected in (
+            (0x3f80, 119, 0x78),
+            (0x3f80, 0, 0x7e),
+            (0x3f80, 254, 0),
+            (0x3f80, 255, 0),
             (0x3f80, 127, 0x38),  # 1.0
             (0x3f80, 128, 0x30),  # 1.0 / 2
             (0x3f80, 126, 0x40),  # 1.0 * 2
@@ -38,13 +42,13 @@ class PackLaneTest(unittest.TestCase):
                 self.assertEqual(pack_bf16_lane(bits, 127), expected)
 
     def test_invalid_words_and_scale_codes_fail(self) -> None:
-        for bits, scale in ((-1, 127), (65536, 127), (0, 121), (0, 129),
+        for bits, scale in ((-1, 127), (65536, 127), (0, -1), (0, 256),
                             (True, 127), (0, True)):
             with self.subTest(bits=bits, scale=scale), self.assertRaises(ValueError):
                 pack_bf16_lane(bits, scale)
 
     def test_every_pack_result_is_a_legal_finite_mxu_operand(self) -> None:
-        for scale in range(122, 129):
+        for scale in range(256):
             for bits in range(65536):
                 result = pack_bf16_lane(bits, scale)
                 self.assertTrue(result == 0 or 1 <= (result >> 3) & 15 <= 15)

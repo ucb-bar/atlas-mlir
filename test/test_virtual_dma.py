@@ -6,6 +6,7 @@ DMA waits come from insert-atlas-dma-waits after lowering."""
 from __future__ import annotations
 
 import unittest
+import re
 
 from test_virtual_ssa import BIN, ROOT, run
 from test_virtual_mxu_handles import program, load, reset, accumulate, readout
@@ -133,9 +134,9 @@ class VirtualDMATest(unittest.TestCase):
                                 if address == 4294967264 else
                                 "DRAM address must be a 32-byte-aligned selected-memory address")
                     self.rejected(copy(fmt, address=address), expected)
-            for size in (0, 32, 1024 if fmt == "bf16" else 2048, -1):
+            for size in (0, 31, 33, 4096, -1):
                 with self.subTest(fmt=fmt, size=size):
-                    self.rejected(copy(fmt, size=size), "byte length must equal the complete tile size")
+                    self.rejected(copy(fmt, size=size), "byte length must be a positive 32-byte multiple")
 
     def test_store_geometry_is_checked_independently(self) -> None:
         for fmt in ("fp8", "bf16"):
@@ -146,9 +147,27 @@ class VirtualDMATest(unittest.TestCase):
             self.rejected(source, "DRAM address must be a 32-byte-aligned selected-memory address")
             source = copy(fmt).replace(
                 dma_store(fmt),
-                "    %bad_size = arith.constant 32 : i32\n"
+                "    %bad_size = arith.constant 33 : i32\n"
                 + dma_store(fmt).replace("%addr, %size", "%addr, %bad_size"))
-            self.rejected(source, "byte length must equal the complete tile size")
+            self.rejected(source, "byte length must be a positive 32-byte multiple")
+
+    def test_partial_dma_prefixes_are_verified_and_zero_padded(self) -> None:
+        for fmt in ("fp8", "bf16"):
+            maximum = 1024 if fmt == "fp8" else 2048
+            for size in (32, 64, maximum - 32):
+                with self.subTest(fmt=fmt, size=size):
+                    self.accepted(copy(fmt, size=size))
+                    result = run("atlas-opt", copy(fmt, size=size), "--atlas-compile")
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    for contract in ("dma", "mxu", "tile", "cfg", "source_memory", "buffer"):
+                        self.assertIn("atlas.virtual_" + contract + "_contract", result.stdout)
+                    self.assertIn('"atlas.vli"', result.stdout)
+                    # Rehashing metadata cannot make nonzero private padding
+                    # satisfy the independent buffer initialization contract.
+                    changed, count = re.subn(r'("atlas.vli"[^\n]*immediate = )0( : i32)', r'\g<1>1\2', result.stdout, count=1)
+                    self.assertEqual(count, 1)
+                    rejected = run("atlas-opt", changed, "--verify-atlas-generated-schedule")
+                    self.assertNotEqual(rejected.returncode, 0)
 
     def test_dynamic_values_and_non_additive_proofs_fail(self) -> None:
         for operand in ("addr", "size"):

@@ -1,4 +1,5 @@
 add_mlir_dialect_library(MLIRAtlas
+  AtlasProofWork.cpp
   AtlasDialect.cpp
   AtlasTypes.cpp
   AtlasOps.cpp

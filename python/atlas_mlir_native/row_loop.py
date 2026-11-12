@@ -28,6 +28,8 @@ from .binding import (
 from .resident_graph import is_staged_bf16, staged_memory_plan
 from .row_softmax import prepare_row_softmax
 
+ROW_LOOP_COLUMN_TILES_PER_LAUNCH = 512
+
 
 def _json(value):
     return (json.dumps(value, sort_keys=True, indent=2) + "\n").encode()
@@ -43,14 +45,38 @@ class RowLoopPlan:
     readonly_bytes: int
     output_bytes: int
     scratch_bytes: int
+    io_memory_base: int = DRAM_BASE
 
     @property
     def groups(self):
         return len(self.tiling.regions)
 
     @property
+    def groups_per_launch(self):
+        # Keep complete softmax rows together. A launch contains at most512
+        # column tiles, and its frame is reused only after synchronous readback.
+        # Pick a divisor so every invocation runs the identical checked image.
+        if self.tiling.source.nodes[-1].op == "rmsnorm":
+            return self.groups
+        limit = max(1, ROW_LOOP_COLUMN_TILES_PER_LAUNCH // self.tiling.column_tiles)
+        return next(count for count in range(min(self.groups, limit), 0, -1)
+                    if self.groups % count == 0)
+
+    @property
+    def launches(self):
+        return self.groups // self.groups_per_launch
+
+    def execution_record(self):
+        result = {**self.record(), "schema": "atlas.row_loop_execution_plan.v1",
+                  "launches_per_invocation": self.launches}
+        if self.launches > 1:
+            result["groups_per_launch"] = self.groups_per_launch
+            result["frame_reuse"] = "synchronous batches; output remains private until every batch completes"
+        return result
+
+    @property
     def writable_base(self):
-        return DRAM_BASE + self.groups * self.readonly_bytes
+        return self.io_memory_base + self.groups * self.readonly_bytes
 
     @property
     def scratch_base(self):
@@ -71,7 +97,7 @@ class RowLoopPlan:
         if not 0 <= offset < self.readonly_bytes + self.output_bytes + self.scratch_bytes:
             raise ValueError("row-body address is outside its selected frame")
         if offset < self.readonly_bytes:
-            return original + group * self.readonly_bytes
+            return self.io_memory_base + offset + group * self.readonly_bytes
         return self.writable_base + group * self.writable_bytes + offset - self.readonly_bytes
 
     def record(self):
@@ -80,7 +106,7 @@ class RowLoopPlan:
             "source_request_digest": self.tiling.source.digest(),
             "body_request_digest": self.tiling.regions[0].request.digest(),
             "groups": self.groups,
-            "readonly_base": DRAM_BASE,
+            "readonly_base": self.io_memory_base,
             "readonly_stride_bytes": self.readonly_bytes,
             "output_base": self.writable_base,
             "output_stride_bytes": self.writable_bytes,
@@ -92,8 +118,15 @@ class RowLoopPlan:
         }
 
 
-def prepare_plan(source):
-    tiling = prepare_row_softmax(source)
+def prepare_plan(source, *, io_memory_base=DRAM_BASE):
+    if type(io_memory_base) is not int or io_memory_base % 32:
+        raise ValueError("I/O memory base requires an aligned integer address")
+    if source.nodes[-1].op == "rmsnorm":
+        from .rmsnorm import prepare_rmsnorm
+
+        tiling = prepare_rmsnorm(source)
+    else:
+        tiling = prepare_row_softmax(source)
     body = tiling.regions[0].request
     if any(replace(row.request, source_identity=body.source_identity) != body for row in tiling.regions):
         raise NativeCompilationError("unsupported_semantics", "row bodies differ beyond source provenance")
@@ -108,8 +141,11 @@ def prepare_plan(source):
     if is_staged_bf16(body):
         _, slots, _, _ = staged_memory_plan(body)
         total = max(slots.values()) + 1
-    plan = RowLoopPlan(tiling, readonly * TILE_BYTES, outputs * TILE_BYTES, (total - readonly - outputs) * TILE_BYTES)
-    if plan.end > DRAM_BASE + dram_slots() * TILE_BYTES:
+    plan = RowLoopPlan(tiling, readonly * TILE_BYTES, outputs * TILE_BYTES, (total - readonly - outputs) * TILE_BYTES, io_memory_base)
+    from .memory_windows import dma_span_in_window
+    if (type(io_memory_base) is not int or io_memory_base % 32 or
+        plan.end - io_memory_base > dram_slots() * TILE_BYTES or
+        not dma_span_in_window(io_memory_base, plan.end - io_memory_base)):
         raise NativeCompilationError("resource_limit", "complete row loop exceeds the selected I/O window")
     return plan
 
@@ -136,7 +172,7 @@ def virtual_program(plan, body_text):
         initial_state = first.results[0]
     loop = repeat_state_cfg(
         function,
-        iterations=plan.groups,
+        iterations=plan.groups_per_launch,
         steps=(plan.readonly_bytes, plan.writable_bytes),
         index_type=i32,
         initial_state=initial_state,
@@ -168,6 +204,8 @@ def virtual_program(plan, body_text):
         accesses += 1
     if not accesses:
         raise ValueError("row body contains no explicit DMA accesses")
+    if plan.io_memory_base != DRAM_BASE:
+        function.attributes["atlas.input_dram_base"] = IntegerAttr(plan.io_memory_base, 64)
     function.attributes["atlas.output_dram_base"] = IntegerAttr(plan.writable_base, 64)
     function.attributes["atlas.output_dram_bytes"] = IntegerAttr(plan.end - plan.writable_base, 64)
     simplify_state_cfg(function)
@@ -177,8 +215,10 @@ def virtual_program(plan, body_text):
     return stream.getvalue()
 
 
-def compile_row_loop(snapshot, source, *, target_source, destination, limits):
-    plan = prepare_plan(source)
+def compile_row_loop(snapshot, source, *, target_source, destination, limits, io_memory_base=DRAM_BASE):
+    from .region_composition import compile_virtual_with_receipt
+
+    plan = prepare_plan(source, io_memory_base=io_memory_base)
     body = plan.tiling.regions[0].request
     abi = AtlasNativeBinding.plan_boundary_abi(body)
     destination.mkdir(parents=True, exist_ok=False)
@@ -208,7 +248,7 @@ def compile_row_loop(snapshot, source, *, target_source, destination, limits):
     virtual = virtual_program(plan, explicit)
     (destination / "atlas-virtual.mlir").write_text(virtual)
     try:
-        machine = _run([str(tools / "atlas-opt"), *NATIVE_PIPELINES[_native_pipeline()], "-"], input_text=virtual)
+        machine = compile_virtual_with_receipt(virtual, tools=tools, pipeline=_native_pipeline(), destination=destination)
     except NativeCompilationError as error:
         diagnostic = destination / "lowering-error.txt"
         diagnostic.write_text(error.reason + "\n")
@@ -217,8 +257,16 @@ def compile_row_loop(snapshot, source, *, target_source, destination, limits):
     program = json.loads(_run([str(tools / "atlas-emit"), "--program-json", "-"], input_text=machine))
     if program.get("selected_rtl_revision") != RTL_REVISION:
         raise NativeCompilationError("unqualified_target", "row loop emitter uses a different RTL revision")
+    from .restoration_budget import instruction_bound
+    from .limits import functional_instruction_limit
+    try:
+        bound = instruction_bound(virtual, machine, program, max_instructions=functional_instruction_limit(limits))
+    except (ValueError, KeyError, IndexError) as error:
+        raise NativeCompilationError("resource_limit", "row loop instruction bound is unproved: " + str(error)) from error
+    if not bound["admitted"]:
+        raise NativeCompilationError("resource_limit", "row loop worst-case instruction bound exceeds " + str(bound["max_instructions"]) + ": " + str(bound["instruction_bound"]))
     binary = b"".join(row["word_u32"].to_bytes(4, "little") for row in program["instructions"])
-    execution = {**plan.record(), "schema": "atlas.row_loop_execution_plan.v1", "launches_per_invocation": 1}
+    execution = plan.execution_record()
     files = {
         "source-request.json": _json(source.record()),
         "row-softmax-plan.json": _json(plan.tiling.record()),
@@ -226,6 +274,7 @@ def compile_row_loop(snapshot, source, *, target_source, destination, limits):
         "atlas-virtual.mlir": virtual.encode(),
         "atlas-machine.mlir": machine.encode(),
         "physical-program.json": _json(program),
+        "row-loop-instruction-bound.json": _json(bound),
         "program.bin": binary,
     }
     for name, data in files.items():
@@ -255,15 +304,15 @@ def compile_row_loop(snapshot, source, *, target_source, destination, limits):
         },
     }
     (destination / "manifest.json").write_bytes(_json(result))
-    verify_row_loop(source, destination, target_source=target_source)
+    verify_row_loop(source, destination, target_source=target_source, io_memory_base=io_memory_base)
     return result
 
 
-def verify_row_loop(source, compiled, *, target_source):
-    """Replay row/frame formation and physical lowering against the native body."""
+def verify_row_loop(source, compiled, *, target_source, io_memory_base=DRAM_BASE):
+    """Reconstruct the frame and check its original captured physical lowering."""
     from .binding import check_io_memory_manifest
 
-    plan = prepare_plan(source)
+    plan = prepare_plan(source, io_memory_base=io_memory_base)
     manifest = json.loads((compiled / "manifest.json").read_text())
     check_io_memory_manifest(manifest)
     if manifest.get("schema") != "atlas.row_loop_compilation.v1":
@@ -288,7 +337,7 @@ def verify_row_loop(source, compiled, *, target_source):
         json.loads((compiled / "source-request.json").read_text()) != source.record()
         or json.loads((compiled / "row-softmax-plan.json").read_text()) != plan.tiling.record()
         or json.loads((compiled / "execution_plan.json").read_text())
-        != {**plan.record(), "schema": "atlas.row_loop_execution_plan.v1", "launches_per_invocation": 1}
+        != plan.execution_record()
         or manifest.get("body_manifest_sha256") != _sha((compiled / "body/manifest.json").read_bytes())
         or manifest.get("target_inventory_sha256")
         != _sha((target_source / "docs/selected-variant-inventory.json").read_bytes())
@@ -308,9 +357,26 @@ def verify_row_loop(source, compiled, *, target_source):
     virtual = virtual_program(plan, explicit)
     if virtual != (compiled / "atlas-virtual.mlir").read_text():
         raise ValueError("row-loop CFG or address transformation changed")
-    machine = _run([str(tools / "atlas-opt"), *NATIVE_PIPELINES[pipeline], "-"], input_text=virtual)
-    if machine != (compiled / "atlas-machine.mlir").read_text():
-        raise ValueError("row-loop physical lowering changed")
+    # Validate the captured result of the original bounded compilation. Export
+    # verification must not run another spill/lowering pipeline with a fresh
+    # budget. The source/frame is still independently reconstructed above, and
+    # saved physical contracts plus exact current emission are checked below.
+    receipt = json.loads((compiled / "compilation-pipeline.json").read_text())
+    from .publication_options import valid_receipt_timing
+    captured = "spilled_virtual_sha256" in receipt
+    capture_options = ["--mlir-disable-threading",
+                "--mlir-print-ir-before=lower-atlas-virtual-to-machine",
+                "--mlir-print-ir-module-scope"] if captured else []
+    expected = [str(tools / "atlas-opt"), *capture_options, *NATIVE_PIPELINES[pipeline], "-"]
+    machine = (compiled / "atlas-machine.mlir").read_text()
+    if (receipt.get("argv") != expected or receipt.get("wall_limit_s") != 30
+            or receipt.get("verifier_limits") != "compiler defaults"
+            or not valid_receipt_timing(receipt)
+            or receipt.get("input_sha256") != _sha(virtual.encode())
+            or receipt.get("output_sha256") != _sha(machine.encode())
+            or (captured and receipt["spilled_virtual_sha256"] != _sha((compiled / "mandatory-spilled-virtual.mlir").read_bytes()))
+            or receipt.get("tool_sha256") != {name: _sha((tools / name).read_bytes()) for name in ("atlas-opt", "atlas-emit")}):
+        raise ValueError("row-loop captured compilation identity changed")
     _run([str(tools / "atlas-opt"), *NATIVE_CHECKS, "--verify-atlas-timing", "-"], input_text=machine)
     program = json.loads(_run([str(tools / "atlas-emit"), "--program-json", "-"], input_text=machine))
     binary = b"".join(row["word_u32"].to_bytes(4, "little") for row in program["instructions"])
@@ -319,4 +385,12 @@ def verify_row_loop(source, compiled, *, target_source):
         or binary != (compiled / "program.bin").read_bytes()
     ):
         raise ValueError("row-loop program differs from its checked physical lowering")
+    from .restoration_budget import instruction_bound
+    from .limits import functional_instruction_limit
+    from types import SimpleNamespace
+    saved_bound = json.loads((compiled / "row-loop-instruction-bound.json").read_text())
+    cap = functional_instruction_limit(SimpleNamespace(functional_instruction_limit=saved_bound["max_instructions"]))
+    bound = instruction_bound(virtual, machine, program, max_instructions=cap)
+    if not bound["admitted"] or saved_bound != bound:
+        raise ValueError("row loop instruction bound differs or exceeds default")
     return plan, manifest

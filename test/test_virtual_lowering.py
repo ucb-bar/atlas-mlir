@@ -174,6 +174,19 @@ class VirtualLoweringTest(unittest.TestCase):
         self.assertEqual(machine.returncode, 0, machine.stderr)
         self.assertIn('"atlas.vpu_reduce"', machine.stdout)
 
+    def test_column_sum_uses_checked_registered_pipeline(self) -> None:
+        source = virtual_chain(1).replace('kind = "relu"', 'kind = "col_sum"')
+        source = source.replace('"atlas.virtual_vpu_unary"', '"atlas.virtual_vpu_reduce"')
+        result = run("atlas-opt", source, "--atlas-compile-unscheduled")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('kind = "col_sum"', result.stdout)
+        for option in ("--verify-atlas-machine-stream", "--verify-atlas-generated-schedule", "--verify-atlas-timing"):
+            checked = run("atlas-opt", result.stdout, option)
+            self.assertEqual(checked.returncode, 0, checked.stderr)
+        invalid = run("atlas-opt", source.replace('kind = "col_sum"', 'kind = "column_sum"'))
+        self.assertNotEqual(invalid.returncode, 0)
+        self.assertIn("unknown virtual reduce VPU kind", invalid.stderr)
+
     def test_loop_branch_and_edge_cycle_lower_to_checked_machine_streams(self) -> None:
         for name in ("loop", "branch", "swap_loop"):
             with self.subTest(name=name):

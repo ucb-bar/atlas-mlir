@@ -41,6 +41,7 @@ def prepare_c_package(
     semantic_source: KernelRequest | None = None,
     semantic_operand_scale_exponents: tuple[int, int] | None = None,
     semantic_epilogue: str | None = None,
+    _finite_fp8_top: bool = False,
 ):
     """Validate source and publication before rendering raw FP8/BF16 host calls."""
     if compiled.is_symlink() or not compiled.is_dir():
@@ -147,17 +148,48 @@ def prepare_c_package(
     }
     codegen = execution.get("codegen")
     if codegen is not None:
-        if codegen.get("reduction_unroll") not in (1, 2, 4, 8):
+        if not isinstance(codegen, dict) or type(codegen.get("reduction_unroll")) is not int or codegen["reduction_unroll"] not in (1, 2, 4, 8):
             raise ValueError("unrecognized reduction unroll factor")
         expected["codegen"] = codegen
-    virtual = _virtual(
-        device_tiling,
-        tuple(addresses[:2]),
-        output[0],
-        epilogue,
-        seed_address=addresses[2] if seed else None,
-        k_unroll=codegen["reduction_unroll"] if codegen else 1,
-    )
+    resident = False
+    schedule_keys = {"operand_reuse_requested", "operand_reuse", "operand_reuse_fallback",
+                     "resident_a_panel_tiles", "resident_a_panels", "reduction_unroll_scope", "partial_accumulator"}
+    if codegen and any(key in codegen for key in schedule_keys):
+        requested, actual = codegen.get("operand_reuse_requested"), codegen.get("operand_reuse")
+        if requested not in ("ordered", "resident-a") or actual not in ("ordered", "resident-a"):
+            raise ValueError("unrecognized loop operand reuse policy")
+        schedule = {"operand_reuse_requested": requested}
+        if requested == "resident-a" and device_tiling.counts[1] > 1:
+            from .resident_looped_tiling import schedule_record
+
+            schedule.update(schedule_record(device_tiling))
+            resident = True
+        else:
+            schedule["operand_reuse"] = "ordered"
+            if requested == "resident-a":
+                schedule["operand_reuse_fallback"] = "one output-column tile provides no activation reuse"
+        if {key: value for key, value in codegen.items() if key in schedule_keys} != schedule:
+            raise ValueError("loop operand reuse metadata differs from its checked source lowering")
+    if resident:
+        from .resident_looped_tiling import virtual_resident_a
+
+        if manifest.get("lowering_pipeline") != "mandatory":
+            raise ValueError("resident loop publication needs the qualified mandatory pipeline")
+        if manifest.get("resident_loop_lowering_source_sha256") != sha(Path(__file__).with_name("resident_looped_tiling.py").read_bytes()):
+            raise ValueError("resident loop lowering source differs from its checked publication")
+        virtual = virtual_resident_a(
+            device_tiling, tuple(addresses[:2]), output[0], epilogue,
+            seed_address=addresses[2] if seed else None,
+        )
+    else:
+        virtual = _virtual(
+            device_tiling,
+            tuple(addresses[:2]),
+            output[0],
+            epilogue,
+            seed_address=addresses[2] if seed else None,
+            k_unroll=codegen["reduction_unroll"] if codegen else 1,
+        )
     if codegen and codegen["program_size_limit_bytes"] is not None:
         virtual = virtual.replace(
             "attributes {",
@@ -183,11 +215,11 @@ def prepare_c_package(
         "target_inventory_sha256"
     ):
         raise ValueError("selected runtime checkout differs from the compiled target inventory")
-    public = {"atlas_host.h": (runtime / "atlas_host.h").read_text()}
     host_source = (runtime / "atlas_host.c").read_text()
-    from .c_runtime import program_array, runtime_members
+    from .c_runtime import program_array, runtime_headers, runtime_members
 
-    host_members, runtime_files, runtime_record = runtime_members(public["atlas_host.h"], host_source, runtime_linkage)
+    public = runtime_headers(runtime)
+    host_members, runtime_files, runtime_record = runtime_members(public, host_source, runtime_linkage)
     m, n, k = tiling.extents
     ab, wb, ob = device_tiling.buffer_bytes
     workspace = ab + wb + ob + 2048 + (ob if seed else 0) + (m * n * 2 if streaming else 0)
@@ -211,6 +243,8 @@ def prepare_c_package(
     )
     region, region_declarations, region_source = wrappers.region, wrappers.declarations, wrappers.implementation
     private_headers, conversion_source = wrappers.private_headers, wrappers.packing
+    from .contraction_source_c import fp8_invalid_c
+    invalid_fp8 = fp8_invalid_c("values[i]", finite_top=wrappers.finite_fp8_top or _finite_fp8_top)
     declarations = f"""
 #define {upper}_M {m}u
 #define {upper}_N {n}u
@@ -320,8 +354,7 @@ static int {name}_overlaps(const void *a, size_t an, const void *b, size_t bn) {
 }}
 static int {name}_valid_fp8(const uint8_t *values, size_t bytes) {{
   for (size_t i = 0; i < bytes; ++i) {{
-    unsigned exponent = (values[i] >> 3) & 15u;
-    if (values[i] != 0 && (exponent == 0 || exponent == 15)) return 0;
+    if {invalid_fp8} return 0;
   }}
   return 1;
 }}
@@ -467,7 +500,7 @@ model execution plan.
         + ([{"id": seed.id, "shape": [m, n], "dtype": "bf16-le-raw", "bytes": m * n * 2}] if seed else []),
         "host_output": {"id": source.outputs[0], "shape": [m, n], "dtype": "bf16-le-raw", "bytes": m * n * 2},
         "source_members": {
-            "atlas_host.h": sha(public["atlas_host.h"].encode()),
+            **{filename: sha(text.encode()) for filename, text in public.items()},
             "atlas_host.c": sha(host_source.encode()),
             "looped_packing.c": sha(helpers.encode()),
             **{filename: sha(text.encode()) for filename, text in private_headers.items()},

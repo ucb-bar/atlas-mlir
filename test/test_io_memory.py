@@ -14,7 +14,7 @@ from atlas_mlir_native.binding import (
     check_io_memory_manifest,
     dram_slots,
 )
-from atlas_mlir_native.pointwise import plan_abi, prepare_plan, prepare_source
+from atlas_mlir_native.pointwise import plan_abi, prepare_execution_plan, prepare_plan, prepare_source
 from merlin.semantic_compiler.codegen import CodegenOptions, codegen_options
 from merlin.semantic_compiler.model import (
     KernelRequest,
@@ -40,8 +40,10 @@ def test_larger_io_window_is_explicit_and_only_changes_the_external_bank():
     baseline = AtlasNativeBinding.profile()
     assert dram_slots() == DRAM_SLOTS
     request = prepare_source(source()).request
-    with pytest.raises(NativeCompilationError, match="memory window"):
-        plan_abi(request)
+    _, device, streaming = prepare_execution_plan(request)
+    assert streaming is not None and streaming["launch_count"] > 1
+    assert sum((*device.input_packed_bytes, device.packed_bytes)) <= DRAM_SLOTS * TILE_BYTES
+    plan_abi(request)
     with codegen_options(CodegenOptions(io_memory_bytes=1048576)):
         expanded = AtlasNativeBinding.profile()
         assert dram_slots() == 512 and expanded.digest() != baseline.digest()
@@ -49,6 +51,8 @@ def test_larger_io_window_is_explicit_and_only_changes_the_external_bank():
         assert expanded.descriptors == baseline.descriptors
         assert expanded.banks[1:] == baseline.banks[1:]
         assert expanded.banks[0].capacity == 512
+        _, _, streaming = prepare_execution_plan(request)
+        assert streaming is None
         abi, plan = plan_abi(request), prepare_plan(request)
         slots = [*abi["fixed_inputs"].values(), *abi["fixed_outputs"]]
         ranges = [(DRAM_BASE + slot * TILE_BYTES, DRAM_BASE + slot * TILE_BYTES + size)

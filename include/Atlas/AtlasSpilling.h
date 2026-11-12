@@ -18,6 +18,8 @@ Value atlasAccessedSlot(Operation *op);
 // The value a save writes to its slot or a restore reads back; null for a
 // slot copy.
 Value atlasSlotValue(Operation *op);
+// Optional runtime element index of a scalar slot access.
+Value atlasSlotIndex(Operation *op);
 // The spill value a spill store produces and its reload reads.
 Value atlasSpillSaved(Operation *op);
 // The tile a spill store saves or a reload restores.

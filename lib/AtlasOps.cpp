@@ -68,6 +68,8 @@ ATLAS_MACHINE_EFFECTS(VirtualReloadBF16Op)
 ATLAS_MACHINE_EFFECTS(VirtualReloadFP8Op)
 ATLAS_MACHINE_EFFECTS(VirtualSaveOp)
 ATLAS_MACHINE_EFFECTS(VirtualRestoreOp)
+ATLAS_MACHINE_EFFECTS(VirtualSlotLoadOp)
+ATLAS_MACHINE_EFFECTS(VirtualSlotStoreOp)
 ATLAS_MACHINE_EFFECTS(VirtualSlotCopyOp)
 ATLAS_MACHINE_EFFECTS(VirtualControlOp)
 
@@ -89,6 +91,8 @@ void VirtualSlotOp::getEffects(
 LogicalResult VirtualSlotOp::verify() { return verifyAtlasSlotOperation(*this); }
 LogicalResult VirtualSaveOp::verify() { return verifyAtlasSlotOperation(*this); }
 LogicalResult VirtualRestoreOp::verify() { return verifyAtlasSlotOperation(*this); }
+LogicalResult VirtualSlotLoadOp::verify() { return verifyAtlasSlotOperation(*this); }
+LogicalResult VirtualSlotStoreOp::verify() { return verifyAtlasSlotOperation(*this); }
 LogicalResult VirtualSlotCopyOp::verify() { return verifyAtlasSlotOperation(*this); }
 
 LogicalResult VirtualSpillBF16Op::verify() { return verifyAtlasSpillOperation(*this); }
@@ -126,6 +130,12 @@ void VirtualMXUMatmulOp::getEffects(
 void VirtualPackFP8Op::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
         &effects) {
+  effects.emplace_back(MemoryEffects::Read::get());
+  effects.emplace_back(MemoryEffects::Write::get());
+}
+
+void VirtualRawPackFP8Op::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>> &effects) {
   effects.emplace_back(MemoryEffects::Read::get());
   effects.emplace_back(MemoryEffects::Write::get());
 }
@@ -173,6 +183,25 @@ constantI32(Value value, llvm::DenseMap<Value, std::optional<uint32_t>> &constan
     auto rhs = constantI32(add.getRhs(), constants);
     if (lhs && rhs)
       result = static_cast<uint32_t>(static_cast<uint64_t>(*lhs) + *rhs);
+  } else if (Operation *op = value.getDefiningOp(); op &&
+      isa<arith::SubIOp, arith::AndIOp, arith::OrIOp, arith::XOrIOp,
+          arith::ShLIOp, arith::ShRUIOp>(op)) {
+    if (auto sub = dyn_cast<arith::SubIOp>(op);
+        sub && sub.getOverflowFlags() != arith::IntegerOverflowFlags::none)
+      return std::nullopt;
+    if (auto shl = dyn_cast<arith::ShLIOp>(op);
+        shl && shl.getOverflowFlags() != arith::IntegerOverflowFlags::none)
+      return std::nullopt;
+    auto lhs = constantI32(op->getOperand(0), constants);
+    auto rhs = constantI32(op->getOperand(1), constants);
+    if (lhs && rhs) {
+      if (isa<arith::SubIOp>(op)) result = *lhs - *rhs;
+      if (isa<arith::AndIOp>(op)) result = *lhs & *rhs;
+      if (isa<arith::OrIOp>(op)) result = *lhs | *rhs;
+      if (isa<arith::XOrIOp>(op)) result = *lhs ^ *rhs;
+      if (isa<arith::ShLIOp>(op) && *rhs < 32) result = *lhs << *rhs;
+      if (isa<arith::ShRUIOp>(op) && *rhs < 32) result = *lhs >> *rhs;
+    }
   }
   constants[value] = result;
   return result;
@@ -201,14 +230,16 @@ static LogicalResult verifyVirtualDMATransfer(Operation *op, Value dramByte,
     return op->emitOpError(
         "DRAM address and byte length must be proven by i32 arith.constant/arith.addi expressions "
         "or a guarded nonwrapping address induction with a constant byte length");
-  if (*size != tileBytes)
-    return op->emitOpError("byte length must equal the complete tile size ")
+  if (!*size || *size > tileBytes || *size % 32)
+    return op->emitOpError("byte length must be a positive 32-byte multiple no larger than tile size ")
            << tileBytes;
-  if (address->first < 0x80000000u || address->first % 32 || address->last % 32)
+  if (!atlasDMAMemorySpan(address->first, 1) || address->first % 32 || address->last % 32)
     return op->emitOpError(
         "DRAM address must be a 32-byte-aligned selected-memory address");
   if (static_cast<uint64_t>(address->last) + *size > (1ULL << 32))
     return op->emitOpError("DRAM transfer span exceeds the 32-bit address space");
+  if (!atlasDMAMemorySpan(address->first, uint64_t(address->last) - address->first + *size))
+    return op->emitOpError("DRAM transfer span leaves selected memory");
   return success();
 }
 
@@ -293,11 +324,13 @@ LogicalResult VirtualMXUAccumulateOp::verify() {
 }
 
 LogicalResult VirtualPackFP8Op::verify() {
-  return inRange(getOperation(), "scale_code", getScaleCode(), 0, 255);
+  return inRange(getOperation(), "scale_code",
+                 getScaleCodeAttr().getValue().getSExtValue(), 0, 255);
 }
 
 LogicalResult VirtualPackRoundTripBF16Op::verify() {
-  return inRange(getOperation(), "scale_code", getScaleCode(), 122, 128);
+  return inRange(getOperation(), "scale_code",
+                 getScaleCodeAttr().getValue().getSExtValue(), 0, 255);
 }
 
 LogicalResult VirtualOutputBF16Op::verify() {
@@ -326,7 +359,8 @@ LogicalResult VirtualVPUBinaryOp::verify() {
 
 LogicalResult VirtualVPUReduceOp::verify() {
   StringRef kind = getKind();
-  if (kind != "row_max" && kind != "row_min" && kind != "row_sum")
+  if (kind != "row_max" && kind != "row_min" && kind != "row_sum" &&
+      kind != "col_max" && kind != "col_min" && kind != "col_sum")
     return emitOpError("unknown virtual reduce VPU kind");
   return success();
 }

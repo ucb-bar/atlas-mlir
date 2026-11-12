@@ -120,6 +120,24 @@ def Atlas_VirtualRestoreOp : Atlas_Op<"virtual_restore",
   let results = (outs Atlas_VirtualStateType:$next, Atlas_SlotValue:$value);
   let hasVerifier = 1;
 }
+// Exact scalar storage access within an allocator-owned slot. Offsets and
+// widths are source constants. An optional runtime element index is scaled by
+// the access width, then added to byte_offset. Its range must fit the slot;
+// no physical register or delay is selected here.
+def Atlas_VirtualSlotLoadOp : Atlas_Op<"virtual_slot_load",
+    [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
+  let arguments = (ins Atlas_VirtualStateType:$state, Atlas_VirtualSpillType:$slot,
+                       StrAttr:$kind, I32Attr:$byte_offset, Optional<I32>:$index);
+  let results = (outs Atlas_VirtualStateType:$next, I32:$value);
+  let hasVerifier = 1;
+}
+def Atlas_VirtualSlotStoreOp : Atlas_Op<"virtual_slot_store",
+    [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
+  let arguments = (ins Atlas_VirtualStateType:$state, Atlas_VirtualSpillType:$slot,
+                       I32:$src, StrAttr:$kind, I32Attr:$byte_offset, Optional<I32>:$index);
+  let results = (outs Atlas_VirtualStateType:$next);
+  let hasVerifier = 1;
+}
 def Atlas_VirtualSlotCopyOp : Atlas_Op<"virtual_slot_copy",
     [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
   let arguments = (ins Atlas_VirtualStateType:$state, Atlas_VirtualSpillType:$src,
@@ -233,6 +251,16 @@ def Atlas_VirtualPackRoundTripBF16Op : Atlas_Op<"virtual_pack_roundtrip_bf16", [
   let arguments = (ins Atlas_VirtualBF16Type:$src, I32Attr:$scale_code);
   let results = (outs Atlas_VirtualBF16Type:$result);
   let hasVerifier = 1;
+}
+
+// The external quantizer exposes PACK's raw byte order, rather than the MXU
+// row relayout performed by virtual_pack_fp8. The low scalar byte is the
+// E8M0 code consumed by SELD.
+def Atlas_VirtualRawPackFP8Op : Atlas_Op<"virtual_raw_pack_fp8",
+    [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
+  let summary = "PACK a BF16 tile with a runtime scale and raw byte order";
+  let arguments = (ins Atlas_VirtualBF16Type:$src, I32:$scale);
+  let results = (outs Atlas_VirtualFP8Type:$result);
 }
 
 def Atlas_VirtualVPUUnaryOp : Atlas_Op<"virtual_vpu_unary", [Pure]> {

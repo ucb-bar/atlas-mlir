@@ -871,7 +871,7 @@ def compile_program(virtual: str, output: Path, atlas: Path,
          "-mattr=-c", "-filetype=obj", "-o", str(obj)],
         input_text=llvm_ir)
     elf = output / "program.elf"
-    run([str(linker), "-m", "elf32lriscv", "--no-relax", "-Ttext=0",
+    run([str(linker), "-m", "elf32lriscv", "--no-relax", "--image-base=0", "-Ttext=0",
          "-e", "atlas_program", "-o", str(elf), str(obj)])
     object_text = output / "program.text.bin"
     run([str(llvm / "llvm-objcopy"), "--dump-section",

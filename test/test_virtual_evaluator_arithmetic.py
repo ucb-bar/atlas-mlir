@@ -360,12 +360,13 @@ class VirtualEvaluatorVpuTest(unittest.TestCase):
         self.assertEqual(dict(result.outputs), {0: expected})
 
     def test_pack_roundtrip_unpacks_at_unit_scale_and_rechecks_admission(self) -> None:
-        for code, expected in ((126, 0x4000), (127, 0x3F80), (128, 0x3F00)):
+        for code, expected in ((0, 0x43E0), (119, 0x4380), (126, 0x4000),
+                               (127, 0x3F80), (128, 0x3F00), (254, 0), (255, 0)):
             source = ROUNDTRIP.replace("127 : i32", f"{code} : i32")
             with self.subTest(scale=code):
                 self.assertEqual(evaluate_tile_operation(operation(source), (repeated((0x3F80,)),)),
                     repeated((expected,)))
-        for code in (121, 129):
+        for code in (-1, 256):
             op = operation(ROUNDTRIP)
             op.attributes["scale_code"] = builtin.IntegerAttr(code, builtin.i32)
             with self.subTest(scale=code), self.assertRaises(UnsupportedVirtualMode):
@@ -388,7 +389,7 @@ class VirtualEvaluatorVpuTest(unittest.TestCase):
             with self.subTest(source=source, operands=operands), self.assertRaises(VirtualInterfaceError):
                 evaluate_tile_operation(operation(source), operands)
         for source, name, attribute in ((MOV, "kind", builtin.StringAttr("sqrt")), (ADD, "kind", builtin.StringAttr("div")),
-                                          (PACK, "scale_code", builtin.IntegerAttr(121, builtin.i32))):
+                                          (PACK, "scale_code", builtin.IntegerAttr(256, builtin.i32))):
             op = operation(source)
             op.attributes[name] = attribute
             with self.subTest(attribute=attribute), self.assertRaises(UnsupportedVirtualMode):

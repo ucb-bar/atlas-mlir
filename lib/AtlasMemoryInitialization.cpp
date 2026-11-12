@@ -1,3 +1,5 @@
+#include "Atlas/AtlasProofWork.h"
+#include "Atlas/AtlasProofLimits.h"
 #include "Atlas/AtlasAddressAnalysis.h"
 #include "Atlas/AtlasOps.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
@@ -5,8 +7,11 @@
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "llvm/ADT/DenseMap.h"
 #include <algorithm>
+#include <cstdlib>
 #include <iterator>
 #include <map>
+#include <deque>
+#include <vector>
 
 using namespace mlir;
 using namespace mlir::atlas;
@@ -27,6 +32,17 @@ public:
     }
     intervals.emplace(first, end);
   }
+  bool intersect(const InitializedBytes &other) {
+    std::map<uint64_t, uint64_t> common;
+    for (auto [first, end] : intervals)
+      for (auto [rightFirst, rightEnd] : other.intervals) {
+        auto begin = std::max(first, rightFirst), stop = std::min(end, rightEnd);
+        if (begin < stop) common[begin] = stop;
+      }
+    bool changed = common != intervals;
+    intervals = std::move(common);
+    return changed;
+  }
   bool covers(uint64_t first, uint64_t end) const {
     auto next = intervals.upper_bound(first);
     return next != intervals.begin() && std::prev(next)->second >= end;
@@ -37,6 +53,7 @@ public:
 LogicalResult mlir::atlas::verifyAtlasOutputInitialization(Operation *operation,
                                                           uint64_t first,
                                                           uint64_t end) {
+  atlasProofInvocation(AtlasProofKind::SourceInitialization);
   auto function = dyn_cast<func::FuncOp>(operation);
   if (!function || function.isDeclaration()) return failure();
   llvm::DenseMap<Value, uint32_t> values;
@@ -56,11 +73,46 @@ LogicalResult mlir::atlas::verifyAtlasOutputInitialization(Operation *operation,
   };
   // This is a work bound, not an inferred loop bound or a hardware limit.
   // Unknown runtime branches and exhausted proofs remain compile failures.
-  unsigned remaining = 1000000;
+  unsigned remaining = kAtlasScalarProofWorkLimit;
   Block *block = &function.getBody().front();
-  while (block) {
+  struct Pending {
+    Block *block;
+    llvm::DenseMap<Value, uint32_t> values;
+    InitializedBytes initialized;
+    std::optional<unsigned> predecessor;
+  };
+  std::deque<Pending> pending;
+  std::map<std::vector<uint64_t>, InitializedBytes> entries;
+  std::map<std::vector<uint64_t>, unsigned> stateIDs;
+  AtlasProofStateGraph graph;
+  pending.push_back({block, values, initialized, std::nullopt});
+  while (!pending.empty()) {
+    auto current = std::move(pending.front()); pending.pop_front();
+    block = current.block; values = std::move(current.values); initialized = std::move(current.initialized);
+    std::vector<std::pair<uint64_t, uint32_t>> scalar;
+    for (auto [value, bits] : values)
+      scalar.emplace_back(reinterpret_cast<uintptr_t>(value.getAsOpaquePointer()), bits);
+    std::sort(scalar.begin(), scalar.end());
+    std::vector<uint64_t> key{reinterpret_cast<uintptr_t>(block)};
+    for (auto [value, bits] : scalar) { key.push_back(value); key.push_back(bits); }
+    auto [state, newState] = stateIDs.emplace(key, stateIDs.size());
+    if (newState) graph.addNode();
+    unsigned stateID = state->second;
+    if (current.predecessor) {
+      auto edge = graph.addEdge(*current.predecessor, stateID, remaining);
+      if (edge == AtlasProofStateGraph::EdgeResult::Cycle)
+        return operation->emitOpError("output initialization proof encountered a nonterminating scalar-state cycle");
+      if (edge == AtlasProofStateGraph::EdgeResult::Exhausted)
+        return operation->emitOpError("output initialization proof exceeded its scalar work limit");
+    }
+    auto [entry, fresh] = entries.emplace(key, initialized);
+    if (!fresh) {
+      if (!entry->second.intersect(initialized)) continue;
+      initialized = entry->second;
+    }
     Block *next = nullptr;
     for (Operation &op : *block) {
+      atlasProofTransfer(AtlasProofKind::SourceInitialization);
       if (!remaining--)
         return op.emitOpError("output initialization proof exceeded its scalar work limit");
       // Revisited loop definitions must not retain an earlier iteration's fact.
@@ -69,13 +121,22 @@ LogicalResult mlir::atlas::verifyAtlasOutputInitialization(Operation *operation,
         auto value = dyn_cast<IntegerAttr>(c.getValue());
         if (value && (c.getType().isInteger(32) || c.getType().isInteger(1)))
           values[c.getResult()] = value.getValue().getZExtValue();
-      } else if (isa<arith::AddIOp, arith::SubIOp, arith::MulIOp>(op)) {
+      } else if (isa<arith::AddIOp, arith::SubIOp, arith::MulIOp,
+                     arith::AndIOp, arith::OrIOp, arith::XOrIOp,
+                     arith::ShLIOp, arith::ShRUIOp>(op)) {
         auto a = get(op.getOperand(0)), b = get(op.getOperand(1));
         if (a && b) {
-          uint32_t value = isa<arith::AddIOp>(op) ? *a + *b :
-                           isa<arith::SubIOp>(op) ? *a - *b : *a * *b;
-          values[op.getResult(0)] = value;
+          if (isa<arith::AddIOp>(op)) values[op.getResult(0)] = *a + *b;
+          if (isa<arith::SubIOp>(op)) values[op.getResult(0)] = *a - *b;
+          if (isa<arith::MulIOp>(op)) values[op.getResult(0)] = *a * *b;
+          if (isa<arith::AndIOp>(op)) values[op.getResult(0)] = *a & *b;
+          if (isa<arith::OrIOp>(op)) values[op.getResult(0)] = *a | *b;
+          if (isa<arith::XOrIOp>(op)) values[op.getResult(0)] = *a ^ *b;
+          if (isa<arith::ShLIOp>(op) && *b < 32) values[op.getResult(0)] = *a << *b;
+          if (isa<arith::ShRUIOp>(op) && *b < 32) values[op.getResult(0)] = *a >> *b;
         }
+      } else if (auto extend = dyn_cast<arith::ExtUIOp>(op)) {
+        if (auto value = get(extend.getIn())) values[extend.getResult()] = *value & 1;
       } else if (auto cmp = dyn_cast<arith::CmpIOp>(op)) {
         auto a = get(cmp.getLhs()), b = get(cmp.getRhs());
         if (a && b) {
@@ -114,16 +175,22 @@ LogicalResult mlir::atlas::verifyAtlasOutputInitialization(Operation *operation,
         next = enter(branch.getDest(), branch.getDestOperands());
       } else if (auto branch = dyn_cast<cf::CondBranchOp>(op)) {
         auto condition = get(branch.getCondition());
-        if (!condition)
-          return op.emitOpError("output initialization cannot prove a runtime branch");
-        next = *condition ? enter(branch.getTrueDest(), branch.getTrueDestOperands()) :
-                            enter(branch.getFalseDest(), branch.getFalseDestOperands());
+        if (!condition) {
+          auto saved = values;
+          Block *alternate = enter(branch.getFalseDest(), branch.getFalseDestOperands());
+          pending.push_back({alternate, values, initialized, stateID});
+          values = std::move(saved);
+          next = enter(branch.getTrueDest(), branch.getTrueDestOperands());
+        } else next = *condition ? enter(branch.getTrueDest(), branch.getTrueDestOperands()) :
+                                   enter(branch.getFalseDest(), branch.getFalseDestOperands());
       } else if (isa<func::ReturnOp>(op)) {
-        return success();
+        next = nullptr;
+        break;
       }
     }
-    if (!next) return block->getParentOp()->emitOpError("output initialization needs a supported CFG terminator");
-    block = next;
+    if (next) pending.push_back({next, values, initialized, stateID});
+    else if (!isa<func::ReturnOp>(block->getTerminator()))
+      return block->getParentOp()->emitOpError("output initialization needs a supported CFG terminator");
   }
-  return failure();
+  return success();
 }
