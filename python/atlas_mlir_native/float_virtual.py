@@ -28,9 +28,12 @@ class Builder(ScalarBuilder):
         self.state=state; return tile
     def load(self,slot,index,width):
         state,value=self.names(2)
+        lane_offset = 0
+        if isinstance(index, tuple):
+            index, lane_offset = index
         operand='' if isinstance(index,int) else f',{index}'
         type_='' if isinstance(index,int) else ',i32'
-        offset=index*width if isinstance(index,int) else 0
+        offset=(index if isinstance(index,int) else lane_offset)*width
         self.lines.append(f'    {state}, {value} = "atlas.virtual_slot_load"({self.state},%{slot}{operand}) {{kind = "{"lhu" if width==2 else "lw"}", byte_offset = {offset} : i32}} : ({S},{P}{type_}) -> ({S},i32)')
         self.state=state; return value
     def store(self,slot,index,value,width):
@@ -53,6 +56,25 @@ class Builder(ScalarBuilder):
             return accumulators
         finally:
             self.lane_constants=None
+    def checked_lane_groups(self, label, count, accumulators, body):
+        """Share address calculation and constants across four adjacent lanes."""
+        factor = 4
+        if count % factor:
+            return self.loop(label, count, accumulators, body)
+
+        def group(index, values):
+            base = self.binary('shl', index, self.constant(2))
+            assert self.lane_constants is None
+            self.lane_constants = {}
+            try:
+                for lane in range(factor):
+                    values = body((base, lane), values)
+                return values
+            finally:
+                self.lane_constants = None
+
+        return self.loop(label, count // factor, accumulators, group)
+
     def splat(self,bits): return self.value(f'"atlas.virtual_vpu_splat"() {{bits = {bits} : i32}} : () -> {T}')
     def vector_binary(self,kind,a,b): return self.value(f'"atlas.virtual_vpu_binary"({a},{b}) {{kind = "{kind}"}} : ({T},{T}) -> {T}')
     def dma_load(self,address,bytes_):
@@ -133,14 +155,19 @@ def virtual_program(p):
         pointers=[c(p.io_memory_base),c(p.io_memory_base+[n.id for n in p.operands].index(p.node.inputs[-1])*p.input_bytes),c(p.output_address)]
         def tile_body(tile,values):
             bad,ap,bp,out=values
-            a=b.dma_load(ap,lanes*p.width);b.save('left',a)
-            b.save('right',b.dma_load(bp,lanes*p.width) if len(p.operands)>1 else a)
+            # A one-tile binary preflight leaves both immutable inputs in VMEM.
+            if not (binary and tiles == 1 and phase == 'compute'):
+                a=b.dma_load(ap,lanes*p.width);b.save('left',a)
+                b.save('right',b.dma_load(bp,lanes*p.width) if len(p.operands)>1 else a)
             if phase=='check':
                 def validate(index,acc):
                     a,d=b.inputs(p,index)
                     return [op('or',acc[0],_valid(b,p,a,d))]
-                bad,=(b.loop('preflight_lane',lanes,[bad],validate) if binary or not expand_unary
-                      else b.unary_lanes(lanes,[bad],validate))
+                if binary:
+                    bad,=b.checked_lane_groups('preflight_lane',lanes,[bad],validate)
+                else:
+                    bad,=(b.loop('preflight_lane',lanes,[bad],validate) if not expand_unary
+                          else b.unary_lanes(lanes,[bad],validate))
             else:
                 if binary:
                     def classify(index,acc):
@@ -154,7 +181,7 @@ def virtual_program(p):
                             rbad=op('or',rbad,exceptional)
                         both_negative_zero=cmp('eq',op('or',op('xor',a,c(32768)),op('xor',d,c(32768))),c(0))
                         return [qbad,op('or',rbad,both_negative_zero)]
-                    qbad,rbad=b.loop('classify_lane',lanes,[c(0),c(0)],classify)
+                    qbad,rbad=b.checked_lane_groups('classify_lane',lanes,[c(0),c(0)],classify)
                     qualified=b.value(f'arith.cmpi eq, {qbad}, {c(0)} : i32')
                     lines.append(f'    cf.cond_br {qualified}, ^qualified({b.state} : {S}), ^pair_test({b.state} : {S})')
                     lines.append(f'  ^qualified(%qualified_state: {S}):');b.state='%qualified_state'
