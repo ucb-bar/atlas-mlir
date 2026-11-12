@@ -10,7 +10,11 @@ from .exponent_restoration import Emitter, STATE, BF16, SLOT
 FP8 = '!atlas.virtual_fp8'
 WEIGHT = '!atlas.virtual_mxu_weight<1>'
 ACC = '!atlas.virtual_mxu_acc<1>'
-PANEL_K_TILES = 32
+# Two activation rows and one weight column use 192 KiB at this cap, leaving
+# 48 KiB of the selected 240 KiB frame for restoration and ordinary allocation.
+# Native allocation and image proofs still decide whether the candidate fits.
+PANEL_K_TILES = 64
+MIN_K_TILES = 32
 MAX_K_TILES = 192
 
 
@@ -21,7 +25,7 @@ def admitted(plan):
     # candidate saves bytes versus a complete activation-row cache; native
     # sizing and measured timing remain separate gates.
     return (prod(plan.batch_shape) == 1 and mc >= 2 and mc % 2 == 0 and nc >= 2
-            and PANEL_K_TILES <= kc <= MAX_K_TILES and plan.epilogue_precision is None)
+            and MIN_K_TILES <= kc <= MAX_K_TILES and plan.epilogue_precision is None)
 
 
 def virtual_source(plan, layout, restoration):

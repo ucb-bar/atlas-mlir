@@ -328,3 +328,30 @@ the tradeoff is explicit rather than treating every larger region as faster.
 The uncached compile/source replay takes 153 seconds; Rust simulation takes
 3.9 seconds. Quantized epilogues are excluded from this configuration because
 their current schedule disables paired operand reuse.
+
+## Use the available operand-panel capacity
+
+The opt-in `paired-cache` schedule now keeps up to 64 K tiles per panel instead
+of 32. Two activation rows plus one weight column occupy at most 192 KiB,
+leaving 48 KiB of the selected 240 KiB frame for restoration and allocation.
+The existing minimum reduction size remains 32 tiles; shape eligibility,
+per-output K order, BF16 rounding, final restoration and native resource proofs
+are unchanged. Fewer panel boundaries mean fewer partial-result stores/reloads.
+
+| Projection shape (M, N, K) | 32-tile panels | 64-tile panels |
+| --- | ---: | ---: |
+| (64, 5632, 2048) | 16,285,613 cycles | 15,204,783 cycles |
+| (64, 2048, 5632) | 15,302,709 cycles | 14,123,595 cycles |
+
+The complete 87-dispatch layer drops from **120,664,430 to 116,439,296 cycles**,
+saving 4,225,134 cycles (3.50%), with every output word still exact. Instructions
+fall from 14,538,797 to 14,487,786. The largest image shrinks from 50,080 to
+49,096 bytes. Compilation/source replay takes 155 seconds; Rust simulation takes
+3.9 seconds and the generated-C run takes 4.6 seconds.
+
+New Rust gates compare both panel sizes over K=1024/1025/2049, partial M/N tiles,
+multiple row pairs and late rejected exponents. They verify whole-memory equality,
+protected bytes, status, the ordinary instruction bound and the 128-KiB image
+limit. The focused suite passes three tests and three subtests, with two legacy
+Python-model gates skipped. The full-width kernel probes and complete independent
+FX comparison also pass.
