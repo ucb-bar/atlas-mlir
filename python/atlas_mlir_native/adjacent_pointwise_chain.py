@@ -34,7 +34,7 @@ def _column_view(plan, operand, producer):
             and plan.shape[1] >= 32 and plan.input_shape(operand) == (plan.shape[0],32))
 
 
-def prepare(region, adapter):
+def prepare(region, adapter, io_memory_base=None):
     from .pointwise import prepare_source, prepare_execution_plan
     original = region
     pure=[node for node in region.nodes if node.effect=='pure']
@@ -110,7 +110,7 @@ def prepare(region, adapter):
     sizes.update({f'output_{i}':plan.packed_bytes for i,plan in enumerate(plans)})
     sizes.update({f'boundary_{i}':plans[edge['consumer']].input_packed_bytes[edge['operand']] for i,edge in enumerate(edges)})
     sizes['status']=2048
-    addresses, arena_bytes = allocate_adjacent_arena(sizes, (*(view['name'] for view in views),*mutable))
+    addresses, arena_bytes = allocate_adjacent_arena(sizes, (*(view['name'] for view in views),*mutable), io_memory_base)
     proof=dict(boundaries=[dict(producer=pure[edge['producer']].id,consumer=pure[edge['consumer']].id,
                 operand=edge['operand'],kind=edge['kind'],source_matrix=[edge['rows'],edge['columns']],
                 consumer_conversion=edge['spec'].record(),pad_code=edge['pad']) for edge in edges],
@@ -120,7 +120,7 @@ def prepare(region, adapter):
         proof['output_narrowing'] = 'non-NaN BF16 result; exact widening followed by RNE is identity'
     return dict(region=original,precisions=tuple(precisions),plans=tuple(plans),inputs=inputs,views=tuple(views),
                 bindings=tuple(bindings),edges=tuple(edges),mutable=mutable,sizes=sizes,addresses=addresses,
-                arena_bytes=arena_bytes,proof=proof)
+                arena_bytes=arena_bytes,io_memory_base=io_memory_base,proof=proof)
 
 
 def alternatives(adapter, source, choices):
@@ -191,7 +191,8 @@ def compile_group(group, snapshot, *, target_source, destination, limits):
         # and every scalar arithmetic step remain byte-for-byte identical.
         member=destination/'members'/str(index)
         descriptor, selection = compile_pointwise_member(precision, plan, snapshot, addresses=(), output=None,
-            target_source=target_source, destination=member, limits=limits, ordinary_abi=True)
+            target_source=target_source, destination=member, limits=limits, ordinary_abi=True,
+            io_memory_base=group['io_memory_base'])
         descriptors.append(descriptor); selections.append(selection)
     tools=Path(os.environ.get('ATLAS_OOT_BIN_DIR',target_source/'build/bin'))
     virtual=virtual_group(group,descriptors,tools=tools)
