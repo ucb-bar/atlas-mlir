@@ -84,6 +84,31 @@ def test_overlapping_fixed_slots_are_rejected_before_scheduling():
     assert 'overlap' in result.stderr
 
 
+def test_cache_priority_reaches_first_output_through_mutable_slots():
+    source = function('priority', [start(), slot('a'), slot('b'),
+        const('a_addr', DRAM_BASE - 2**32), const('b_addr', DRAM_BASE + 2048 - 2**32),
+        const('out0', DRAM_BASE + 65536 - 2**32), const('out1', DRAM_BASE + 67584 - 2**32),
+        const('size', 2048),
+        dma_load('io0', 'load_a', 'a_value', 'a_addr', 'size', 'bf16'),
+        save('load_a', 'save_a', 'a', 'a_value'),
+        dma_load('save_a', 'load_b', 'b_value', 'b_addr', 'size', 'bf16'),
+        save('load_b', 'save_b', 'b', 'b_value'),
+        restore('save_b', 'read_b', 'first', 'b'),
+        restore('read_b', 'read_a', 'second', 'a'),
+        dma_store('read_a', 'store0', 'first', 'out0'),
+        dma_store('store0', 'store1', 'second', 'out1'), f'return %store1 : {S}'],
+        attrs=f'atlas.input_dram_base = {DRAM_BASE} : i64, '
+              f'atlas.output_dram_base = {DRAM_BASE + 65536} : i64, '
+              'atlas.output_dram_bytes = 4096 : i64')
+    lines = {key: next(i for i, row in enumerate(source.splitlines(), 1)
+                      if row.lstrip().startswith('%' + key + ','))
+             for key in ('load_a', 'load_b')}
+    order = {line: index for index, line in enumerate(scheduled_lines(source))}
+    # Both loads are independent, but B is needed for the first output. The
+    # original SSA-only priority could not follow save/restore through B's slot.
+    assert order[lines['load_b']] < order[lines['load_a']]
+
+
 @pytest.mark.skipif(not os.environ.get('ATLAS_RUST_NPU_MODEL'), reason='select Rust simulator')
 def test_rust_random_schedules_preserve_whole_memory(tmp_path):
     initial = bytearray([0xa5]) * 73728

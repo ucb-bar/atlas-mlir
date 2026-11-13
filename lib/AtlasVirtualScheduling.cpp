@@ -784,27 +784,19 @@ public:
       cost.drains = isImplicitMemory(op);
       costs.push_back(cost);
     }
-    // The earliest output each value reaches through non-state operands, or n
-    // for none. Among equal starts, prefer it: shared operands load for their
-    // first tile, and an available tile finishes before another tile's first
-    // layer advances.
+    // The earliest output reachable through the actual dependency graph, or n
+    // for none. Include scratch hazards: a saved tile feeds its later restores
+    // without an SSA tensor edge. Among equal starts, prefer work needed by
+    // the first output, before advancing another tile's independent work.
     firstOutput.assign(n, n);
-    llvm::DenseMap<Operation *, unsigned> index;
-    for (unsigned i = 0; i < n; ++i)
-      index[g.nodes[i]] = i;
     for (unsigned i = n; i-- > 0;) {
       Operation *op = g.nodes[i];
       if (isa<VirtualDMAStoreFP8Op, VirtualDMAStoreBF16Op,
               VirtualOutputBF16Op>(op))
         firstOutput[i] = i;
-      for (Value operand : op->getOperands()) {
-        if (isa<VirtualStateType>(operand.getType()))
-          continue;
-        auto found = index.find(operand.getDefiningOp());
-        if (found != index.end())
-          firstOutput[found->second] =
-              std::min(firstOutput[found->second], firstOutput[i]);
-      }
+      // Edges point forward, so each successor's priority is already known.
+      for (unsigned successor : g.succs[i])
+        firstOutput[i] = std::min(firstOutput[i], firstOutput[successor]);
     }
     // The longest path from each node to the block's end, counting its own
     // work. Edges point forward, so successors are done first.
