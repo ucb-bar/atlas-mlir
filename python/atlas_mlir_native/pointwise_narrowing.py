@@ -6,7 +6,6 @@ This is a target-representation proof, not reassociation of source FP32 math.
 """
 from dataclasses import dataclass, replace
 from hashlib import sha256
-from itertools import pairwise
 from pathlib import Path
 
 from merlin.compile.semantic_regions import extract_semantic_region
@@ -22,10 +21,9 @@ class Narrowing:
 def prepare(source, adapter):
     from .pointwise import PointwisePrecision, prepare_source
     from .pointwise_math import MathPointwisePrecision
+    from .gelu import GeluPrecision
+    from .sigmoid import SigmoidPrecision, SiluPrecision
 
-    pure = [node for node in source.nodes if node.effect == 'pure']
-    if len(pure) != 2:
-        raise ValueError('pointwise narrowing needs one computation and one cast')
     producer = split_private_bf16_cast(source)
     result = producer.node(producer.outputs[0])
     precision = prepare_source(producer,
@@ -37,10 +35,23 @@ def prepare(source, adapter):
     # require a positive denominator of magnitude at least 2**-63. Their selected
     # arithmetic produces BF16, and exact widening followed by RNE is identity
     # for every non-NaN BF16 encoding (including infinities and signed zero).
-    if (type(precision) not in (PointwisePrecision, MathPointwisePrecision)
-            or precision.request.nodes[-1].op not in {
+    bounded_pointwise = (type(precision) in (PointwisePrecision, MathPointwisePrecision)
+            and precision.request.nodes[-1].op in {
                 'mul_bf16_zero', 'add_bf16_rne', 'sub_bf16_rne',
-                'divide_bf16_lut', 'rsqrt_bf16_lut'}):
+                'divide_bf16_lut', 'rsqrt_bf16_lut'})
+    # The separately selected GELU policy admits |x| <= 2**32. Its cube and
+    # scaled inner sum remain finite; tanh lies in [-1, 1], so the final
+    # half*x*(1+tanh) is finite as well. All steps retain the existing BF16
+    # rounding and coefficient encodings, including both signed zeros.
+    bounded_gelu = (type(precision) is GeluPrecision and adapter.gelu
+                    and precision.request.nodes[-1].op == 'tanh_gelu_bf16_lut')
+    # The selected sigmoid has a finite positive denominator >= 1, and
+    # returns finite BF16 in (0, 1]. Its optional product keeps |x| <= 32.
+    bounded_sigmoid = (adapter.sigmoid
+        and (type(precision) is SigmoidPrecision and precision.request.nodes[-1].op == 'sigmoid_bf16_lut'
+             or type(precision) is SiluPrecision and adapter.pointwise
+             and precision.request.nodes[-1].op == 'silu_bf16_lut'))
+    if not (bounded_pointwise or bounded_gelu or bounded_sigmoid):
         raise ValueError('pointwise narrowing has no non-NaN result proof for this policy')
     return Narrowing(source, precision)
 
@@ -51,17 +62,20 @@ def alternatives(adapter, source, choices):
     from .pointwise import plan_abi
 
     choices = list(choices)
-    singles = sorted((row for row in choices if len(row.nodes) == 1), key=lambda row: row.nodes)
+    casts = {row.nodes[0]: row for row in choices if len(row.nodes) == 1
+             and row.placement == 'accelerator' and dict(row.metadata).get('kind') == 'exact_float_device'}
     pure = [node for node in source.nodes if node.effect == 'pure']
     adapter._pointwise_narrowing_groups = {}
-    for first, last in pairwise(singles):
-        if (first.placement != 'accelerator' or last.placement != 'accelerator'
-                or last.nodes[0] != first.nodes[0] + 1
+    for first in tuple(choices):
+        if (first.placement != 'accelerator'
                 or dict(first.metadata).get('kind') not in ('pointwise', 'pointwise_math')
-                or dict(last.metadata).get('kind') != 'exact_float_device'):
+                or first.nodes != tuple(range(min(first.nodes), max(first.nodes)+1))):
+            continue
+        last = casts.get(max(first.nodes)+1)
+        if last is None:
             continue
         try:
-            region = extract_semantic_region(source, tuple(pure[row.nodes[0]].id for row in (first, last)))
+            region = extract_semantic_region(source, tuple(pure[index].id for index in (*first.nodes, *last.nodes)))
             group = prepare(region, adapter)
             plan_abi(group.precision.request)
         except ValueError:

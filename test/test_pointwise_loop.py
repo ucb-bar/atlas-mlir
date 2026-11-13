@@ -17,7 +17,7 @@ from test_looped_mnk import ROOT, build_snapshot
 
 def check_source_c_call(
     self, package, initial, binary, execute, values, wanted_bytes, invalid_values=(), *, source_dtype="f32",
-    output_dtype=None, expected_status=0,
+    output_dtype=None, expected_status=0, check_launch_inputs=None,
 ):
     from atlas_mlir_native.binding import DRAM_BASE
 
@@ -103,7 +103,10 @@ def check_source_c_call(
                     b"".join(words[i].to_bytes(4, "little") for i in range(len(words))),
                     binary,
                 )
-                self.assertEqual(memory, initial)
+                if check_launch_inputs is None:
+                    self.assertEqual(memory, initial)
+                else:
+                    check_launch_inputs(memory)
                 memory[:] = execute(memory)
                 polls = 0
         except (AssertionError, RuntimeError, ValueError, KeyError, OSError) as error:

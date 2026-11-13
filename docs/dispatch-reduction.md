@@ -20,6 +20,10 @@ that TinyLlama result and reduces the complete SmolVLA vision block to
 1,025,795,466 cycles with 156 dispatches, including the cast changes below.
 The subsequent [private softmax input fold](softmax-input-folding.md) reaches
 **881,588,507 cycles and 151 dispatches** on the same SmolVLA fixture.
+With [private GELU boundary folding](pointwise-boundary-folding.md), it reaches
+**766,046,001 cycles and 147 dispatches**. Independent-request TinyLlama batching
+with shared panels and SiLU boundary folding takes **140,285,224 cycles for two
+requests**, versus 165,506,710 for those requests executed separately.
 
 ### Private softmax result casts
 

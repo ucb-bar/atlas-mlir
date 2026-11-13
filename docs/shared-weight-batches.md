@@ -39,6 +39,10 @@ retains private casts around its selected sigmoid/product SiLU region that
 the earlier B=1 expansion already fuses. Those boundaries are a separate
 optimization opportunity, not savings attributed to this change.
 
+The subsequent [activation boundary folding](pointwise-boundary-folding.md)
+removes those casts and reaches 140,285,224 cycles and 67 dispatches. That
+combined result is 15.24% faster than the same two requests run separately.
+
 All **262,144 BF16 output words** match both independent request references.
 The first request also matches the previous B=1 reference. The second request's
 separate execution measures 82,733,891 cycles; the first measures 82,772,819.

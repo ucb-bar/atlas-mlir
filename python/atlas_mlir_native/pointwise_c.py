@@ -50,7 +50,7 @@ def prepare_c_package(
 
 
 def prepare_precision_c_package(precision, compiled, name, *, target_source, runtime_linkage="separate",
-                                output_dtype=None):
+                                output_dtype=None, input_dtype=None):
     """Replay a precision-owned target and render its explicit source operands."""
     source = precision.source
     request = precision.request
@@ -153,7 +153,11 @@ def prepare_precision_c_package(precision, compiled, name, *, target_source, run
     if not bound["admitted"] or saved_bound != bound:
         raise ValueError("pointwise instruction bound differs or exceeds default")
     elements = [prod(node.type.shape) for node in request.nodes]
-    source_dtype = source.nodes[-1].type.dtype
+    if input_dtype is not None and input_dtype != 'bf16':
+        raise ValueError('private input transport requires original BF16 codes')
+    source_dtype = source.nodes[-1].type.dtype if input_dtype is None else input_dtype
+    if input_dtype is not None and output_dtype is None:
+        output_dtype = source.nodes[-1].type.dtype
     encode = render_bf16_codes_c if source_dtype == "bf16" else render_f32_array_c
     source_inputs = tuple(node.id for node in source.nodes if node.effect in {"input", "constant"})
     helpers = (
