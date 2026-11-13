@@ -181,6 +181,15 @@ def _emit_like(graph, node, target, operands):
     return result
 
 
+def _replace_node(graph, node, replacement):
+    """Replace ``node`` by ``replacement`` after checking the result shape and dtype are unchanged."""
+    if (replacement.meta["val"].shape != node.meta["val"].shape
+            or replacement.meta["val"].dtype != node.meta["val"].dtype):
+        raise ValueError(f"native tail rewrite changed the result ABI: {node.name}")
+    node.replace_all_uses_with(replacement)
+    graph.erase_node(node)
+
+
 def _patch_im2col(graph, node):
     """Non-overlapping patch im2col (stride = kernel, no padding or dilation) is a pure layout.
 
@@ -198,10 +207,7 @@ def _patch_im2col(graph, node):
     current = _emit_like(graph, node, torch.ops.aten.reshape.default, [x, [batch, channels, oh, kh, ow, kw]])
     current = _emit_like(graph, node, torch.ops.aten.permute.default, [current, [0, 1, 3, 5, 2, 4]])
     current = _emit_like(graph, node, torch.ops.aten.reshape.default, [current, [batch, channels * kh * kw, oh * ow]])
-    if current.meta["val"].shape != node.meta["val"].shape or current.meta["val"].dtype != node.meta["val"].dtype:
-        raise ValueError(f"patch im2col layout changed the result ABI: {node.name}")
-    node.replace_all_uses_with(current)
-    graph.erase_node(node)
+    _replace_node(graph, node, current)
     return [{"node": node.name, "operator": "im2col", "layout": "non-overlapping patches"}]
 
 
@@ -211,11 +217,9 @@ def _split_native_tails(program):
     ``atlas::qlinear`` with a bias is the bias-free contraction followed by ``y + bias`` in the
     layer dtype, and ``atlas::qconv2d`` is the same contraction on im2col codes followed by
     ``RefQuantConv2d.forward``'s reshape, permute, reshape, and bias addition (atlas_fx_ops
-    defines both bodies this way). Codes, exponents, and bias tensors are passed unchanged.
+    defines both bodies this way). A non-overlapping patch ``aten.im2col`` becomes its exact
+    reshape and permute layout. Codes, exponents, and bias tensors are passed unchanged.
     """
-    from torch._guards import detect_fake_mode
-    from torch.fx.passes.shape_prop import _extract_tensor_metadata
-
     graph, rewrites = program.graph, []
     for node in list(graph.nodes):
         if node.op == "call_function" and node.target is torch.ops.aten.im2col.default:
@@ -228,38 +232,22 @@ def _split_native_tails(program):
         bias = args["bias"]
         if name == "qlinear" and bias is None:
             continue
-        dtype = getattr(torch, args["out_dtype"])
-        if bias is not None and bias.meta["val"].dtype != dtype:
+        if bias is not None and bias.meta["val"].dtype != getattr(torch, args["out_dtype"]):
             raise ValueError(f"native bias dtype differs from its layer dtype: {node.name}")
-        fake = detect_fake_mode([node.meta["val"]])
-        meta = {key: value for key, value in node.meta.items() if key not in {"val", "tensor_meta"}}
-
-        def emit(target, operands):
-            values = [item.meta["val"] if isinstance(item, torch.fx.Node) else item for item in operands]
-            with fake:
-                value = target(*values)
-            result = graph.call_function(target, tuple(operands))
-            result.meta.update(meta, val=value, tensor_meta=_extract_tensor_metadata(value))
-            return result
-
-        with graph.inserting_before(node):
-            current = emit(torch.ops.atlas.qlinear.default,
-                           [args["x_codes"], args["x_exp"], args["w_codes"], args["w_exp"], None,
-                            args["out_dtype"], args["weight_format"]])
-            if name == "qconv2d":
-                batch, height, width = args["batch"], args["out_h"], args["out_w"]
-                channels = args["w_codes"].meta["val"].shape[0]
-                current = emit(torch.ops.aten.reshape.default, [current, [batch, height * width, channels]])
-                current = emit(torch.ops.aten.permute.default, [current, [0, 2, 1]])
-                current = emit(torch.ops.aten.reshape.default, [current, [batch, channels, height, width]])
-                if bias is not None:
-                    bias = emit(torch.ops.aten.view.default, [bias, [1, -1, 1, 1]])
+        current = _emit_like(graph, node, torch.ops.atlas.qlinear.default,
+                             [args["x_codes"], args["x_exp"], args["w_codes"], args["w_exp"], None,
+                              args["out_dtype"], args["weight_format"]])
+        if name == "qconv2d":
+            batch, height, width = args["batch"], args["out_h"], args["out_w"]
+            channels = args["w_codes"].meta["val"].shape[0]
+            current = _emit_like(graph, node, torch.ops.aten.reshape.default, [current, [batch, height * width, channels]])
+            current = _emit_like(graph, node, torch.ops.aten.permute.default, [current, [0, 2, 1]])
+            current = _emit_like(graph, node, torch.ops.aten.reshape.default, [current, [batch, channels, height, width]])
             if bias is not None:
-                current = emit(torch.ops.aten.add.Tensor, [current, bias])
-        if current.meta["val"].shape != node.meta["val"].shape or current.meta["val"].dtype != node.meta["val"].dtype:
-            raise ValueError(f"native tail rewrite changed the result ABI: {node.name}")
-        node.replace_all_uses_with(current)
-        graph.erase_node(node)
+                bias = _emit_like(graph, node, torch.ops.aten.view.default, [bias, [1, -1, 1, 1]])
+        if bias is not None:
+            current = _emit_like(graph, node, torch.ops.aten.add.Tensor, [current, bias])
+        _replace_node(graph, node, current)
         rewrites.append({"node": node.name, "operator": name, "bias": bias is not None})
     if rewrites:
         graph.lint()
