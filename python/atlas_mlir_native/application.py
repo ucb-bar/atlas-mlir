@@ -223,6 +223,7 @@ class AtlasApplicationAdapter:
         from .binding import _native_pipeline
         from .publication_options import deterministic_receipts_enabled
         from .quantized_operand_reuse import reuse_policy
+        from .private_staging import storage_policy
         from .float_virtual import binary_lane_groups, binary_vector_preflight, cast_vector_preflight
         from merlin.semantic_compiler.codegen import current_codegen_options
 
@@ -264,6 +265,7 @@ class AtlasApplicationAdapter:
                 **({"execution_instruction_limit": current_codegen_options().execution_instruction_limit}
                    if current_codegen_options().execution_instruction_limit is not None else {}),
                 **({"quantized_operand_reuse": operand_reuse} if operand_reuse != "ordered" else {}),
+                **({"staging_storage": "vmem"} if storage_policy() == "vmem" else {}),
             },
         }
 

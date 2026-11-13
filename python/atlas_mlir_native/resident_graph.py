@@ -655,6 +655,8 @@ def compile_resident(
     staged_bf16 = is_staged_bf16(request)
     staged_mixed = is_staged_mixed(request)
     staged_tiles = staged_bf16 or staged_mixed
+    from .private_staging import mark_fragment, promote, storage_policy
+    promote_staging = staged_bf16 and storage_policy() == 'vmem'
     deadline = monotonic() + limits.wall_timeout_s if staged_tiles else None
     cuts, slots, sizes = memory_plan(request)
     abi = plan_abi(request)
@@ -748,6 +750,9 @@ def compile_resident(
             function.attributes["atlas.output_dram_bytes"] = IntegerAttr(
                 (max(slots.values()) + 1 - readonly) * TILE_BYTES, 64
             )
+        if promote_staging:
+            mark_fragment(function, source=request, region=region, slots=slots,
+                          sizes=sizes, dram_base=DRAM_BASE)
         stream = io.StringIO()
         Printer(stream=stream).print_op(module)
         fragments.append(stream.getvalue())
@@ -777,6 +782,9 @@ def compile_resident(
     # them as isolated entries would discard that context. The joined CFG is
     # checked by the normal lowering and memory-initialization passes below.
     virtual = compose_fragments(fragments, tools=tools, boundaries_lowered=staged_tiles)
+    staging_promotion = None
+    if promote_staging:
+        virtual, staging_promotion = promote(virtual)
     (destination / "atlas-virtual.mlir").write_text(virtual)
     pipeline = _native_pipeline()
     machine = _run(
@@ -857,6 +865,8 @@ def compile_resident(
             source_liveness_buffers=mixed_memory_plan(request)[3],
             limitations=["diagnostic_primitive_domains_require_execution_check", "completed_tile_byte_preserving_policy_transports"],
         )
+    if staging_promotion is not None:
+        execution['private_staging'] = staging_promotion
     for name, data in {
         "source-request.json": request.record(),
         "execution_plan.json": execution,

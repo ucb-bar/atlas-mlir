@@ -608,6 +608,7 @@ def tuning_key(snapshot, request, fixed_inputs, fixed_outputs, limits):
     from merlin.semantic_compiler import codegen
 
     from .binding import _native_pipeline
+    from .private_staging import storage_policy
 
     tool = Path(os.environ["ATLAS_OOT_BIN_DIR"]) / "atlas-opt"
     return {
@@ -625,6 +626,7 @@ def tuning_key(snapshot, request, fixed_inputs, fixed_outputs, limits):
         "fixed_outputs": list(fixed_outputs),
         "pipeline": _native_pipeline(),
         "operand_reuse": _operand_reuse_policy(),
+        **({"staging_storage": "vmem"} if storage_policy() == "vmem" else {}),
         "search_limits": limits.record(),
         "program_size_limit_bytes": codegen.current_codegen_options().program_size_limit_bytes,
         **({"execution_instruction_limit": codegen.current_codegen_options().execution_instruction_limit}

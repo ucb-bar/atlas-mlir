@@ -18,6 +18,7 @@ Start with the [repository README](../README.md) for the build, and the
 | [Scratch output priority](scratch-output-priority.md) | Native scheduling through cache dependencies and complete-layer measurements. |
 | [Panel readout](panel-readout.md) | Keeping completed MXU tiles on chip through scaling and epilogues. |
 | [Row dispatch budget](row-dispatch-budget.md) | Batching complete softmax rows under the selected execution budget. |
+| [Private staging](private-staging.md) | Keeping private BF16 graph intermediates in invocation-local VMEM. |
 | [Model compilation followups](model-compilation-followups.md) | Additional optimizations, prerequisite PRs, and feature switches. |
 | [Single-program profiling](single-program-profiling.md) | Connected graphs in one image, model execution and measurement scope. |
 | [Hardware status](hardware-status.md) | Per-instruction status, RTL/model differences, and how to rerun the RTL core tests. |
