@@ -42,6 +42,30 @@ def exponent_geometry(plan):
     return result
 
 
+def guard_record(plan, layout):
+    """Describe every emitted guard; native verification proves each body."""
+    from .quantized_panel_reuse import inline_readout_admitted
+
+    rows = layout.get('operand_reuse_panel_m_tiles', 0)
+    inline = (layout.get('operand_reuse') in ('paired-cache', 'panel-cache')
+              and inline_readout_admitted(rows, plan.k))
+    prefixes = [f'panel_readout_{row}' for row in range(rows)] if inline else ['restore']
+    guards = [dict(guard_block=prefix+'_factor_done', vector_block=prefix+'_vector',
+                   scalar_block=prefix+'_scalar', factor_body=prefix+'_factor_body',
+                   factor_done=prefix+'_factor_done', join_block=prefix+'_join',
+                   factor_header=prefix+'_factor_header') for prefix in prefixes]
+    common = dict(exponent_modes=[geometry['mode'] for geometry in exponent_geometry(plan)],
+                  exponent_roles=['lhs', 'rhs'],
+                  scalar_factor_broadcast='sparse_pow2_s_minus_1_col_sum_then_row_sum',
+                  factor_bound=8, lhs_index_coefficient=4, lhs_index_offsets=[0, 1, 2, 3],
+                  rhs_index_coefficient=2, rhs_index_offsets=[0, 1, 16, 17],
+                  per_operand_range=list(fast_factor_range(plan)),
+                  raw_nonzero_abs_exp2_bounds=[-26, 32], exponent_pages=layout['exponent_addresses'])
+    if inline:
+        return dict(schema='atlas.exponent_restoration_guards.v2', guards=guards, **common)
+    return dict(schema='atlas.exponent_restoration_guard.v1', **guards[0], **common)
+
+
 class Emitter:
     def __init__(self, prefix):
         self.prefix = prefix
@@ -114,9 +138,10 @@ def _entry():
     ]
 
 
-def _tile(plan, layout, *, output_address="ytile", exponent_addresses=("restore_lpage", "restore_rpage"), input_state="ss", output_state="stored", logical_rows=True):
+def _tile(plan, layout, *, output_address="ytile", exponent_addresses=("restore_lpage", "restore_rpage"), input_state="ss", output_state="stored", logical_rows=True,
+          result="result", row_tile="m", column_tile="n", output_bytes="out_bytes", prefix="restore"):
     """Replace a completed tile store with restoration followed by that store."""
-    e = Emitter('restore')
+    e = Emitter(prefix)
     epilogue = getattr(plan, 'epilogue_precision', None)
     if epilogue is not None:
         from .device_boundary import _admitted, _boolean
@@ -129,30 +154,30 @@ def _tile(plan, layout, *, output_address="ytile", exponent_addresses=("restore_
         epilogue_spec = epilogue.operand_specs[contract_operand]
     e.state = input_state
     zero, one = e.const(0), e.const(1)
-    mt = 'm' if (plan.m + 31)//32 > 1 else zero
-    nt = 'n' if (plan.n + 31)//32 > 1 else zero
-    e.effect('save', ['restore_data', 'result'], [SLOT, BF16])
+    mt = row_tile if (plan.m + 31)//32 > 1 else zero
+    nt = column_tile if (plan.n + 31)//32 > 1 else zero
+    e.effect('save', ['restore_data', result], [SLOT, BF16])
     for which, address in zip(('lhs', 'rhs'), exponent_addresses, strict=True):
         value = e.effect('dma_load_bf16', [address, e.const(2048)], ['i32', 'i32'], BF16)
         e.effect('save', ['restore_'+which, value], [SLOT, BF16])
     invalid = e.load('restore_status', zero)
     entry_state = e.state
-    e.emit(f'cf.br ^restore_word_header(%{entry_state}, %{zero}, %{invalid} : {STATE}, i32, i32)')
-    e.lines.append(f'  ^restore_word_header(%restore_ws: {STATE}, %restore_i: i32, %restore_invalid: i32):')
+    e.emit(f'cf.br ^{prefix}_word_header(%{entry_state}, %{zero}, %{invalid} : {STATE}, i32, i32)')
+    e.lines.append(f'  ^{prefix}_word_header(%{prefix}_ws: {STATE}, %{prefix}_i: i32, %{prefix}_invalid: i32):')
     scan_rows = min(32, 1 << (min(plan.m, 32)-1).bit_length()) if logical_rows else 32
     limit = e.const(scan_rows * 16)
-    more = e.cmp('ult', 'restore_i', limit)
-    e.emit(f'cf.cond_br %{more}, ^restore_word_body(%restore_ws : {STATE}), ^restore_word_done(%restore_ws, %restore_invalid : {STATE}, i32)')
-    e.lines.append(f'  ^restore_word_body(%restore_wb: {STATE}):')
-    e.state = 'restore_wb'
-    index = 'restore_i'
+    more = e.cmp('ult', f'{prefix}_i', limit)
+    e.emit(f'cf.cond_br %{more}, ^{prefix}_word_body(%{prefix}_ws : {STATE}), ^{prefix}_word_done(%{prefix}_ws, %{prefix}_invalid : {STATE}, i32)')
+    e.lines.append(f'  ^{prefix}_word_body(%{prefix}_wb: {STATE}):')
+    e.state = f'{prefix}_wb'
+    index = f'{prefix}_i'
     if scan_rows < 32:
         low_bits = (scan_rows * 8).bit_length()-1
-        index = e.binary('ori', e.binary('andi', 'restore_i', e.const(scan_rows*8-1)),
-                         e.binary('shli', e.binary('shrui', 'restore_i', e.const(low_bits)), e.const(8)))
+        index = e.binary('ori', e.binary('andi', f'{prefix}_i', e.const(scan_rows*8-1)),
+                         e.binary('shli', e.binary('shrui', f'{prefix}_i', e.const(low_bits)), e.const(8)))
     packed = e.load('restore_data', index)
     restored = []
-    invalid = 'restore_invalid'
+    invalid = f'{prefix}_invalid'
     lhs_geometry, rhs_geometry = exponent_geometry(plan)
     for lane in range(2):
         # Finish each admission predicate promptly, keeping only its accumulated
@@ -221,17 +246,17 @@ def _tile(plan, layout, *, output_address="ytile", exponent_addresses=("restore_
         restored.append(code)
     result = e.binary('ori', restored[0], e.binary('shli', restored[1], e.const(16)))
     e.store('restore_data', index, result)
-    next_i = e.binary('addi', 'restore_i', one)
-    e.emit(f'cf.br ^restore_word_header(%{e.state}, %{next_i}, %{invalid} : {STATE}, i32, i32)')
-    e.lines.append(f'  ^restore_word_done(%restore_wd: {STATE}, %restore_bad: i32):')
-    e.state = 'restore_wd'
-    e.store('restore_status', zero, 'restore_bad')
+    next_i = e.binary('addi', f'{prefix}_i', one)
+    e.emit(f'cf.br ^{prefix}_word_header(%{e.state}, %{next_i}, %{invalid} : {STATE}, i32, i32)')
+    e.lines.append(f'  ^{prefix}_word_done(%{prefix}_wd: {STATE}, %{prefix}_bad: i32):')
+    e.state = f'{prefix}_wd'
+    e.store('restore_status', zero, f'{prefix}_bad')
     tile = e.effect('restore', ['restore_data'], [SLOT], BF16)
-    _store_completed(e, tile, plan, layout, output_address, output_state)
+    _store_completed(e, tile, plan, layout, output_address, output_state, output_bytes)
     return e.lines
 
 
-def _store_completed(e, tile, plan, layout, output_address, output_state):
+def _store_completed(e, tile, plan, layout, output_address, output_state, output_bytes):
     epilogue = getattr(plan, 'epilogue_precision', None)
     if epilogue is not None:
         address = e.binary('addi',output_address,e.const(layout['output_bytes']+layout['status_bytes']))
@@ -240,7 +265,7 @@ def _store_completed(e, tile, plan, layout, output_address, output_state):
         product = e.name('epilogue_product')
         e.emit(f'%{product} = "atlas.virtual_vpu_binary"(%{operands[0]}, %{operands[1]}) {{kind = "mul"}} : ({BF16}, {BF16}) -> {BF16}')
         tile = product
-    e.emit(f'%{output_state} = "atlas.virtual_dma_store_bf16"(%{e.state}, %{tile}, %{output_address}, %out_bytes) : ({STATE}, {BF16}, i32, i32) -> {STATE}')
+    e.emit(f'%{output_state} = "atlas.virtual_dma_store_bf16"(%{e.state}, %{tile}, %{output_address}, %{output_bytes}) : ({STATE}, {BF16}, i32, i32) -> {STATE}')
 
 
 def _scratch(name):
@@ -279,10 +304,12 @@ def _vector_entry():
     return lines+e.lines
 
 
-def _vector_tile(plan, layout, *, output_address, exponent_addresses, scalar_fallback=True):
+def _vector_tile(plan, layout, *, output_address, exponent_addresses, scalar_fallback=True,
+                 input_state="ss", output_state="stored", result="result",
+                 row_tile="m", column_tile="n", output_bytes="out_bytes", prefix="restore"):
     """Build separable exact factors and choose the proven normal fast path."""
-    e=Emitter('restore_factor')
-    e.state='ss'
+    e=Emitter(prefix+'_factor')
+    e.state=input_state
     for which,address in zip(('lhs','rhs'),exponent_addresses,strict=True):
         value=e.effect('dma_load_bf16',[address,e.const(2048)],['i32','i32'],BF16)
         e.effect('save',['restore_'+which,value],[SLOT,BF16])
@@ -311,38 +338,38 @@ def _vector_tile(plan, layout, *, output_address, exponent_addresses, scalar_fal
         # row_sum then adds those two equal powers, so seed with 2^(s-1).
         half=e.binary('subi',bits,e.const(128))
         e.store('restore_factor_lhs' if which=='lhs' else 'restore_factor_rhs0',zero,half)
-    e.emit(f'cf.br ^restore_factor_header(%{e.state}, %{zero}, %{initial_bad} : {STATE}, i32, i32)')
-    e.lines.append(f'  ^restore_factor_header(%restore_factor_s: {STATE}, %restore_factor_i: i32, %restore_factor_bad: i32):')
-    more=e.cmp('ult','restore_factor_i',e.const(8))
-    e.emit(f'cf.cond_br %{more}, ^restore_factor_body(%restore_factor_s : {STATE}), ^restore_factor_done(%restore_factor_s, %restore_factor_bad : {STATE}, i32)')
-    e.lines.append(f'  ^restore_factor_body(%restore_factor_b: {STATE}):')
-    e.state='restore_factor_b'
-    bad='restore_factor_bad'
+    e.emit(f'cf.br ^{prefix}_factor_header(%{e.state}, %{zero}, %{initial_bad} : {STATE}, i32, i32)')
+    e.lines.append(f'  ^{prefix}_factor_header(%{prefix}_factor_s: {STATE}, %{prefix}_factor_i: i32, %{prefix}_factor_bad: i32):')
+    more=e.cmp('ult',f'{prefix}_factor_i',e.const(8))
+    e.emit(f'cf.cond_br %{more}, ^{prefix}_factor_body(%{prefix}_factor_s : {STATE}), ^{prefix}_factor_done(%{prefix}_factor_s, %{prefix}_factor_bad : {STATE}, i32)')
+    e.lines.append(f'  ^{prefix}_factor_body(%{prefix}_factor_b: {STATE}):')
+    e.state=f'{prefix}_factor_b'
+    bad=f'{prefix}_factor_bad'
     # Eight iterations fill all 32 row factors and both groups of sixteen
     # column factors. Each packed RHS word is written exactly once.
     if 'lhs' not in hoisted:
-        row_base=e.binary('shli','restore_factor_i',e.const(2))
+        row_base=e.binary('shli',f'{prefix}_factor_i',e.const(2))
         for offset in range(4):
             row=row_base if offset==0 else e.binary('addi',row_base,e.const(offset))
             bits,bad=factor('lhs',row,bad)
             e.store('restore_factor_lhs',e.binary('shli',row,e.const(3)),bits)
     if 'rhs' not in hoisted:
-        column_base=e.binary('shli','restore_factor_i',e.const(1))
+        column_base=e.binary('shli',f'{prefix}_factor_i',e.const(1))
         for group in range(2):
             column=column_base if group==0 else e.binary('addi',column_base,e.const(16))
             first,bad=factor('rhs',column,bad)
             second,bad=factor('rhs',e.binary('addi',column,e.const(1)),bad)
             packed=e.binary('ori',first,e.binary('shli',second,e.const(16)))
-            e.store('restore_factor_rhs'+str(group),'restore_factor_i',packed)
-    nxt=e.binary('addi','restore_factor_i',e.const(1))
-    e.emit(f'cf.br ^restore_factor_header(%{e.state}, %{nxt}, %{bad} : {STATE}, i32, i32)')
-    e.lines.append(f'  ^restore_factor_done(%restore_factor_d: {STATE}, %restore_factor_rejected: i32):')
+            e.store('restore_factor_rhs'+str(group),f'{prefix}_factor_i',packed)
+    nxt=e.binary('addi',f'{prefix}_factor_i',e.const(1))
+    e.emit(f'cf.br ^{prefix}_factor_header(%{e.state}, %{nxt}, %{bad} : {STATE}, i32, i32)')
+    e.lines.append(f'  ^{prefix}_factor_done(%{prefix}_factor_d: {STATE}, %{prefix}_factor_rejected: i32):')
     # This sole exponent-dependent branch is certified by the fixed eight-step
     # factor loop. Every DMA address/size is independent of the predicate.
-    safe=e.cmp('eq','restore_factor_rejected',e.const(0))
-    e.emit(f'cf.cond_br %{safe}, ^restore_vector(%restore_factor_d : {STATE}), ^restore_scalar(%restore_factor_d : {STATE}) {{atlas.exponent_restoration_guard = "normal_pow2_v1", atlas.exponent_lower = {lower} : i32, atlas.exponent_upper = {upper} : i32}}')
-    e.lines.append(f'  ^restore_vector(%restore_vector_s: {STATE}):')
-    e.state='restore_vector_s'
+    safe=e.cmp('eq',f'{prefix}_factor_rejected',e.const(0))
+    e.emit(f'cf.cond_br %{safe}, ^{prefix}_vector(%{prefix}_factor_d : {STATE}), ^{prefix}_scalar(%{prefix}_factor_d : {STATE}) {{atlas.exponent_restoration_guard = "normal_pow2_v1", atlas.exponent_lower = {lower} : i32, atlas.exponent_upper = {upper} : i32}}')
+    e.lines.append(f'  ^{prefix}_vector(%{prefix}_vector_s: {STATE}):')
+    e.state=f'{prefix}_vector_s'
     def unary(kind,value):
         result=e.name(kind)
         e.emit(f'%{result} = "atlas.virtual_vpu_reduce"(%{value}) {{kind = "{kind}"}} : ({BF16}) -> {BF16}')
@@ -363,23 +390,24 @@ def _vector_tile(plan, layout, *, output_address, exponent_addresses, scalar_fal
             factors=unary('col_sum',e.effect('restore',[slot],[SLOT],BF16))
             right.append(binary('mul',factors,e.effect('restore',[mask],[SLOT],BF16)))
         rhs=binary('add',*right)
-    tile=binary('mul',binary('mul','result',lhs),rhs)
-    _store_completed(e,tile,plan,layout,output_address,'restore_vector_stored')
-    e.emit(f'cf.br ^restore_join(%restore_vector_stored : {STATE})')
-    e.lines.append(f'  ^restore_scalar(%restore_scalar_s: {STATE}):')
+    tile=binary('mul',binary('mul',result,lhs),rhs)
+    _store_completed(e,tile,plan,layout,output_address,f'{prefix}_vector_stored',output_bytes)
+    e.emit(f'cf.br ^{prefix}_join(%{prefix}_vector_stored : {STATE})')
+    e.lines.append(f'  ^{prefix}_scalar(%{prefix}_scalar_s: {STATE}):')
     if scalar_fallback:
         e.lines += _tile(plan,layout,output_address=output_address,exponent_addresses=exponent_addresses,
-                         input_state='restore_scalar_s',output_state='restore_scalar_stored')
+                         input_state=f'{prefix}_scalar_s',output_state=f'{prefix}_scalar_stored',
+                         result=result,row_tile=row_tile,column_tile=column_tile,output_bytes=output_bytes,prefix=prefix)
     else:
         # The successful numerical domain is explicitly narrowed in the
         # execution plan. Never publish a value for an unavailable fallback:
         # status is sticky and the C boundary checks it before reading output.
         # Zero is admitted by the optional product, including all padded lanes.
-        e.state='restore_scalar_s'
+        e.state=f'{prefix}_scalar_s'
         e.store('restore_status',e.const(0),e.const(1))
-        _store_completed(e,zero_tile,plan,layout,output_address,'restore_scalar_stored')
-    e.emit(f'cf.br ^restore_join(%restore_scalar_stored : {STATE})')
-    e.lines.append(f'  ^restore_join(%stored: {STATE}):')
+        _store_completed(e,zero_tile,plan,layout,output_address,f'{prefix}_scalar_stored',output_bytes)
+    e.emit(f'cf.br ^{prefix}_join(%{prefix}_scalar_stored : {STATE})')
+    e.lines.append(f'  ^{prefix}_join(%{output_state}: {STATE}):')
     return e.lines
 
 

@@ -16,6 +16,7 @@ Start with the [repository README](../README.md) for the build, and the
 | [Instruction memory](instruction-memory.md) | Final image size, branch ranges, reduction unrolling and profiling. |
 | [Quantized operand reuse](quantized-operand-reuse.md) | Optional MXU1 activation residency, shared Merlin planning, limits, and validation. |
 | [Scratch output priority](scratch-output-priority.md) | Native scheduling through cache dependencies and complete-layer measurements. |
+| [Panel readout](panel-readout.md) | Keeping completed MXU tiles on chip through scaling and epilogues. |
 | [Model compilation followups](model-compilation-followups.md) | Additional optimizations, prerequisite PRs, and feature switches. |
 | [Single-program profiling](single-program-profiling.md) | Connected graphs in one image, model execution and measurement scope. |
 | [Hardware status](hardware-status.md) | Per-instruction status, RTL/model differences, and how to rerun the RTL core tests. |

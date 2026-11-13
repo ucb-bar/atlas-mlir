@@ -136,6 +136,7 @@ def compile_source(snapshot, source, *, target_source, destination, limits, io_m
 
 
 def _compile_source(snapshot, source, plan, *, target_source, destination, limits):
+    from .exponent_restoration import guard_record
     from .quantized_loop_sizing import size_counted, publish_route
 
     sizing = size_counted(plan,target_source=target_source,limits=limits)
@@ -234,17 +235,7 @@ def _compile_source(snapshot, source, plan, *, target_source, destination, limit
                  'execution_plan.json': encoded(layout), 'tile-body-selection.json': encoded(selections),
                  'compilation-pipeline.json': (destination/'compilation-pipeline.json').read_bytes(),
                  'restoration-instruction-bound.json': encoded(bound),
-                 'restoration-guard.json': encoded(dict(schema='atlas.exponent_restoration_guard.v1',
-                     guard_block='restore_factor_done', vector_block='restore_vector', scalar_block='restore_scalar',
-                     factor_body='restore_factor_body', factor_done='restore_factor_done',
-                     exponent_modes=[geometry['mode'] for geometry in exponent_geometry(plan)],
-                     exponent_roles=['lhs','rhs'],
-                     scalar_factor_broadcast='sparse_pow2_s_minus_1_col_sum_then_row_sum',
-                     join_block='restore_join', factor_header='restore_factor_header', factor_bound=8,
-                     lhs_index_coefficient=4, lhs_index_offsets=[0,1,2,3],
-                     rhs_index_coefficient=2, rhs_index_offsets=[0,1,16,17],
-                     per_operand_range=list(fast_factor_range(plan)),
-                     raw_nonzero_abs_exp2_bounds=[-26,32], exponent_pages=layout['exponent_addresses'])),
+                 'restoration-guard.json': encoded(guard_record(plan, layout)),
                  'atlas-virtual.mlir': virtual.encode(), 'atlas-machine.mlir': machine.encode(),
                  'physical-program.json': encoded(program)}
     if (destination/'mandatory-spilled-virtual.mlir').is_file():

@@ -266,7 +266,7 @@ def bind_counted(original, canonical, materialized, destination, capture, *, tar
     from . import quantized_loop as loop
     from .quantized_loop_sizing import Sizing, publish_route, selected_route
     from .restoration_budget import instruction_bound, fallback_tiles
-    from .exponent_restoration import exponent_geometry, fast_factor_range
+    from .exponent_restoration import guard_record
 
     plan, checked = loop.prepare_source(original), loop.prepare_source(canonical)
     if selected_route(checked, materialized) != "counted":
@@ -311,14 +311,7 @@ def bind_counted(original, canonical, materialized, destination, capture, *, tar
         raise ValueError("rebound counted instruction bound exceeds unchanged policy")
     bound["scalar_fallback_tile_budget"] = fallback_tiles(plan)
     bound["restoration_admission"] = layout["restoration_admission"]
-    guard = dict(schema="atlas.exponent_restoration_guard.v1", guard_block="restore_factor_done",
-                 vector_block="restore_vector", scalar_block="restore_scalar", factor_body="restore_factor_body",
-                 factor_done="restore_factor_done", exponent_modes=[geometry["mode"] for geometry in exponent_geometry(plan)],
-                 exponent_roles=["lhs", "rhs"], scalar_factor_broadcast="sparse_pow2_s_minus_1_col_sum_then_row_sum",
-                 join_block="restore_join", factor_header="restore_factor_header", factor_bound=8,
-                 lhs_index_coefficient=4, lhs_index_offsets=[0, 1, 2, 3], rhs_index_coefficient=2,
-                 rhs_index_offsets=[0, 1, 16, 17], per_operand_range=list(fast_factor_range(plan)),
-                 raw_nonzero_abs_exp2_bounds=[-26, 32], exponent_pages=layout["exponent_addresses"])
+    guard = guard_record(plan, layout)
     files.update({name: _json(record) for name, record in {
         "source-request.json": original.record(), "already-quantized-plan.json": plan.record(), "execution_plan.json": layout,
         "tile-body-selection.json": selections, "restoration-instruction-bound.json": bound, "restoration-guard.json": guard}.items()})

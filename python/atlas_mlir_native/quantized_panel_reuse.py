@@ -2,7 +2,7 @@
 
 Each K panel loads activation rows once, then each weight column once for
 those rows. Completed BF16 partial sums live in the existing output buffer between
-panels. Restoration runs only after all K terms; host publication still checks
+panels. Final tiles stay on chip through restoration after all K terms; host publication checks
 one sticky status before exposing any result.
 """
 from .exponent_restoration import Emitter, STATE, BF16, SLOT
@@ -16,6 +16,16 @@ ACC = '!atlas.virtual_mxu_acc<1>'
 PANEL_K_TILES = 64
 MIN_K_TILES = 32
 MAX_K_TILES = 192
+# Each inline readout adds a guarded factor loop. Bound code replication and
+# verifier cost independently of the operand-cache geometry.
+MAX_INLINE_READOUT_ROWS = 4
+MAX_INLINE_READOUT_PRODUCTS = 512
+
+
+def inline_readout_admitted(m_tiles, k):
+    """Bound static body growth before the final native resource proofs."""
+    return (0 < m_tiles <= MAX_INLINE_READOUT_ROWS
+            and m_tiles * ((k + 31) // 32) <= MAX_INLINE_READOUT_PRODUCTS)
 
 
 def admitted(plan, *, m_tiles=2, min_k_tiles=MIN_K_TILES):
@@ -42,6 +52,7 @@ def virtual_source(plan, layout, restoration, *, geometry=None):
     a, w = layout['input_addresses'][:2]
     output = layout['output_addresses'][0]
     pages = restoration.pages()
+    inline_readout = inline_readout_admitted(m_tiles, plan.k)
     e = Emitter('panel')
     e.lines = ['module {', f'  func.func @looped_matmul() -> {STATE} attributes {{'
         f'atlas.retain_bf16_accumulators, atlas.input_dram_base = {a} : i64, '
@@ -105,7 +116,12 @@ def virtual_source(plan, layout, restoration, *, geometry=None):
                 save(f'panel_a_{row}_{tile}',load(address,FP8),FP8)
         names = [f'p{phase}_s',f'p{phase}_n',f'p{phase}_w',f'p{phase}_y']
         types = [STATE,'i32','i32','i32']
-        branch(f'p{phase}_header',[e.state,e.const(0),e.const(w+first*1024),'pair_y'],types)
+        initial = [e.state,e.const(0),e.const(w+first*1024),'pair_y']
+        if inline_readout:
+            names.append(f'p{phase}_rpage')
+            types.append('i32')
+            initial.append(e.const(pages[1][0]))
+        branch(f'p{phase}_header',initial,types)
         block(f'p{phase}_header',names,types)
         more = e.cmp('ult',names[1],e.const(nc))
         e.emit(f'cf.cond_br %{more}, ^p{phase}_body(%{e.state} : {STATE}), ^p{phase}_done(%{e.state} : {STATE})')
@@ -119,41 +135,61 @@ def virtual_source(plan, layout, restoration, *, geometry=None):
                 left = restore(f'panel_a_{row}_{tile}',FP8)
                 right = restore(f'panel_w_0_{tile}',FP8)
                 partial = product(left,right,partial)
-            store(partial,address)
-        branch(f'p{phase}_header',[e.state,offset(names[1],1),offset(names[2],kc*1024),
-                                  offset(names[3],2048)],types)
+            if first + count < kc or not inline_readout:
+                store(partial,address)
+            else:
+                logical_row = offset(e.binary('shli', 'pair', e.const(m_tiles.bit_length()-1)), row)
+                left_page = offset('pair_lpage', row*pages[0][1]) if pages[0][1] else e.const(pages[0][0])
+                right_page = names[4] if pages[1][1] else e.const(pages[1][0])
+                # Restore only after the last ordered K term. Keep this tile
+                # on chip through scaling/epilogue and publish it once; earlier
+                # K panels still use the output buffer for rounded partials.
+                stored = e.name('readout_done')
+                e.lines.extend(restoration.tile(
+                    input_state=e.state, output_state=stored, result=partial,
+                    output_address=address, exponent_addresses=(left_page, right_page),
+                    row_tile=logical_row, column_tile=names[1], output_bytes=e.const(2048),
+                    prefix=f'panel_readout_{row}'))
+                e.state = stored
+        next_values = [e.state,offset(names[1],1),offset(names[2],kc*1024),offset(names[3],2048)]
+        if inline_readout:
+            next_values.append(offset(names[4],pages[1][1]))
+        branch(f'p{phase}_header',next_values,types)
         block(f'p{phase}_done',[f'p{phase}_done_s'],[STATE])
 
-    # Reuse the original restoration/epilogue hook once, after the complete
-    # reduction. Its m/n names retain logical tail checks in the scalar fallback;
-    # a fused product consumes restored values, never a partial K result.
-    rm_types = [STATE,'i32','i32','i32']
-    branch('restore_m_header',[e.state,e.const(0),'pair_y','pair_lpage'],rm_types)
-    block('restore_m_header',['rm_s','rm','rm_y','restore_lpage'],rm_types)
-    more = e.cmp('ult','rm',e.const(m_tiles))
-    e.emit(f'cf.cond_br %{more}, ^restore_m_body(%rm_s : {STATE}), ^pair_next(%rm_s : {STATE})')
-    block('restore_m_body',['rm_body_s'],[STATE])
-    pair_m = e.binary('shli','pair',e.const(m_tiles.bit_length()-1))
-    e.emit(f'%m = arith.addi %{pair_m}, %rm : i32')
-    rn_types = [STATE,'i32','i32','i32']
-    branch('restore_n_header',[e.state,e.const(0),'rm_y',e.const(pages[1][0])],rn_types)
-    block('restore_n_header',['rn_s','n','ytile','restore_rpage'],rn_types)
-    more = e.cmp('ult','n',e.const(nc))
-    e.emit(f'cf.cond_br %{more}, ^restore_n_body(%rn_s : {STATE}), ^restore_m_next(%rn_s : {STATE})')
-    block('restore_n_body',['rn_body_s'],[STATE])
-    value = load('ytile',BF16)
-    branch('store',[e.state,value],[STATE,BF16])
-    block('store',['ss','result'],[STATE,BF16])
-    e.emit('%out_bytes = arith.constant 2048 : i32')
-    exponent_addresses = [name if page[1] else e.const(page[0])
-                          for name,page in zip(('restore_lpage','restore_rpage'),pages,strict=True)]
-    e.lines.extend(restoration.tile(output_address='ytile',exponent_addresses=exponent_addresses))
-    e.state = 'stored'
-    branch('restore_n_header',[e.state,offset('n',1),offset('ytile',2048),
-                               offset('restore_rpage',pages[1][1])],rn_types)
-    block('restore_m_next',['rm_next_s'],[STATE])
-    branch('restore_m_header',[e.state,offset('rm',1),offset('rm_y',nc*2048),
-                               offset('restore_lpage',pages[0][1])],rm_types)
+    if inline_readout:
+        branch('pair_next', [e.state], [STATE])
+    else:
+        # Reuse the original restoration/epilogue hook once, after the complete
+        # reduction. Its m/n names retain logical tail checks in the scalar fallback;
+        # a fused product consumes restored values, never a partial K result.
+        rm_types = [STATE,'i32','i32','i32']
+        branch('restore_m_header',[e.state,e.const(0),'pair_y','pair_lpage'],rm_types)
+        block('restore_m_header',['rm_s','rm','rm_y','restore_lpage'],rm_types)
+        more = e.cmp('ult','rm',e.const(m_tiles))
+        e.emit(f'cf.cond_br %{more}, ^restore_m_body(%rm_s : {STATE}), ^pair_next(%rm_s : {STATE})')
+        block('restore_m_body',['rm_body_s'],[STATE])
+        pair_m = e.binary('shli','pair',e.const(m_tiles.bit_length()-1))
+        e.emit(f'%m = arith.addi %{pair_m}, %rm : i32')
+        rn_types = [STATE,'i32','i32','i32']
+        branch('restore_n_header',[e.state,e.const(0),'rm_y',e.const(pages[1][0])],rn_types)
+        block('restore_n_header',['rn_s','n','ytile','restore_rpage'],rn_types)
+        more = e.cmp('ult','n',e.const(nc))
+        e.emit(f'cf.cond_br %{more}, ^restore_n_body(%rn_s : {STATE}), ^restore_m_next(%rn_s : {STATE})')
+        block('restore_n_body',['rn_body_s'],[STATE])
+        value = load('ytile',BF16)
+        branch('store',[e.state,value],[STATE,BF16])
+        block('store',['ss','result'],[STATE,BF16])
+        e.emit('%out_bytes = arith.constant 2048 : i32')
+        exponent_addresses = [name if page[1] else e.const(page[0])
+                              for name,page in zip(('restore_lpage','restore_rpage'),pages,strict=True)]
+        e.lines.extend(restoration.tile(output_address='ytile',exponent_addresses=exponent_addresses))
+        e.state = 'stored'
+        branch('restore_n_header',[e.state,offset('n',1),offset('ytile',2048),
+                                   offset('restore_rpage',pages[1][1])],rn_types)
+        block('restore_m_next',['rm_next_s'],[STATE])
+        branch('restore_m_header',[e.state,offset('rm',1),offset('rm_y',nc*2048),
+                                   offset('restore_lpage',pages[0][1])],rm_types)
     block('pair_next',['pair_next_s'],[STATE])
     branch('pair_header',[e.state,offset('pair',1),offset('pair_a',m_tiles*kc*1024),
                           offset('pair_y',m_tiles*nc*2048),offset('pair_lpage',m_tiles*pages[0][1])],pair_types)
