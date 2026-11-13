@@ -135,6 +135,8 @@ def _compile_source(snapshot, source, plan, *, target_source, destination, limit
     if sizing.record()['route'] != 'counted' and _tile_io_base.get() != DRAM_BASE:
         raise NativeCompilationError('compile_error', 'custom I/O base requires the counted quantized loop route')
     if sizing.record()['route'] == 'k32_tiles':
+        if plan.operand_permutation is not None:
+            raise NativeCompilationError('resource_limit', 'overlarge contraction must retain its operand permutation')
         if plan.narrowing_input_id is not None:
             raise NativeCompilationError('resource_limit', 'overlarge contraction must retain its separate narrowing cast')
         if getattr(plan, 'epilogue_precision', None) is not None:

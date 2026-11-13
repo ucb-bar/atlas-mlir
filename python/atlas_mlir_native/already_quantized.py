@@ -108,6 +108,14 @@ class QuantizedPlan:
     epilogue_other_id: str | None = None
     epilogue_other_dtype: str | None = None
     narrowing_input_id: str | None = None
+    operand_permutation: tuple[str, str, tuple[int, ...]] | None = None
+
+    @property
+    def physical_operand_ids(self):
+        if self.operand_permutation is None:
+            return self.operand_ids
+        logical, physical, _ = self.operand_permutation
+        return tuple(physical if key == logical else key for key in self.operand_ids)
 
     @property
     def output_id(self):
@@ -135,6 +143,10 @@ class QuantizedPlan:
                 input_id=self.narrowing_input_id, source_dtype="f32", output_dtype="bf16",
                 admission="restored finite normal BF16 or signed zero; exact FP32 widening",
                 arithmetic="unchanged ordered K and exponent restoration; omit widening then narrowing"))
+        if self.operand_permutation is not None:
+            logical, physical, axes = self.operand_permutation
+            record['operand_permutation'] = dict(logical_operand=logical, physical_operand=physical,
+                axes=list(axes), placement='existing raw-byte input tile packing; no intermediate copy')
         return record
 
 
@@ -152,6 +164,9 @@ def _body(source, continued):
 
 def prepare_source(source):
     pure = [node for node in source.nodes if node.effect == "pure"]
+    if any(node.op in {'gather', 'transpose'} for node in pure):
+        from .quantized_operand_permutation import prepare_source as prepare_permutation
+        return prepare_permutation(source)
     if (len(pure) == 2 and pure[0].op in OPS
             and pure[1].op in ("f32_mul", "bf16_mul")):
         from .quantized_epilogue import prepare_source as prepare_epilogue

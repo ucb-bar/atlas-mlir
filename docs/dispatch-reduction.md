@@ -8,12 +8,46 @@ fork branch.
 
 ## Latest validated result
 
-The unchanged full decoder layer runs in **87,250,937 Rust-model cycles and
-61 dispatches**, versus **226,725,080 cycles and 586 dispatches** for the retained
-baseline: **61.52% fewer cycles and 89.59% fewer dispatches**. Every one of its
+The unchanged full decoder layer runs in **86,084,811 Rust-model cycles and
+60 dispatches**, versus **226,725,080 cycles and 586 dispatches** for the retained
+baseline: **62.03% fewer cycles and 89.76% fewer dispatches**. Every one of its
 131,072 BF16 output words matches the independent selected-arithmetic reference.
 Use the explicit cache, preflight, composition and optimized-pipeline options
 below. Historical sections record intermediate configurations and their limits.
+
+### Operand permutation folded into tile packing
+
+The opt-in `quantized_operand_permutation` composition pattern folds one private
+FP8 matrix transpose into the consumer's existing raw-byte tile packing. Merlin
+proves complete permutation semantics, ownership, placement and unchanged
+boundary representations. Merlin commit `da7d974ed` supplies that proof. Atlas admits only unchanged batch axes and a counted
+MXU contraction that fits its resources, then changes the packing read index.
+The native arithmetic, ordered K accumulation, exponents and FP8 bytes are
+unchanged. No additional host copy is introduced.
+
+| Full decoder, optimized pipeline | Shared views | Folded operand permutation |
+| --- | ---: | ---: |
+| Device cycles | 87,250,937 | 86,084,811 |
+| NPU dispatches | 61 | 60 |
+| Layout NPU dispatches | 22 | 21 |
+| Executed instructions | 11,266,285 | 10,988,765 |
+| Different BF16 output words | 0 | 0 |
+
+This removes the transpose before the attention probability/value contraction,
+saving 1,166,126 cycles (1.34%). Full compilation and independent source replay
+passed in 244.02 seconds. Rust simulation took 3.73 seconds, or 4.35 seconds
+including the generated C harness. Artifacts use the `application-operand-permutation`,
+`compile-layer-operand-permutation.log` and `rust-layer-operand-permutation` names.
+
+Validation includes 63 shared Merlin tests and 48 Atlas tests with 37 subtests;
+three existing optional simulator tests were skipped. Four generated C/Rust
+cases exercise both operands, batch sizes, nonmultiples of 32, and the existing
+narrowing fusion. They compare packed bytes and every output word against an
+independent integer oracle, preserve inputs and guards, and reject invalid
+codes before transfers. Source and resource checks reject shared/public views,
+changed representations, exponent permutations, slices, batch-axis permutations
+and insufficient I/O space. Overlarge contractions retain the separate layout
+operation instead of entering an unsupported fallback route.
 
 ### Shared dense buffer views
 
@@ -530,7 +564,7 @@ skipped. Source replay and ordinary native instruction/image proofs remain activ
 pattern list. The measured configuration can use the normal CLI with:
 
 ```bash
-export ATLAS_ADJACENT_PATTERNS=adjacent_square_reduce,adjacent_reduction_scale,adjacent_pointwise_chain,pointwise_narrowing,quantized_narrowing,quantized_epilogue,expanded_silu
+export ATLAS_ADJACENT_PATTERNS=adjacent_square_reduce,adjacent_reduction_scale,adjacent_pointwise_chain,pointwise_narrowing,quantized_narrowing,quantized_epilogue,expanded_silu,quantized_operand_permutation
 export ATLAS_QUANTIZED_OPERAND_REUSE=paired-cache
 export ATLAS_EXACT_BINARY_LANE_GROUPS=1
 export ATLAS_EXACT_BINARY_VECTOR_PREFLIGHT=1

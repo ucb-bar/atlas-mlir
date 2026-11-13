@@ -24,6 +24,8 @@ def prepare_c_package(source, compiled, name, *, target_source):
     from .c_runtime import program_array, runtime_headers, runtime_members
     plan = prepare_source(source)
     if selected_route(plan,compiled) == 'k32_tiles':
+        if plan.operand_permutation is not None:
+            raise ValueError('overlarge contraction must retain its operand permutation')
         if plan.narrowing_input_id is not None:
             raise ValueError('overlarge contraction must retain its separate narrowing cast')
         if getattr(plan, 'epilogue_precision', None) is not None:
@@ -56,7 +58,15 @@ def prepare_c_package(source, compiled, name, *, target_source):
     inputs = [source.node(key) for key in plan.input_ids]
     sizes = [prod(node.type.shape)*{"i8":1,"ui8":1,"u8":1,"fp8_e4m3":1,"i32":4,"si32":4,"bf16":2,"f32":4}[node.type.dtype] for node in inputs]
     a,b = (source.node(key) for key in plan.operand_ids)
-    ia,ib = (plan.input_ids.index(key) for key in plan.operand_ids)
+    ia,ib = (plan.input_ids.index(key) for key in plan.physical_operand_ids)
+    lhs_index = f'(batch*{m}u+mt*32u+row)*{k}u+kt*32u+c'
+    rhs_index = f'(batch*{n}u+nt*32u+row)*{k}u+kt*32u+c'
+    if plan.operand_permutation is not None:
+        logical, _, _ = plan.operand_permutation
+        if logical == plan.operand_ids[0]:
+            lhs_index = f'(batch*{k}u+kt*32u+c)*{m}u+mt*32u+row'
+        else:
+            rhs_index = f'(batch*{k}u+kt*32u+c)*{n}u+nt*32u+row'
     iea,ieb = (plan.input_ids.index(key) for key in plan.exponent_ids)
     output_bytes = batches*m*n*(2 if plan.output_dtype=="bf16" else 4)
     mc,nc,kc = ((value+31)//32 for value in (m,n,k))
@@ -202,11 +212,11 @@ int {name}_source_dispatch(void *context,const void *const *inputs,void *const *
   for (size_t batch=0;batch<{batches}u;++batch) for (size_t mt=0;mt<{mc}u;++mt)
     for (size_t kt=0;kt<{kc}u;++kt) for (size_t row=0;row<32u && mt*32u+row<{m}u;++row)
       for (size_t c=0;c<32u && kt*32u+c<{k}u;++c)
-        region->workspace[((batch*{mc}u+mt)*{kc}u+kt)*1024u+row*32u+c]=a[(batch*{m}u+mt*32u+row)*{k}u+kt*32u+c];
+        region->workspace[((batch*{mc}u+mt)*{kc}u+kt)*1024u+row*32u+c]=a[{lhs_index}];
   for (size_t batch=0;batch<{rhs_batches}u;++batch) for (size_t nt=0;nt<{nc}u;++nt)
     for (size_t kt=0;kt<{kc}u;++kt) for (size_t row=0;row<32u && nt*32u+row<{n}u;++row)
       for (size_t c=0;c<32u && kt*32u+c<{k}u;++c)
-        region->workspace[{lhs_bytes}u+((batch*{nc}u+nt)*{kc}u+kt)*1024u+row*32u+c]=b[(batch*{n}u+nt*32u+row)*{k}u+kt*32u+c];
+        region->workspace[{lhs_bytes}u+((batch*{nc}u+nt)*{kc}u+kt)*1024u+row*32u+c]=b[{rhs_index}];
 {exponent_packing}
 {extra_packing}
 {launch}
