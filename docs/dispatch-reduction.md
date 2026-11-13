@@ -8,12 +8,51 @@ fork branch.
 
 ## Latest validated result
 
-The unchanged full decoder layer runs in **89,065,169 Rust-model cycles and
-71 dispatches**, versus **226,725,080 cycles and 586 dispatches** for the retained
-baseline: **60.72% fewer cycles and 87.88% fewer dispatches**. Every one of its
+The unchanged full decoder layer runs in **87,250,937 Rust-model cycles and
+61 dispatches**, versus **226,725,080 cycles and 586 dispatches** for the retained
+baseline: **61.52% fewer cycles and 89.59% fewer dispatches**. Every one of its
 131,072 BF16 output words matches the independent selected-arithmetic reference.
 Use the explicit cache, preflight, composition and optimized-pipeline options
 below. Historical sections record intermediate configurations and their limits.
+
+### Shared dense buffer views
+
+Merlin commit `e7edc1053` adds the opt-in `--application-buffer-views` pass
+(`CodegenOptions(application_buffer_views=True)` for Python callers). Use the
+same option during verification. This is entirely shared Merlin functionality:
+source-view proofs, buffer ownership, lifetime retention and dispatch emission.
+Atlas still owns target transfers and layouts that actually rearrange elements.
+
+Ten of this layer's 32 layout operations qualify as internal dense storage
+views. They perform no copy and launch no NPU program. The original logical
+nodes and checked C callbacks remain. Views of external inputs/constants or
+public outputs, permutations, nontrivial gathers and cases that would overlap
+two distinct consumer input ports retain their current materializations.
+
+| Full decoder, optimized pipeline | Quantizer budget | Shared views |
+| --- | ---: | ---: |
+| Device cycles | 89,065,169 | 87,250,937 |
+| NPU dispatches | 71 | 61 |
+| Layout NPU dispatches | 32 | 22 |
+| Executed instructions | 11,291,813 | 11,266,285 |
+| Different BF16 output words | 0 | 0 |
+
+Views save 1,814,232 device cycles (2.04%) and ten launches. Full compilation
+and independent source replay passed in 246.73 seconds. Rust simulation took
+3.60 seconds, or 4.21 seconds including the generated C harness. All 131,072
+output words match the same independent reference; no weights or source
+operations changed. These measurements use the `application-buffer-views` and
+`rust-layer-buffer-views` artifact directories and a fresh `snapshot-buffer-views`
+compiler snapshot. The source hash and Rust configuration remain unchanged.
+
+Merlin validation: 75 tests passed, including generated C execution at 1, 33
+and 132 elements, alias-chain lifetime retention, unchanged input bytes,
+external/public boundaries, mismatched shape/type/policy/maps, overlapping
+consumer ports, forged source proofs and rehashed allocation rejection.
+Repository structure checks and target-name checks passed. The repository-wide
+regex check still reports existing uses in unchanged `baremetal_harness.py`;
+the new pass introduces no regex. Required layout transformations are still
+separate and need additional producer/consumer folding.
 
 ### Quantizer dispatch budgets
 
