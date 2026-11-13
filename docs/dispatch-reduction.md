@@ -462,3 +462,27 @@ account for 1,016,232 cycles / 338,424 bytes and recorded transfers for 5,653,93
 cycles. The small active-cycle difference from standalone launches comes from
 the persistent host/device timeline. These are schedule-model estimates, not
 measured Saturn RTL timings or a complete host-computation benchmark.
+
+## Process adjacent BF16 words together in exact unary kernels
+
+With the existing exact-float unroll option, widening and sign flips now load
+one 32-bit word for two adjacent BF16 values. Widening shifts the low half and
+masks the high half into separate FP32 words; negation toggles both sign bits in
+one word. Both operations preserve raw encodings. Unrolled unary kernels also
+omit their unused duplicate input scratch copy. Complete widening preflight and
+atomic rejection remain unchanged; compact default kernels retain their source.
+
+For 131,072 values, widening improves from **1,883,586 to 1,586,045 cycles** and
+BF16 negation from **1,209,381 to 807,264**. The whole layer improves from
+**100,447,374 to 99,292,808 cycles**, still **80 dispatches** and exactly equal to
+the independent reference. Instructions fall from 10,829,635 to 10,273,057.
+The fresh compile, using the ordinary target application factory, takes 148
+seconds; Rust simulation takes 3.6 seconds.
+
+The new Rust gate compares compact and unrolled kernels against the independent
+host bit reference for every BF16 encoding (NaNs included for sign flip), all
+65,282 non-NaN widening codes, single/odd/multiple-tile lengths and invalid values
+at the beginning, middle and end. One test and eight subtests pass. Six existing
+vector-preflight tests and 14 subtests pass. Three native image/bound/default
+option checks also pass. All tests retain immutable-input and failed-output
+publication checks.

@@ -76,6 +76,24 @@ class Builder(ScalarBuilder):
 
         return self.loop(label, count // factor, accumulators, group)
 
+    def unary_word_pairs(self, operation, count):
+        """Read adjacent BF16 encodings once without interpreting their bits."""
+        assert operation in ('bf16_to_f32', 'bf16_neg') and count % 2 == 0
+
+        def pair(index, unused):
+            word = self.load('left', index, 4)
+            if operation == 'bf16_neg':
+                self.store('result', index,
+                    self.binary('xor', word, self.constant(0x80008000)), 4)
+            else:
+                self.store('result', 2 * index,
+                    self.binary('shl', word, self.constant(16)), 4)
+                self.store('result', 2 * index + 1,
+                    self.binary('and', word, self.constant(0xffff0000)), 4)
+            return []
+
+        self.unary_lanes(count // 2, [], pair)
+
     def splat(self,bits): return self.value(f'"atlas.virtual_vpu_splat"() {{bits = {bits} : i32}} : () -> {T}')
     def vector_binary(self,kind,a,b): return self.value(f'"atlas.virtual_vpu_binary"({a},{b}) {{kind = "{kind}"}} : ({T},{T}) -> {T}')
     def dma_load(self,address,bytes_):
@@ -261,7 +279,8 @@ def virtual_program(p):
     # preflight. Arithmetic starts only after every tile passed validation.
     if binary and tiles > 512:
         raise ValueError('exact binary route table exceeds one 2048-byte slot')
-    slots=('left','right','result','pairs','status') + (('routes',) if binary else ())
+    slots=(('left','result','pairs','status') if expand_unary and not binary
+           else ('left','right','result','pairs','status')) + (('routes',) if binary else ())
     for slot in slots:b.slot(slot)
     zero=b.splat(0)
     for slot in slots:b.save(slot,zero)
@@ -274,7 +293,8 @@ def virtual_program(p):
             # A one-tile binary preflight leaves both immutable inputs in VMEM.
             if not (binary and tiles == 1 and phase == 'compute'):
                 a=b.dma_load(ap,lanes*p.width);b.save('left',a)
-                b.save('right',b.dma_load(bp,lanes*p.width) if len(p.operands)>1 else a)
+                if binary or not expand_unary:
+                    b.save('right',b.dma_load(bp,lanes*p.width) if len(p.operands)>1 else a)
             if phase=='check':
                 if binary:
                     if vector_preflight:
@@ -345,7 +365,9 @@ def virtual_program(p):
                 def calculate(index,unused):
                     a,d=b.inputs(p,index);b.store('result',index,_compute(b,p,a,d),p.output_width)
                     return []
-                if binary or not expand_unary:
+                if expand_unary and p.op in ('bf16_to_f32', 'bf16_neg'):
+                    b.unary_word_pairs(p.op, lanes)
+                elif binary or not expand_unary:
                     b.loop('scalar_lane',lanes,[],calculate)
                 else:
                     b.unary_lanes(lanes,[],calculate)
