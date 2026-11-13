@@ -15,6 +15,10 @@ baseline: **63.49% fewer cycles and 89.93% fewer dispatches**. Every one of its
 Use the explicit cache, preflight, composition and optimized-pipeline options
 below. Historical sections record intermediate configurations and their limits.
 
+The newer opt-in [shape-selected panel cache](mxu-panel-selection.md) preserves
+that TinyLlama result and reduces the complete SmolVLA vision block to
+1,025,795,466 cycles with 156 dispatches, including the cast changes below.
+
 ### Private softmax result casts
 
 The opt-in `softmax_narrowing` composition pattern publishes the selected

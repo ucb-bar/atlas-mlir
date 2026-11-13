@@ -140,6 +140,20 @@ def _retain_checked(directory, record):
 
 def size_counted(plan, *, target_source=None, limits=None, operand_reuse=None):
     """Return a retained, checked route decision at the current exact settings."""
+    from .quantized_operand_reuse import reuse_policy
+
+    policy = reuse_policy() if operand_reuse is None else operand_reuse
+    result = _size_counted(plan, target_source=target_source, limits=limits, operand_reuse=policy)
+    # Retry only a proved capacity refusal. Compiler errors and failed proof
+    # checks must remain visible. Each candidate keeps its own immutable sizing
+    # evidence; the caller publishes the actual selected policy and geometry.
+    if policy == 'panel-cache' and result.record().get('reason') in {
+            'encoded_instruction_memory', 'untimed_instruction_bound', 'physical_instruction_bound'}:
+        return _size_counted(plan, target_source=target_source, limits=limits, operand_reuse='paired-cache')
+    return result
+
+
+def _size_counted(plan, *, target_source=None, limits=None, operand_reuse=None):
     from .quantized_loop import _execution_geometry, execution_layout, virtual_source
     from .region_composition import compile_virtual_with_receipt
 

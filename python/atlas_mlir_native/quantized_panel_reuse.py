@@ -1,7 +1,7 @@
-"""Bounded two-row operand panels for ordered MXU1 contractions.
+"""Bounded operand panels for ordered MXU1 contractions.
 
-Each K panel loads both activation rows once, then each weight column once for
-both rows. Completed BF16 partial sums live in the existing output buffer between
+Each K panel loads activation rows once, then each weight column once for
+those rows. Completed BF16 partial sums live in the existing output buffer between
 panels. Restoration runs only after all K terms; host publication still checks
 one sticky status before exposing any result.
 """
@@ -18,20 +18,26 @@ MIN_K_TILES = 32
 MAX_K_TILES = 192
 
 
-def admitted(plan):
+def admitted(plan, *, m_tiles=2, min_k_tiles=MIN_K_TILES):
     from math import prod
     mc, nc, kc = ((v+31)//32 for v in (plan.m, plan.n, plan.k))
-    # Tiny reductions cannot amortize the partial-result traffic. An admitted
-    # candidate saves bytes versus a complete activation-row cache; native
-    # sizing and measured timing remain separate gates.
-    return (prod(plan.batch_shape) == 1 and mc >= 2 and mc % 2 == 0 and nc >= 2
-            and MIN_K_TILES <= kc <= MAX_K_TILES)
+    # This checks geometry, not profitability. The original paired policy
+    # keeps its K threshold; wider panels are ranked separately by traffic.
+    # Native sizing and measured timing remain separate gates.
+    return (type(m_tiles) is int and m_tiles in (2, 4, 8, 16, 32)
+            and prod(plan.batch_shape) == 1 and mc >= m_tiles and mc % m_tiles == 0 and nc >= 2
+            and min_k_tiles <= kc <= MAX_K_TILES)
 
 
-def virtual_source(plan, layout, restoration):
+def virtual_source(plan, layout, restoration, *, geometry=None):
     """Emit typed slots/operations; native allocation and timing remain mandatory."""
-    if not admitted(plan):
-        raise ValueError('paired operand panels require one batch, paired M tiles and bounded K')
+    m_tiles, k_tiles = (2, PANEL_K_TILES) if geometry is None else geometry
+    if not admitted(plan, m_tiles=m_tiles, min_k_tiles=MIN_K_TILES if geometry is None else 1):
+        raise ValueError('operand panels require one batch, divisible M tiles and bounded K')
+    if type(k_tiles) is not int or not 1 <= k_tiles <= PANEL_K_TILES:
+        raise ValueError('K panels require between 1 and 64 tiles')
+    if (m_tiles + 1) * k_tiles > 192:
+        raise ValueError('operand panels exceed the selected 192 KiB reservation')
     mc, nc, kc = ((v+31)//32 for v in (plan.m, plan.n, plan.k))
     a, w = layout['input_addresses'][:2]
     output = layout['output_addresses'][0]
@@ -42,9 +48,9 @@ def virtual_source(plan, layout, restoration):
         f'atlas.output_dram_base = {output} : i64, '
         f'atlas.output_dram_bytes = {layout["output_bytes"]+layout["status_bytes"]} : i64}} {{',
         f'    %start = "atlas.virtual_start"() : () -> {STATE}']
-    for kind, rows in (('a', 2), ('w', 1)):
+    for kind, rows in (('a', m_tiles), ('w', 1)):
         for row in range(rows):
-            for tile in range(min(PANEL_K_TILES,kc)):
+            for tile in range(min(k_tiles,kc)):
                 e.emit(f'%panel_{kind}_{row}_{tile} = "atlas.virtual_slot"() '
                     f'{{kind = "fp8", words = 256 : i32, slot_word = -1 : i32, purpose = "scratch"}} : () -> {SLOT}')
     e.lines.extend(restoration.entry())
@@ -85,15 +91,15 @@ def virtual_source(plan, layout, restoration):
     pair_types = [STATE,'i32','i32','i32','i32']
     branch('pair_header',['restore_start',*initial],pair_types)
     block('pair_header',['pair_s','pair','pair_a','pair_y','pair_lpage'],pair_types)
-    more = e.cmp('ult','pair',e.const(mc//2))
+    more = e.cmp('ult','pair',e.const(mc//m_tiles))
     e.emit(f'cf.cond_br %{more}, ^pair_body(%pair_s : {STATE}), ^done(%pair_s : {STATE})')
     block('pair_body',['pair_body_s'],[STATE])
 
     # The panel count is statically capped. Each N traversal is counted, so
     # generated code grows with bounded K, never with the number of columns.
-    for phase, first in enumerate(range(0,kc,PANEL_K_TILES)):
-        count = min(PANEL_K_TILES,kc-first)
-        for row in range(2):
+    for phase, first in enumerate(range(0,kc,k_tiles)):
+        count = min(k_tiles,kc-first)
+        for row in range(m_tiles):
             for tile in range(count):
                 address = offset('pair_a',(row*kc+first+tile)*1024)
                 save(f'panel_a_{row}_{tile}',load(address,FP8),FP8)
@@ -106,7 +112,7 @@ def virtual_source(plan, layout, restoration):
         block(f'p{phase}_body',[f'p{phase}_body_s'],[STATE])
         for tile in range(count):
             save(f'panel_w_0_{tile}',load(offset(names[2],tile*1024),FP8),FP8)
-        for row in range(2):
+        for row in range(m_tiles):
             address = offset(names[3],row*nc*2048)
             partial = load(address,BF16) if first else None
             for tile in range(count):
@@ -124,10 +130,10 @@ def virtual_source(plan, layout, restoration):
     rm_types = [STATE,'i32','i32','i32']
     branch('restore_m_header',[e.state,e.const(0),'pair_y','pair_lpage'],rm_types)
     block('restore_m_header',['rm_s','rm','rm_y','restore_lpage'],rm_types)
-    more = e.cmp('ult','rm',e.const(2))
+    more = e.cmp('ult','rm',e.const(m_tiles))
     e.emit(f'cf.cond_br %{more}, ^restore_m_body(%rm_s : {STATE}), ^pair_next(%rm_s : {STATE})')
     block('restore_m_body',['rm_body_s'],[STATE])
-    pair_m = e.binary('shli','pair',e.const(1))
+    pair_m = e.binary('shli','pair',e.const(m_tiles.bit_length()-1))
     e.emit(f'%m = arith.addi %{pair_m}, %rm : i32')
     rn_types = [STATE,'i32','i32','i32']
     branch('restore_n_header',[e.state,e.const(0),'rm_y',e.const(pages[1][0])],rn_types)
@@ -149,8 +155,8 @@ def virtual_source(plan, layout, restoration):
     branch('restore_m_header',[e.state,offset('rm',1),offset('rm_y',nc*2048),
                                offset('restore_lpage',pages[0][1])],rm_types)
     block('pair_next',['pair_next_s'],[STATE])
-    branch('pair_header',[e.state,offset('pair',1),offset('pair_a',2*kc*1024),
-                          offset('pair_y',2*nc*2048),offset('pair_lpage',2*pages[0][1])],pair_types)
+    branch('pair_header',[e.state,offset('pair',1),offset('pair_a',m_tiles*kc*1024),
+                          offset('pair_y',m_tiles*nc*2048),offset('pair_lpage',m_tiles*pages[0][1])],pair_types)
     block('done',['final'],[STATE])
     e.lines.extend(restoration.finish('final'))
     e.lines += ['  }','}']
