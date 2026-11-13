@@ -12,6 +12,7 @@ _ADJACENT_PATTERNS = (
     ("adjacent_reduction_scale", "_reduction_scale_groups"),
     ("adjacent_pointwise_chain", "_pointwise_chain_groups"),
     ("quantized_epilogue", "_quantized_epilogue_groups"),
+    ("quantized_epilogue_narrowing", "_quantized_epilogue_narrowing_groups"),
     ("quantized_narrowing", "_quantized_narrowing_groups"),
     ("pointwise_narrowing", "_pointwise_narrowing_groups"),
     ("softmax_narrowing", "_softmax_narrowing_groups"),

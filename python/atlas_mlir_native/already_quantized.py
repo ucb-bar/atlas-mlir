@@ -141,8 +141,12 @@ class QuantizedPlan:
         if self.narrowing_input_id is not None:
             record.update(schema="atlas.already_quantized_narrowing.v1", narrowing=dict(
                 input_id=self.narrowing_input_id, source_dtype="f32", output_dtype="bf16",
-                admission="restored finite normal BF16 or signed zero; exact FP32 widening",
-                arithmetic="unchanged ordered K and exponent restoration; omit widening then narrowing"))
+                admission=("bounded non-NaN BF16 epilogue product; exact FP32 widening"
+                           if self.epilogue_precision is not None else
+                           "restored finite normal BF16 or signed zero; exact FP32 widening"),
+                arithmetic=("unchanged ordered K, exponent restoration and original BF16 RNE multiply; "
+                            "omit widening then narrowing" if self.epilogue_precision is not None else
+                            "unchanged ordered K and exponent restoration; omit widening then narrowing")))
         if self.operand_permutation is not None:
             logical, physical, axes = self.operand_permutation
             record['operand_permutation'] = dict(logical_operand=logical, physical_operand=physical,
@@ -164,6 +168,10 @@ def _body(source, continued):
 
 def prepare_source(source):
     pure = [node for node in source.nodes if node.effect == "pure"]
+    if (len(pure) == 3 and pure[0].op in OPS and pure[1].op == "f32_mul"
+            and pure[2].op == "f32_to_bf16"):
+        from .quantized_epilogue_narrowing import prepare_source as prepare_product_narrowing
+        return prepare_product_narrowing(source)
     if any(node.op in {'gather', 'transpose'} for node in pure):
         from .quantized_operand_permutation import prepare_source as prepare_permutation
         return prepare_permutation(source)

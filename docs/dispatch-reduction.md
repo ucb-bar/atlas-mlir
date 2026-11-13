@@ -52,6 +52,28 @@ Directed tests cover plain, masked and guarded softmax, multidimensional
 shapes, partial tiles, escaping results, changed rounding, unsupported domains,
 input/output overlap, rejected NaNs and generated C execution through Rust.
 
+### Private contraction/product result casts
+
+The additional opt-in `quantized_epilogue_narrowing` pattern combines an
+already-quantized contraction, its existing selected BF16 product epilogue,
+and a private exact f32-to-BF16 result cast. The ordered K reduction, exponent
+restoration, multiplication operand order and BF16 rounding remain unchanged.
+The selected bounded product produces non-NaN BF16 codes, so its exact f32
+widening and the immediately following RNE narrowing can be omitted.
+
+On the same complete SmolVLA vision block this removes another **317,986,532
+cycles and six dispatches**: **1,421,679,019 → 1,103,692,487 cycles**, and
+**162 → 156 dispatches**. All 786,432 output words still match the independent
+reference. The TinyLlama fixture has no additional eligible boundary and
+remains at 82,772,819 cycles and 59 dispatches with identical output words.
+
+Tests cover both product operand orders, batch and tile tails, independent
+integer-product expectations, source/shape rejection, proved capacity refusal,
+visible compiler errors, input/output overlap, NaN rejection and a late
+device-side exponent failure that leaves the caller's result unchanged.
+The full-layer artifacts are `application-epilogue-narrowing` and
+`rust-epilogue-narrowing` under the SmolVLA study directory.
+
 ### Large static quantizer applications
 
 Aligned BF16 static quantizers now size counted bodies from the selected
