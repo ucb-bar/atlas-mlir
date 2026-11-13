@@ -8,12 +8,55 @@ fork branch.
 
 ## Latest validated result
 
-The unchanged full decoder layer runs in **89,068,106 Rust-model cycles and
-80 dispatches**, versus **226,725,080 cycles and 586 dispatches** for the retained
-baseline: **60.72% fewer cycles and 86.35% fewer dispatches**. Every one of its
+The unchanged full decoder layer runs in **89,065,169 Rust-model cycles and
+71 dispatches**, versus **226,725,080 cycles and 586 dispatches** for the retained
+baseline: **60.72% fewer cycles and 87.88% fewer dispatches**. Every one of its
 131,072 BF16 output words matches the independent selected-arithmetic reference.
 Use the explicit cache, preflight, composition and optimized-pipeline options
 below. Historical sections record intermediate configurations and their limits.
+
+### Quantizer dispatch budgets
+
+Dynamic activation quantization now uses the selected application execution
+budget when batching complete reduction groups. It previously scheduled against
+1M instructions even when the application selected 128M. The default schedule
+is unchanged. A stricter target API limit is recorded and replayed, and export
+under a smaller invocation budget refuses the larger schedule.
+
+Batching never splits an amax group. The 256-entry exponent slot, selected I/O
+window, aligned-group restrictions, actual machine instruction-bound proof and
+128 KiB instruction-image limit remain independent admission checks. The legacy
+per-group estimate sizes batches; it is not the proof used to admit a binary.
+
+| Full decoder, optimized pipeline | Previous scheduler | Selected quantizer budget |
+| --- | ---: | ---: |
+| Device cycles | 89,068,106 | 89,065,169 |
+| Dispatches | 80 | 71 |
+| Executed instructions | 11,292,164 | 11,291,813 |
+| Different BF16 output words | 0 | 0 |
+
+This change removes nine launches with a small device-cycle saving of 2,937;
+it primarily reduces dispatch overhead. Rust simulation took 3.60 seconds
+(4.23 seconds for the generated C harness). These are simulation wall times,
+not hardware latency. The source, weights, Rust runner and PACK compatibility
+mode are the same as the scheduler comparison below.
+
+Validation: 44 quantizer/encoding tests and 25 subtests passed. Directed Rust
+tests cover 13 heads of 96 elements, 32 of 4,096, nine of 32,768, and a
+257-head exponent-slot tail, including exceptional encodings, both exponent
+rules, exact codes/exponents, padding and untouched memory. Rejection tests
+cover instruction/image/I/O limits, indivisible groups and replay budgets.
+The full layer matches all 131,072 independent-reference BF16 output words.
+
+The first compile's independent replay encountered a native crash while
+destroying a DMA-verifier state set in an unchanged exact-float kernel. A fresh
+independent replay of the complete publication passed in 103.59 seconds; the
+crash has not been reproduced or diagnosed. Its log is retained at
+`out/dispatch-audit/compile-layer-quantizer-budget.log`. The passing application,
+replay and Rust receipts use the `application-quantizer-budget`,
+`verify-layer-quantizer-budget.log` and `rust-layer-quantizer-budget` names under
+the artifact roots described below. This change does not claim to fix that
+native verifier issue.
 
 ## Changes
 

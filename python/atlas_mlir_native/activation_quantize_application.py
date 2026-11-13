@@ -18,7 +18,7 @@ from merlin.semantic_compiler.target_binding import verify_native_publication
 
 from . import vector_quantize as device
 from .binding import TARGET_IDENTITY, TILE_BYTES, dram_slots
-from .limits import DEFAULT_FUNCTIONAL_INSTRUCTION_LIMIT
+from .limits import functional_instruction_limit
 
 STATIC_CHUNK_ELEMENTS = 2048
 # A static body has no amax or per-row exponent packing. Even the worst
@@ -32,12 +32,10 @@ STATIC_WHOLE_BODY_MAX_ELEMENTS = 1 << 19
 # measurement is not a worst-case proof. Admission uses the replayed machine
 # instruction bound; do not use this scheduling constant as that proof.
 DYNAMIC_GROUP_WORST_INSTRUCTIONS = 119_525
-DYNAMIC_GROUPS_PER_LAUNCH = DEFAULT_FUNCTIONAL_INSTRUCTION_LIMIT // DYNAMIC_GROUP_WORST_INSTRUCTIONS
 # Counted full-tile groups scale with their number of 4,096-element blocks.
 # Charge each block the complete measured single-group cost, including fixed
-# exponent and launch work. This conservative envelope admits a single
-# 32,768-element window512 head and preserves eight 4,096-element heads.
-MAX_DYNAMIC_GROUP_ELEMENTS = 4096 * DYNAMIC_GROUPS_PER_LAUNCH
+# exponent and launch work. The selected execution budget sizes this envelope;
+# compilation must still prove the actual machine bound and image capacity.
 
 
 def _dynamic_group_instruction_bound(length):
@@ -57,6 +55,15 @@ class QuantizerSchedule:
     attrs: dict
     bodies: tuple[KernelRequest, ...]
     launches: tuple[dict, ...]
+    instruction_limit: int
+
+    @property
+    def dynamic_groups_per_launch(self):
+        return self.instruction_limit // DYNAMIC_GROUP_WORST_INSTRUCTIONS
+
+    @property
+    def max_dynamic_group_elements(self):
+        return 4096 * self.dynamic_groups_per_launch
 
     @property
     def count(self):
@@ -74,12 +81,12 @@ class QuantizerSchedule:
                     exponent_bytes=prod(self.exponents.type.shape) * 4,
                     static_chunk_elements=STATIC_CHUNK_ELEMENTS,
                     static_whole_body_max_elements=STATIC_WHOLE_BODY_MAX_ELEMENTS,
-                    max_dynamic_group_elements=MAX_DYNAMIC_GROUP_ELEMENTS,
-                    dynamic_groups_per_launch=DYNAMIC_GROUPS_PER_LAUNCH,
+                    max_dynamic_group_elements=self.max_dynamic_group_elements,
+                    dynamic_groups_per_launch=self.dynamic_groups_per_launch,
                     dynamic_group_worst_instructions=DYNAMIC_GROUP_WORST_INSTRUCTIONS,
                     dynamic_group_bound_block_elements=4096,
                     dynamic_group_bound_rule="119525 * ceil(group_elements / 4096)",
-                    functional_instruction_limit=DEFAULT_FUNCTIONAL_INSTRUCTION_LIMIT,
+                    functional_instruction_limit=self.instruction_limit,
                     bodies=[dict(index=index, path=f"segments/body_{index:03d}", request_digest=body.digest(),
                                  shape=list(body.node(self.x.id).type.shape)) for index, body in enumerate(self.bodies)],
                     launches=list(self.launches), launches_per_invocation=len(self.launches),
@@ -100,9 +107,11 @@ def _body(source, x, codes, exponents, attrs, shape):
     return body
 
 
-def prepare_plan(source):
+def prepare_plan(source, *, limits=None):
     from . import dynamic_quantize, static_quantize
 
+    instruction_limit = functional_instruction_limit(limits)
+    max_group_elements = 4096 * (instruction_limit // DYNAMIC_GROUP_WORST_INSTRUCTIONS)
     code = next((node for node in source.nodes if node.op == "atlas.quantize_act.codes"), None)
     if code is None:
         raise ValueError("activation quantizer needs its code projection")
@@ -150,14 +159,14 @@ def prepare_plan(source):
         while group < len(groups):
             first, end = groups[group]
             length = (end - first) * k
-            if length > MAX_DYNAMIC_GROUP_ELEMENTS:
-                raise ValueError(f"indivisible dynamic reduction group has {length} elements; selected device body supports at most {MAX_DYNAMIC_GROUP_ELEMENTS}")
+            if length > max_group_elements:
+                raise ValueError(f"indivisible dynamic reduction group has {length} elements; selected device body supports at most {max_group_elements}")
             if length > 4096 and length % 1024:
                 raise ValueError("indivisible dynamic reduction group above 4096 elements requires complete 1024-element tiles")
             packed = 1
             bounded_tiles = length % 1024 == 0 or length <= 1024
             if reduction == "head" and x.type.dtype == "bf16" and length % 32 == 0 and bounded_tiles:
-                capacity = min(DEFAULT_FUNCTIONAL_INSTRUCTION_LIMIT // _dynamic_group_instruction_bound(length), 256,
+                capacity = min(instruction_limit // _dynamic_group_instruction_bound(length), 256,
                                max(1, (dram_slots() * TILE_BYTES - 1024) // (length * 3)))
                 while (packed < capacity and group + packed < len(groups)
                        and groups[group + packed][1] - groups[group + packed][0] == end - first):
@@ -176,11 +185,11 @@ def prepare_plan(source):
                              input_bytes=length * (2 if x.type.dtype == "bf16" else 4),
                              code_offset_bytes=first, code_bytes=length,
                              exponent_offset_bytes=exp_first * 4, exponent_bytes=exp_count * 4))
-    return QuantizerSchedule(source, x, codes, exponents, attrs, tuple(bodies), tuple(launches))
+    return QuantizerSchedule(source, x, codes, exponents, attrs, tuple(bodies), tuple(launches), instruction_limit)
 
 
 def compile_source(snapshot, region, *, target_source, destination, limits):
-    plan = prepare_plan(region)
+    plan = prepare_plan(region, limits=limits)
     destination = Path(destination)
     destination.mkdir(parents=True, exist_ok=False)
     (destination / "segments").mkdir()
@@ -269,7 +278,14 @@ def prepare_c_package(region, compiled, name, *, target_source, runtime_linkage=
 
     if runtime_linkage != "separate":
         raise ValueError("scheduled quantizer requires shared runtime linkage")
-    plan, compiled = prepare_plan(region), Path(compiled)
+    from types import SimpleNamespace
+
+    compiled = Path(compiled)
+    # Reconstruct the exact scheduling budget, including a stricter target-API
+    # limit. The resolver also prevents replay above the current invocation cap.
+    saved = json.loads((compiled / "quantizer-schedule.json").read_text())
+    plan = prepare_plan(region, limits=SimpleNamespace(
+        functional_instruction_limit=saved["functional_instruction_limit"]))
     manifest = json.loads((compiled / "quantizer-manifest.json").read_text())
     _verify_publication(compiled, manifest, plan)
     if (json.loads((compiled / "source-request.json").read_text()) != region.record()
