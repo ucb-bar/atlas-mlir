@@ -65,13 +65,15 @@ def _execution_geometry(plan):
                 status_address=status, status_bytes=2048, **extra), end
 
 
-def execution_layout(plan, *, operand_reuse=None):
+def execution_layout(plan, *, operand_reuse=None, exponent_page_cache=None):
     from .quantized_operand_reuse import schedule_record
+    from .exponent_page_cache import record as page_cache_record
     geometry, end = _execution_geometry(plan)
     if end > _tile_io_base.get() + dram_slots()*TILE_BYTES:
         raise NativeCompilationError("resource_limit", "quantized loop buffers exceed selected DRAM window")
     return dict(schema="atlas.quantized_loop_execution.v1", operation="mxu1_cap448_looped_ordered",
                 **geometry, **schedule_record(plan, operand_reuse),
+                **page_cache_record(plan, selected=exponent_page_cache),
                 status_encoding='little-endian u32: 0=admitted; 1=exponent, readout, or fallback resource/domain refusal',
                 restoration_admission=dict(scalar_fallback_tile_budget=fallback_tiles(plan),
                     successful_exponent_domain=('full_scalar_admission' if fallback_tiles(plan) else 'vector_domain_only'),

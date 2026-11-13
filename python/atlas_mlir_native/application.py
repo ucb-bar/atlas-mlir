@@ -224,6 +224,7 @@ class AtlasApplicationAdapter:
         from .publication_options import deterministic_receipts_enabled
         from .quantized_operand_reuse import reuse_policy
         from .private_staging import storage_policy
+        from .exponent_page_cache import enabled as exponent_page_cache_enabled
         from .float_virtual import binary_lane_groups, binary_vector_preflight, cast_vector_preflight
         from merlin.semantic_compiler.codegen import current_codegen_options
 
@@ -267,6 +268,7 @@ class AtlasApplicationAdapter:
                    if current_codegen_options().execution_instruction_limit is not None else {}),
                 **({"quantized_operand_reuse": operand_reuse} if operand_reuse != "ordered" else {}),
                 **({"staging_storage": staging_storage} if staging_storage != "dram" else {}),
+                **({"exponent_page_cache": True} if exponent_page_cache_enabled() else {}),
             },
         }
 

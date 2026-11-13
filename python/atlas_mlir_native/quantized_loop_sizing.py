@@ -100,6 +100,7 @@ def untimed_bound(source, report):
 
 
 def _identity(plan, virtual, target_source, tools, limits, operand_reuse):
+    from .exponent_page_cache import enabled as exponent_page_cache_enabled
     options = current_codegen_options()
     pipeline = _native_pipeline()
     arguments = list(NATIVE_PIPELINES[pipeline])
@@ -121,6 +122,7 @@ def _identity(plan, virtual, target_source, tools, limits, operand_reuse):
         target_inventory_sha256=_digest(target_source/'docs/selected-variant-inventory.json'),
         tool_sha256={name: _digest(tools/name) for name in ('atlas-opt','atlas-emit')},
         capture_postspill=capture,
+        **({'exponent_page_cache': True} if exponent_page_cache_enabled() else {}),
         **({"operand_reuse_requested": operand_reuse} if operand_reuse != "ordered" else {}))
 
 
@@ -154,6 +156,7 @@ def size_counted(plan, *, target_source=None, limits=None, operand_reuse=None):
 
 
 def _size_counted(plan, *, target_source=None, limits=None, operand_reuse=None):
+    from .exponent_page_cache import enabled as exponent_page_cache_enabled
     from .quantized_loop import _execution_geometry, execution_layout, virtual_source
     from .region_composition import compile_virtual_with_receipt
 
@@ -168,6 +171,8 @@ def _size_counted(plan, *, target_source=None, limits=None, operand_reuse=None):
                 target_identity=plan.source.target_identity, selected_io_memory_bytes=window,
                 counted_frame_bytes=end-io_base, physical_instruction_limit=functional_instruction_limit(),
                 native_publication=False)
+    if exponent_page_cache_enabled():
+        base['exponent_page_cache'] = True
     if io_base != DRAM_BASE:
         base['io_memory_base'] = io_base
     if operand_reuse != 'ordered':
@@ -338,7 +343,9 @@ def _check_construction_evidence(plan, compiled, sizing, route, role, manifest):
             raise ValueError('quantized construction evidence changed while reading')
     if not names:
         return
-    layout = execution_layout(plan, operand_reuse=sizing.get('operand_reuse_requested', 'ordered'))
+    from .exponent_page_cache import recorded_enabled
+    layout = execution_layout(plan, operand_reuse=sizing.get('operand_reuse_requested', 'ordered'),
+                              exponent_page_cache=recorded_enabled(sizing))
     virtual = virtual_source(plan,layout)
     identity = sizing.get('identity',{})
     if (payloads['source-virtual.mlir'] != virtual.encode()
@@ -556,7 +563,9 @@ def selected_route(plan, compiled):
         actual['scalar_fallback_tile_budget'] = fallback_tiles(plan)
         from .quantized_loop import execution_layout, virtual_source
         execution = json.loads((compiled/'execution_plan.json').read_text())
-        layout = execution_layout(plan, operand_reuse=sizing.get('operand_reuse_requested', 'ordered'))
+        from .exponent_page_cache import recorded_enabled
+        layout = execution_layout(plan, operand_reuse=sizing.get('operand_reuse_requested', 'ordered'),
+                                  exponent_page_cache=recorded_enabled(sizing))
         if execution != layout or (compiled/'atlas-virtual.mlir').read_text() != virtual_source(plan, layout):
             raise ValueError('counted publication execution schedule differs')
         actual['restoration_admission'] = layout['restoration_admission']

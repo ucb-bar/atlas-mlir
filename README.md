@@ -148,3 +148,6 @@ The [already-quantized intake guide](docs/already-quantized-intake.md) records b
 
 The [exact-float input layout guide](docs/float-input-layout.md) describes folding
 private slices and broadcasts into checked input packing without changing arithmetic.
+
+The [exponent page cache guide](docs/exponent-page-cache.md) describes reusing
+invariant quantization scales in VMEM across output tiles.

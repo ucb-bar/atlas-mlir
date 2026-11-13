@@ -276,7 +276,9 @@ def bind_counted(original, canonical, materialized, destination, capture, *, tar
         raise ValueError("only counted contraction materializations support binding")
     previous = json.loads((materialized / "manifest.json").read_bytes())
     execution = json.loads((materialized / "execution_plan.json").read_text())
-    layout = loop.execution_layout(plan, operand_reuse=execution.get("operand_reuse_requested", "ordered"))
+    from .exponent_page_cache import recorded_enabled
+    layout = loop.execution_layout(plan, operand_reuse=execution.get("operand_reuse_requested", "ordered"),
+                                   exponent_page_cache=recorded_enabled(execution))
     virtual = loop.virtual_source(plan, layout)
     if virtual.encode() != (materialized / "atlas-virtual.mlir").read_bytes():
         raise ValueError("rebound counted virtual program differs from checked canonical source")

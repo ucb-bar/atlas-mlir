@@ -127,19 +127,19 @@ class Emitter:
         self.effect('slot_store', [slot, value, index], [SLOT, 'i32', 'i32'], attrs=' {kind = \"sw\", byte_offset = 0 : i32}')
 
 
-def _entry():
+def _entry(*, output_state='restore_start'):
     return [
         f'    %restore_data = "atlas.virtual_slot"() {{kind = "bf16", words = 512 : i32, slot_word = -1 : i32, purpose = "scratch", atlas.exponent_scratch = "data"}} : () -> {SLOT}',
         f'    %restore_lhs = "atlas.virtual_slot"() {{kind = "bf16", words = 512 : i32, slot_word = -1 : i32, purpose = "scratch", atlas.exponent_scratch = "lhs"}} : () -> {SLOT}',
         f'    %restore_rhs = "atlas.virtual_slot"() {{kind = "bf16", words = 512 : i32, slot_word = -1 : i32, purpose = "scratch", atlas.exponent_scratch = "rhs"}} : () -> {SLOT}',
         f'    %restore_status = "atlas.virtual_slot"() {{kind = "bf16", words = 512 : i32, slot_word = -1 : i32, purpose = "scratch", atlas.exponent_scratch = "status"}} : () -> {SLOT}',
         f'    %restore_zero = "atlas.virtual_vpu_splat"() {{bits = 0 : i32}} : () -> {BF16}',
-        f'    %restore_start = "atlas.virtual_save"(%start, %restore_status, %restore_zero) : ({STATE}, {SLOT}, {BF16}) -> {STATE}',
+        f'    %{output_state} = "atlas.virtual_save"(%start, %restore_status, %restore_zero) : ({STATE}, {SLOT}, {BF16}) -> {STATE}',
     ]
 
 
 def _tile(plan, layout, *, output_address="ytile", exponent_addresses=("restore_lpage", "restore_rpage"), input_state="ss", output_state="stored", logical_rows=True,
-          result="result", row_tile="m", column_tile="n", output_bytes="out_bytes", prefix="restore"):
+          result="result", row_tile="m", column_tile="n", output_bytes="out_bytes", prefix="restore", resident_exponents=()):
     """Replace a completed tile store with restoration followed by that store."""
     e = Emitter(prefix)
     epilogue = getattr(plan, 'epilogue_precision', None)
@@ -157,7 +157,9 @@ def _tile(plan, layout, *, output_address="ytile", exponent_addresses=("restore_
     mt = row_tile if (plan.m + 31)//32 > 1 else zero
     nt = column_tile if (plan.n + 31)//32 > 1 else zero
     e.effect('save', ['restore_data', result], [SLOT, BF16])
-    for which, address in zip(('lhs', 'rhs'), exponent_addresses, strict=True):
+    for index, (which, address) in enumerate(zip(('lhs', 'rhs'), exponent_addresses, strict=True)):
+        if index in resident_exponents:
+            continue
         value = e.effect('dma_load_bf16', [address, e.const(2048)], ['i32', 'i32'], BF16)
         e.effect('save', ['restore_'+which, value], [SLOT, BF16])
     invalid = e.load('restore_status', zero)
@@ -272,7 +274,7 @@ def _scratch(name):
     return f'    %{name} = "atlas.virtual_slot"() {{kind = "bf16", words = 512 : i32, slot_word = -1 : i32, purpose = "scratch"}} : () -> {SLOT}'
 
 
-def _vector_entry():
+def _vector_entry(*, output_state='restore_start'):
     """Create constant half masks once, using a fixed initialized tile."""
     lines = _entry()
     # Initialize masks before entering the contraction loops. The mask loop
@@ -300,17 +302,19 @@ def _vector_entry():
     e.emit(f'%{right} = "atlas.virtual_vpu_binary"(%restore_ones, %{left}) {{kind = "sub"}} : ({BF16}, {BF16}) -> {BF16}')
     e.effect('save',['restore_mask_right',right],[SLOT,BF16])
     e.emit(f'cf.br ^restore_ready(%{e.state} : {STATE})')
-    e.lines.append(f'  ^restore_ready(%restore_start: {STATE}):')
+    e.lines.append(f'  ^restore_ready(%{output_state}: {STATE}):')
     return lines+e.lines
 
 
 def _vector_tile(plan, layout, *, output_address, exponent_addresses, scalar_fallback=True,
                  input_state="ss", output_state="stored", result="result",
-                 row_tile="m", column_tile="n", output_bytes="out_bytes", prefix="restore"):
+                 row_tile="m", column_tile="n", output_bytes="out_bytes", prefix="restore", resident_exponents=()):
     """Build separable exact factors and choose the proven normal fast path."""
     e=Emitter(prefix+'_factor')
     e.state=input_state
-    for which,address in zip(('lhs','rhs'),exponent_addresses,strict=True):
+    for index,(which,address) in enumerate(zip(('lhs','rhs'),exponent_addresses,strict=True)):
+        if index in resident_exponents:
+            continue
         value=e.effect('dma_load_bf16',[address,e.const(2048)],['i32','i32'],BF16)
         e.effect('save',['restore_'+which,value],[SLOT,BF16])
     zero_tile=e.name('zero')
@@ -397,7 +401,8 @@ def _vector_tile(plan, layout, *, output_address, exponent_addresses, scalar_fal
     if scalar_fallback:
         e.lines += _tile(plan,layout,output_address=output_address,exponent_addresses=exponent_addresses,
                          input_state=f'{prefix}_scalar_s',output_state=f'{prefix}_scalar_stored',
-                         result=result,row_tile=row_tile,column_tile=column_tile,output_bytes=output_bytes,prefix=prefix)
+                         result=result,row_tile=row_tile,column_tile=column_tile,output_bytes=output_bytes,prefix=prefix,
+                         resident_exponents=resident_exponents)
     else:
         # The successful numerical domain is explicitly narrowed in the
         # execution plan. Never publish a value for an unavailable fallback:
@@ -414,9 +419,11 @@ def _vector_tile(plan, layout, *, output_address, exponent_addresses, scalar_fal
 class Restoration:
     """Typed readout hook used by the counted-loop emitter."""
     def __init__(self, plan, layout, *, vector=True, logical_rows=True, scalar_fallback=True):
+        from .exponent_page_cache import ExponentPageCache
         self.plan, self.layout = plan, layout
         self.vector, self.logical_rows = vector, logical_rows
         self.scalar_fallback = scalar_fallback
+        self.page_cache = ExponentPageCache(plan, layout)
 
     def pages(self):
         return tuple((address, 2048 if geometry['mode'] == 'row' else 0,
@@ -424,12 +431,26 @@ class Restoration:
                      for address, geometry in zip(self.layout['exponent_addresses'], exponent_geometry(self.plan), strict=True))
 
     def entry(self):
-        return _vector_entry() if self.vector else _entry()
+        entry = _vector_entry if self.vector else _entry
+        if 'invocation' not in self.page_cache.scopes:
+            return entry()
+        return entry(output_state='restore_uncached') + self.page_cache.prefetch(
+            'invocation', self.layout['exponent_addresses'], input_state='restore_uncached',
+            output_state='restore_start', prefix='restore_cache_entry')
+
+    def batch_entry(self, input_state, exponent_addresses):
+        if 'batch' not in self.page_cache.scopes:
+            return [], input_state
+        output_state = 'restore_batch_ready'
+        return self.page_cache.prefetch('batch', exponent_addresses, input_state=input_state,
+            output_state=output_state, prefix='restore_cache_batch'), output_state
 
     def tile(self, **kwargs):
         if self.vector:
-            return _vector_tile(self.plan, self.layout, scalar_fallback=self.scalar_fallback, **kwargs)
-        return _tile(self.plan, self.layout, logical_rows=self.logical_rows, **kwargs)
+            return _vector_tile(self.plan, self.layout, scalar_fallback=self.scalar_fallback,
+                                resident_exponents=self.page_cache.resident, **kwargs)
+        return _tile(self.plan, self.layout, logical_rows=self.logical_rows,
+                     resident_exponents=self.page_cache.resident, **kwargs)
 
     def finish(self, state):
         e = Emitter('restore_finish')
