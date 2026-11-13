@@ -37,7 +37,7 @@ def test_geometry_accounts_for_partial_traffic_and_keeps_frame_reserve():
                 assert ((m + 31) // 32) % rows == 0
     for m, n, k, batch in ((32, 65, 1024, ()), (65, 65, 1024, ()),
                             (128, 32, 1024, ()), (128, 65, 64, ()),
-                            (128, 65, 6145, ()), (64, 65, 1024, (2,))):
+                            (128, 65, 6145, ()), (63, 65, 1024, (2,))):
         assert panel_geometry(plan_for(m, n, k, batch=batch)) is None
 
 

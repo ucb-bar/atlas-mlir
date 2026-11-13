@@ -11,7 +11,8 @@ column together occupy at most 192 KiB, leaving 48 KiB of the selected scratch
 frame for restoration and ordinary allocation. The ranking accounts for
 additional BF16 partial-result writes and reads when a wider M panel forces
 smaller K panels. Candidates that cannot save traffic retain the existing
-wide-row cache. Batch reuse is not part of this change.
+wide-row cache. Tile-aligned batches with shared weights can also use the
+physical traversal described in [shared-weight-batches.md](shared-weight-batches.md).
 
 The selected M/K geometry is recorded and rederived for native rebinding and
 C export. Native allocation, initialization, timing, dynamic-instruction and

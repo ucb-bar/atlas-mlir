@@ -68,8 +68,13 @@ def schedule_record(plan, policy=None):
         from .quantized_panel_geometry import panel_geometry
         geometry = panel_geometry(plan)
         if geometry is not None:
+            from math import prod
+            from .quantized_panel_geometry import shared_weight_panel_plan
+            physical = shared_weight_panel_plan(plan)
+            extra = ({'operand_reuse_flattened_batches': prod(plan.batch_shape)}
+                     if physical.batch_shape != plan.batch_shape else {})
             return dict(operand_reuse_requested=requested, operand_reuse='panel-cache',
-                        operand_reuse_panel_m_tiles=geometry[0], operand_reuse_panel_k_tiles=geometry[1])
+                        operand_reuse_panel_m_tiles=geometry[0], operand_reuse_panel_k_tiles=geometry[1], **extra)
         return {**schedule_record(plan, 'wide-cache'), 'operand_reuse_requested': requested}
     if requested == 'paired-cache':
         from .quantized_panel_reuse import admitted, PANEL_K_TILES

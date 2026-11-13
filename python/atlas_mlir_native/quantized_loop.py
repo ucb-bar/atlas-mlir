@@ -92,7 +92,7 @@ def virtual_source(plan, layout):
     schedule = schedule_record(plan, layout.get('operand_reuse_requested', 'ordered'))
     if any(layout.get(key) != schedule.get(key) for key in (
             'operand_reuse_requested', 'operand_reuse', 'operand_reuse_cached_tiles',
-            'operand_reuse_panel_m_tiles', 'operand_reuse_panel_k_tiles')):
+            'operand_reuse_panel_m_tiles', 'operand_reuse_panel_k_tiles', 'operand_reuse_flattened_batches')):
         raise ValueError('recorded quantized operand reuse schedule differs')
     restoration = Restoration(plan, layout, scalar_fallback=bool(fallback_tiles(plan)))
     if schedule.get('operand_reuse') == 'paired-cache':
@@ -100,8 +100,11 @@ def virtual_source(plan, layout):
         return rematerialize_scalar_constants(paired_source(plan, layout, restoration))
     if schedule.get('operand_reuse') == 'panel-cache':
         from .quantized_panel_reuse import virtual_source as panel_source
+        from .quantized_panel_geometry import shared_weight_panel_plan
+        physical = shared_weight_panel_plan(plan)
+        restoration = Restoration(physical, layout, scalar_fallback=bool(fallback_tiles(plan)))
         geometry = (schedule['operand_reuse_panel_m_tiles'], schedule['operand_reuse_panel_k_tiles'])
-        return rematerialize_scalar_constants(panel_source(plan, layout, restoration, geometry=geometry))
+        return rematerialize_scalar_constants(panel_source(physical, layout, restoration, geometry=geometry))
     virtual = _virtual(Geometry(), tuple(layout['input_addresses'][:2]), layout['output_addresses'][0],
                        unit=1, k_unroll=8 if prod(plan.batch_shape) == 1 else 1,
                        batch_count=prod(plan.batch_shape),
