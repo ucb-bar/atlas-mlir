@@ -20,6 +20,7 @@ _ADJACENT_PATTERNS = (
     ("pointwise_input_widening", "_pointwise_input_widening_groups"),
     ("expanded_silu", "_expanded_silu_groups"),
     ("quantized_operand_permutation", "_quantized_operand_permutation_groups"),
+    ("quantizer_input_permutation", "_quantizer_input_permutation_groups"),
 )
 
 

@@ -17,10 +17,11 @@ def compile_source(snapshot, region, *, target_source, destination, limits):
                                  destination=destination, limits=limits, _plan=prepare_plan(region))
 
 
-def prepare_c_package(region, compiled, name, *, target_source, runtime_linkage='separate'):
+def prepare_c_package(region, compiled, name, *, target_source, runtime_linkage='separate', input_permutation=None):
     plan=prepare_plan(region)
     result=scalar.prepare_c_package(region, compiled, name, target_source=target_source,
-                                    runtime_linkage=runtime_linkage, _plan=plan)
+                                    runtime_linkage=runtime_linkage, _plan=plan,
+                                    input_permutation=input_permutation)
     vector_path=plan.width==2 and not any(n%32 for n in (plan.count,plan.group_elements,plan.head_elements))
     return replace(result,description={**result.description, 'kind':'vector_quantize',
                    'quantizer_engine':'vector' if vector_path else 'unsupported_device_body',

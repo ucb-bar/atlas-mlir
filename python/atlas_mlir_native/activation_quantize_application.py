@@ -286,7 +286,7 @@ def _verify_publication(root, manifest, plan):
         verify_native_publication(leaf, detail, engine="merlin_native", request_digest=body.digest(), target_identity=plan.source.target_identity)
 
 
-def prepare_c_package(region, compiled, name, *, target_source, runtime_linkage="separate"):
+def prepare_c_package(region, compiled, name, *, target_source, runtime_linkage="separate", input_permutation=None):
     from merlin.compile.c_sources import c_source_pair
     from merlin.compile.semantic_application import CompiledCRegion
     from .c_runtime import RUNTIME_SHARED_FILES
@@ -310,7 +310,8 @@ def prepare_c_package(region, compiled, name, *, target_source, runtime_linkage=
     if [row["path"] for row in manifest["segments"]] != expected_paths:
         raise ValueError("scheduled quantizer body set differs from source schedule")
     lowered = [device.prepare_c_package(body, compiled / path, name + f"_body_{index:03d}",
-                                       target_source=target_source, runtime_linkage=runtime_linkage)
+                                       target_source=target_source, runtime_linkage=runtime_linkage,
+                                       input_permutation=input_permutation)
                for index, (body, path) in enumerate(zip(plan.bodies, expected_paths, strict=True))]
     maximum = max(row.description["workspace_bytes"] for row in lowered)
     code_at, exp_at = maximum, maximum + plan.count
@@ -329,7 +330,11 @@ def prepare_c_package(region, compiled, name, *, target_source, runtime_linkage=
         inner = name + f"_body_{index:03d}"
         output_values = {plan.codes.id: f"region->workspace+{code_at + call['code_offset_bytes']}u",
                          plan.exponents.id: f"region->workspace+{exp_at + call['exponent_offset_bytes']}u"}
-        launch_code.append("  { const void *body_inputs[1]={(const uint8_t *)inputs[0]+" + str(call["input_offset_bytes"]) + "u}; void *body_outputs[2]={" + ",".join(output_values[key] for key in region.outputs) + f"}}; int result={inner}_source_dispatch(&region->source_{index},body_inputs,body_outputs); if (result) return result; }}")
+        source_pointer=f'(const uint8_t *)inputs[0]+{call["input_offset_bytes"]}u'
+        if input_permutation is not None:
+            launch_code.append(f'  region->source_{index}.input_first={call["input_offset_bytes"] // plan.width}u;')
+            source_pointer='inputs[0]'
+        launch_code.append("  { const void *body_inputs[1]={" + source_pointer + "}; void *body_outputs[2]={" + ",".join(output_values[key] for key in region.outputs) + f"}}; int result={inner}_source_dispatch(&region->source_{index},body_inputs,body_outputs); if (result) return result; }}")
     offsets = {plan.codes.id: code_at, plan.exponents.id: exp_at}
     from .slice_dispatch import render_slice_dispatch
     declarations, implementation = render_slice_dispatch(
