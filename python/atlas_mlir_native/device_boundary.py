@@ -8,6 +8,7 @@ invocation-local status slot records rejection without data-dependent control.
 from __future__ import annotations
 
 from .exponent_restoration import BF16, SLOT, STATE, Emitter
+from .memory_windows import dma_span_in_window
 from .region_composition import rematerialize_scalar_constants
 
 
@@ -36,9 +37,9 @@ def _configuration(source, destination, status, rows, columns, kind, ranges, pad
     if ranges and not any(low <= pad <= high for low, high in ranges):
         raise ValueError('device boundary pad must be admitted by its consumer')
     spans = ((source,pages*2048),(destination,pages*2048),(status,2048))
-    if any(type(address) is not int or not 0x80000000 <= address <= 0xffffffff or address % 2048
-           or address+size > 1 << 32 for address,size in spans):
-        raise ValueError('device boundary pages must be aligned fixed DRAM ranges')
+    if any(type(address) is not int or address % 2048 or not dma_span_in_window(address, size)
+           for address,size in spans):
+        raise ValueError('device boundary pages must be aligned fixed DMA ranges')
     if any(a < b+bn and b < a+an for i,(a,an) in enumerate(spans) for b,bn in spans[i+1:]):
         raise ValueError('device boundary source, destination, and status must be disjoint')
     if output_base is None and output_bytes is None:
@@ -47,7 +48,7 @@ def _configuration(source, destination, status, rows, columns, kind, ranges, pad
         if source < output_base+output_bytes and output_base < source+pages*2048:
             raise ValueError('implicit boundary output window overlaps its source')
     if (type(output_base) is not int or type(output_bytes) is not int or output_base % 32 or output_bytes % 32
-            or output_base < 0x80000000 or output_bytes <= 0 or output_base+output_bytes > 1 << 32
+            or not dma_span_in_window(output_base, output_bytes)
             or any(address < output_base or address+size > output_base+output_bytes for address,size in spans[1:])):
         raise ValueError('device boundary output window does not cover its publications')
     return pages,ranges,pad,output_base,output_bytes
