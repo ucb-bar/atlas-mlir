@@ -656,7 +656,8 @@ def compile_resident(
     staged_mixed = is_staged_mixed(request)
     staged_tiles = staged_bf16 or staged_mixed
     from .private_staging import mark_fragment, promote, storage_policy
-    promote_staging = staged_bf16 and storage_policy() == 'vmem'
+    staging_storage = storage_policy()
+    promote_staging = staged_bf16 and staging_storage != 'dram'
     deadline = monotonic() + limits.wall_timeout_s if staged_tiles else None
     cuts, slots, sizes = memory_plan(request)
     abi = plan_abi(request)
@@ -784,7 +785,9 @@ def compile_resident(
     virtual = compose_fragments(fragments, tools=tools, boundaries_lowered=staged_tiles)
     staging_promotion = None
     if promote_staging:
-        virtual, staging_promotion = promote(virtual)
+        readonly_addresses = tuple(DRAM_BASE + fixed_inputs[node.id] * TILE_BYTES for node in request.nodes
+                                   if node.effect in ('input', 'constant')) if staging_storage == 'vmem-inputs' else None
+        virtual, staging_promotion = promote(virtual, readonly_addresses=readonly_addresses)
     (destination / "atlas-virtual.mlir").write_text(virtual)
     pipeline = _native_pipeline()
     machine = _run(

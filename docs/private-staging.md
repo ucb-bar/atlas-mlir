@@ -31,6 +31,25 @@ counts. The existing host-visible arena is retained; unused private DRAM bytes
 are not promised as reclaimed application storage. Mixed FP8/BF16 staging is
 outside this option's current scope.
 
+## Repeated immutable inputs
+
+`ATLAS_STAGING_STORAGE=vmem-inputs` additionally caches repeatedly read input
+and constant tiles. The checked source boundary identifies immutable full
+BF16 tiles; any writer, partial transfer, dynamic address or address outside
+that boundary is refused. Single-use tiles retain their original transfers.
+
+Private intermediates take priority within the same 96-slot candidate budget.
+The remaining slots cache inputs in descending read-count order, with address
+as a deterministic tie-breaker. Each selected tile is loaded once and saved
+in VMEM, then restored at its original uses. The prefetch block runs inside
+every counted row iteration, after its guard. Nothing is assumed resident
+between row groups or dispatches. Slot declarations alone remain in the entry
+preheader.
+
+The execution receipt records the candidate and selected addresses, available
+slots, prefetches and replaced loads. Both compilation identities include the
+actual storage policy, keeping `dram`, `vmem` and `vmem-inputs` distinct.
+
 ## Complete-layer results
 
 | Identical fixture and arithmetic | Before cycles | After cycles | Dispatches |
@@ -64,6 +83,33 @@ silicon timing. Retained artifacts under `perf-studies/smolvla-dispatch` are
 `tinyllama-vmem-staging`, `application-vmem-staging`,
 `rust-tinyllama-vmem-staging` and `rust-vmem-staging`.
 
+## Immutable-input cache results
+
+| Identical fixture | Private intermediates only | Plus immutable inputs | Dispatches |
+| --- | ---: | ---: | ---: |
+| TinyLlama B=1, 64 tokens | 77,504,366 | 77,504,366 | 59 → 59 |
+| SmolVLA vision block B=1, 1,024 tokens | 621,089,999 | 606,944,206 | 122 → 122 |
+
+`vmem-inputs` saves another **14,145,793 cycles (2.28%)** and **24 MiB of
+DRAM reads** in the complete SmolVLA block. Only its softmax image changes:
+59,617,965 → 45,472,172 cycles. The other 121 images and their counts remain
+identical. All 59 TinyLlama images remain identical. Every output word still
+matches the same independent references used above.
+
+SmolVLA now reads 441,597,952 bytes and writes 161,253,984 bytes. Its same-work
+serial-launch bound is 450,307,928 cycles, with 1.43% useful MAC utilization
+relative to one MXU. Runtime instruction count increases from 80,645,992 to
+80,697,064 because cache initialization adds instructions; the reduction in
+DRAM traffic outweighs that cost. These remain device-only simulation results.
+
+Retained artifacts are `application-readonly-staging`,
+`tinyllama-readonly-staging-v2`, `rust-readonly-staging` and
+`rust-tinyllama-readonly-staging-v2`. The first TinyLlama compilation hit an
+intermittent native buffer-verifier crash during an unchanged contraction.
+The failing input was retained; three direct replays produced identical valid
+images, and a fresh complete compilation and simulation passed. This feature
+does not claim to fix that compiler crash.
+
 ## Validation
 
 Generated-C/Rust tests cover plain, masked and guarded softmax, f32 and BF16
@@ -78,3 +124,10 @@ address, reject unknown/partial/misaligned transfers, preserve transfers when
 the candidate limit is exceeded, and separate cached compilations by storage
 policy. Existing randomized native/Rust slot-scheduling tests cover RAW, WAR
 and WAW hazards with independent transfers.
+
+For immutable input caching, directed tests also exercise zero and partial
+remaining cache capacity, deterministic selection among repeated reads,
+immutable-prefix violations, unexpected device writers and dynamic addresses.
+Generated-C/Rust tests run both `vmem` and `vmem-inputs`, including varying rows
+to detect a cache incorrectly retained across iterations. A zero-slot fallback
+executes the original DRAM path and still matches every reference word.

@@ -228,6 +228,7 @@ class AtlasApplicationAdapter:
         from merlin.semantic_compiler.codegen import current_codegen_options
 
         operand_reuse = reuse_policy()
+        staging_storage = storage_policy()
         names = {node.id: f"node_{i}" for i, node in enumerate(region.nodes)}
         choice = alternative.to_dict()
         choice.pop("id")
@@ -265,7 +266,7 @@ class AtlasApplicationAdapter:
                 **({"execution_instruction_limit": current_codegen_options().execution_instruction_limit}
                    if current_codegen_options().execution_instruction_limit is not None else {}),
                 **({"quantized_operand_reuse": operand_reuse} if operand_reuse != "ordered" else {}),
-                **({"staging_storage": "vmem"} if storage_policy() == "vmem" else {}),
+                **({"staging_storage": staging_storage} if staging_storage != "dram" else {}),
             },
         }
 

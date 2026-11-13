@@ -114,6 +114,10 @@ def test_materialization_identity_uses_effective_inputs_and_receipt_mode(tmp_pat
     changed = adapter.materialization_identity(source, choice)
     assert changed != original
     assert changed["compilation_identity"]["staging_storage"] == "vmem"
+    monkeypatch.setenv("ATLAS_STAGING_STORAGE", "vmem-inputs")
+    inputs_cached = adapter.materialization_identity(source, choice)
+    assert inputs_cached != changed and inputs_cached != original
+    assert inputs_cached["compilation_identity"]["staging_storage"] == "vmem-inputs"
     monkeypatch.setenv("ATLAS_STAGING_STORAGE", "dram")
     assert adapter.materialization_identity(source, choice) == original
     with adapter.publication_options(deterministic_receipts=True):

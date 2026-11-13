@@ -611,6 +611,7 @@ def tuning_key(snapshot, request, fixed_inputs, fixed_outputs, limits):
     from .private_staging import storage_policy
 
     tool = Path(os.environ["ATLAS_OOT_BIN_DIR"]) / "atlas-opt"
+    staging_storage = storage_policy()
     return {
         "request_digest": request.digest(),
         "target_identity": request.target_identity,
@@ -626,7 +627,7 @@ def tuning_key(snapshot, request, fixed_inputs, fixed_outputs, limits):
         "fixed_outputs": list(fixed_outputs),
         "pipeline": _native_pipeline(),
         "operand_reuse": _operand_reuse_policy(),
-        **({"staging_storage": "vmem"} if storage_policy() == "vmem" else {}),
+        **({"staging_storage": staging_storage} if staging_storage != "dram" else {}),
         "search_limits": limits.record(),
         "program_size_limit_bytes": codegen.current_codegen_options().program_size_limit_bytes,
         **({"execution_instruction_limit": codegen.current_codegen_options().execution_instruction_limit}

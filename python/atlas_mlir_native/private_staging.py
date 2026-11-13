@@ -21,9 +21,9 @@ _TILE_BYTES = 2048
 
 def storage_policy():
     policy = os.environ.get('ATLAS_STAGING_STORAGE', 'dram')
-    if policy not in ('dram', 'vmem'):
+    if policy not in ('dram', 'vmem', 'vmem-inputs'):
         raise NativeCompilationError('unsupported_semantics',
-                                     'ATLAS_STAGING_STORAGE must be dram or vmem')
+                                     'ATLAS_STAGING_STORAGE must be dram, vmem or vmem-inputs')
     return policy
 
 
@@ -81,7 +81,7 @@ def mark_fragment(function, *, source, region, slots, sizes, dram_base):
             op.attributes[_MARKER] = IntegerAttr(address, 64)
 
 
-def promote(source):
+def promote(source, *, readonly_addresses=None):
     """Replace marked full-tile transfers; normal native checks prove placement.
 
     Slots share the original liveness allocation. Public inputs/constants and
@@ -141,6 +141,14 @@ def promote(source):
             for old, new in zip(op.results, replacement.results, strict=True):
                 old.replace_all_uses_with(new)
             block.erase_op(op)
+    if readonly_addresses is not None:
+        from .readonly_staging import cache_readonly
+        record = cache_readonly(function, context, readonly_addresses,
+                                capacity=max(0, PRIVATE_STAGING_TILE_LIMIT - len(addresses)))
+        receipt.update(schema='atlas.private_staging.v2', requested='vmem-inputs', input_cache=record)
+        if record['cached_addresses']:
+            receipt['selected'] = 'vmem-inputs'
+            receipt.pop('reason', None)
     module.verify()
     stream = io.StringIO()
     Printer(stream=stream).print_op(module)
