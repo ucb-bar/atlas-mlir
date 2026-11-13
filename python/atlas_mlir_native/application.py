@@ -1786,6 +1786,8 @@ class AtlasApplicationAdapter:
             "source_workspace_bytes": interface["workspace_bytes"],
             "precision_plan": precision.record(),
             "native_export": record,
+            **({"launches_per_invocation": record["launches_per_invocation"]}
+               if "launches_per_invocation" in record else {}),
         }
         return CompiledCRegion(
             record.get("batch_dispatch", name + "_source_dispatch"),

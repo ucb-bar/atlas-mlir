@@ -10,7 +10,7 @@ from itertools import pairwise
 from pathlib import Path
 
 from merlin.compile.semantic_regions import extract_semantic_region
-from merlin.semantic_compiler.model import pointwise_identity_maps
+from merlin.compile.result_narrowing import split_private_bf16_cast
 
 
 @dataclass(frozen=True)
@@ -26,14 +26,9 @@ def prepare(source, adapter):
     pure = [node for node in source.nodes if node.effect == 'pure']
     if len(pure) != 2:
         raise ValueError('pointwise narrowing needs one computation and one cast')
-    result, cast = pure
-    if (result.type.dtype != 'f32' or cast.op != 'f32_to_bf16'
-            or cast.inputs != (result.id,) or source.outputs != (cast.id,)
-            or cast.type != replace(result.type, dtype='bf16')
-            or dict(cast.attrs) != {'numeric_semantics': 'f32-to-bf16-rne-v1'}
-            or cast.index_maps != pointwise_identity_maps(len(cast.type.shape), 1)):
-        raise ValueError('pointwise narrowing needs a private result and exact dense cast')
-    precision = prepare_source(extract_semantic_region(source, (result.id,)),
+    producer = split_private_bf16_cast(source)
+    result = producer.node(producer.outputs[0])
+    precision = prepare_source(producer,
         allow_math=True, bf16_policy=adapter.bf16_pointwise,
         rne_add_policy=adapter.qualified_rne_add if result.op == 'f32_add' else None,
         exp_policy=adapter.source_exp_policy)
@@ -47,10 +42,6 @@ def prepare(source, adapter):
                 'mul_bf16_zero', 'add_bf16_rne', 'sub_bf16_rne',
                 'divide_bf16_lut', 'rsqrt_bf16_lut'}):
         raise ValueError('pointwise narrowing has no non-NaN result proof for this policy')
-    inputs = tuple(node for node in source.nodes if node.effect in ('input', 'constant'))
-    original_inputs = tuple(node for node in precision.source.nodes if node.effect in ('input', 'constant'))
-    if inputs != original_inputs:
-        raise ValueError('pointwise narrowing changed the original operand boundary')
     return Narrowing(source, precision)
 
 

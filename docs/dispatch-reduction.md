@@ -8,12 +8,49 @@ fork branch.
 
 ## Latest validated result
 
-The unchanged full decoder layer runs in **86,084,811 Rust-model cycles and
-60 dispatches**, versus **226,725,080 cycles and 586 dispatches** for the retained
-baseline: **62.03% fewer cycles and 89.76% fewer dispatches**. Every one of its
+The unchanged full decoder layer runs in **82,772,819 Rust-model cycles and
+59 dispatches**, versus **226,725,080 cycles and 586 dispatches** for the retained
+baseline: **63.49% fewer cycles and 89.93% fewer dispatches**. Every one of its
 131,072 BF16 output words matches the independent selected-arithmetic reference.
 Use the explicit cache, preflight, composition and optimized-pipeline options
 below. Historical sections record intermediate configurations and their limits.
+
+### Private softmax result casts
+
+The opt-in `softmax_narrowing` composition pattern publishes the selected
+softmax's BF16 result directly when the only source consumer is an exact
+f32-to-BF16 RNE cast. It preserves the row-softmax program, input encoders,
+domain checks and original masking/empty-row policy. Merlin commit `61e956e28`
+proves the private dense result boundary and exact cast; Atlas separately
+proves that the selected bounded softmax produces non-NaN BF16 probabilities.
+Exact widening followed by RNE narrowing preserves those encodings.
+
+| Independently checked complete layer | Before | Static budgets + softmax narrowing |
+| --- | ---: | ---: |
+| TinyLlama decoder, batch 1, 64 tokens: cycles | 86,084,811 | 82,772,819 |
+| TinyLlama decoder: dispatches | 60 | 59 |
+| SmolVLA vision block, batch 1, 1,024 tokens: cycles | 1,743,455,544 | 1,421,679,019 |
+| SmolVLA vision block: dispatches | 9,761 | 162 |
+
+Every output word matches the original-FX independent Atlas-arithmetic
+reference: 131,072 BF16 words for TinyLlama and 786,432 for SmolVLA. SmolVLA's
+static quantizers account for 9,593 removed launches and 3,789,993 saved cycles;
+the private softmax cast accounts for six launches and 317,986,532 cycles.
+The softmax itself still executes the same 24 launches and 180,322,848 cycles.
+These measurements use the pinned Rust model with RTL numerics and
+`pack_layout=register_rows`; they are not RTL or silicon measurements.
+
+The SmolVLA fixture is the real first vision encoder block, independently
+calibrated with 32 training images and `atlas_v1_awq_tile_static`, with a held-out
+image for execution. It is not Nicolas's unavailable calibrated bundle or a
+full-policy quality evaluation. Its width-768 attention, LayerNorm, biased
+projections and width-3072 GELU MLP exercise a different architecture from the
+TinyLlama decoder. The integration artifacts retain source, calibration,
+compiler, simulator and reference hashes under `perf-studies/smolvla-dispatch`.
+
+Directed tests cover plain, masked and guarded softmax, multidimensional
+shapes, partial tiles, escaping results, changed rounding, unsupported domains,
+input/output overlap, rejected NaNs and generated C execution through Rust.
 
 ### Large static quantizer applications
 

@@ -60,13 +60,17 @@ def prepare_source_c_package(
 
 
 def render_source_interface(precision, name: str, raw_workspace: int, *, finite_sentinel_bits=None,
-                            score_domain=SOFTMAX_DOMAIN):
+                            score_domain=SOFTMAX_DOMAIN, output_dtype="f32"):
     if dict(precision.request.nodes[0].attrs).get("input_domain") != score_domain:
         raise ValueError("source interface score domain differs from the checked precision plan")
     shape = precision.request.nodes[0].type.shape
     if score_domain == ROWSPAN80_DOMAIN and shape[1] > ROWSPAN80_MAX_COLUMNS:
         raise ValueError("row-relative span80 domain supports at most 1024 columns")
+    if output_dtype not in {"f32", "bf16"}:
+        raise ValueError("unsupported softmax publication dtype")
+    output_type = "float" if output_dtype == "f32" else "uint8_t"
     count = shape[0] * shape[1]
+    output_bytes = count * (4 if output_dtype == "f32" else 2)
     masked = hasattr(precision.source_region, "mask")
     guarded = isinstance(precision.source_region, GuardedMaskedRowSoftmaxSource)
     input_type = "void" if guarded else "float"
@@ -88,7 +92,7 @@ def render_source_interface(precision, name: str, raw_workspace: int, *, finite_
         conversion_call = f"{name}_masked_prepare(inputs[0],inputs[1],ctx->workspace,ctx->workspace+{encoded}u)"
         mask_checks = f"""
   if (!{name}_valid(inputs[1],{mask_bytes}u) ||
-      {name}_overlap(inputs[1],{mask_bytes}u,out,{floats}u) ||
+      {name}_overlap(inputs[1],{mask_bytes}u,out,{output_bytes}u) ||
       {name}_overlap(inputs[1],{mask_bytes}u,ctx->workspace,{scratch}u) ||
       {name}_overlap(inputs[1],{mask_bytes}u,region->workspace,{raw_workspace}u) ||
       {name}_overlap(inputs[1],{mask_bytes}u,ctx,sizeof(*ctx)) ||
@@ -113,11 +117,19 @@ def render_source_interface(precision, name: str, raw_workspace: int, *, finite_
 typedef struct {{ {name}_context *region; uint8_t *workspace; }} {name}_source_context;
 /* Bind separate conversion scratch; both workspaces survive a timed-out call. */
 {name}_status {name}_source_bind({name}_source_context *, {name}_context *, void *, size_t);
-/* Dense source f32 scores and f32 result; recorded BF16 precision change inside. */
+/* Dense source f32 scores and {output_dtype} result; recorded BF16 precision change inside. */
 {name}_status {name}_source_run({name}_source_context *, const {input_type} *const *inputs,
-                               float *output, atlas_host_result *device_result);
+                               {output_type} *output, atlas_host_result *device_result);
 int {name}_source_dispatch(void *, const void *const *inputs, void *const *outputs);
 """
+    publication = (f"  __builtin_memcpy(out,ctx->workspace+{output_offset}u,{output_bytes}u);"
+                   if output_dtype == "bf16" else f"""
+  for (size_t i=0; i<{count}u; ++i) {{
+    uint32_t bits=((uint32_t)ctx->workspace[{output_offset}u+i*2u] |
+                   ((uint32_t)ctx->workspace[{output_offset}u+i*2u+1u]<<8))<<16;
+    __builtin_memcpy(out+i,&bits,4u);
+  }}
+""")
     source = (
         (helpers if masked else render_f32_operand_c(conversion, name + "_encode_source"))
         + f"""
@@ -136,33 +148,29 @@ int {name}_source_dispatch(void *, const void *const *inputs, void *const *outpu
   return {upper}_OK;
 }}
 {name}_status {name}_source_run({name}_source_context *ctx, const {input_type} *const *inputs,
-                               float *out, atlas_host_result *device) {{
+                               {output_type} *out, atlas_host_result *device) {{
   if (device) *device=ATLAS_HOST_INVALID;
   if (!ctx || !ctx->region || !ctx->region->host || !ctx->workspace || !inputs)
     return {upper}_INVALID;
   {name}_context *region=ctx->region;
   if (region->host->active) {{ if (device) *device=ATLAS_HOST_BUSY; return {upper}_DEVICE_ERROR; }}
-  if (!{name}_valid(inputs[0],{floats}u) || !{name}_valid(out,{floats}u) ||
-      {name}_overlap(inputs[0],{floats}u,out,{floats}u) ||
+  if (!{name}_valid(inputs[0],{floats}u) || !{name}_valid(out,{output_bytes}u) ||
+      {name}_overlap(inputs[0],{floats}u,out,{output_bytes}u) ||
       {name}_overlap(inputs[0],{floats}u,ctx->workspace,{scratch}u) ||
-      {name}_overlap(out,{floats}u,ctx->workspace,{scratch}u) ||
+      {name}_overlap(out,{output_bytes}u,ctx->workspace,{scratch}u) ||
       {name}_overlap(inputs[0],{floats}u,region->workspace,{raw_workspace}u) ||
-      {name}_overlap(out,{floats}u,region->workspace,{raw_workspace}u) ||
+      {name}_overlap(out,{output_bytes}u,region->workspace,{raw_workspace}u) ||
       {name}_overlap(inputs[0],{floats}u,ctx,sizeof(*ctx)) ||
-      {name}_overlap(out,{floats}u,ctx,sizeof(*ctx)) ||
+      {name}_overlap(out,{output_bytes}u,ctx,sizeof(*ctx)) ||
       {name}_overlap(inputs[0],{floats}u,region,sizeof(*region)) ||
-      {name}_overlap(out,{floats}u,region,sizeof(*region)) ||
+      {name}_overlap(out,{output_bytes}u,region,sizeof(*region)) ||
       {name}_overlap(inputs[0],{floats}u,region->host,sizeof(*region->host)) ||
-      {name}_overlap(out,{floats}u,region->host,sizeof(*region->host))) return {upper}_INVALID;
+      {name}_overlap(out,{output_bytes}u,region->host,sizeof(*region->host))) return {upper}_INVALID;
 {mask_checks}  if ({conversion_call}) return {upper}_INPUT_DOMAIN;
   {name}_status status={name}_run(region,ctx->workspace{",ctx->workspace+" + str(encoded) + "u" if masked else ""},
                                 ctx->workspace+{output_offset}u,device);
   if (status!={upper}_OK) return status;
-  for (size_t i=0; i<{count}u; ++i) {{
-    uint32_t bits=((uint32_t)ctx->workspace[{output_offset}u+i*2u] |
-                   ((uint32_t)ctx->workspace[{output_offset}u+i*2u+1u]<<8))<<16;
-    __builtin_memcpy(out+i,&bits,4u);
-  }}
+{publication}
   return {upper}_OK;
 }}
 int {name}_source_dispatch(void *ctx, const void *const *inputs, void *const *outputs) {{
@@ -186,7 +194,7 @@ int {name}_source_dispatch(void *ctx, const void *const *inputs, void *const *ou
         "workspace_bytes": scratch,
         "input_dtype": "mixed" if guarded else "f32",
         **({"input_dtypes": ["f32", "i1"], "mask_semantics": "true-excludes-score"} if guarded else {}),
-        "output_dtype": "f32",
+        "output_dtype": output_dtype,
         "precision_plan": precision.record(),
         **({"additive_mask": {"zero_keeps": True, "finite_exclusion_bits": finite_sentinel_bits,
                               "scores": "finite absolute value at most 128" if score_domain == ROWSPAN80_DOMAIN else "finite absolute value at most 32",
@@ -205,11 +213,11 @@ int {name}_source_dispatch(void *ctx, const void *const *inputs, void *const *ou
 This package also contains the source-bound interface. After binding the raw
 region, call `{name}_source_bind` with separate
 `{upper}_SOURCE_WORKSPACE_BYTES` bytes. `{name}_source_run` accepts one dense f32
-score tensor through its input-pointer array and returns dense f32 probabilities.
+score tensor through its input-pointer array and returns dense {output_dtype} probabilities.
 `{name}_source_dispatch` exposes the same call to Merlin's dispatch program.
 The input is rounded to BF16 RNE, then checked against the recorded score-code
 domain. Values outside that domain are rejected rather than clipped to scores.
-The device uses the selected row-softmax policy; output BF16 is widened exactly.
+The device uses the selected row-softmax policy; output BF16 is {"widened exactly" if output_dtype == "f32" else "published unchanged"}.
 {mask_note}
 Keep both contexts and workspaces alive through completion, including timeouts.
 The output stays unchanged on failure. This precision change has no model-quality
