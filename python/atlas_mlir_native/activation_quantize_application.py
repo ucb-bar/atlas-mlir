@@ -21,12 +21,20 @@ from .binding import TARGET_IDENTITY, TILE_BYTES, dram_slots
 from .limits import functional_instruction_limit
 
 STATIC_CHUNK_ELEMENTS = 2048
-# A static body has no amax or per-row exponent packing. Even the worst
-# 32-lane prefix path costs at most 50 instructions/tile plus 128 fixed:
-# 50 * (2**19 / 32) + 128 = 819,328, below the default 1M bound. Unchanged
-# npu_model measured 819,249 at count 524,256 (the largest gcd32 extent).
-# Larger inputs or smaller I/O windows retain bounded chunk dispatch.
-STATIC_WHOLE_BODY_MAX_ELEMENTS = 1 << 19
+# A static body has no amax or exceptional-lane scan. Use a conservative
+# envelope for the smallest supported (32-lane) tile, then independently prove
+# the actual generated machine bound during compilation and C export.
+STATIC_TILE_INSTRUCTIONS = 50
+STATIC_FIXED_INSTRUCTIONS = 128
+
+
+def _static_body_capacity(instruction_limit):
+    instruction_elements = max(0, (instruction_limit - STATIC_FIXED_INSTRUCTIONS)
+                               // STATIC_TILE_INSTRUCTIONS) * 32
+    memory_elements = max(0, (dram_slots() * TILE_BYTES - 32) // 3)
+    return min(instruction_elements, memory_elements) // 32 * 32
+
+
 # Legacy measured scheduling estimate retained to preserve chunking and images.
 # The current exceptional-lane loop has 25 words, so the older 119,525/group
 # measurement is not a worst-case proof. Admission uses the replayed machine
@@ -80,7 +88,8 @@ class QuantizerSchedule:
                     input_bytes=self.count * self.width, code_bytes=self.count,
                     exponent_bytes=prod(self.exponents.type.shape) * 4,
                     static_chunk_elements=STATIC_CHUNK_ELEMENTS,
-                    static_whole_body_max_elements=STATIC_WHOLE_BODY_MAX_ELEMENTS,
+                    static_whole_body_max_elements=_static_body_capacity(self.instruction_limit),
+                    static_instruction_envelope="50 * ceil(elements / 32) + 128",
                     max_dynamic_group_elements=self.max_dynamic_group_elements,
                     dynamic_groups_per_launch=self.dynamic_groups_per_launch,
                     dynamic_group_worst_instructions=DYNAMIC_GROUP_WORST_INSTRUCTIONS,
@@ -133,9 +142,15 @@ def prepare_plan(source, *, limits=None):
         raise ValueError("scheduled quantizer extent exceeds bounded addressing")
     spans = []
     if mode == "static":
-        chunk = (count if x.type.dtype == 'bf16' and count % 32 == 0
-                 and count <= STATIC_WHOLE_BODY_MAX_ELEMENTS
-                 and count * 3 + 32 <= dram_slots() * TILE_BYTES else STATIC_CHUNK_ELEMENTS)
+        chunk = STATIC_CHUNK_ELEMENTS
+        if x.type.dtype == 'bf16' and count % 32 == 0:
+            capacity = _static_body_capacity(instruction_limit)
+            if capacity < 32:
+                raise ValueError("selected execution budget or I/O window cannot fit a static quantizer tile")
+            # A large tensor uses bounded counted bodies, not thousands of
+            # tiny fallback launches. Full-tile chunks also avoid making every
+            # iteration use a prefix tile merely because the final tail is short.
+            chunk = count if count <= capacity else (capacity // 1024 * 1024 or capacity)
         for first in range(0, count, chunk):
             length = min(chunk, count - first)
             spans.append((first, length, 0, 1, (length,)))

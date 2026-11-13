@@ -15,6 +15,22 @@ baseline: **62.03% fewer cycles and 89.76% fewer dispatches**. Every one of its
 Use the explicit cache, preflight, composition and optimized-pipeline options
 below. Historical sections record intermediate configurations and their limits.
 
+### Large static quantizer applications
+
+Aligned BF16 static quantizers now size counted bodies from the selected
+execution-instruction budget and I/O window. The old 524,288-element cutoff
+sent larger tensors through one launch per 2,048 elements, regardless of those
+budgets. Actual instruction bounds, instruction-image capacity, native checks
+and the final partial-body offsets remain mandatory.
+
+In the independently checked SmolVLA vision-layer run (batch 1, 1,024 tokens,
+768 channels), static quantization drops from 9,600 launches to seven.
+Including the unchanged three dynamic quantizers, quantization takes
+57,133,599 cycles instead of 60,923,592. These are per-quantizer measurements
+from the full layer; the combined layer also enables softmax result narrowing.
+Tests cover every BF16 encoding, large tensors, partial bodies, small I/O
+windows and instruction-budget refusal using the generated C and Rust model.
+
 ### Operand permutation folded into tile packing
 
 The opt-in `quantized_operand_permutation` composition pattern folds one private
