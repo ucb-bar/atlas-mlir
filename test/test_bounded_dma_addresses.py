@@ -18,6 +18,25 @@ def loop_source(count):
     return SOURCE.replace("%count = arith.constant 3", f"%count = arith.constant {count}")
 
 
+def scaled_index_source():
+    """Derive both aligned pointers from one guarded index, without pointer phis."""
+    source = SOURCE.replace(
+        '%s, %zero, %a, %w, %initial : !atlas.virtual_state, i32, i32, i32, !atlas.virtual_bf16',
+        '%s, %zero, %initial : !atlas.virtual_state, i32, !atlas.virtual_bf16')
+    source = source.replace('%k: i32, %ap: i32, %wp: i32,', '%k: i32,')
+    source = source.replace('  %bytes = arith.constant 1024 : i32',
+        '  %bits = arith.constant 10 : i32\n'
+        '  %offset = arith.shli %k, %bits : i32\n'
+        '  %ap = arith.addi %a, %offset : i32\n'
+        '  %wp = arith.addi %w, %offset : i32\n'
+        '  %bytes = arith.constant 1024 : i32')
+    source = source.replace('  %an = arith.addi %ap, %bytes : i32\n', '')
+    source = source.replace('  %wn = arith.addi %wp, %bytes : i32\n', '')
+    return source.replace(
+        '%s6, %kn, %an, %wn, %tile : !atlas.virtual_state, i32, i32, i32, !atlas.virtual_bf16',
+        '%s6, %kn, %tile : !atlas.virtual_state, i32, !atlas.virtual_bf16')
+
+
 def pointer_loop_source(*, start=0x90000000, distance=3072, step=1024):
     """Use the advancing A address itself as the unsigned loop guard."""
     def signed(value):
@@ -68,6 +87,87 @@ def loop_inputs(count):
 
 
 class BoundedDMAAddressTest(unittest.TestCase):
+    def test_scheduled_address_preparation_fits_without_spilling_proof_values(self):
+        source = scaled_index_source()
+        slots, loads = [], []
+        state = 'bs'
+        for index in range(32):
+            slots.append(f'  %slot{index} = "atlas.virtual_slot"() '
+                         '{kind = "fp8", words = 256 : i32, slot_word = -1 : i32, purpose = "scratch"}'
+                         ' : () -> !atlas.virtual_spill')
+            loads.extend((
+                f'  %offset{index} = arith.constant {index * 1024} : i32',
+                f'  %address{index} = arith.addi %ap, %offset{index} : i32',
+                f'  %loaded{index}, %tile{index} = "atlas.virtual_dma_load_fp8"(%{state}, %address{index}, %bytes)'
+                ' : (!atlas.virtual_state, i32, i32) -> (!atlas.virtual_state, !atlas.virtual_fp8)',
+                f'  %saved{index} = "atlas.virtual_save"(%loaded{index}, %slot{index}, %tile{index})'
+                ' : (!atlas.virtual_state, !atlas.virtual_spill, !atlas.virtual_fp8) -> !atlas.virtual_state'))
+            state = f'saved{index}'
+        source = source.replace('  %zero =', '\n'.join(slots) + '\n  %zero =')
+        source = source.replace('  %s1, %x =', '\n'.join(loads) + '\n  %s1, %x =')
+        source = source.replace('"atlas.virtual_dma_load_fp8"(%bs, %ap, %bytes)',
+                                f'"atlas.virtual_dma_load_fp8"(%{state}, %ap, %bytes)')
+        machine = run('atlas-opt', source, '--atlas-compile')
+        self.assertEqual(machine.returncode, 0, machine.stderr[:2000])
+        checked = run('atlas-opt', machine.stdout,
+                      '--verify-atlas-generated-schedule', '--verify-atlas-timing')
+        self.assertEqual(checked.returncode, 0, checked.stderr[:2000])
+        # Scheduling pressure is still bounded by the selected rewrite budget.
+        bounded = run('atlas-opt', source, '--schedule-atlas-virtual',
+                      '--spill-atlas-virtual=max-spills=1')
+        self.assertNotEqual(bounded.returncode, 0)
+        self.assertIn('spill rewrite work limit', bounded.stderr)
+
+    def test_aligned_scaled_index_survives_physical_replay(self):
+        for bits, span in ((5, 1088), (10, 3072), (11, 5120)):
+            with self.subTest(bits=bits):
+                source = scaled_index_source().replace(
+                    '%bits = arith.constant 10', f'%bits = arith.constant {bits}')
+                machine = run('atlas-opt', source, *PIPELINE)
+                self.assertEqual(machine.returncode, 0, machine.stderr[:2000])
+                self.assertIn(f'dram_span = {span} : i32', machine.stdout)
+                checked = run('atlas-opt', machine.stdout,
+                              '--verify-atlas-generated-schedule', '--verify-atlas-timing')
+                self.assertEqual(checked.returncode, 0, checked.stderr[:2000])
+
+    def test_scaled_index_rejects_unaligned_interiors_overflow_and_missing_guard(self):
+        source = scaled_index_source()
+        mutations = [
+            # The endpoints (0 and 32) are aligned; the interior value 16 is not.
+            ('%bits = arith.constant 10', '%bits = arith.constant 4'),
+            ('%bits = arith.constant 10', '%bits = arith.constant 31'),
+            ('%bits = arith.constant 10', '%bits = arith.constant 32'),
+            ('%a = arith.constant -1879048192', '%a = arith.constant -1024'),
+            ('%a = arith.constant -1879048192', '%a = arith.constant -1879048191'),
+            ('cmpi ult', 'cmpi ule'),
+            ('%count = arith.constant 3', '%count = arith.constant 0'),
+            ('%offset = arith.shli %k, %bits : i32',
+             '%offset = arith.shli %k, %bits overflow<nsw> : i32'),
+            ('^body(%ls : !atlas.virtual_state), ^exit(%ls, %acc : !atlas.virtual_state, !atlas.virtual_bf16)',
+             '^exit(%ls, %acc : !atlas.virtual_state, !atlas.virtual_bf16), ^body(%ls : !atlas.virtual_state)'),
+        ]
+        for old, new in mutations:
+            with self.subTest(new=new):
+                self.assertIn(old, source)
+                checked = run('atlas-opt', source.replace(old, new), '--verify-atlas-virtual-stream')
+                self.assertNotEqual(checked.returncode, 0)
+                self.assertEqual(checked.stdout, '')
+
+    def test_scaled_index_physical_replay_rejects_forged_source_and_bounds(self):
+        machine = run('atlas-opt', scaled_index_source(), *PIPELINE)
+        self.assertEqual(machine.returncode, 0, machine.stderr[:2000])
+        for old, new in (('constant = 10 : i32', 'constant = 4 : i32'),
+                         ('constant = 10 : i32', 'constant = 31 : i32'),
+                         ('constant = 3 : i32', 'constant = 4 : i32'),
+                         ('def = "arith.shli"', 'def = "arith.addi"'),
+                         ('dram_span = 3072 : i32', 'dram_span = 4096 : i32')):
+            with self.subTest(field=new):
+                self.assertIn(old, machine.stdout)
+                checked = run('atlas-opt', machine.stdout.replace(old, new, 1),
+                              '--verify-atlas-generated-schedule')
+                self.assertNotEqual(checked.returncode, 0)
+                self.assertEqual(checked.stdout, '')
+
     def test_pointer_guard_uses_ceil_trip_count_without_a_separate_counter(self):
         for distance, step, span in ((1, 1024, 1024), (2049, 1024, 3072),
                                      (3072, 1024, 3072), (3104, 1536, 4096)):

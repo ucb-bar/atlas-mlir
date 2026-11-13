@@ -229,7 +229,7 @@ static LogicalResult verifyVirtualDMATransfer(Operation *op, Value dramByte,
   if (!address || !size)
     return op->emitOpError(
         "DRAM address and byte length must be proven by i32 arith.constant/arith.addi expressions "
-        "or a guarded nonwrapping address induction with a constant byte length");
+        "or a guarded nonwrapping address induction/aligned scaled index with a constant byte length");
   if (!*size || *size > tileBytes || *size % 32)
     return op->emitOpError("byte length must be a positive 32-byte multiple no larger than tile size ")
            << tileBytes;

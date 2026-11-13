@@ -5,6 +5,8 @@ those rows. Completed BF16 partial sums live in the existing output buffer betwe
 panels. Final tiles stay on chip through restoration after all K terms; host publication checks
 one sticky status before exposing any result.
 """
+from math import prod
+
 from .exponent_restoration import Emitter, STATE, BF16, SLOT
 
 FP8 = '!atlas.virtual_fp8'
@@ -28,22 +30,23 @@ def inline_readout_admitted(m_tiles, k):
             and m_tiles * ((k + 31) // 32) <= MAX_INLINE_READOUT_PRODUCTS)
 
 
-def admitted(plan, *, m_tiles=2, min_k_tiles=MIN_K_TILES):
-    from math import prod
+def admitted(plan, *, m_tiles=2, min_k_tiles=MIN_K_TILES, allow_batches=False):
     mc, nc, kc = ((v+31)//32 for v in (plan.m, plan.n, plan.k))
     # This checks geometry, not profitability. The original paired policy
     # keeps its K threshold; wider panels are ranked separately by traffic.
     # Native sizing and measured timing remain separate gates.
     return (type(m_tiles) is int and m_tiles in (2, 4, 8, 16, 32)
-            and prod(plan.batch_shape) == 1 and mc >= m_tiles and mc % m_tiles == 0 and nc >= 2
+            and (allow_batches or prod(plan.batch_shape) == 1)
+            and mc >= m_tiles and mc % m_tiles == 0 and nc >= 2
             and min_k_tiles <= kc <= MAX_K_TILES)
 
 
-def virtual_source(plan, layout, restoration, *, geometry=None):
+def virtual_source(plan, layout, restoration, *, geometry=None, allow_batches=False):
     """Emit typed slots/operations; native allocation and timing remain mandatory."""
     m_tiles, k_tiles = (2, PANEL_K_TILES) if geometry is None else geometry
-    if not admitted(plan, m_tiles=m_tiles, min_k_tiles=MIN_K_TILES if geometry is None else 1):
-        raise ValueError('operand panels require one batch, divisible M tiles and bounded K')
+    if not admitted(plan, m_tiles=m_tiles, min_k_tiles=MIN_K_TILES if geometry is None else 1,
+                    allow_batches=allow_batches):
+        raise ValueError('operand panels require admitted batches, divisible M tiles and bounded K')
     if type(k_tiles) is not int or not 1 <= k_tiles <= PANEL_K_TILES:
         raise ValueError('K panels require between 1 and 64 tiles')
     if (m_tiles + 1) * k_tiles > 192:
@@ -53,6 +56,8 @@ def virtual_source(plan, layout, restoration, *, geometry=None):
     output = layout['output_addresses'][0]
     pages = restoration.pages()
     inline_readout = inline_readout_admitted(m_tiles, plan.k)
+    if prod(plan.batch_shape) > 1 and (not inline_readout or kc > k_tiles):
+        raise ValueError('batched panels require a complete cached K reduction and inline readout')
     e = Emitter('panel')
     e.lines = ['module {', f'  func.func @looped_matmul() -> {STATE} attributes {{'
         f'atlas.retain_bf16_accumulators, atlas.input_dram_base = {a} : i64, '
@@ -98,12 +103,53 @@ def virtual_source(plan, layout, restoration, *, geometry=None):
     def store(value, address):
         e.effect('dma_store_bf16',[value,address,e.const(2048)],[BF16,'i32','i32'])
 
-    initial = [e.const(v) for v in (0,a,output,pages[0][0])]
-    pair_types = [STATE,'i32','i32','i32','i32']
-    branch('pair_header',['restore_start',*initial],pair_types)
-    block('pair_header',['pair_s','pair','pair_a','pair_y','pair_lpage'],pair_types)
+    batches = prod(plan.batch_shape)
+    shared_weight = len(plan.source.node(plan.operand_ids[1]).type.shape) == 2
+    batch_strides = dict(batch_a=mc*kc*1024, batch_y=mc*nc*2048,
+                         batch_w=0 if shared_weight else nc*kc*1024,
+                         batch_lpage=pages[0][2], batch_rpage=pages[1][2])
+
+    def origin(name, address):
+        # Rematerialize the aligned offset at each use. Only one batch index
+        # stays live through nested restoration, rather than five pointers.
+        result = e.const(address)
+        stride = batch_strides[name] if batches > 1 else 0
+        assert stride % 32 == 0
+        for bit in range(5, stride.bit_length()):
+            if stride & (1 << bit):
+                term = e.binary('shli', 'panel_batch', e.const(bit))
+                result = e.binary('addi', result, term)
+        return result
+
+    if batches > 1:
+        batch_types = [STATE, 'i32']
+        branch('panel_batch_header', ['restore_start', e.const(0)], batch_types)
+        block('panel_batch_header', ['panel_bs', 'panel_batch'], batch_types)
+        more = e.cmp('ult', 'panel_batch', e.const(batches))
+        e.emit(f'cf.cond_br %{more}, ^panel_batch_body(%panel_bs : {STATE}), ^done(%panel_bs : {STATE})')
+        block('panel_batch_body', ['panel_body_s'], [STATE])
+        page_origins = (origin('batch_lpage', pages[0][0]), origin('batch_rpage', pages[1][0]))
+        prefetch, e.state = restoration.batch_entry(e.state, page_origins)
+        e.lines.extend(prefetch)
+        initial = [e.const(0), origin('batch_a', a), origin('batch_y', output)]
+        if pages[0][1]:
+            initial.append(origin('batch_lpage', pages[0][0]))
+        pair_start, pair_end = e.state, 'panel_batch_next'
+    else:
+        initial = [e.const(v) for v in (0,a,output,pages[0][0])]
+        pair_start, pair_end = 'restore_start', 'done'
+    # Do not carry invariant scale-page pointers around nested batch loops.
+    # Their origins are rematerialized at use, and unused phis still consume
+    # scarce scalar registers during allocation.
+    carry_left_page = batches == 1 or bool(pages[0][1])
+    pair_names = ['pair_s', 'pair', 'pair_a', 'pair_y']
+    if carry_left_page:
+        pair_names.append('pair_lpage')
+    pair_types = [STATE] + ['i32'] * (len(pair_names) - 1)
+    branch('pair_header',[pair_start,*initial],pair_types)
+    block('pair_header',pair_names,pair_types)
     more = e.cmp('ult','pair',e.const(mc//m_tiles))
-    e.emit(f'cf.cond_br %{more}, ^pair_body(%pair_s : {STATE}), ^done(%pair_s : {STATE})')
+    e.emit(f'cf.cond_br %{more}, ^pair_body(%pair_s : {STATE}), ^{pair_end}(%pair_s : {STATE})')
     block('pair_body',['pair_body_s'],[STATE])
 
     # The panel count is statically capped. Each N traversal is counted, so
@@ -116,11 +162,14 @@ def virtual_source(plan, layout, restoration, *, geometry=None):
                 save(f'panel_a_{row}_{tile}',load(address,FP8),FP8)
         names = [f'p{phase}_s',f'p{phase}_n',f'p{phase}_w',f'p{phase}_y']
         types = [STATE,'i32','i32','i32']
-        initial = [e.state,e.const(0),e.const(w+first*1024),'pair_y']
-        if inline_readout:
+        initial = [e.state, e.const(0)]
+        weight_base = origin('batch_w', w+first*1024)
+        initial.extend((weight_base, 'pair_y'))
+        carry_right_page = inline_readout and (batches == 1 or bool(pages[1][1]))
+        if carry_right_page:
             names.append(f'p{phase}_rpage')
             types.append('i32')
-            initial.append(e.const(pages[1][0]))
+            initial.append(origin('batch_rpage', pages[1][0]))
         branch(f'p{phase}_header',initial,types)
         block(f'p{phase}_header',names,types)
         more = e.cmp('ult',names[1],e.const(nc))
@@ -139,8 +188,9 @@ def virtual_source(plan, layout, restoration, *, geometry=None):
                 store(partial,address)
             else:
                 logical_row = offset(e.binary('shli', 'pair', e.const(m_tiles.bit_length()-1)), row)
-                left_page = offset('pair_lpage', row*pages[0][1]) if pages[0][1] else e.const(pages[0][0])
-                right_page = names[4] if pages[1][1] else e.const(pages[1][0])
+                left_page = (offset('pair_lpage', row*pages[0][1]) if pages[0][1] else
+                             origin('batch_lpage', pages[0][0]))
+                right_page = names[4] if pages[1][1] else origin('batch_rpage', pages[1][0])
                 # Restore only after the last ordered K term. Keep this tile
                 # on chip through scaling/epilogue and publish it once; earlier
                 # K panels still use the output buffer for rounded partials.
@@ -152,7 +202,7 @@ def virtual_source(plan, layout, restoration, *, geometry=None):
                     prefix=f'panel_readout_{row}'))
                 e.state = stored
         next_values = [e.state,offset(names[1],1),offset(names[2],kc*1024),offset(names[3],2048)]
-        if inline_readout:
+        if carry_right_page:
             next_values.append(offset(names[4],pages[1][1]))
         branch(f'p{phase}_header',next_values,types)
         block(f'p{phase}_done',[f'p{phase}_done_s'],[STATE])
@@ -172,7 +222,9 @@ def virtual_source(plan, layout, restoration, *, geometry=None):
         pair_m = e.binary('shli','pair',e.const(m_tiles.bit_length()-1))
         e.emit(f'%m = arith.addi %{pair_m}, %rm : i32')
         rn_types = [STATE,'i32','i32','i32']
-        branch('restore_n_header',[e.state,e.const(0),'rm_y',e.const(pages[1][0])],rn_types)
+        initial = [e.state, e.const(0), 'rm_y']
+        initial.append(origin('batch_rpage', pages[1][0]))
+        branch('restore_n_header', initial, rn_types)
         block('restore_n_header',['rn_s','n','ytile','restore_rpage'],rn_types)
         more = e.cmp('ult','n',e.const(nc))
         e.emit(f'cf.cond_br %{more}, ^restore_n_body(%rn_s : {STATE}), ^restore_m_next(%rn_s : {STATE})')
@@ -181,8 +233,9 @@ def virtual_source(plan, layout, restoration, *, geometry=None):
         branch('store',[e.state,value],[STATE,BF16])
         block('store',['ss','result'],[STATE,BF16])
         e.emit('%out_bytes = arith.constant 2048 : i32')
-        exponent_addresses = [name if page[1] else e.const(page[0])
-                              for name,page in zip(('restore_lpage','restore_rpage'),pages,strict=True)]
+        exponent_addresses = [name if page[1] else origin(batch_name, page[0])
+                              for name,batch_name,page in zip(('restore_lpage','restore_rpage'),
+                                  ('batch_lpage','batch_rpage'),pages,strict=True)]
         e.lines.extend(restoration.tile(output_address='ytile',exponent_addresses=exponent_addresses))
         e.state = 'stored'
         branch('restore_n_header',[e.state,offset('n',1),offset('ytile',2048),
@@ -191,8 +244,14 @@ def virtual_source(plan, layout, restoration, *, geometry=None):
         branch('restore_m_header',[e.state,offset('rm',1),offset('rm_y',nc*2048),
                                    offset('restore_lpage',pages[0][1])],rm_types)
     block('pair_next',['pair_next_s'],[STATE])
-    branch('pair_header',[e.state,offset('pair',1),offset('pair_a',m_tiles*kc*1024),
-                          offset('pair_y',m_tiles*nc*2048),offset('pair_lpage',m_tiles*pages[0][1])],pair_types)
+    next_pair = [e.state, offset('pair',1), offset('pair_a',m_tiles*kc*1024),
+                 offset('pair_y',m_tiles*nc*2048)]
+    if carry_left_page:
+        next_pair.append(offset('pair_lpage',m_tiles*pages[0][1]))
+    branch('pair_header', next_pair, pair_types)
+    if batches > 1:
+        block('panel_batch_next', ['panel_next_s'], [STATE])
+        branch('panel_batch_header', [e.state, offset('panel_batch', 1)], batch_types)
     block('done',['final'],[STATE])
     e.lines.extend(restoration.finish('final'))
     e.lines += ['  }','}']

@@ -151,3 +151,6 @@ private slices and broadcasts into checked input packing without changing arithm
 
 The [exponent page cache guide](docs/exponent-page-cache.md) describes reusing
 invariant quantization scales in VMEM across output tiles.
+
+The [batched operand panel guide](docs/batched-operand-panels.md) covers independent
+batch reuse, bounded DMA address generation and measured complete-layer results.

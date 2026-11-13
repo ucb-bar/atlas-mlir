@@ -11,6 +11,7 @@
 #include "mlir/IR/RegionGraphTraits.h"
 #include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
 #include "mlir/Pass/Pass.h"
+#include "mlir/Interfaces/SideEffectInterfaces.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/PostOrderIterator.h"
@@ -569,6 +570,45 @@ void orderBlocks(func::FuncOp function) {
     block->moveBefore(&function.getBody(), function.getBody().end());
 }
 
+// A proven DMA address cannot be saved to a scalar slot: doing so hides its
+// source recurrence. A pure, single-use address expression can instead move
+// next to its consumer, together with its single-use scalar operands. This
+// recovers pressure from early address preparation without weakening proofs
+// or duplicating work, and never moves an operation across a block boundary.
+bool sinkAddressExpression(func::FuncOp function,
+                           const llvm::DenseSet<Value> &protectedValues,
+                           const llvm::DenseSet<Value> &peakValues,
+                           llvm::DenseSet<Operation *> &sunk) {
+  for (Block &block : function.getBody()) {
+    for (Operation &op : block) {
+      if (sunk.contains(&op) || op.getNumResults() != 1 || !isPure(&op) ||
+          op.getNumRegions()) continue;
+      Value value = op.getResult(0);
+      if (!protectedValues.contains(value) || !peakValues.contains(value) ||
+          !value.hasOneUse()) continue;
+      Operation *consumer = value.use_begin()->getOwner();
+      if (consumer->getBlock() != &block || op.getNextNode() == consumer) continue;
+      SmallVector<Operation *> expressions{&op};
+      for (unsigned i = 0; i < expressions.size(); ++i)
+        for (Value operand : expressions[i]->getOperands()) {
+          Operation *producer = operand.getDefiningOp();
+          if (producer && producer->getBlock() == &block &&
+              producer->getNumResults() == 1 && operand.hasOneUse() &&
+              (operand.getType().isInteger(32) || operand.getType().isInteger(1)) &&
+              !producer->getNumRegions() && isPure(producer))
+            expressions.push_back(producer);
+        }
+      for (Operation *expression : llvm::reverse(expressions))
+        expression->moveBefore(consumer);
+      // Independent expressions can share a consumer. Never move them back
+      // and forth while pressure elsewhere requires an ordinary spill.
+      sunk.insert(&op);
+      return true;
+    }
+  }
+  return false;
+}
+
 struct SpillAtlasVirtualPass
     : PassWrapper<SpillAtlasVirtualPass, OperationPass<ModuleOp>> {
   MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(SpillAtlasVirtualPass)
@@ -609,6 +649,7 @@ struct SpillAtlasVirtualPass
         failed(verifyAtlasVirtualModule(module)))
       return signalPassFailure();
     llvm::DenseSet<Value> saved;
+    llvm::DenseSet<Operation *> sunkAddresses;
     // FP8 has no register-to-register edge move in this selected lowering.
     // Transport its block arguments through checked raw slots instead.
     unsigned count = mxuSpills + spillBlockArguments(function, RegisterKind::FP8);
@@ -688,6 +729,11 @@ struct SpillAtlasVirtualPass
           return signalPassFailure();
         }
         orderBlocks(function);
+        continue;
+      }
+      if (scalar && sinkAddressExpression(function, protectedScalars, peakValues,
+                                         sunkAddresses)) {
+        ++count;
         continue;
       }
       if (!count)

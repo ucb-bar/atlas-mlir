@@ -106,7 +106,8 @@ def virtual_source(plan, layout):
         physical = shared_weight_panel_plan(plan)
         restoration = Restoration(physical, layout, scalar_fallback=bool(fallback_tiles(plan)))
         geometry = (schedule['operand_reuse_panel_m_tiles'], schedule['operand_reuse_panel_k_tiles'])
-        return rematerialize_scalar_constants(panel_source(physical, layout, restoration, geometry=geometry))
+        return rematerialize_scalar_constants(panel_source(physical, layout, restoration, geometry=geometry,
+            allow_batches=schedule.get('operand_reuse_requested') == 'batch-panel-cache'))
     virtual = _virtual(Geometry(), tuple(layout['input_addresses'][:2]), layout['output_addresses'][0],
                        unit=1, k_unroll=8 if prod(plan.batch_shape) == 1 else 1,
                        batch_count=prod(plan.batch_shape),
@@ -115,7 +116,7 @@ def virtual_source(plan, layout):
                        output_window_bytes=layout['output_bytes']+layout['status_bytes'],
                        cache_a=schedule.get('operand_reuse', 'ordered') in ('row-cache', 'prefix-cache'),
                        cache_a_tiles=schedule.get('operand_reuse_cached_tiles'),
-                       wide_cache_a=(schedule.get('operand_reuse_requested') in ('wide-cache', 'paired-cache', 'panel-cache')
+                       wide_cache_a=(schedule.get('operand_reuse_requested') in ('wide-cache', 'paired-cache', 'panel-cache', 'batch-panel-cache')
                                      and 'operand_reuse_cached_tiles' in schedule))
     return rematerialize_scalar_constants(virtual)
 

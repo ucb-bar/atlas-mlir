@@ -7,7 +7,7 @@ from dataclasses import replace
 from math import prod
 
 from .exponent_restoration import exponent_geometry
-from .quantized_panel_reuse import admitted
+from .quantized_panel_reuse import admitted, inline_readout_admitted
 
 PANEL_TILE_BUDGET = 192  # 1 KiB FP8 tiles; retain 48 KiB for other allocations.
 
@@ -28,19 +28,28 @@ def shared_weight_panel_plan(plan):
     return replace(plan, m=batches * plan.m, batch_shape=())
 
 
-def panel_geometry(plan):
+def panel_geometry(plan, *, allow_batches=False):
     """Return profitable M/K panel counts, or retain the existing row cache."""
     plan = shared_weight_panel_plan(plan)
     mc, nc, kc = ((value + 31) // 32 for value in (plan.m, plan.n, plan.k))
     candidates = []
     for rows in (2, 4, 8, 16, 32):
-        if not admitted(plan, m_tiles=rows, min_k_tiles=1):
+        if not admitted(plan, m_tiles=rows, min_k_tiles=1, allow_batches=allow_batches):
             continue
         columns = min(64, PANEL_TILE_BUDGET // (rows + 1))
+        # Bound the nested batch body to one resident K panel with immediate
+        # final restoration. Longer reductions retain the existing row cache.
+        if (prod(plan.batch_shape) > 1 and
+                (kc > columns or not inline_readout_admitted(rows, plan.k))):
+            continue
         phases = (kc + columns - 1) // columns
-        # Activation reads and the final store/restoration are common to these
-        # schedules. Each phase adds one BF16 output write and subsequent read.
-        traffic = (mc // rows) * nc * kc * 1024 + 4096 * mc * nc * phases
+        # Retain the historical ranking for replay of existing publications.
+        # The batch policy charges only actual partial-result round trips:
+        # inline final restoration consumes its last readout directly.
+        round_trips = phases
+        if allow_batches and inline_readout_admitted(rows, plan.k):
+            round_trips -= 1
+        traffic = (mc // rows) * nc * kc * 1024 + 4096 * mc * nc * round_trips
         candidates.append((traffic, phases, rows, columns))
     if not candidates:
         return None

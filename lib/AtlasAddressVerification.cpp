@@ -228,6 +228,18 @@ private:
   std::optional<I32AddressSpan> derive(int id, int useBlock) {
     if (auto n = literal(id)) return I32AddressSpan{*n,*n};
     const auto &v = values[id];
+    if (!unsignedRange && v.def == "arith.shli" && v.operands.size() == 2) {
+      // Re-establish both nonwrapping bounds and alignment from the captured
+      // expression. An ordinary scalar range alone proves neither that every
+      // interior address is aligned nor that scaling stays within i32.
+      auto bits = literal(v.operands[1]);
+      if (!bits || *bits < 5 || *bits >= 32) return std::nullopt;
+      auto index = proveUnsigned(v.operands[0],useBlock);
+      if (!index || (uint64_t(index->last) << *bits) > UINT32_MAX)
+        return std::nullopt;
+      return I32AddressSpan{uint32_t(index->first << *bits),
+                            uint32_t(index->last << *bits)};
+    }
     if (unsignedRange) if (auto selected = maskedSelect(id,useBlock)) return selected;
     if (v.def == "arith.addi" && v.operands.size() == 2) {
       auto a = prove(v.operands[0],useBlock), b = prove(v.operands[1],useBlock);
