@@ -229,7 +229,10 @@ def bind_row_loop(original, canonical, materialized, destination, capture, *, ta
         raise ValueError("row loop rebinding requires identical lowered semantics")
     previous = json.loads((materialized / "manifest.json").read_bytes())
     row_loop.verify_row_loop(canonical, materialized, target_source=target_source)
-    plan, checked = row_loop.prepare_plan(original), row_loop.prepare_plan(canonical)
+    execution = json.loads((materialized / "execution_plan.json").read_text())
+    budget = execution.get("dispatch_instruction_budget", row_loop.DEFAULT_FUNCTIONAL_INSTRUCTION_LIMIT)
+    plan = row_loop.prepare_plan(original, instruction_budget=budget)
+    checked = row_loop.prepare_plan(canonical, instruction_budget=budget)
     body, canonical_body = plan.tiling.regions[0].request, checked.tiling.regions[0].request
     destination.mkdir(parents=True, exist_ok=False)
     bind_tile(body, canonical_body, materialized / "body", destination / "body", capture)
