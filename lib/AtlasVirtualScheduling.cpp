@@ -96,6 +96,7 @@ Effects effectsOf(Operation *op) {
                 VirtualVPUUnaryOp, VirtualVPUBinaryOp, VirtualVPUReduceOp,
                 VirtualVPUSplatOp, VirtualXLUTransposeOp,
                 VirtualScaleConstantOp, VirtualSlotOp,
+                VirtualSaveOp, VirtualRestoreOp, VirtualSlotCopyOp,
                 arith::ConstantOp, arith::AddIOp, arith::CmpIOp,
                 arith::SubIOp, arith::AndIOp, arith::OrIOp, arith::XOrIOp,
                 arith::ShLIOp, arith::ShRUIOp, arith::ExtUIOp>(op))
@@ -207,6 +208,40 @@ FailureOr<BlockGraph> buildGraph(Block &block) {
         readers.push_back(i);
       }
     }
+  }
+  // Mutable VMEM slots are separate logical allocations for the entire
+  // invocation. The input verifier rejects overlapping assigned slots, and
+  // placement keeps unassigned slots disjoint from each other and DMA staging.
+  // Preserve RAW, WAR and WAW order on each slot, including both sides of a
+  // copy. Independent slot traffic need not serialize DMA or MXU work.
+  // Scalar indexed accesses remain full barriers, but participate here too so
+  // their dependencies stay explicit if their scheduling policy later changes.
+  struct SlotUses {
+    std::optional<unsigned> writer;
+    SmallVector<unsigned> readers;
+  };
+  llvm::DenseMap<Value, SlotUses> slots;
+  auto accessSlot = [&](Value slot, unsigned node, bool write) {
+    SlotUses &uses = slots[slot];
+    if (uses.writer)
+      edge(*uses.writer, node);
+    if (write) {
+      for (unsigned reader : uses.readers)
+        edge(reader, node);
+      uses.readers.clear();
+      uses.writer = node;
+    } else {
+      uses.readers.push_back(node);
+    }
+  };
+  for (unsigned i = 0; i < n; ++i) {
+    Operation *op = g.nodes[i];
+    if (!isAtlasSlotAccess(op))
+      continue;
+    accessSlot(atlasAccessedSlot(op), i,
+               isa<VirtualSaveOp, VirtualSlotStoreOp>(op));
+    if (auto copy = dyn_cast<VirtualSlotCopyOp>(op))
+      accessSlot(copy.getDst(), i, true);
   }
   auto cannotOrder = [](Operation *op, const Twine &why) {
     return op->emitError("schedule-atlas-virtual cannot order this block: ")
@@ -439,6 +474,15 @@ Cost costOf(Operation *op) {
   if (isAtlasSlotAccess(op)) {
     auto slot = atlasAccessedSlot(op).getDefiningOp<VirtualSlotOp>();
     unsigned words = slot.getWords();
+    if (words > 1 && isa<VirtualSaveOp, VirtualRestoreOp>(op)) {
+      // A tile save/restore occupies LSU, not the DRAM engine. The frontend
+      // can issue other work after its last register instruction; only users
+      // of this slot/value wait for completion.
+      const MachineTiming &t = isa<VirtualSaveOp>(op) ? vstore : vload;
+      unsigned registers = words / kAtlasRegisterWords;
+      int issued = (registers - 1) * t.interval;
+      return {Unit::Lsu, int(registers) * t.interval, issued + t.latency, issued + 1};
+    }
     unsigned cycles = words == 1 ? kScalarSlotCycles : (words / kAtlasRegisterWords) * (vload.latency + vstore.latency);
     return blocking(Unit::Dma, cycles);
   }
@@ -563,6 +607,14 @@ public:
       if (staging.contains(operand))
         count(counts, operand, 1);
     return counts;
+  }
+
+  bool fitsRegisters(Operation *op) const {
+    KindCounts counts = during(op);
+    for (unsigned k = 0; k < kKinds.size(); ++k)
+      if (counts[k] > capacity[k])
+        return false;
+    return true;
   }
 
   // Live values once `op` has run, if it is placed next.
@@ -790,12 +842,16 @@ public:
   // A load starts as soon as the frontend is free, so with `lookahead` loaded
   // tiles awaiting their first use, another load waits while anything else
   // is ready: a boundary tile must not drain transfers whose users all come
-  // after it, and each holds a staging window until its first use.
+  // after it, and each holds a staging window until its first use. Tensor
+  // restores count too: unlike DMA tiles they already occupy registers, and
+  // the spiller cannot recursively spill another explicit restore.
   std::vector<unsigned> listSchedule(const KindCounts &capacity,
                                      unsigned lookahead) const {
     Pressure pressure(block, g.nodes, liveness, capacity);
     llvm::SmallDenseSet<Value> unused;
     auto isLoad = [](Operation *op) {
+      if (auto restore = dyn_cast<VirtualRestoreOp>(op))
+        return isa<VirtualBF16Type, VirtualFP8Type>(restore.getValue().getType());
       return isa<VirtualDMALoadFP8Op, VirtualDMALoadBF16Op>(op);
     };
     return build([&](const Machine &machine, ArrayRef<unsigned> ready) {
@@ -804,7 +860,18 @@ public:
       };
       SmallVector<unsigned> eligible;
       llvm::copy_if(ready, std::back_inserter(eligible),
-                    [&](unsigned node) { return !held(node); });
+                    [&](unsigned node) {
+                      return !held(node) && pressure.fitsRegisters(g.nodes[node]);
+                    });
+      // Computing future DMA addresses during a long transfer looks cheap,
+      // but their proof witnesses cannot generally be spilled. Explicit
+      // restores cannot be spilled recursively either. Prefer work that fits
+      // the registers, even if it exceeds the soft prefetch lookahead. Only
+      // relax this when every ready operation needs a spill.
+      if (eligible.empty())
+        llvm::copy_if(ready, std::back_inserter(eligible), [&](unsigned node) {
+          return pressure.fitsRegisters(g.nodes[node]);
+        });
       if (eligible.empty())
         eligible.assign(ready.begin(), ready.end());
       auto key = [&](unsigned node) {

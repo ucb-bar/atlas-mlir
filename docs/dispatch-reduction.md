@@ -6,6 +6,15 @@ Both companion branches are named `perf/model-dispatch-reduction`. Merlin's
 branch starts from `reed-nicolas/merlin:feat/tinyllama`; it does not modify that
 fork branch.
 
+## Latest validated result
+
+The unchanged full decoder layer runs in **89,068,106 Rust-model cycles and
+80 dispatches**, versus **226,725,080 cycles and 586 dispatches** for the retained
+baseline: **60.72% fewer cycles and 86.35% fewer dispatches**. Every one of its
+131,072 BF16 output words matches the independent selected-arithmetic reference.
+Use the explicit cache, preflight, composition and optimized-pipeline options
+below. Historical sections record intermediate configurations and their limits.
+
 ## Changes
 
 BF16 add/sub checks the qualified vector domain before checking exceptional
@@ -486,3 +495,66 @@ at the beginning, middle and end. One test and eight subtests pass. Six existing
 vector-preflight tests and 14 subtests pass. Three native image/bound/default
 option checks also pass. All tests retain immutable-input and failed-output
 publication checks.
+
+## Schedule independent cache traffic across DMA and compute
+
+Virtual saves, restores and slot copies now carry read-after-write,
+write-after-read and write-after-write dependencies for their individual scratch
+buffers. They previously acted as global barriers. Tensor saves/restores are
+costed as LSU work, allowing independent DMA and MXU work to issue alongside
+it. Scalar indexed accesses retain their conservative barriers. The existing
+verifier rejects overlapping assigned scratch slots and allocation keeps them
+separate from DMA staging.
+
+Prefetch lookahead includes tensor restores, and the scheduler prefers ready
+operations that fit the available registers. This prevents speculative DMA
+address calculations and explicit restores from accumulating values that the
+spiller cannot spill. Ordinary dependency, allocation, initialized-memory,
+address, timing and image proofs remain mandatory.
+
+The quantized mandatory pipeline is intentionally unscheduled. Enable the
+optimized pipeline to use this scheduling change for contractions:
+
+```bash
+export ATLAS_NATIVE_PIPELINE=optimized
+```
+
+Use the preceding `ATLAS_ADJACENT_PATTERNS` and preflight/cache options, plus
+`--exact-float-unroll --execution-instruction-limit 128000000 --io-memory-bytes 67108864`.
+Two fresh builds with the same Python source/options and old versus new compiler
+binaries isolate the scheduler change:
+
+| Full layer | Cycles | Dispatches | Instructions |
+| --- | ---: | ---: | ---: |
+| Previous mandatory configuration | 99,292,808 | 80 | 10,273,057 |
+| Optimized pipeline, previous scheduler | 97,948,064 | 80 | 10,209,195 |
+| Optimized pipeline, per-slot scheduling | **89,068,106** | **80** | 11,292,164 |
+
+The isolated saving is **8,879,958 cycles (9.07%)**. Every output word matches the
+same independent FX reference in both optimized runs. More issued instructions
+are an explicit tradeoff of the overlapping schedule; measured cycles improve
+for every changed launch in this fixture. The mandatory pipeline with the new
+compiler alone measures 99,064,582 cycles, so its small improvement should not be
+confused with the optimized-pipeline result.
+
+In the controlled optimized comparison, gate projection improves from
+15,083,179 to 12,931,167 cycles; up projection with its fused product from
+15,553,451 to 13,237,759; and down projection from 14,017,109 to 11,712,919.
+Two separate full-width probes using one virtual schedule followed by mandatory
+physical timing also pass whole-memory equality. They are distinct configurations,
+with results retained in the local audit directory.
+
+Five directed tests pass, including random dependency orders, overlapping-slot
+rejection, nine Rust schedule executions and bounded 64/176-tile reduction panels
+with tails and rejected exponents. The existing scheduler suite passes 24 tests
+and 364 subtests; 80 broader compiler/runtime regressions and 61 subtests pass.
+Fresh compilation/source replay takes 227 seconds before and 244 seconds after
+when both builds run concurrently. Concurrent Rust runs take about 4.4 seconds
+of simulation and 5.1 seconds including generated-C execution; these wall times
+are subject to host load.
+
+The largest optimized image is 50,652 bytes, below the unchanged 128-KiB IMEM
+cap. The corresponding persistent host replay matches all initialized compiler
+memory bytes and estimates **95,685,194 elapsed cycles**, including **89,066,090
+active NPU cycles** and **6,619,104 idle cycles**, under the same uncalibrated host
+assumptions described above.
