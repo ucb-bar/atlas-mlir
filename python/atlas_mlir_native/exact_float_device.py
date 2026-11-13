@@ -234,7 +234,7 @@ def compile_source(snapshot,region,*,target_source,destination,limits,io_memory_
     return manifest
 
 
-def prepare_c_package(region,compiled,name,*,target_source,runtime_linkage="separate",io_memory_base=DRAM_BASE):
+def prepare_c_package(region,compiled,name,*,target_source,runtime_linkage="separate",io_memory_base=DRAM_BASE,input_layout=None):
     import hashlib,json,os
     from pathlib import Path
     from merlin.compile.c_sources import c_source_pair
@@ -267,12 +267,24 @@ def prepare_c_package(region,compiled,name,*,target_source,runtime_linkage="sepa
     if not bound["admitted"] or json.loads((compiled/"float-instruction-bound.json").read_text())!=bound:
         raise ValueError("exact float instruction bound differs or exceeds selected budget")
     upper=name.upper();n=len(p.operands);logical=p.count*p.width;obytes=p.count*p.output_width
+    input_sizes = [logical] * n
+    mapped_index, packing_helper = None, ""
+    if input_layout is not None:
+        from merlin.compile.layout_c import render_indexed_slice_copy
+        physical, view = input_layout
+        mapped_index = [operand.id for operand in p.operands].index(view.id)
+        if (p.operands[mapped_index].type.dtype != view.type.dtype
+                or p.operands[mapped_index].type.numerical_policy != view.type.numerical_policy
+                or p.count > prod(view.type.shape)):
+            raise ValueError("exact float input packing differs from its logical operand")
+        packing_helper = render_indexed_slice_copy(physical, view, name + "_pack_input")
+        input_sizes[mapped_index] = prod(physical.type.shape) * p.width
     states=[("ctx","sizeof(*ctx)"),("region","sizeof(*region)"),("region->host","sizeof(*region->host)"),
             ("region->workspace",f"{p.workspace_bytes}u"),("inputs",f"{n}u*sizeof(*inputs)"),("outputs","sizeof(*outputs)")]
     checks=[f"  if (!{name}_range({ptr},{size})) return {upper}_INVALID;" for ptr,size in states]
     for i,(ptr,size) in enumerate(states):
         for other,osize in states[:i]:checks.append(f"  if ({name}_overlap({ptr},{size},{other},{osize})) return {upper}_INVALID;")
-    values=[(f"inputs[{i}]",logical) for i in range(n)]+[("outputs[0]",obytes)]
+    values=[(f"inputs[{i}]",input_sizes[i]) for i in range(n)]+[("outputs[0]",obytes)]
     for i,(ptr,size) in enumerate(values):
         checks.append(f"  if (!{name}_range({ptr},{size}u)) return {upper}_INVALID;")
         for other,osize in states:checks.append(f"  if ({name}_overlap({ptr},{size}u,{other},{osize})) return {upper}_INVALID;")
@@ -286,18 +298,24 @@ def prepare_c_package(region,compiled,name,*,target_source,runtime_linkage="sepa
 #define {upper}_SOURCE_WORKSPACE_BYTES 1u
 typedef enum {{ {upper}_OK=0,{upper}_INVALID=1,{upper}_DOMAIN=2,{upper}_MEMORY_ERROR=3,{upper}_DEVICE_ERROR=4 }} {name}_status;
 typedef struct {{ atlas_host *host; atlas_tile_memory_io io; uint8_t *workspace; size_t max_polls; atlas_host_buffer buffers[{n+1}]; }} {name}_context;
-typedef struct {{ {name}_context *region; }} {name}_source_context;
+typedef struct {{ {name}_context *region; size_t input_first; }} {name}_source_context;
 {name}_status {name}_bind({name}_context *,atlas_host *,atlas_tile_memory_io,void *,size_t,size_t);
 {name}_status {name}_source_bind({name}_source_context *,{name}_context *,void *,size_t);
 int {name}_source_dispatch(void *,const void *const *,void *const *);
 '''
-    copies=[]
+    copies=[];transfers=[]
     for i in range(n):
         at=i*p.input_bytes
-        copies.append(f'''  __builtin_memcpy(region->workspace+{at}u,inputs[{i}],{logical}u);
-  __builtin_memset(region->workspace+{at+logical}u,0,{p.input_bytes-logical}u);
-  if (region->io.write(region->io.context,{p.io_memory_base+at}u,region->workspace+{at}u,{p.input_bytes}u)) return {upper}_MEMORY_ERROR;''')
-    implementation=program_array(name+"_words",binary)+f'''
+        if i == mapped_index:
+            copies.append(f"  if ({name}_pack_input(region->workspace+{at}u,inputs[{i}],ctx->input_first,{p.count}u)) return {upper}_INVALID;")
+        else:
+            copies.append(f"  __builtin_memcpy(region->workspace+{at}u,inputs[{i}],{logical}u);")
+        copies.append(f"  __builtin_memset(region->workspace+{at+logical}u,0,{p.input_bytes-logical}u);")
+        transfer=f"  if (region->io.write(region->io.context,{p.io_memory_base+at}u,region->workspace+{at}u,{p.input_bytes}u)) return {upper}_MEMORY_ERROR;"
+        # Validate every packed slice before any device I/O.
+        (transfers if input_layout is not None else copies).append(transfer)
+    copies.extend(transfers)
+    implementation=packing_helper+program_array(name+"_words",binary)+f'''
 static int {name}_range(const void *p,size_t n) {{ return p && n && n<=UINTPTR_MAX-(uintptr_t)p; }}
 static int {name}_overlap(const void *a,size_t an,const void *b,size_t bn) {{ return (uintptr_t)a<(uintptr_t)b+bn && (uintptr_t)b<(uintptr_t)a+an; }}
 {name}_status {name}_bind({name}_context *ctx,atlas_host *host,atlas_tile_memory_io io,void *workspace,size_t bytes,size_t polls) {{
@@ -311,7 +329,7 @@ static int {name}_overlap(const void *a,size_t an,const void *b,size_t bn) {{ re
   if (!{name}_range(ctx,sizeof(*ctx)) || !{name}_range(region,sizeof(*region)) || !{name}_range(region->host,sizeof(*region->host)) ||
       !{name}_range(region->workspace,{p.workspace_bytes}u) || {name}_overlap(ctx,sizeof(*ctx),region,sizeof(*region)) ||
       {name}_overlap(ctx,sizeof(*ctx),region->host,sizeof(*region->host)) || {name}_overlap(ctx,sizeof(*ctx),region->workspace,{p.workspace_bytes}u) || region->host->active) return {upper}_INVALID;
-  ctx->region=region;return {upper}_OK;
+  ctx->region=region;ctx->input_first=0;return {upper}_OK;
 }}
 int {name}_source_dispatch(void *opaque,const void *const *inputs,void *const *outputs) {{
   {name}_source_context *ctx=opaque;

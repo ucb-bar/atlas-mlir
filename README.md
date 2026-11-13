@@ -145,3 +145,6 @@ checks, long branches and measured reduction unrolling. These paths preserve the
 selected numerical policies; software/model checks do not qualify an FPGA build.
 
 The [already-quantized intake guide](docs/already-quantized-intake.md) records byte-preserving code transport and the paired BF16 readout factor domain.
+
+The [exact-float input layout guide](docs/float-input-layout.md) describes folding
+private slices and broadcasts into checked input packing without changing arithmetic.

@@ -89,7 +89,7 @@ def _verify_publication(root,manifest,p):
         verify_native_publication(leaf,detail,engine="merlin_native",request_digest=body.digest(),target_identity=p.source.target_identity)
 
 
-def prepare_c_package(region,compiled,name,*,target_source,runtime_linkage="separate"):
+def prepare_c_package(region,compiled,name,*,target_source,runtime_linkage="separate",input_layout=None):
     from merlin.compile.c_sources import c_source_pair
     from merlin.compile.semantic_application import CompiledCRegion
     from merlin.compile.launch_schedule import make_launch_schedule
@@ -97,10 +97,19 @@ def prepare_c_package(region,compiled,name,*,target_source,runtime_linkage="sepa
     if runtime_linkage!="separate":raise ValueError("scheduled exact float requires shared runtime linkage")
     p=prepare_plan(region);compiled=Path(compiled);manifest=json.loads((compiled/"float-manifest.json").read_text());_verify_publication(compiled,manifest,p)
     paths=[f"segments/body_{i:03d}" for i in range(len(p.bodies))]
-    leaves=[device.prepare_c_package(body,compiled/path,name+f"_body_{i:03d}",target_source=target_source,runtime_linkage=runtime_linkage)
+    leaves=[device.prepare_c_package(body,compiled/path,name+f"_body_{i:03d}",target_source=target_source,runtime_linkage=runtime_linkage,input_layout=input_layout)
             for i,(body,path) in enumerate(zip(p.bodies,paths,strict=True))]
     maximum=max(leaf.description["workspace_bytes"] for leaf in leaves)
     result_bytes=p.plan.count*p.plan.output_width;workspace_bytes=maximum+result_bytes;n=len(p.plan.operands);upper=name.upper()
+    input_bytes = [p.plan.count * p.plan.width] * n
+    mapped_index = None
+    if input_layout is not None:
+        from math import prod
+        physical, view = input_layout
+        mapped_index = [operand.id for operand in p.plan.operands].index(view.id)
+        if p.plan.operands[mapped_index].type != view.type:
+            raise ValueError("exact float input layout differs from its logical operand")
+        input_bytes[mapped_index] = prod(physical.type.shape) * p.plan.width
     fields="\n".join(f"  {name}_body_{i:03d}_context body_{i}; {name}_body_{i:03d}_source_context source_{i};" for i in range(len(leaves)))
     bind_calls=[]
     for i in range(len(leaves)):
@@ -109,11 +118,14 @@ def prepare_c_package(region,compiled,name,*,target_source,runtime_linkage="sepa
     calls=[]
     for call in p.launches:
         i=call["body_index"];inner=name+f"_body_{i:03d}"
-        operands=','.join(f"(const uint8_t *)inputs[{j}]+{call['input_offset_bytes']}u" for j in range(n))
+        operands=','.join(f"inputs[{j}]" if j == mapped_index else
+                         f"(const uint8_t *)inputs[{j}]+{call['input_offset_bytes']}u" for j in range(n))
+        if input_layout is not None:
+            calls.append(f"  region->source_{i}.input_first={call['input_offset_bytes']//p.plan.width}u;")
         calls.append(f"  {{ const void *body_inputs[{n}]={{{operands}}}; void *body_outputs[1]={{region->workspace+{maximum+call['output_offset_bytes']}u}}; int status={inner}_source_dispatch(&region->source_{i},body_inputs,body_outputs); if(status) return status; }}")
     from .slice_dispatch import render_slice_dispatch
     declarations,implementation=render_slice_dispatch(name,workspace_bytes=workspace_bytes,fields=fields,
-        bind_calls=bind_calls,input_bytes=[p.plan.count*p.plan.width]*n,
+        bind_calls=bind_calls,input_bytes=input_bytes,
         output_slices=[(maximum,result_bytes)],launch_calls=calls)
     public={};sources={};files={}
     for i,item in enumerate(leaves):

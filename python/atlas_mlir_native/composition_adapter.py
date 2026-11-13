@@ -21,6 +21,7 @@ _ADJACENT_PATTERNS = (
     ("expanded_silu", "_expanded_silu_groups"),
     ("quantized_operand_permutation", "_quantized_operand_permutation_groups"),
     ("quantizer_input_permutation", "_quantizer_input_permutation_groups"),
+    ("float_input_layout", "_float_input_layout_groups"),
 )
 
 
