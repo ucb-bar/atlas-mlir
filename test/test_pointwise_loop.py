@@ -38,6 +38,11 @@ def check_source_c_call(
     if source_dtype == "bf16":
         client_source = client_source.replace("const float *const *inputs,float *output",
                                               "const uint8_t *const *inputs,uint8_t *output")
+    elif source_dtype == "opaque":
+        client_source = client_source.replace("const float *const *inputs,float *output",
+                                              "const void *const *inputs,void *output")
+        client_source = client_source.replace("return pointwise_source_run(&source,inputs,output,0);",
+            "void *outputs[]={output}; return pointwise_source_dispatch(&source,inputs,outputs);")
     elif source_dtype != "f32":
         raise ValueError("unsupported source test dtype")
     if output_dtype == "bf16" and source_dtype == "f32":
@@ -163,7 +168,7 @@ def check_source_c_call(
         self.assertEqual(words, {})
         self.assertEqual(memory, initial)
         self.assertEqual(result.raw[:-1], bytes([0xA7]) * (len(wanted_bytes) + 32))
-    if output_dtype == "bf16" and source_dtype == "f32":
+    if source_dtype == "opaque" or output_dtype == "bf16" and source_dtype == "f32":
         # Mixed-width publication must still refuse an output inside an input.
         memory[:] = initial
         words.clear()

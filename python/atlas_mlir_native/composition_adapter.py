@@ -16,6 +16,7 @@ _ADJACENT_PATTERNS = (
     ("quantized_narrowing", "_quantized_narrowing_groups"),
     ("pointwise_narrowing", "_pointwise_narrowing_groups"),
     ("softmax_narrowing", "_softmax_narrowing_groups"),
+    ("softmax_input_widening", "_softmax_input_widening_groups"),
     ("expanded_silu", "_expanded_silu_groups"),
     ("quantized_operand_permutation", "_quantized_operand_permutation_groups"),
 )

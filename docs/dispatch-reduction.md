@@ -18,6 +18,8 @@ below. Historical sections record intermediate configurations and their limits.
 The newer opt-in [shape-selected panel cache](mxu-panel-selection.md) preserves
 that TinyLlama result and reduces the complete SmolVLA vision block to
 1,025,795,466 cycles with 156 dispatches, including the cast changes below.
+The subsequent [private softmax input fold](softmax-input-folding.md) reaches
+**881,588,507 cycles and 151 dispatches** on the same SmolVLA fixture.
 
 ### Private softmax result casts
 

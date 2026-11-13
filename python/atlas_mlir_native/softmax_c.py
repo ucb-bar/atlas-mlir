@@ -54,6 +54,7 @@ def _prepare_c_package(
     allow_guarded=False,
     finite_sentinel_bits=None,
     score_domain=SOFTMAX_DOMAIN,
+    input_dtype="f32",
     output_dtype="f32",
 ):
     staged_precision = precision
@@ -68,6 +69,8 @@ def _prepare_c_package(
             raise ValueError("semantic softmax differs from its checked native source")
     if finite_sentinel_bits is not None and precision is None:
         raise ValueError("finite additive sentinel requires a bound semantic source interface")
+    if input_dtype not in {"f32", "bf16"} or input_dtype == "bf16" and precision is None:
+        raise ValueError("softmax score transport requires a supported bound source interface")
     if output_dtype not in {"f32", "bf16"} or output_dtype == "bf16" and precision is None:
         raise ValueError("softmax result publication requires a supported bound source interface")
     if compiled.is_symlink() or not compiled.is_dir():
@@ -515,7 +518,7 @@ int {name}_dispatch(void *ctx, const void *const *inputs, void *const *outputs) 
 
         more_declarations, more_source, source_interface, extra_readme = render_source_interface(
             precision, name, workspace, finite_sentinel_bits=finite_sentinel_bits, score_domain=score_domain,
-            output_dtype=output_dtype,
+            input_dtype=input_dtype, output_dtype=output_dtype,
         )
         declarations += more_declarations
         implementation += more_source
