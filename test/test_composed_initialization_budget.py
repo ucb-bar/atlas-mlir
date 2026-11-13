@@ -6,12 +6,12 @@ import subprocess
 import unittest
 
 
-def source(iterations=100001, *, initialized=True):
+def source(iterations=100001, *, initialized=True, scalar_facts=12):
     write='''%next = "atlas.virtual_dma_store_bf16"(%body_state, %tile, %out, %bytes)
         : (!atlas.virtual_state, !atlas.virtual_bf16, i32, i32) -> !atlas.virtual_state''' if initialized else '%next = "atlas.virtual_nop"(%token) : (!atlas.virtual_state) -> !atlas.virtual_state'
-    # Independent scalar facts deliberately exercise proof work. They do not
-    # increase the machine loop's trip count or authorize any extra memory.
-    facts='\n'.join(f'%unused{i} = arith.constant {i} : i32' for i in range(12))
+    # Independent data facts must not be replayed at every loop iteration by
+    # the memory proof. They do not authorize any extra memory.
+    facts='\n'.join(f'%unused{i} = arith.constant {i} : i32' for i in range(scalar_facts))
     return f'''module {{
       func.func @proof() -> !atlas.virtual_state attributes {{
         atlas.input_dram_base = 2415919104 : i64,
@@ -60,6 +60,30 @@ class ComposedInitializationBudgetTest(unittest.TestCase):
         result=self.compile(source())
         self.assertNotEqual(result.returncode,0)
         self.assertIn('scalar work limit',result.stderr)
+
+    def test_large_data_body_does_not_exhaust_memory_proof(self):
+        # 512 * 2048 unrelated scalar facts used to consume the allowance
+        # before completing a small, safe set of memory/control operations.
+        result = self.compile(source(iterations=512, scalar_facts=2048))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        # Replay the retained CFG independently of the live source analysis.
+        checked = subprocess.run([str(Path(os.environ['ATLAS_OOT_BIN_DIR'])/'atlas-opt'),
+            '--verify-atlas-generated-schedule', '-'], input=result.stdout,
+            text=True, capture_output=True)
+        self.assertEqual(checked.returncode, 0, checked.stderr)
+
+    def test_large_data_body_preserves_memory_and_termination_rejections(self):
+        text = source(iterations=512, scalar_facts=2048)
+        unsafe = text.replace('(%body_state, %tile, %out, %bytes)',
+                              '(%body_state, %tile, %end, %bytes)')
+        result = self.compile(unsafe)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('before they are initialized', result.stderr)
+        cyclic = text.replace('%n = arith.addi %counter,%one',
+                              '%n = arith.addi %counter,%zero')
+        result = self.compile(cyclic)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('scalar-state cycle', result.stderr)
 
     def test_uninitialized_output_read_is_still_refused(self):
         # Keep this control below every proof budget so it rejects the actual

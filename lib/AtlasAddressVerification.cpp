@@ -374,12 +374,6 @@ bool initializedOutputReads(const AtlasVerificationContext &ctx,
     auto id = contractI32(d, "id");
     if (!id || !operations.emplace(*id, d).second) return false;
   }
-  std::vector<std::vector<int32_t>> operationsByBlock(source.blocks.size());
-  for (const auto &[id, record] : operations) {
-    auto block = contractI32(record, "block");
-    if (!block || *block < 0 || *block >= int32_t(source.blocks.size())) return false;
-    operationsByBlock[*block].push_back(id);
-  }
   for (Operation *op : ctx.ops) {
     atlasProofRecord(AtlasProofKind::CapturedAddress);
     if (!isa<DMAOp>(op)) continue;
@@ -392,6 +386,15 @@ bool initializedOutputReads(const AtlasVerificationContext &ctx,
         !operations.count(*owner) || !transfers.emplace(*owner, cast<DictionaryAttr>(dma[*id])).second)
       return false;
   }
+  // Scalar expressions are evaluated on demand below. Replaying unrelated
+  // tensor/scalar operations at every loop iteration adds no memory evidence.
+  // Validate all records once, then retain every DMA transfer in source order.
+  std::vector<std::vector<int32_t>> operationsByBlock(source.blocks.size());
+  for (const auto &[id, record] : operations) {
+    auto block = contractI32(record, "block");
+    if (!block || *block < 0 || *block >= int32_t(source.blocks.size())) return false;
+    if (transfers.count(id)) operationsByBlock[*block].push_back(id);
+  }
   std::map<int32_t, uint32_t> arguments;
   // One bit per aligned DMA beat. Copying a tree node per initialized beat
   // made snapshots of wide output panels much larger than their payload.
@@ -400,6 +403,34 @@ bool initializedOutputReads(const AtlasVerificationContext &ctx,
   std::set<int> active;
   // Every scalar step and output-byte read is still checked exhaustively.
   unsigned remaining = kAtlasScalarProofWorkLimit;
+  // Follow only scalar values that can affect a transfer or a control edge.
+  // A branch may carry unrelated data; its value cannot distinguish memory
+  // states. Derive this slice independently from the retained CFG, including
+  // every predecessor of a needed block argument.
+  llvm::BitVector needed(source.values.size());
+  std::vector<std::vector<int>> incomingValues(source.values.size());
+  for (const auto &edge : source.edges)
+    for (unsigned i = 0; i < edge.incoming.size(); ++i)
+      incomingValues[source.blocks[edge.to].args[i]].push_back(edge.incoming[i]);
+  std::vector<int> work;
+  auto require = [&](int id) {
+    if (id >= 0 && id < int(source.values.size()) && !needed.test(id)) {
+      needed.set(id);
+      work.push_back(id);
+    }
+  };
+  for (const auto &block : source.blocks) require(block.condition);
+  for (const auto &[id, transfer] : transfers)
+    if (auto value = contractI32(transfer, "dram_value")) require(*value);
+  while (!work.empty()) {
+    if (!remaining) return false;
+    --remaining;
+    atlasProofRecord(AtlasProofKind::CapturedInitialization);
+    int id = work.back(); work.pop_back();
+    const auto &value = source.values[id];
+    const auto &operands = value.def == "argument" ? incomingValues[id] : value.operands;
+    for (int operand : operands) require(operand);
+  }
   std::function<std::optional<uint32_t>(int)> evaluate = [&](int id) -> std::optional<uint32_t> {
     if (!remaining || id < 0 || id >= int(source.values.size()) || !active.insert(id).second) return std::nullopt;
     --remaining;
@@ -488,7 +519,9 @@ bool initializedOutputReads(const AtlasVerificationContext &ctx,
     auto enqueue = [&](int edge) {
       const auto &next = source.edges[edge];
       std::vector<std::optional<uint32_t>> incoming;
-      for (int v : next.incoming) incoming.push_back(evaluate(v));
+      for (unsigned i = 0; i < next.incoming.size(); ++i)
+        incoming.push_back(needed.test(source.blocks[next.to].args[i]) ?
+            evaluate(next.incoming[i]) : std::nullopt);
       auto nextArguments = arguments;
       for (unsigned i = 0; i < incoming.size(); ++i) {
         int arg = source.blocks[next.to].args[i];
