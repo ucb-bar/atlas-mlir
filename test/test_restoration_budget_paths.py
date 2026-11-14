@@ -1,5 +1,6 @@
 """Executable physical paths bound counted loops without charging both arms."""
 from copy import deepcopy
+import gzip
 import json
 from pathlib import Path
 import unittest
@@ -74,7 +75,7 @@ class ExecutableBlockPathTest(unittest.TestCase):
                 instruction_bound('', machine, {'instructions': rows}, max_instructions=cap)
 
     def test_region087_worst_case_shape_is_admitted(self):
-        fixture = json.loads((ROOT / 'test/fixtures/dynamic-head-quantizer-bound.json').read_text())
+        fixture = json.loads(gzip.decompress((ROOT / 'test/fixtures/dynamic-head-quantizer-bound.json.gz').read_bytes()))
         proof = instruction_bound(**fixture)
         self.assertEqual(proof['instruction_bound'], 988_850)
         self.assertTrue(proof['admitted'])
