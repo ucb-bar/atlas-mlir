@@ -8,7 +8,7 @@ The mandatory PACK scale-domain test regenerates model receipts for all 256 code
 
 RTL paths below are relative to Atlas RTL revision `2ae0bef209df6db78c3de18e8f651bb43855cce9`. The floating-point dependency is `9a0cc09c41ab918a3548580185f39cca8d559e0d`. Model paths are relative to unmodified npu_model `47b8599d8ffbe5ddd96059ffe2b5be2427a410f5`. The older hardware-status revision remains the authority for historical hardware runs.
 
-The inspected scale decoders, PACK, UNPACK, MXU helpers, scalar scale writes, and both MXU sequencers are byte-identical to the compiler's selected RTL revision `0079c0541111197741a231c002e3843fa6f545b2`. Both RTL revisions pin the same floating-point dependency, whose inspected output converter also matches that pin. Thus the source proof applies to the selected compiler target as well as the live checkout.
+The inspected scale decoders, PACK, UNPACK, MXU helpers, scalar scale writes, and both MXU sequencers are byte-identical to the compiler's selected RTL revision `0079c0541111197741a231c002e3843fa6f545b2`. Both RTL revisions pin the same floating-point dependency, whose inspected output converter also matches that pin. Thus the source proof applies to the selected compiler target as well as RTL revision `2ae0bef`.
 
 | ID | Source | Established behavior |
 | --- | --- | --- |

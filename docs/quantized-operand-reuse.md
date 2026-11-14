@@ -55,7 +55,7 @@ do not read this environment variable.
 
 This extension is restricted to the quantized MXU1 path. It adds no MXU0 operand
 cache, PACK repair, compiler cache, or program residency implementation; those
-are provided by the companion upstream work.
+are in https://github.com/ucb-bar/atlas-mlir/pull/44.
 
 ## Bounded prefixes for wider reductions
 

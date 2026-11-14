@@ -1,6 +1,7 @@
 # Already-quantized K32 partial domain
 
-For selected model47 MXU1 arithmetic, every admitted K32 readout is positive
+For the selected MXU1 arithmetic (policy suffix `model47-v1`, following the
+RTL's normalization of short sums), every admitted K32 readout is positive
 zero or finite normal BF16, with nonzero magnitude in `[2^-26, 2^32]`.
 Reset starts this invariant; ordered BF16 readout/reseed preserves it for any K.
 Padding is positive zero. Final exponent restoration has its separate domain;

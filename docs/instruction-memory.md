@@ -53,7 +53,7 @@ The execution plan's `codegen` record includes the requested and effective opera
 
 C export uses the authenticated execution policy rather than the current environment. It recomputes the panel metadata and typed source, checks the resident provider fingerprint, and rejects inconsistent policy metadata even when its artifact hashes have been recomputed.
 
-The portable numerical regression is `test_resident_looped_mnk`. With compiler tools and the original47 model configured, set `ATLAS_RUN_NPU_MODEL=1` and `NPU_MODEL_ROOT` to the selected model checkout, then run the module from `test/`. It checks independent ordered arithmetic for two K panels, cancellation, external BF16 seeds, final-only ReLU, padded output lanes, unchanged operands, and surrounding DRAM guards.
+The portable numerical regression is `test_resident_looped_mnk`. With compiler tools and the pinned npu_model checkout configured, set `ATLAS_RUN_NPU_MODEL=1` and `NPU_MODEL_ROOT` to the selected model checkout, then run the module from `test/`. It checks independent ordered arithmetic for two K panels, cancellation, external BF16 seeds, final-only ReLU, padded output lanes, unchanged operands, and surrounding DRAM guards.
 
 ## Measure variants
 

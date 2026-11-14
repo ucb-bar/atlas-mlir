@@ -1,9 +1,8 @@
 # TinyLlama follow-up optimizations
 
-Branch `perf/tinyllama-next-optimizations` starts at Nicolas's Atlas TinyLlama
-head `7e00f41d9794198c35dec01de565471d556b8be6`. Validation uses the Merlin PR #63
-head `5503777c8434a03c3a5b6c5751668f6ed8c2fed5` in a separate, detached worktree;
-it does not require writing to Nicolas's fork.
+Branch `perf/tinyllama-next-optimizations` starts at the Atlas TinyLlama head
+`7e00f41d9794198c35dec01de565471d556b8be6`. Validation uses the Merlin PR #63
+head `5503777c8434a03c3a5b6c5751668f6ed8c2fed5`.
 
 ## Binary validation and classification
 

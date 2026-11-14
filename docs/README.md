@@ -15,6 +15,12 @@ Start with the [repository README](../README.md) for the build, and the
 | [Baremetal-IDE integration](baremetal-c-integration.md) | Generated C/H, embedded program/data, platform callbacks and the host build. |
 | [Instruction memory](instruction-memory.md) | Final image size, branch ranges, reduction unrolling and profiling. |
 | [Quantized operand reuse](quantized-operand-reuse.md) | Optional MXU1 activation residency, shared Merlin planning, limits, and validation. |
+| [Activation quantization](activation-quantization.md) | Host or device activation quantizers, device body selection, and instruction limits. |
+| [Already-quantized intake](already-quantized-intake.md) | Consuming FP8 codes and int32 exponents unchanged: capture, source operations, admission, and masks. |
+| [Already-quantized K32 domain](already-quantized-k32-domain.md) | The BF16 readout domain that K32 partial sums stay within on MXU1. |
+| [Exact float device](exact-float-device.md) | Exact BF16/FP32 casts, negation, add, and subtract on the device. |
+| [PACK scale domain](pack-scale-domain.md) | Raw PACK scale codes, their source evidence, and the guarded conversion. |
+| [Proof work measurement](proof-work-measurement.md) | Measuring verifier work in `atlas-opt` and `atlas-emit`. |
 | [Model compilation followups](model-compilation-followups.md) | Additional optimizations, prerequisite PRs, and feature switches. |
 | [Single-program profiling](single-program-profiling.md) | Connected graphs in one image, model execution and measurement scope. |
 | [Hardware status](hardware-status.md) | Per-instruction status, RTL/model differences, and how to rerun the RTL core tests. |

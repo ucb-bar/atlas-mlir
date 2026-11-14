@@ -18,13 +18,7 @@ The admitted contraction domain contains positive zero and finite normal E4M3 co
 
 The device program checks every paired activation and weight exponent sum before host output publication. Each sum must lie in `[-133, 127]`, so `BF16(2**(lhs_exp + rhs_exp))` is a finite, nonzero, exactly representable BF16 coefficient. The check includes zero accumulators and uses the same scalar, row, and head exponent mappings as readout. On the fast path, the per-operand range proves this sum admission. The Python readout helper enforces the same factor domain.
 
-The counted-image policy retains scalar fallback only for images with at most
-two output tiles. Larger images have an explicit zero scalar-fallback budget;
-an exponent outside their VPU range sets rejection status. Compilation also
-requires the bound reconstructed from the final physical CFG, including K
-work and the admitted restoration paths, to fit 1,000,000 instructions. This
-can refuse a small image with unusually large K. The policy narrows runtime
-admission without changing any admitted result or the runner's default cap.
+The counted-image policy retains scalar fallback only for images with at most two output tiles. Larger images have an explicit zero scalar-fallback budget; an exponent outside their VPU range sets rejection status. Compilation also requires the bound reconstructed from the final physical CFG, including K work and the admitted restoration paths, to fit 1,000,000 instructions. This can refuse a small image with unusually large K. The policy narrows runtime admission without changing any admitted result or the runner's default cap.
 
 The optional `already_quantized_mask = "bf16-minfinite-zero-bounded32-nonempty-v1"` admits an unchanged additive mask containing positive zero or the exact BF16 minimum-finite sentinel. It checks finite scores with absolute value at most 32 and nonempty rows, then derives a keep mask. The proof requires that adding any admitted score leaves the sentinel unchanged in float32 and that its exponential underflows to zero. Normalized softmax probabilities are computed before the authored probability quantizer. No packed-exponential renormalization substitutes for that graph.
 

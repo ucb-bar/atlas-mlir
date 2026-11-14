@@ -21,9 +21,10 @@ The repository also ships a Python package (`atlas-mlir-native-support`) that
 plugs Atlas into Merlin's native compiler, and a small C runtime for the host
 side.
 
-The TinyLlama examples require Merlin's `pr/tinyllama` branch, which uses the
-model2MLIR quantization adapter and Atlas native provider together. See the
-[whole-model run instructions](https://github.com/reed-nicolas/merlin/blob/pr/tinyllama/examples/atlas/whole-model/unchanged_fx/README.md#live-capture-and-the-standard-application-compiler)
+The TinyLlama examples use Merlin's `feat/tinyllama` branch
+(https://github.com/ucb-bar/merlin/pull/63), which uses the model2MLIR
+quantization adapter and the Atlas native provider together. See the
+[whole-model run instructions](https://github.com/reed-nicolas/merlin/blob/feat/tinyllama/examples/atlas/whole-model/unchanged_fx/README.md#live-capture-and-the-standard-application-compiler)
 for the matching repositories, adapter, bundle regeneration, and commands.
 
 ## Build
