@@ -123,7 +123,8 @@ def transition_source(group):
         rows=group['rows'], columns=1, kind='column_to_row', admitted_code_ranges=spec.admitted_code_ranges,
         pad=int.from_bytes(group['plan'].input_pad(group['operand']), 'little'),
         canonicalize_negative_zero=spec.canonicalize_negative_zero,
-        output_base=group['addresses'][first], output_bytes=sum(group['sizes'][key] for key in group['mutable']))
+        output_base=group['addresses'][first], output_bytes=sum(group['sizes'][key] for key in group['mutable']),
+        io_memory_base=group['io_memory_base'])
 
 
 def compile_group(group, snapshot, *, target_source, destination, limits):

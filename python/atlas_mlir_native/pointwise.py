@@ -569,6 +569,8 @@ def compile_pointwise(
     base = selected_io_base() if io_memory_base is None else io_memory_base
     if type(base) is not int or base % 32:
         raise NativeCompilationError("resource_limit", "pointwise buffers leave selected DMA memory windows")
+    from .binding import validate_explicit_io_base
+    validate_explicit_io_base(base)
     addresses = [base + fixed_inputs[node.id] * TILE_BYTES for node in request.nodes[:-1]]
     output = base + fixed_outputs[0] * TILE_BYTES
     ranges = [(address, address + size) for address, size in zip([*addresses, output], sizes, strict=True)]

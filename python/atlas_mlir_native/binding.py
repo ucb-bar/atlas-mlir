@@ -269,6 +269,26 @@ def validate_io_window(base=None, size=None):
     return base, size
 
 
+def validate_explicit_io_base(base, *, alignment=32):
+    """Check an API override while retaining legacy leaf DMA alignment.
+
+    Invocation geometry remains unchanged. A declared capacity contains the
+    complete override window; legacy callers retain their actual-span checks.
+    """
+    from merlin.semantic_compiler.codegen import current_codegen_options
+
+    options = current_codegen_options()
+    _, size = validate_io_window()
+    alignment = options.io_memory_alignment or alignment
+    if (type(alignment) is not int or alignment < 32 or alignment & (alignment - 1)
+            or type(base) is not int or base < 0 or base % alignment):
+        raise NativeCompilationError("compile_error", "I/O base must respect selected memory alignment")
+    capacity_base, capacity = options.io_memory_capacity_base, options.io_memory_capacity_bytes
+    if capacity is not None and not capacity_base <= base < base + size <= capacity_base + capacity:
+        raise NativeCompilationError("compile_error", "I/O window exceeds declared memory capacity")
+    return base
+
+
 def dram_slots():
     """Selected I/O allocation window, separate from fixed on-chip memories.
 

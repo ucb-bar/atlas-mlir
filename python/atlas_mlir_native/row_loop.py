@@ -132,8 +132,8 @@ def prepare_plan(source, *, io_memory_base=None, instruction_budget=None):
     io_memory_base = selected_io_base() if io_memory_base is None else io_memory_base
     if type(io_memory_base) is not int or io_memory_base % 32:
         raise ValueError("I/O memory base requires an aligned integer address")
-    from .binding import validate_io_window
-    validate_io_window(io_memory_base)
+    from .binding import validate_explicit_io_base
+    validate_explicit_io_base(io_memory_base)
     if instruction_budget is None:
         instruction_budget = functional_instruction_limit()
     if type(instruction_budget) is not int or instruction_budget <= 0:

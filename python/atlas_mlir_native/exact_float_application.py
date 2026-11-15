@@ -26,7 +26,7 @@ class FloatSchedule:
                     publication="copy logical output only after every device status succeeds",weight_conversion="none")
 
 def prepare_plan(source):
-    p=device.prepare_plan(source);bodies=[];sizes={};launches=[]
+    p=device.prepare_source_plan(source);bodies=[];sizes={};launches=[]
     chunk=device.chunk_elements(p)
     for start in range(0,p.count,chunk):
         size=min(chunk,p.count-start)

@@ -93,10 +93,13 @@ def virtual_transition(*, source_address, destination_address, status_address,
     pages,ranges,pad,output_base,output_bytes = _configuration(
         source_address,destination_address,status_address,rows,columns,kind,
         admitted_code_ranges,pad,canonicalize_negative_zero,output_base,output_bytes)
-    from merlin.semantic_compiler.codegen import current_codegen_options
-    if io_memory_base is not None or current_codegen_options().io_memory_base is not None:
-        from .binding import validate_io_window
-        base, size = validate_io_window(io_memory_base)
+    from merlin.semantic_compiler.codegen import IO_MEMORY_OPTIONS, current_codegen_options
+    options = current_codegen_options()
+    if io_memory_base is not None or any(getattr(options, name) is not None for name in IO_MEMORY_OPTIONS):
+        from .binding import io_memory_base as selected_io_base, validate_explicit_io_base, dram_slots, TILE_BYTES
+        base = selected_io_base() if io_memory_base is None else io_memory_base
+        validate_explicit_io_base(base)
+        size = dram_slots() * TILE_BYTES
         if any(address < base or address + length > base + size for address, length in
                ((source_address, pages * 2048), (destination_address, pages * 2048),
                 (status_address, 2048), (output_base, output_bytes))):

@@ -117,6 +117,8 @@ def prepare_source(source, *, io_memory_base=None):
     if (type(io_memory_base) is not int or io_memory_base < 0 or io_memory_base % 32
             or io_memory_base + dram_slots() * TILE_BYTES > 1 << 32):
         raise ValueError("device I/O window must be 32-byte aligned within the 32-bit buffer ABI")
+    from .binding import validate_explicit_io_base
+    validate_explicit_io_base(io_memory_base)
     if (source.target_identity != TARGET_IDENTITY or source.lowering_policy != "diagnostic"
             or source.physical_extents or source.boundary_layouts or source.output_layouts
             or source.output_storages != ("external",)):

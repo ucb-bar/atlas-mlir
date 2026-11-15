@@ -87,9 +87,10 @@ class FloatPlan:
                     vector_admission={"qualified":"signed-zero or abs-code2f80..4f80",
                                       "pair":"normal-or-signed-zero inputs except both-negative-zero; private result must be normal or provably exact zero"} if self.op in ("bf16_add","bf16_sub") else None)
 
-def prepare_plan(source, *, io_memory_base=None):
+def prepare_source_plan(source, *, io_memory_base=None):
+    """Validate logical source semantics before bounded physical slicing."""
     io_memory_base = selected_io_base() if io_memory_base is None else io_memory_base
-    from .binding import TARGET_IDENTITY,TILE_BYTES,dram_slots
+    from .binding import TARGET_IDENTITY
     from merlin.semantic_compiler.model import TensorType,pointwise_identity_maps
     pure=[n for n in source.nodes if n.effect=="pure"]
     if len(pure)!=1 or pure[0].op not in OPS: raise ValueError("exact float needs one supported operation")
@@ -109,8 +110,20 @@ def prepare_plan(source, *, io_memory_base=None):
             v.type!=TensorType(n.type.shape,"bf16" if width==2 else "f32","raw-bit-pattern") for v in operands)):
         raise ValueError("exact float source types, maps, domain, or boundaries differ")
     plan=FloatPlan(source,n,operands,prod(n.type.shape),width,ow,io_memory_base)
-    if (type(io_memory_base) is not int or io_memory_base % 32 or
-        not dma_span_in_window(io_memory_base, plan.workspace_bytes)):
+    if type(io_memory_base) is not int or io_memory_base % 32:
+        raise ValueError("exact float buffers leave selected DMA memory windows")
+    from .binding import validate_explicit_io_base
+    validate_explicit_io_base(io_memory_base)
+    return plan
+
+
+def prepare_plan(source, *, io_memory_base=None):
+    """Admit a physical leaf only when its complete frame fits DMA memory."""
+    from .binding import dram_slots, TILE_BYTES
+
+    plan = prepare_source_plan(source, io_memory_base=io_memory_base)
+    if (plan.workspace_bytes > dram_slots() * TILE_BYTES
+            or not dma_span_in_window(plan.io_memory_base, plan.workspace_bytes)):
         raise ValueError("exact float buffers leave selected DMA memory windows")
     return plan
 

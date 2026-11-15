@@ -398,6 +398,8 @@ def compile_reduction(
     plan = prepare_plan(request)
     if type(io_memory_base) is not int or io_memory_base < 0 or io_memory_base % TILE_BYTES:
         raise NativeCompilationError("compile_error", "reduction I/O base must be a tile-aligned integer")
+    from .binding import validate_explicit_io_base
+    validate_explicit_io_base(io_memory_base, alignment=2048)
     if set(fixed_inputs) != {request.nodes[0].id, request.nodes[1].id} or len(fixed_outputs) != 1:
         raise NativeCompilationError("compile_error", "reduction ABI must bind data, seed and output")
     slots = tuple(fixed_inputs[n.id] for n in request.nodes[:2]) + tuple(fixed_outputs)

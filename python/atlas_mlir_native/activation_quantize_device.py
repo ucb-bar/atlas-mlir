@@ -85,6 +85,8 @@ def prepare_plan(source, *, io_memory_base=None):
     io_memory_base = selected_io_base() if io_memory_base is None else io_memory_base
     if type(io_memory_base) is not int or io_memory_base % 32:
         raise ValueError("I/O memory base requires an aligned integer address")
+    from .binding import validate_explicit_io_base
+    validate_explicit_io_base(io_memory_base)
     from .binding import TARGET_IDENTITY, TILE_BYTES, dram_slots
     from .static_quantize import prepare_source as static
     from .dynamic_quantize import prepare_source as dynamic
