@@ -153,7 +153,11 @@ def size_counted(plan, *, target_source=None, limits=None, operand_reuse=None):
             'encoded_instruction_memory', 'untimed_instruction_bound', 'physical_instruction_bound'}:
         if policy == 'batch-panel-cache':
             return size_counted(plan, target_source=target_source, limits=limits, operand_reuse='panel-cache')
-        return _size_counted(plan, target_source=target_source, limits=limits, operand_reuse='paired-cache')
+        result = _size_counted(plan, target_source=target_source, limits=limits, operand_reuse='paired-cache')
+    from .quantized_resident import requested_bindings
+    if result.record().get('route') != 'counted' and requested_bindings(plan):
+        raise NativeCompilationError('unsupported_semantics',
+                                     'resident immutable inputs require an admitted counted image')
     return result
 
 

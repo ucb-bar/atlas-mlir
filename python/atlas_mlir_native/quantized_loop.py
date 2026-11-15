@@ -68,9 +68,11 @@ def _execution_geometry(plan):
 def execution_layout(plan, *, operand_reuse=None, exponent_page_cache=None):
     from .quantized_operand_reuse import schedule_record
     from .exponent_page_cache import record as page_cache_record
+    from .quantized_resident import bind_geometry
     geometry, end = _execution_geometry(plan)
     if end > selected_io_memory_base() + dram_slots()*TILE_BYTES:
         raise NativeCompilationError("resource_limit", "quantized loop buffers exceed selected DRAM window")
+    geometry = bind_geometry(plan, geometry)
     return dict(schema="atlas.quantized_loop_execution.v1", operation="mxu1_cap448_looped_ordered",
                 **geometry, **schedule_record(plan, operand_reuse),
                 **page_cache_record(plan, selected=exponent_page_cache),

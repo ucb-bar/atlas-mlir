@@ -70,6 +70,8 @@ def prepare_c_package(source, compiled, name, *, target_source):
         else:
             rhs_index = f'(batch*{k}u+kt*32u+c)*{n}u+nt*32u+row'
     iea,ieb = (plan.input_ids.index(key) for key in plan.exponent_ids)
+    resident_ids = {item['node_id'] for item in execution.get('resident_bindings', [])}
+    resident_indices = {plan.input_ids.index(key) for key in resident_ids}
     output_bytes = batches*m*n*(2 if plan.output_dtype=="bf16" else 4)
     mc,nc,kc = ((value+31)//32 for value in (m,n,k))
     rhs_batches = batches if b.type.shape[:-2] else 1
@@ -125,20 +127,23 @@ int {name}_source_dispatch(void *,const void *const *,void *const *);
     arrays=program_array(name+"_words",binary)
     addresses=execution["input_addresses"]
     out=execution["output_addresses"][0]
-    write_inputs = [(addresses[0], 0, lhs_bytes), (addresses[1], lhs_bytes, rhs_bytes),
-                    *zip(execution['exponent_addresses'], exponent_offsets, exponent_bytes, strict=True)]
+    read_inputs = [(addresses[0], 0, lhs_bytes), (addresses[1], lhs_bytes, rhs_bytes),
+                   *zip(execution['exponent_addresses'], exponent_offsets, exponent_bytes, strict=True)]
+    read_ids = [*plan.physical_operand_ids, *plan.exponent_ids]
     if extra_bytes:
-        write_inputs.append((addresses[2],extra_offset,extra_bytes))
+        read_inputs.append((addresses[2],extra_offset,extra_bytes))
+        read_ids.append(plan.epilogue_other_id)
+    write_inputs = [span for span, node_id in zip(read_inputs, read_ids, strict=True) if node_id not in resident_ids]
     writes = '\n'.join(f'  if (region->io.write(region->io.context,{address}u,region->workspace+{offset}u,{size}u)) return 3;'
                        for address, offset, size in write_inputs)
-    buffers = ',\n      '.join(f'{{{address}u,{size}u,ATLAS_HOST_DEVICE_READ}}' for address, _, size in write_inputs)
+    buffers = ',\n      '.join(f'{{{address}u,{size}u,ATLAS_HOST_DEVICE_READ}}' for address, _, size in read_inputs)
     buffers += f',\n      {{{out}u,{device_output_bytes}u,ATLAS_HOST_DEVICE_WRITE}},\n      {{{execution["status_address"]}u,{execution["status_bytes"]}u,ATLAS_HOST_DEVICE_WRITE}}'
     launch=f"""
   status=atlas_host_ensure_loaded(region->host,{name}_words,{len(binary)//4}u);
   if (status!=ATLAS_HOST_OK) {{ if (device) *device=status; return 4; }}
 {writes}
   atlas_host_buffer buffers[]={{{buffers}}};
-  status=atlas_host_start(region->host,buffers,{len(write_inputs)+2}u);
+  status=atlas_host_start(region->host,buffers,{len(read_inputs)+2}u);
   if (status==ATLAS_HOST_OK) status=atlas_host_wait(region->host,region->max_polls);
   if (device) *device=status;
   if (status!=ATLAS_HOST_OK) return 4;
@@ -149,6 +154,8 @@ int {name}_source_dispatch(void *,const void *const *,void *const *);
 """
     pack_exponents = []
     for index, offset, geometry in zip((iea, ieb), exponent_offsets, execution['exponent_layouts'], strict=True):
+        if index in resident_indices:
+            continue
         if geometry['mode'] == 'row':
             pack_exponents.append(f"""
   for (size_t batch=0;batch<{geometry['batches']}u;++batch)
@@ -162,6 +169,24 @@ int {name}_source_dispatch(void *,const void *const *,void *const *);
     __builtin_memcpy(region->workspace+{offset}u+page*2048u,(const uint8_t *)inputs[{index}]+page*4u,4u);
 """)
     exponent_packing = ''.join(pack_exponents)
+    operand_packing = ''
+    if ia not in resident_indices:
+        operand_packing += f"""  for (size_t batch=0;batch<{batches}u;++batch) for (size_t mt=0;mt<{mc}u;++mt)
+    for (size_t kt=0;kt<{kc}u;++kt) for (size_t row=0;row<32u && mt*32u+row<{m}u;++row)
+      for (size_t c=0;c<32u && kt*32u+c<{k}u;++c)
+        region->workspace[((batch*{mc}u+mt)*{kc}u+kt)*1024u+row*32u+c]=a[{lhs_index}];
+"""
+    if ib not in resident_indices:
+        operand_packing += f"""  for (size_t batch=0;batch<{rhs_batches}u;++batch) for (size_t nt=0;nt<{nc}u;++nt)
+    for (size_t kt=0;kt<{kc}u;++kt) for (size_t row=0;row<32u && nt*32u+row<{n}u;++row)
+      for (size_t c=0;c<32u && kt*32u+c<{k}u;++c)
+        region->workspace[{lhs_bytes}u+((batch*{nc}u+nt)*{kc}u+kt)*1024u+row*32u+c]=b[{rhs_index}];
+"""
+    input_check = ' && '.join(f'i!={index}u' for index in sorted(resident_indices))
+    input_check = f'if ({input_check}) ' if input_check else ''
+    code_skip = ' || '.join(f'which=={index}u' for index, node_id in enumerate(plan.physical_operand_ids)
+                           if node_id in resident_ids)
+    code_skip = f'    if ({code_skip}) continue;\n' if code_skip else ''
     storing = ("uint16_t value=(uint16_t)word; __builtin_memcpy(ctx->workspace+index*2u,&value,2u);" if plan.output_dtype=="bf16"
         else "uint32_t value=word<<16; __builtin_memcpy(ctx->workspace+index*4u,&value,4u);")
     implementation=extra_encoder+arrays+f"""
@@ -198,7 +223,7 @@ int {name}_source_dispatch(void *context,const void *const *inputs,void *const *
   if (!{name}_range(out,{output_bytes}u)) return 1;
   for (size_t r=0;r<7u;++r) {{
     if (!{name}_range(reserved[r],reserved_sizes[r]) || {name}_overlap(out,{output_bytes}u,reserved[r],reserved_sizes[r])) return 1;
-    for (size_t i=0;i<{count}u;++i) if (!{name}_range(inputs[i],sizes[i]) ||
+    for (size_t i=0;i<{count}u;++i) {input_check}if (!{name}_range(inputs[i],sizes[i]) ||
         (r<5u && {name}_overlap(inputs[i],sizes[i],reserved[r],reserved_sizes[r])) ||
         {name}_overlap(inputs[i],sizes[i],out,{output_bytes}u)) return 1;
   }}
@@ -206,20 +231,12 @@ int {name}_source_dispatch(void *context,const void *const *inputs,void *const *
     if ({name}_overlap(reserved[table],reserved_sizes[table],reserved[r],reserved_sizes[r])) return 1;
   const uint8_t *a=inputs[{ia}],*b=inputs[{ib}];
   for (size_t which=0;which<2u;++which) {{
-    const uint8_t *v=which?b:a; size_t size=which?{prod(b.type.shape)}u:{prod(a.type.shape)}u;
+{code_skip}    const uint8_t *v=which?b:a; size_t size=which?{prod(b.type.shape)}u:{prod(a.type.shape)}u;
     for (size_t i=0;i<size;++i) if (!(v[i]==0u || (v[i]>=8u && v[i]<=126u) || (v[i]>=136u && v[i]<=254u))) return 2;
   }}
   /* Pack complete logical operands once, preserving every admitted FP8 code. */
   __builtin_memset(region->workspace,0,{output_offset}u);
-  for (size_t batch=0;batch<{batches}u;++batch) for (size_t mt=0;mt<{mc}u;++mt)
-    for (size_t kt=0;kt<{kc}u;++kt) for (size_t row=0;row<32u && mt*32u+row<{m}u;++row)
-      for (size_t c=0;c<32u && kt*32u+c<{k}u;++c)
-        region->workspace[((batch*{mc}u+mt)*{kc}u+kt)*1024u+row*32u+c]=a[{lhs_index}];
-  for (size_t batch=0;batch<{rhs_batches}u;++batch) for (size_t nt=0;nt<{nc}u;++nt)
-    for (size_t kt=0;kt<{kc}u;++kt) for (size_t row=0;row<32u && nt*32u+row<{n}u;++row)
-      for (size_t c=0;c<32u && kt*32u+c<{k}u;++c)
-        region->workspace[{lhs_bytes}u+((batch*{nc}u+nt)*{kc}u+kt)*1024u+row*32u+c]=b[{rhs_index}];
-{exponent_packing}
+{operand_packing}{exponent_packing}
 {extra_packing}
 {launch}
   for (size_t batch=0;batch<{batches}u;++batch) for (size_t first_m=0;first_m<{m}u;first_m+=32u)
@@ -246,6 +263,8 @@ int {name}_source_dispatch(void *context,const void *const *inputs,void *const *
         rejection_status=dict(address=execution["status_address"],bytes=4,success=0,rejection=1),
         precision_plan=plan.record(),input_node_ids=list(plan.input_ids),output_node_ids=[plan.output_id],
         source_interface=dict(workspace_bytes=converted,failure_output="unchanged",completion="synchronous"),**runtime_record)
+    if resident_ids:
+        record['resident_bindings'] = execution['resident_bindings']
     if plan.epilogue_precision is not None:
         record.update(kind='quantized_epilogue',schema='atlas.quantized_epilogue_c_package.v1',
             epilogue=dict(precision=plan.epilogue_precision.record(),contract_operand=plan.epilogue_contract_operand,

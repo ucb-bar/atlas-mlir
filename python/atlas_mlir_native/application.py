@@ -146,6 +146,25 @@ class AtlasApplicationAdapter:
     publication_options = staticmethod(publication_options)
 
     @staticmethod
+    def resident_memory_geometry():
+        """Atlas DRAM aperture used by the compiler's persistent allocator."""
+        return dict(dma_base=0x80000000, dma_capacity=0x80000000, alignment=2048)
+
+    @staticmethod
+    def inventory_resident_inputs(region):
+        from .already_quantized import OPS
+        from .quantized_resident import inventory_resident_inputs
+
+        if not any(node.effect == 'pure' and node.op in OPS for node in region.nodes):
+            return None
+        return inventory_resident_inputs(region)
+
+    @staticmethod
+    def pack_resident_input(region, node_id, dense_bytes):
+        from .quantized_resident import pack_resident_input
+        return pack_resident_input(region, node_id, dense_bytes)
+
+    @staticmethod
     def supports_region_materialization(region, alternative):
         # Other kinds retain their complete original compilation path until
         # their own binding contract and byte-equality gates are available.
