@@ -44,6 +44,7 @@ def cases():
         "slice": request("gather", ((2, 64),), (2, 32), mapping=IndexMap(2, ((1, 0), (0, 1)), (0, 32))),
         "concat": request("concat", ((2, 1, 32), (2, 2, 32)), (2, 3, 32), axis=1),
         "xlu": request("transpose", ((32, 64),), (64, 32), dtype="i8", mapping=IndexMap(2, ((0, 1), (1, 0)), (0, 0))),
+        "ragged_xlu": request("transpose", ((2, 3, 32),), (2, 32, 3), dtype="i8", mapping=IndexMap(3, ((1, 0, 0), (0, 0, 1), (0, 1, 0)), (0, 0, 0))),
         "ragged_scalar_transpose": request("transpose", ((5, 8),), (8, 5), dtype="i8", mapping=IndexMap(2, ((0, 1), (1, 0)), (0, 0))),
     }
 
@@ -80,6 +81,7 @@ class LayoutDeviceRecognitionTest(unittest.TestCase):
     def test_modes_are_selected_from_semantics(self):
         selected = {name: [s["mode"] for s in prepare_source(source).segments] for name, source in cases().items()}
         self.assertEqual(selected["xlu"], ["xlu"])
+        self.assertEqual(selected["ragged_xlu"], ["ragged_xlu"])
         self.assertEqual(selected["small_scalar_reshape"], ["scalar"])
         self.assertEqual(selected["ragged_scalar_transpose"], ["scalar"])
         self.assertEqual(selected["concat"], ["dma", "dma"])
@@ -87,7 +89,7 @@ class LayoutDeviceRecognitionTest(unittest.TestCase):
 
     def test_ragged_xlu_packs_arbitrary_bytes_without_padding(self):
         from atlas_mlir_native.layout_device import _ragged_transpose_words
-        for rows in (1, 3, 31, 33, 65, 163):
+        for rows in (1, 3, 31, 33, 65, 163, 255, 400, 511):
             raw = bytes((i * 37 + i // 64 * 11) % 256 for i in range(rows * 64))
             actual = bytearray()
             for column_base in (0, 32):
@@ -104,6 +106,16 @@ class LayoutDeviceRecognitionTest(unittest.TestCase):
                         value = int.from_bytes(caches[index][offset:offset + 4], "little")
                         word |= ((value << shift) if shift >= 0 else (value >> -shift)) & mask
                     actual.extend(word.to_bytes(4, "little"))
+                grouped = bytearray()
+                for group in range(8):
+                    for _, parts in _ragged_transpose_words(rows, 4):
+                        word = 0
+                        for index, offset, shift, mask in parts:
+                            offset += group * 128
+                            value = int.from_bytes(caches[index][offset:offset + 4], "little")
+                            word |= ((value << shift) if shift >= 0 else (value >> -shift)) & mask
+                        grouped.extend(word.to_bytes(4, "little"))
+                self.assertEqual(bytes(grouped), bytes(actual[-32 * rows:]))
             expected = bytes(raw[row * 64 + column] for column in range(64) for row in range(rows))
             self.assertEqual(bytes(actual), expected)
 
@@ -116,8 +128,11 @@ class LayoutDeviceRecognitionTest(unittest.TestCase):
                 plan = prepare_source(source)
                 self.assertEqual(plan.segments[0]["mode"], "ragged_xlu")
                 text = virtual_program(plan)
-                self.assertEqual(sorted(trips for _, trips in _source_loop_trips(text)), [2, 2, 16])
+                trips = [trips for _, trips in _source_loop_trips(text)]
+                self.assertCountEqual(trips, [2, 2, 16, 8, rows])
                 self.assertEqual(text.count('"atlas.virtual_xlu_transpose"'), (rows + 31) // 32)
+                # Only four output rows' packing is retained in the image.
+                self.assertLess(text.count('"atlas.virtual_slot_load"'), rows * 12)
                 # Semantic eligibility requires the unchanged prefix permutation.
                 changed = replace(source.nodes[-1].index_maps[0], coefficients=((0,1,0,0),(1,0,0,0),(0,0,0,1),(0,0,1,0)))
                 swapped = request("transpose", ((2, 2, rows, 64),), (2, 2, 64, rows), dtype="i8", mapping=changed)
@@ -128,7 +143,7 @@ class LayoutDeviceRecognitionTest(unittest.TestCase):
         from unittest.mock import patch
         from atlas_mlir_native.application import AtlasApplicationAdapter
         from atlas_mlir_native.layout_device import prove_plan
-        source = request("transpose", ((511, 64),), (64, 511), dtype="i8",
+        source = request("transpose", ((191, 64),), (64, 191), dtype="i8",
             mapping=IndexMap(2, ((0,1),(1,0)), (0,0)))
         diagnostic = "Atlas tool rejected selected program: lowered program exceeds the 32768-word policy limit"
         plan = prepare_source(source)
@@ -181,6 +196,28 @@ class LayoutDeviceRecognitionTest(unittest.TestCase):
                     existing = cases()[name]
                     self.assertTrue(adapter._supports_device_source(existing, existing.nodes[-1], "layout_device"))
 
+    def test_layout_proof_errors_are_not_resource_refusals(self):
+        from unittest.mock import patch
+        from atlas_mlir_native.binding import RTL_REVISION
+        from atlas_mlir_native.layout_device import prove_plan
+        plan = prepare_source(cases()["ragged_xlu"])
+        emitted = json.dumps(dict(selected_rtl_revision=RTL_REVISION, instructions=[]))
+        with patch("atlas_mlir_native.layout_device._native_pipeline", return_value="mandatory"):
+            for error in (ValueError("unsupported bound structure"), KeyError("missing field"), IndexError("missing instruction")):
+                with self.subTest(error=type(error).__name__), patch("atlas_mlir_native.layout_device._run",
+                        side_effect=["machine", emitted]), patch("atlas_mlir_native.restoration_budget.instruction_bound", side_effect=error):
+                    with self.assertRaises(type(error)):
+                        prove_plan(plan)
+            with patch("atlas_mlir_native.layout_device._run", side_effect=["machine", "invalid program JSON"]):
+                with self.assertRaises(json.JSONDecodeError):
+                    prove_plan(plan)
+            with patch("atlas_mlir_native.layout_device._run", side_effect=["machine", emitted]), patch(
+                    "atlas_mlir_native.restoration_budget.instruction_bound",
+                    return_value=dict(admitted=False, instruction_bound=1000001)):
+                with self.assertRaises(NativeCompilationError) as failure:
+                    prove_plan(plan)
+                self.assertEqual(failure.exception.status, "resource_limit")
+
     def test_refuses_changed_type_maps_attrs_and_incomplete_source(self):
         source = cases()["broadcast"]
         x, y = source.nodes
@@ -207,6 +244,22 @@ class LayoutDeviceRecognitionTest(unittest.TestCase):
         source = request("transpose", ((513, 64),), (64, 513), dtype="i8", mapping=IndexMap(2, ((0, 1), (1, 0)), (0, 0)))
         with self.assertRaisesRegex(ValueError, "default proof work budget"):
             prepare_source(source)
+
+    def test_ragged_xlu_static_work_budget_preserves_host_route(self):
+        from unittest.mock import patch
+        from atlas_mlir_native.application import AtlasApplicationAdapter
+        from merlin.compile.layout_c import emit_layout_c
+        for rows in (193, 255, 400, 511):
+            source = request("transpose", ((rows, 64),), (64, rows), dtype="i8",
+                mapping=IndexMap(2, ((0, 1), (1, 0)), (0, 0)))
+            with self.subTest(rows=rows):
+                with self.assertRaisesRegex(ValueError, "default proof work budget"):
+                    prepare_source(source)
+                with patch("atlas_mlir_native.layout_device.prove_plan") as proof:
+                    self.assertFalse(AtlasApplicationAdapter._supports_device_source(source, source.nodes[-1], "layout_device"))
+                    proof.assert_not_called()
+                record, _ = emit_layout_c(source, "bounded_transpose")
+                self.assertEqual(record["source_request_digest"], source.digest())
 
 
 @unittest.skipUnless((BIN / "atlas-opt").is_file(), "select built Atlas tools")
@@ -256,6 +309,8 @@ class LayoutDeviceCompilationTest(unittest.TestCase):
                     compile_source(None, source, target_source=ROOT, destination=compiled, limits=None)
                     bound = json.loads((compiled / "layout-instruction-bound.json").read_text())
                     self.assertTrue(bound["admitted"])
+                    from atlas_mlir_native.application import AtlasApplicationAdapter
+                    self.assertTrue(AtlasApplicationAdapter._supports_device_source(source, source.nodes[-1], "layout_device"))
                     machine = (compiled / "atlas-machine.mlir").read_text()
                     for contract in ("dma", "mxu", "tile", "cfg", "source_memory", "buffer"):
                         self.assertIn("atlas.virtual_" + contract + "_contract", machine)

@@ -115,14 +115,14 @@ def _segment(index, shape, source_strides, output_strides, source_offset, output
                 source_row_bytes=0, output_row_bytes=0)
 
 
-def _ragged_transpose_words(rows):
+def _ragged_transpose_words(rows, columns=32):
     """Pack a dense 32-row slab from cached, padded 32x32 XLU tiles.
 
     Each part names a cached tile and an aligned little-endian source word,
     followed by its signed bit shift and destination mask. No padding byte
     contributes to a logical output word, including words crossing rows.
     """
-    for destination in range(0, 32 * rows, 4):
+    for destination in range(0, columns * rows, 4):
         parts = {}
         for byte in range(4):
             column, row = divmod(destination + byte, rows)
@@ -204,6 +204,11 @@ def prepare_source(source, *, io_memory_base=None):
                 and shape[-2] % 32 == 0 and 32 * shape[-1] <= 16384
                 and mapping.coefficients == tuple(tuple(int(j == (i if i < len(shape)-2 else 2*len(shape)-3-i))
                                                      for j in range(len(shape))) for i in range(len(shape)))):
+            # Limit unrolled initialization to 1536 logical slab words.
+            # The counted pack body has one eighth as many logical words;
+            # larger slabs keep the host layout route.
+            if 8 * shape[-1] > 1536:
+                raise ValueError("ragged XLU layout exceeds default proof work budget")
             # Whole prefixes remain inside this device image. Each iteration
             # owns 32 dense output rows, hence both DMA pointer strides align.
             segments.append(dict(input=0, mode="ragged_xlu", counts=[*shape[:-2], shape[-2] // 32],
@@ -298,9 +303,9 @@ def virtual_program(plan, *, size_limit=None):
         lines.append(f"  {value} = arith.addi {base}, {rhs} : i32")
         return value
 
-    def slot():
+    def slot(kind="fp8", words=256):
         value = fresh("slot")
-        lines.append(f'  {value} = "atlas.virtual_slot"() {{kind = "fp8", words = 256 : i32, slot_word = -1 : i32, purpose = "scratch"}} : () -> {spill}')
+        lines.append(f'  {value} = "atlas.virtual_slot"() {{kind = "{kind}", words = {words} : i32, slot_word = -1 : i32, purpose = "scratch"}} : () -> {spill}')
         return value
 
     # Slots are declared in the entry block and receive addresses from spilling.
@@ -308,6 +313,8 @@ def virtual_program(plan, *, size_limit=None):
     ragged_rows = max((segment["output_row_bytes"] for segment in plan.segments
                        if segment["mode"] == "ragged_xlu"), default=0)
     ragged_slots = [slot() for _ in range((ragged_rows + 31) // 32)]
+    slab_words = (8 * ragged_rows + 255) // 256 * 256
+    slab_slot = slot("raw", slab_words) if ragged_rows else None
 
     def load(address, size=32):
         nonlocal current
@@ -335,28 +342,34 @@ def virtual_program(plan, *, size_limit=None):
         current = token
         return value
 
-    def scalar_copy(source_memory, source_offset, target_memory, target_offset, width=1):
+    def scalar_copy(source_memory, source_offset, target_memory, target_offset, width=1,
+                    source_index=None, target_index=None):
         nonlocal current
         token, value = fresh("s"), fresh("byte")
         kind = {1: "lbu", 2: "lhu", 4: "lw"}[width]
-        lines.append(f'  {token}, {value} = "atlas.virtual_slot_load"({current}, {source_memory}) {{kind = "{kind}", byte_offset = {source_offset} : i32}} : ({state}, {spill}) -> ({state}, i32)')
+        index, index_type = (f", {source_index}", ", i32") if source_index is not None else ("", "")
+        lines.append(f'  {token}, {value} = "atlas.virtual_slot_load"({current}, {source_memory}{index}) {{kind = "{kind}", byte_offset = {source_offset} : i32}} : ({state}, {spill}{index_type}) -> ({state}, i32)')
         current = token
         token = fresh("s")
         kind = {1: "sb", 2: "sh", 4: "sw"}[width]
-        lines.append(f'  {token} = "atlas.virtual_slot_store"({current}, {target_memory}, {value}) {{kind = "{kind}", byte_offset = {target_offset} : i32}} : ({state}, {spill}, i32) -> {state}')
+        index, index_type = (f", {target_index}", ", i32") if target_index is not None else ("", "")
+        lines.append(f'  {token} = "atlas.virtual_slot_store"({current}, {target_memory}, {value}{index}) {{kind = "{kind}", byte_offset = {target_offset} : i32}} : ({state}, {spill}, i32{index_type}) -> {state}')
         current = token
 
-    def scalar_word(memory, offset):
+    def scalar_word(memory, offset, index=None):
         nonlocal current
         token, value = fresh("s"), fresh("word")
-        lines.append(f'  {token}, {value} = "atlas.virtual_slot_load"({current}, {memory}) {{kind = "lw", byte_offset = {offset} : i32}} : ({state}, {spill}) -> ({state}, i32)')
+        operand, index_type = (f", {index}", ", i32") if index is not None else ("", "")
+        lines.append(f'  {token}, {value} = "atlas.virtual_slot_load"({current}, {memory}{operand}) {{kind = "lw", byte_offset = {offset} : i32}} : ({state}, {spill}{index_type}) -> ({state}, i32)')
         current = token
         return value
 
-    def put_word(value, offset):
+    def put_word(value, offset, memory=None, index=None):
         nonlocal current
         token = fresh("s")
-        lines.append(f'  {token} = "atlas.virtual_slot_store"({current}, {output_slot}, {value}) {{kind = "sw", byte_offset = {offset} : i32}} : ({state}, {spill}, i32) -> {state}')
+        memory = output_slot if memory is None else memory
+        operand, index_type = (f", {index}", ", i32") if index is not None else ("", "")
+        lines.append(f'  {token} = "atlas.virtual_slot_store"({current}, {memory}, {value}{operand}) {{kind = "sw", byte_offset = {offset} : i32}} : ({state}, {spill}, i32{index_type}) -> {state}')
         current = token
 
     def binary(kind, left, right):
@@ -364,15 +377,13 @@ def virtual_program(plan, *, size_limit=None):
         lines.append(f"  {result} = arith.{kind} {left}, {right} : i32")
         return result
 
-    def xlu_tile(sp, source_row_bytes, rows=32, zero=None):
+    def xlu_tile(sp, source_row_bytes, rows=32):
         # Partial source rows never read outside the complete source matrix.
         # The existing strided assembly serves both aligned and ragged paths.
         if rows == 32 and source_row_bytes == 32:
             value = load(sp, 1024)
             save(value, output_slot)
         else:
-            if zero is not None:
-                save(zero, transpose_slot)
             rows_per_window = max(1, (1024 - 32) // source_row_bytes + 1)
             for first_row in range(0, rows, rows_per_window):
                 count = min(rows_per_window, rows - first_row)
@@ -381,8 +392,7 @@ def virtual_program(plan, *, size_limit=None):
                 save(loaded, source_slot)
                 if first_row == 0:
                     save(loaded, output_slot)
-                    if zero is None:
-                        save(loaded, transpose_slot)
+                    save(loaded, transpose_slot)
                 for row in range(first_row, first_row + count):
                     for word in range(8):
                         scalar_copy(source_slot, (row - first_row) * source_row_bytes + word * 4,
@@ -394,33 +404,33 @@ def virtual_program(plan, *, size_limit=None):
 
     def ragged_transport(sp, dp, segment):
         rows = segment["output_row_bytes"]
-        # Recreate this invariant inside the counted body, avoiding a live
-        # vector across CFG edges. PACK of exact BF16 zero is a raw zero tile.
-        bf16, zero_bf16, zero = "!atlas.virtual_bf16", fresh("zero"), fresh("zero")
-        lines.append(f'  {zero_bf16} = "atlas.virtual_vpu_splat"() {{bits = 0 : i32}} : () -> {bf16}')
-        scale = constant(127)
-        lines.append(f'  {zero} = "atlas.virtual_raw_pack_fp8"({zero_bf16}, {scale}) : ({bf16}, i32) -> {tile}')
         for first in range(0, rows, 32):
             value = xlu_tile(add(sp, first * segment["source_row_bytes"]),
-                             segment["source_row_bytes"], min(32, rows - first), zero)
+                             segment["source_row_bytes"], min(32, rows - first))
             save(value, ragged_slots[first // 32])
-        # Every word is fully assigned before its aligned output beat is
-        # published. The rest of the slot is initialized by xlu_tile's save.
-        for destination, parts in _ragged_transpose_words(rows):
-            packed = None
-            for index, offset, shift, mask in parts:
-                word = scalar_word(ragged_slots[index], offset)
-                if shift:
-                    word = binary("shli" if shift > 0 else "shrui", word, constant(abs(shift)))
-                # A shift alone clips ordinary adjacent-word fragments. At a
-                # ragged row boundary an additional mask excludes other rows.
-                shifted_mask = ((0xffffffff << shift) & 0xffffffff) if shift >= 0 else (0xffffffff >> -shift)
-                if shifted_mask != mask:
-                    word = binary("andi", word, constant(mask))
-                packed = word if packed is None else binary("ori", packed, word)
-            put_word(packed, destination % 32)
-            if destination % 32 == 28:
-                store(restore(output_slot), add(dp, destination - 28))
+        # Four output rows always occupy a whole number of words. Their byte
+        # packing repeats eight times, advancing four columns in every cache.
+        # A separate slab preserves aligned DMA even when rows is odd.
+        def pack_rows(source_index, destination_index):
+            for destination, parts in _ragged_transpose_words(rows, 4):
+                packed = None
+                for index, offset, shift, mask in parts:
+                    word = scalar_word(ragged_slots[index], offset, source_index)
+                    if shift:
+                        word = binary("shli" if shift > 0 else "shrui", word, constant(abs(shift)))
+                    shifted_mask = ((0xffffffff << shift) & 0xffffffff) if shift >= 0 else (0xffffffff >> -shift)
+                    if shifted_mask != mask:
+                        word = binary("andi", word, constant(mask))
+                    packed = word if packed is None else binary("ori", packed, word)
+                put_word(packed, destination, slab_slot, destination_index)
+        repeat(8, constant(0), constant(0), 32, rows, pack_rows)
+
+        def publish(source_index, destination):
+            for word in range(8):
+                scalar_copy(slab_slot, word * 4, output_slot, word * 4, 4,
+                            source_index=source_index)
+            store(restore(output_slot), destination)
+        repeat(rows, constant(0), dp, 8, 32, publish)
 
     def repeat(count, source, destination, source_stride, destination_stride, body):
         nonlocal current
@@ -446,6 +456,13 @@ def virtual_program(plan, *, size_limit=None):
         lines.append(f"  cf.br ^{label}({current}, {next_index}, {next_source}, {next_destination} : {state}, i32, i32, i32)")
         current = fresh("s")
         lines.append(f" ^{label}_done({current}: {state}):")
+
+    if slab_slot is not None:
+        # Indexed writes preserve an initialized footprint under the buffer
+        # contract. Establish it once before any counted prefix traversal.
+        zero = constant(0)
+        for offset in range(0, 32 * ragged_rows, 4):
+            put_word(zero, offset, slab_slot)
 
     for segment in plan.segments:
         source_base = plan.input_addresses[segment["input"]] + segment["source_offset"]
@@ -563,10 +580,9 @@ def prove_plan(plan, *, target_source=None, limits=None):
     if program.get("selected_rtl_revision") != RTL_REVISION:
         raise NativeCompilationError("unqualified_target", "layout emitter RTL differs")
     from .restoration_budget import instruction_bound
-    try:
-        bound = instruction_bound(virtual, machine, program)
-    except (ValueError, KeyError, IndexError) as error:
-        raise NativeCompilationError("resource_limit", "layout instruction bound is unproved: " + str(error)) from error
+    # A failed analyzer is a compiler error, not evidence of a resource refusal.
+    # Only a completed bound that exceeds the policy is host eligible.
+    bound = instruction_bound(virtual, machine, program)
     if not bound["admitted"]:
         raise NativeCompilationError("resource_limit", "layout worst-case instruction bound exceeds 1000000: " + str(bound["instruction_bound"]))
     budget = current_codegen_options().program_size_limit_bytes
