@@ -116,7 +116,7 @@ def _segment(index, shape, source_strides, output_strides, source_offset, output
 
 
 def _ragged_transpose_words(rows, columns=32):
-    """Pack a dense 32-row slab from cached, padded 32x32 XLU tiles.
+    """Pack the requested output rows from cached, padded 32x32 XLU tiles.
 
     Each part names a cached tile and an aligned little-endian source word,
     followed by its signed bit shift and destination mask. No padding byte
@@ -201,13 +201,13 @@ def prepare_source(source, *, io_memory_base=None):
                                  output_strides=list(ds), source_offset=0, output_offset=0, block_bytes=1024,
                                  source_row_bytes=operands[0].type.shape[-1], output_row_bytes=shape[-1]))
         elif (output.op == "transpose" and width == 1 and len(shape) >= 2
-                and shape[-2] % 32 == 0 and 32 * shape[-1] <= 16384
+                and shape[-2] % 32 == 0
                 and mapping.coefficients == tuple(tuple(int(j == (i if i < len(shape)-2 else 2*len(shape)-3-i))
                                                      for j in range(len(shape))) for i in range(len(shape)))):
-            # Limit unrolled initialization to 1536 logical slab words.
+            # Limit unrolled initialization to 1304 logical slab words.
             # The counted pack body has one eighth as many logical words;
             # larger slabs keep the host layout route.
-            if 8 * shape[-1] > 1536:
+            if 8 * shape[-1] > 1304:
                 raise ValueError("ragged XLU layout exceeds default proof work budget")
             # Whole prefixes remain inside this device image. Each iteration
             # owns 32 dense output rows, hence both DMA pointer strides align.
@@ -576,13 +576,22 @@ def prove_plan(plan, *, target_source=None, limits=None):
     # Its immutable result needs no duplicate postcheck. Optimized retains it.
     if pipeline != "mandatory":
         _run([str(tools / "atlas-opt"), *NATIVE_CHECKS, "--verify-atlas-timing", "-"], input_text=machine)
-    program = json.loads(_run([str(tools / "atlas-emit"), "--program-json", "-"], input_text=machine))
+    emitted = _run([str(tools / "atlas-emit"), "--program-json", "-"], input_text=machine)
+    try:
+        program = json.loads(emitted)
+    except json.JSONDecodeError as error:
+        raise NativeCompilationError("compile_error", "layout emitter returned invalid program JSON: " + str(error)) from error
+    if not isinstance(program, dict):
+        raise NativeCompilationError("compile_error", "layout emitter returned a non-object program")
     if program.get("selected_rtl_revision") != RTL_REVISION:
         raise NativeCompilationError("unqualified_target", "layout emitter RTL differs")
     from .restoration_budget import instruction_bound
     # A failed analyzer is a compiler error, not evidence of a resource refusal.
     # Only a completed bound that exceeds the policy is host eligible.
-    bound = instruction_bound(virtual, machine, program)
+    try:
+        bound = instruction_bound(virtual, machine, program)
+    except (ValueError, KeyError, IndexError) as error:
+        raise NativeCompilationError("compile_error", "layout instruction bound is unproved: " + str(error)) from error
     if not bound["admitted"]:
         raise NativeCompilationError("resource_limit", "layout worst-case instruction bound exceeds 1000000: " + str(bound["instruction_bound"]))
     budget = current_codegen_options().program_size_limit_bytes
@@ -643,7 +652,13 @@ def prepare_c_package(source, compiled, name, *, target_source, runtime_linkage=
     machine = _run([str(tools / "atlas-opt"), *_scheduled_virtual_pipeline(manifest["lowering_pipeline"]), "-"], input_text=virtual)
     if machine != (compiled / "atlas-machine.mlir").read_text():
         raise ValueError("device layout machine source differs")
-    program = json.loads(_run([str(tools / "atlas-emit"), "--program-json", "-"], input_text=machine))
+    emitted = _run([str(tools / "atlas-emit"), "--program-json", "-"], input_text=machine)
+    try:
+        program = json.loads(emitted)
+    except json.JSONDecodeError as error:
+        raise NativeCompilationError("compile_error", "layout emitter returned invalid program JSON: " + str(error)) from error
+    if not isinstance(program, dict):
+        raise NativeCompilationError("compile_error", "layout emitter returned a non-object program")
     binary = b"".join(row["word_u32"].to_bytes(4, "little") for row in program["instructions"])
     if binary != (compiled / "program.bin").read_bytes():
         raise ValueError("device layout binary differs")

@@ -143,7 +143,7 @@ class LayoutDeviceRecognitionTest(unittest.TestCase):
         from unittest.mock import patch
         from atlas_mlir_native.application import AtlasApplicationAdapter
         from atlas_mlir_native.layout_device import prove_plan
-        source = request("transpose", ((191, 64),), (64, 191), dtype="i8",
+        source = request("transpose", ((163, 64),), (64, 163), dtype="i8",
             mapping=IndexMap(2, ((0,1),(1,0)), (0,0)))
         diagnostic = "Atlas tool rejected selected program: lowered program exceeds the 32768-word policy limit"
         plan = prepare_source(source)
@@ -206,11 +206,14 @@ class LayoutDeviceRecognitionTest(unittest.TestCase):
             for error in (ValueError("unsupported bound structure"), KeyError("missing field"), IndexError("missing instruction")):
                 with self.subTest(error=type(error).__name__), patch("atlas_mlir_native.layout_device._run",
                         side_effect=["machine", emitted]), patch("atlas_mlir_native.restoration_budget.instruction_bound", side_effect=error):
-                    with self.assertRaises(type(error)):
+                    with self.assertRaises(NativeCompilationError) as failure:
                         prove_plan(plan)
-            with patch("atlas_mlir_native.layout_device._run", side_effect=["machine", "invalid program JSON"]):
-                with self.assertRaises(json.JSONDecodeError):
-                    prove_plan(plan)
+                    self.assertEqual(failure.exception.status, "compile_error")
+            for invalid in ("invalid program JSON", "[]"):
+                with self.subTest(emitted=invalid), patch("atlas_mlir_native.layout_device._run", side_effect=["machine", invalid]):
+                    with self.assertRaises(NativeCompilationError) as failure:
+                        prove_plan(plan)
+                    self.assertEqual(failure.exception.status, "compile_error")
             with patch("atlas_mlir_native.layout_device._run", side_effect=["machine", emitted]), patch(
                     "atlas_mlir_native.restoration_budget.instruction_bound",
                     return_value=dict(admitted=False, instruction_bound=1000001)):
@@ -249,7 +252,7 @@ class LayoutDeviceRecognitionTest(unittest.TestCase):
         from unittest.mock import patch
         from atlas_mlir_native.application import AtlasApplicationAdapter
         from merlin.compile.layout_c import emit_layout_c
-        for rows in (193, 255, 400, 511):
+        for rows in (164, 191, 193, 255, 400, 511):
             source = request("transpose", ((rows, 64),), (64, rows), dtype="i8",
                 mapping=IndexMap(2, ((0, 1), (1, 0)), (0, 0)))
             with self.subTest(rows=rows):
