@@ -87,6 +87,7 @@ class QuantizerApplicationScheduleTest(unittest.TestCase):
         self.assertEqual(scheduled_reference(source, raw), host_reference(source, raw))
         self.assertEqual(prepare_plan(source).source.outputs, source.outputs)
 
+    @unittest.skipUnless((BIN / "atlas-opt").is_file(), "select built Atlas tools")
     def test_large_application_geometry_reuses_bodies(self):
 
         with codegen_options(replace(current_codegen_options(), io_memory_bytes=4325376)):
@@ -99,7 +100,8 @@ class QuantizerApplicationScheduleTest(unittest.TestCase):
         self.assertEqual([item["code_bytes"] for item in dynamic.launches], [28672] * 4 + [16384])
         self.assertEqual([item["exponent_bytes"] for item in dynamic.launches], [28] * 4 + [16])
 
-    def test_irregular_head_tile_counts_do_not_use_full_tile_batch_budget(self):
+    @patch("atlas_mlir_native.activation_quantize_device.prove_plan")
+    def test_irregular_head_tile_counts_do_not_use_full_tile_batch_budget(self, _proof):
         for length in (1056, 2016, 4064):
             plan = prepare_plan(dynamic_source(shape=(10, 1, length), reduce="head"))
             self.assertEqual(len(plan.launches), 10)
@@ -115,7 +117,8 @@ class QuantizerApplicationScheduleTest(unittest.TestCase):
         self.assertEqual(len(plan.launches), 1)
         self.assertEqual(plan.launches[0]["code_bytes"], 524256)
 
-    def test_packed_heads_preserve_independent_exponents_and_remainder(self):
+    @patch("atlas_mlir_native.activation_quantize_device.prove_plan")
+    def test_packed_heads_preserve_independent_exponents_and_remainder(self, _proof):
         source = dynamic_source(shape=(10, 16, 64), reduce="head", rule="nc")
         plan = prepare_plan(source)
         self.assertEqual([item["exponent_bytes"] for item in plan.launches], [32, 8])

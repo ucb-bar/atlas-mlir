@@ -124,8 +124,8 @@ def test_default_budget_reduces_head_packs_before_host(rows, packed):
             assert quantizer_device.prove_plan(plan)[3]['admitted']
 
 
-@pytest.mark.parametrize('heads,length', [(32, 4096), (13, 1024), (10, 96),
-    pytest.param(9, 32768, marks=pytest.mark.skipif(not os.environ.get('ATLAS_OOT_BIN_DIR'), reason='select Atlas tools'))])
+@pytest.mark.skipif(not os.environ.get('ATLAS_OOT_BIN_DIR'), reason='select Atlas tools')
+@pytest.mark.parametrize('heads,length', [(32, 4096), (13, 1024), (10, 96), (9, 32768)])
 def test_selected_budget_batches_whole_heads(heads, length):
     source = dynamic_source(shape=(heads, 1, length), reduce='head')
     with options():
@@ -145,7 +145,8 @@ def test_selected_budget_batches_whole_heads(heads, length):
         assert application.prepare_plan(source).record() == limited.record()
 
 
-def test_exponent_slot_io_and_indivisible_group_limits_remain_active():
+@patch.object(quantizer_device, 'prove_plan')
+def test_exponent_slot_io_and_indivisible_group_limits_remain_active(_proof):
     with options():
         plan = application.prepare_plan(dynamic_source(shape=(257, 1, 32), reduce='head'))
         assert [x['exponent_bytes'] for x in plan.launches] == [1024, 4]
