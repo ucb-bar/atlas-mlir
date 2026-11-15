@@ -153,6 +153,7 @@ def _ragged_transpose_tile_words(rows, tile_rows):
 
 def prepare_source(source, *, io_memory_base=None):
     """Plan byte transport in an explicitly selected device I/O window."""
+    from .options import current_codegen_options
     io_memory_base = selected_io_base() if io_memory_base is None else io_memory_base
     if (type(io_memory_base) is not int or io_memory_base < 0 or io_memory_base % 32
             or io_memory_base + dram_slots() * TILE_BYTES > 1 << 32):
@@ -218,7 +219,8 @@ def prepare_source(source, *, io_memory_base=None):
             segments.append(dict(input=0, mode="xlu", counts=list(counts), source_strides=list(ss),
                                  output_strides=list(ds), source_offset=0, output_offset=0, block_bytes=1024,
                                  source_row_bytes=operands[0].type.shape[-1], output_row_bytes=shape[-1]))
-        elif (output.op == "transpose" and width == 1 and len(shape) >= 2
+        elif (current_codegen_options().device_kv_quantizer
+                and output.op == "transpose" and width == 1 and len(shape) >= 2
                 and shape[-2] % 32 == 0
                 and mapping.coefficients == tuple(tuple(int(j == (i if i < len(shape)-2 else 2*len(shape)-3-i))
                                                      for j in range(len(shape))) for i in range(len(shape)))):
@@ -228,7 +230,7 @@ def prepare_source(source, *, io_memory_base=None):
             # A dense 32-byte source row bypasses assembly for complete tiles.
             # These are necessary bounds only: admission still requires the
             # completed image and dynamic instruction proofs below.
-            from merlin.semantic_compiler.codegen import current_codegen_options
+            from .options import current_codegen_options
             from .limits import functional_instruction_limit
             rows, columns = shape[-1], shape[-2]
             assembled_rows = rows % 32 if columns == 32 else rows
@@ -622,7 +624,7 @@ def prove_plan(plan, *, target_source=None, limits=None):
     """Lower and prove one complete image without publishing any artifacts."""
     if target_source is None:
         target_source = Path(__file__).resolve().parents[2]
-    from merlin.semantic_compiler.codegen import current_codegen_options
+    from .options import current_codegen_options
     virtual = virtual_program(plan, size_limit=current_codegen_options().program_size_limit_bytes)
     pipeline = _native_pipeline()
     tools = Path(os.environ.get("ATLAS_OOT_BIN_DIR", Path(target_source) / "build/bin"))
@@ -706,7 +708,7 @@ def prepare_c_package(source, compiled, name, *, target_source, runtime_linkage=
                               io_memory_base=io_memory_base)
     manifest = json.loads((compiled / "manifest.json").read_text())
     verify_native_publication(compiled, manifest, engine="merlin_native", request_digest=source.digest(), target_identity=source.target_identity)
-    from merlin.semantic_compiler.codegen import current_codegen_options
+    from .options import current_codegen_options
     virtual = virtual_program(plan, size_limit=current_codegen_options().program_size_limit_bytes)
     if (json.loads((compiled / "source-request.json").read_text()) != source.record()
             or json.loads((compiled / "execution_plan.json").read_text()) != plan.record()

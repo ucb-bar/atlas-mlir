@@ -68,6 +68,7 @@ class QuantizerSchedule:
     pipeline: str
     static_body_capacity: int
     static_quantizer_sizing: bool
+    device_kv_quantizer: bool = False
 
     @property
     def dynamic_groups_per_launch(self):
@@ -101,7 +102,8 @@ class QuantizerSchedule:
                     dynamic_group_worst_instructions=DYNAMIC_GROUP_WORST_INSTRUCTIONS,
                     dynamic_group_bound_block_elements=4096,
                     dynamic_group_bound_rule="119525 * ceil(group_elements / 4096)",
-                    dynamic_group_admission="legacy fields size the scheduling envelope; every dynamic body requires exact selected machine-bound planning admission",
+                    **(dict(dynamic_group_admission="legacy fields size the scheduling envelope; every dynamic body requires exact selected machine-bound planning admission")
+                       if self.device_kv_quantizer else {}),
                     functional_instruction_limit=self.instruction_limit,
                     bodies=[dict(index=index, path=f"segments/body_{index:03d}", request_digest=body.digest(),
                                  shape=list(body.node(self.x.id).type.shape)) for index, body in enumerate(self.bodies)],
@@ -123,10 +125,12 @@ def _body(source, x, codes, exponents, attrs, shape):
     return body
 
 
-def prepare_plan(source, *, limits=None, _pipeline=None, _static_capacity=None, _static_sizing=None):
-    from merlin.semantic_compiler.codegen import current_codegen_options
+def prepare_plan(source, *, limits=None, _pipeline=None, _static_capacity=None, _static_sizing=None, _device_kv_quantizer=None):
+    from .options import current_codegen_options
     from . import dynamic_quantize, static_quantize
 
+    device_kv = (current_codegen_options().device_kv_quantizer
+                 if _device_kv_quantizer is None else _device_kv_quantizer)
     instruction_limit = functional_instruction_limit(limits)
     pipeline = _native_pipeline() if _pipeline is None else _pipeline
     if pipeline not in ("mandatory", "optimized"):
@@ -205,8 +209,9 @@ def prepare_plan(source, *, limits=None, _pipeline=None, _static_capacity=None, 
             # The virtual body uses gcd(1024, length) lanes and reduces the
             # complete group before packing. Irregular aligned groups stay
             # unbatched below and retain the independent machine-bound proof.
-            if length > 4096 and length % 32:
-                raise ValueError("indivisible dynamic reduction group above 4096 elements requires complete 32-element tiles")
+            tile = 32 if device_kv else 1024
+            if length > 4096 and length % tile:
+                raise ValueError(f"indivisible dynamic reduction group above 4096 elements requires complete {tile}-element tiles")
             packed = 1
             bounded_tiles = length % 1024 == 0 or length <= 1024
             if reduction == "head" and x.type.dtype == "bf16" and length % 32 == 0 and bounded_tiles:
@@ -218,6 +223,8 @@ def prepare_plan(source, *, limits=None, _pipeline=None, _static_capacity=None, 
             while True:
                 shape = ((length,) if reduction == "tensor" else
                          (packed, end - first, k) if reduction == "head" else (end - first, k))
+                if not device_kv:
+                    break
                 if shape not in proven_bodies and shape not in refused_bodies:
                     body = _body(source, x, codes, exponents, attrs, shape)
                     try:
@@ -244,14 +251,14 @@ def prepare_plan(source, *, limits=None, _pipeline=None, _static_capacity=None, 
     for first, length, exp_first, exp_count, shape in spans:
         if shape not in shapes:
             shapes[shape] = len(bodies)
-            bodies.append(proven_bodies[shape] if mode == "dynamic" else
+            bodies.append(proven_bodies[shape] if mode == "dynamic" and device_kv else
                           _body(source, x, codes, exponents, attrs, shape))
         launches.append(dict(body_index=shapes[shape], input_offset_bytes=first * (2 if x.type.dtype == "bf16" else 4),
                              input_bytes=length * (2 if x.type.dtype == "bf16" else 4),
                              code_offset_bytes=first, code_bytes=length,
                              exponent_offset_bytes=exp_first * 4, exponent_bytes=exp_count * 4))
     return QuantizerSchedule(source, x, codes, exponents, attrs, tuple(bodies), tuple(launches),
-                             instruction_limit, pipeline, static_capacity, static_sizing)
+                             instruction_limit, pipeline, static_capacity, static_sizing, device_kv)
 
 
 def compile_source(snapshot, region, *, target_source, destination, limits):
@@ -354,7 +361,8 @@ def prepare_c_package(region, compiled, name, *, target_source, runtime_linkage=
         functional_instruction_limit=saved["functional_instruction_limit"]),
         _pipeline=saved.get("lowering_pipeline", "mandatory"),
         _static_sizing="static_instruction_envelope" in saved,
-        _static_capacity=saved["static_whole_body_max_elements"])
+        _static_capacity=saved["static_whole_body_max_elements"],
+        _device_kv_quantizer="dynamic_group_admission" in saved)
     manifest = json.loads((compiled / "quantizer-manifest.json").read_text())
     _verify_publication(compiled, manifest, plan)
     if (json.loads((compiled / "source-request.json").read_text()) != region.record()

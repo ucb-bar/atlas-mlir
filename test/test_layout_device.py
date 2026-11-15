@@ -13,8 +13,18 @@ import unittest
 from atlas_mlir_native.binding import DRAM_BASE, TARGET_IDENTITY, _run
 from atlas_mlir_native.layout_device import compile_source, prepare_c_package, prepare_source, virtual_program
 from merlin.semantic_compiler.target_binding import NativeCompilationError
-from merlin.semantic_compiler.codegen import CodegenOptions, codegen_options
+from atlas_mlir_native.options import CodegenOptions, codegen_options
 from merlin.semantic_compiler.model import ConstantBinding, IndexMap, KernelRequest, SemanticNode, TensorType, pointwise_identity_maps
+
+
+import pytest
+from atlas_mlir_native.options import current_codegen_options, codegen_options
+
+
+@pytest.fixture(autouse=True)
+def device_kv_enabled():
+    with codegen_options(replace(current_codegen_options(), device_kv_quantizer=True)):
+        yield
 
 ROOT = Path(__file__).resolve().parents[1]
 BIN = Path(os.environ.get("ATLAS_OOT_BIN_DIR", ROOT / "build/bin"))
@@ -135,7 +145,7 @@ class LayoutDeviceRecognitionTest(unittest.TestCase):
             self.assertEqual(bytes(actual), expected)
 
     def test_ragged_xlu_keeps_complete_prefix_in_counted_device_image(self):
-        with codegen_options(CodegenOptions(io_memory_bytes=67108864)):
+        with codegen_options(CodegenOptions(device_kv_quantizer=True, io_memory_bytes=67108864)):
             from atlas_mlir_native.restoration_budget import _source_loop_trips
             for rows, groups in ((65, 16), (163, 16), (255, 2), (400, 2)):
                 source = request("transpose", ((2, groups, rows, 64),), (2, groups, 64, rows), dtype="i8",
@@ -156,7 +166,7 @@ class LayoutDeviceRecognitionTest(unittest.TestCase):
 
     def test_ragged_xlu_image_does_not_grow_with_tile_count(self):
         counts = []
-        with codegen_options(CodegenOptions(io_memory_bytes=67108864)):
+        with codegen_options(CodegenOptions(device_kv_quantizer=True, io_memory_bytes=67108864)):
             for rows in (65, 513):
                 source = request("transpose", ((rows, 64),), (64, rows), dtype="i8",
                     mapping=IndexMap(2, ((0,1),(1,0)), (0,0)))
@@ -191,14 +201,14 @@ class LayoutDeviceRecognitionTest(unittest.TestCase):
         from atlas_mlir_native.already_quantized import POLICY
         from atlas_mlir_native.application_precision import CONTRACTION_POLICY
         from atlas_mlir_native.row_softmax import SOFTMAX_POLICY
-        from merlin.semantic_compiler.codegen import CodegenOptions, codegen_options
+        from atlas_mlir_native.options import CodegenOptions, codegen_options
         source = request("transpose", ((80, 65, 64),), (80, 64, 65), dtype="i8",
             mapping=IndexMap(3, ((1,0,0),(0,0,1),(0,1,0)), (0,0,0)))
         policy = dict(schema="atlas.diagnostic_application_precision.v1", source_sha256="0" * 64,
             target_identity=TARGET_IDENTITY, contraction=CONTRACTION_POLICY, row_softmax=SOFTMAX_POLICY,
             host_support=["transpose", "reshape", "copy"], already_quantized=POLICY)
         adapter = AtlasApplicationAdapter(policy, original_source_sha256="0" * 64)
-        with codegen_options(CodegenOptions(io_memory_bytes=67108864)):
+        with codegen_options(CodegenOptions(device_kv_quantizer=True, io_memory_bytes=67108864)):
             # Shape recognition stays tool-free even for an oversized prefix.
             with patch("atlas_mlir_native.layout_device.prove_plan") as proof:
                 self.assertEqual(prepare_source(source).segments[0]["mode"], "ragged_xlu")
@@ -274,7 +284,7 @@ class LayoutDeviceRecognitionTest(unittest.TestCase):
         def transpose(rows, heads=1):
             return request("transpose", ((heads, rows, 64),), (heads, 64, rows), dtype="i8",
                 mapping=IndexMap(3, ((1,0,0),(0,0,1),(0,1,0)), (0,0,0)))
-        options = CodegenOptions(io_memory_bytes=67108864)
+        options = CodegenOptions(device_kv_quantizer=True, io_memory_bytes=67108864)
         with codegen_options(options), patch("atlas_mlir_native.layout_device.prove_plan") as proof:
             for source in (transpose(20001), transpose(65, 200)):
                 with self.subTest(shape=source.nodes[-1].type.shape), self.assertRaisesRegex(
@@ -347,7 +357,7 @@ class LayoutDeviceCompilationTest(unittest.TestCase):
                         prepare_c_package(source, compiled, "layout_" + label, target_source=ROOT)
 
     def test_ragged_xlu_native_default_bounds_and_source_contracts(self):
-        with codegen_options(CodegenOptions(io_memory_bytes=67108864)):
+        with codegen_options(CodegenOptions(device_kv_quantizer=True, io_memory_bytes=67108864)):
             from atlas_mlir_native.binding import NATIVE_CHECKS
             with tempfile.TemporaryDirectory(prefix="atlas-ragged-xlu-") as directory:
                 for heads, rows in ((32, 65), (15, 163), (1, 255), (1, 400)):
@@ -378,7 +388,7 @@ class LayoutDeviceCompilationTest(unittest.TestCase):
                 (heads, columns, rows), dtype="i8",
                 mapping=IndexMap(3, ((1,0,0),(0,0,1),(0,1,0)), (0,0,0)))
             with self.subTest(shape=source.nodes[0].type.shape), codegen_options(
-                    CodegenOptions(io_memory_bytes=67108864)):
+                    CodegenOptions(device_kv_quantizer=True, io_memory_bytes=67108864)):
                 self.assertFalse(AtlasApplicationAdapter._supports_device_source(
                     source, source.nodes[-1], "layout_device"))
                 record, files = emit_layout_c(source, "large_transpose")
@@ -416,10 +426,10 @@ class LayoutDeviceCompilationTest(unittest.TestCase):
     def test_ragged_xlu_oversized_complete_prefix_is_ineligible_before_compilation(self):
         from atlas_mlir_native.application import AtlasApplicationAdapter
         from merlin.compile.layout_c import emit_layout_c
-        from merlin.semantic_compiler.codegen import CodegenOptions, codegen_options
+        from atlas_mlir_native.options import CodegenOptions, codegen_options
         source = request("transpose", ((80, 65, 64),), (80, 64, 65), dtype="i8",
             mapping=IndexMap(3, ((1,0,0),(0,0,1),(0,1,0)), (0,0,0)))
-        with codegen_options(CodegenOptions(io_memory_bytes=67108864)):
+        with codegen_options(CodegenOptions(device_kv_quantizer=True, io_memory_bytes=67108864)):
             self.assertFalse(AtlasApplicationAdapter._supports_device_source(source, source.nodes[-1], "layout_device"))
         record, _ = emit_layout_c(source, "oversized_transpose")
         self.assertEqual(record["source_request_digest"], source.digest())

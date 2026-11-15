@@ -14,10 +14,20 @@ import unittest
 
 import numpy as np
 
-from merlin.semantic_compiler.codegen import codegen_options, current_codegen_options
+from atlas_mlir_native.options import codegen_options, current_codegen_options
 from atlas_mlir_native.activation_quantize_application import compile_source, prepare_c_package, prepare_plan
 from test_already_quantized import quantizer_source
 from test_activation_quantize_device import dynamic_source, host_reference
+
+
+import pytest
+from atlas_mlir_native.options import current_codegen_options, codegen_options
+
+
+@pytest.fixture(autouse=True)
+def device_kv_enabled():
+    with codegen_options(replace(current_codegen_options(), device_kv_quantizer=True)):
+        yield
 
 ROOT = Path(__file__).resolve().parents[1]
 BIN = Path(os.environ.get("ATLAS_OOT_BIN_DIR", ROOT / "build/bin"))
@@ -187,7 +197,7 @@ class QuantizerApplicationScheduleTest(unittest.TestCase):
 
     @unittest.skipUnless((BIN / "atlas-opt").is_file(), "select built Atlas tools")
     def test_large_head_batching_scales_the_complete_group_budget(self):
-        from merlin.semantic_compiler.codegen import CodegenOptions, codegen_options
+        from atlas_mlir_native.options import CodegenOptions, codegen_options
 
         for length, packed in ((8192, 4), (16384, 2), (24576, 1), (31744, 1)):
             with self.subTest(length=length):
@@ -195,7 +205,7 @@ class QuantizerApplicationScheduleTest(unittest.TestCase):
                 default = prepare_plan(source)
                 self.assertTrue(all(item["code_bytes"] <= packed * length for item in default.launches))
                 self.assertEqual(sum(item["code_bytes"] for item in default.launches), 8 * length)
-                with codegen_options(CodegenOptions(execution_instruction_limit=1100000)):
+                with codegen_options(CodegenOptions(device_kv_quantizer=True, execution_instruction_limit=1100000)):
                     plan = prepare_plan(source)
                 self.assertEqual(len(plan.launches), 8 // packed)
                 self.assertTrue(all(item["code_bytes"] == packed * length for item in plan.launches))
@@ -204,7 +214,7 @@ class QuantizerApplicationScheduleTest(unittest.TestCase):
     @patch.dict(os.environ, ATLAS_NATIVE_PIPELINE="optimized")
     def test_machine_bound_rejects_large_aligned_groups_during_planning(self):
         from atlas_mlir_native.application import AtlasApplicationAdapter
-        from merlin.semantic_compiler.codegen import CodegenOptions, codegen_options
+        from atlas_mlir_native.options import CodegenOptions, codegen_options
 
         for length in (32736,):
             with self.subTest(length=length):
@@ -212,7 +222,7 @@ class QuantizerApplicationScheduleTest(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "indivisible dynamic reduction group.*instruction bound"):
                     prepare_plan(source)
                 self.assertFalse(AtlasApplicationAdapter._is_vector_quantizer(source, source.outputs))
-                with codegen_options(CodegenOptions(execution_instruction_limit=128000000)):
+                with codegen_options(CodegenOptions(device_kv_quantizer=True, execution_instruction_limit=128000000)):
                     self.assertEqual(len(prepare_plan(source).launches), 1)
 
     @unittest.skipUnless((BIN / "atlas-opt").is_file(), "select built Atlas tools")

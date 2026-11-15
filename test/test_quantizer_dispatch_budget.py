@@ -12,9 +12,19 @@ from atlas_mlir_native import activation_quantize_application as application
 from atlas_mlir_native import activation_quantize_device as quantizer_device
 from atlas_mlir_native import vector_quantize as device
 from dataclasses import replace
-from merlin.semantic_compiler.codegen import codegen_options, current_codegen_options
+from atlas_mlir_native.options import codegen_options, current_codegen_options
 from merlin.semantic_compiler.target_binding import NativeCompilationError
 from test_activation_quantize_device import dynamic_source, host_reference
+
+
+import pytest
+from atlas_mlir_native.options import current_codegen_options, codegen_options
+
+
+@pytest.fixture(autouse=True)
+def device_kv_enabled():
+    with codegen_options(replace(current_codegen_options(), device_kv_quantizer=True)):
+        yield
 
 ROOT = Path(__file__).resolve().parents[1]
 
