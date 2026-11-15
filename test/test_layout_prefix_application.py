@@ -12,7 +12,7 @@ import unittest
 from unittest.mock import patch
 
 import numpy as np
-from merlin.semantic_compiler.codegen import codegen_options, current_codegen_options
+from merlin.semantic_compiler.codegen import CodegenOptions, codegen_options, current_codegen_options
 from atlas_mlir_native import layout_device as device
 from atlas_mlir_native import layout_prefix_application as prefix
 
