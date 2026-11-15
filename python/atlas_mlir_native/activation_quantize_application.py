@@ -67,6 +67,7 @@ class QuantizerSchedule:
     instruction_limit: int
     pipeline: str
     static_body_capacity: int
+    static_quantizer_sizing: bool
 
     @property
     def dynamic_groups_per_launch(self):
@@ -94,7 +95,7 @@ class QuantizerSchedule:
                     static_whole_body_max_elements=self.static_body_capacity,
                     **(dict(lowering_pipeline=self.pipeline,
                             static_instruction_envelope="50 * ceil(elements / 32) + 128")
-                       if self.pipeline == "optimized" else {}),
+                       if self.static_quantizer_sizing else {}),
                     max_dynamic_group_elements=self.max_dynamic_group_elements,
                     dynamic_groups_per_launch=self.dynamic_groups_per_launch,
                     dynamic_group_worst_instructions=DYNAMIC_GROUP_WORST_INSTRUCTIONS,
@@ -121,19 +122,21 @@ def _body(source, x, codes, exponents, attrs, shape):
     return body
 
 
-def prepare_plan(source, *, limits=None, _pipeline=None, _static_capacity=None):
+def prepare_plan(source, *, limits=None, _pipeline=None, _static_capacity=None, _static_sizing=None):
+    from merlin.semantic_compiler.codegen import current_codegen_options
     from . import dynamic_quantize, static_quantize
 
     instruction_limit = functional_instruction_limit(limits)
     pipeline = _native_pipeline() if _pipeline is None else _pipeline
     if pipeline not in ("mandatory", "optimized"):
         raise ValueError("unknown quantizer scheduling pipeline")
-    static_capacity = (_static_body_capacity(instruction_limit) if pipeline == "optimized"
+    static_sizing = current_codegen_options().static_quantizer_sizing if _static_sizing is None else _static_sizing
+    static_capacity = (_static_body_capacity(instruction_limit) if static_sizing
                        else STATIC_WHOLE_BODY_MAX_ELEMENTS)
     if _static_capacity is not None:
         if (type(_static_capacity) is not int or _static_capacity < 0
                 or _static_capacity % 32 or _static_capacity > static_capacity
-                or pipeline == "mandatory" and _static_capacity != static_capacity):
+                or not static_sizing and _static_capacity != static_capacity):
             raise ValueError("saved quantizer static capacity exceeds selected admission")
         static_capacity = _static_capacity
     max_group_elements = 4096 * (instruction_limit // DYNAMIC_GROUP_WORST_INSTRUCTIONS)
@@ -159,7 +162,7 @@ def prepare_plan(source, *, limits=None, _pipeline=None, _static_capacity=None):
     spans = []
     if mode == "static":
         chunk = STATIC_CHUNK_ELEMENTS
-        if pipeline != "optimized":
+        if not static_sizing:
             chunk = (count if x.type.dtype == 'bf16' and count % 32 == 0
                      and count <= STATIC_WHOLE_BODY_MAX_ELEMENTS
                      and count * 3 + 32 <= dram_slots() * TILE_BYTES else STATIC_CHUNK_ELEMENTS)
@@ -220,7 +223,7 @@ def prepare_plan(source, *, limits=None, _pipeline=None, _static_capacity=None):
                              code_offset_bytes=first, code_bytes=length,
                              exponent_offset_bytes=exp_first * 4, exponent_bytes=exp_count * 4))
     return QuantizerSchedule(source, x, codes, exponents, attrs, tuple(bodies), tuple(launches),
-                             instruction_limit, pipeline, static_capacity)
+                             instruction_limit, pipeline, static_capacity, static_sizing)
 
 
 def compile_source(snapshot, region, *, target_source, destination, limits):
@@ -322,6 +325,7 @@ def prepare_c_package(region, compiled, name, *, target_source, runtime_linkage=
     plan = prepare_plan(region, limits=SimpleNamespace(
         functional_instruction_limit=saved["functional_instruction_limit"]),
         _pipeline=saved.get("lowering_pipeline", "mandatory"),
+        _static_sizing="static_instruction_envelope" in saved,
         _static_capacity=saved["static_whole_body_max_elements"])
     manifest = json.loads((compiled / "quantizer-manifest.json").read_text())
     _verify_publication(compiled, manifest, plan)
