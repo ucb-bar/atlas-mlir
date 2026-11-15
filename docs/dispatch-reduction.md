@@ -25,6 +25,33 @@ With [private GELU boundary folding](pointwise-boundary-folding.md), it reaches
 with shared panels and SiLU boundary folding takes **140,285,224 cycles for two
 requests**, versus 165,506,710 for those requests executed separately.
 
+### Current explicit recipe
+
+Pass these arguments to `merlin-targetgen native-compile` for the current W1
+recipe. Tool and simulator paths remain environment configuration.
+
+```text
+--adjacent-patterns adjacent_square_reduce,adjacent_reduction_scale,adjacent_pointwise_chain,pointwise_narrowing,quantized_narrowing,quantized_epilogue,expanded_silu,quantized_operand_permutation,float_input_layout,quantizer_input_permutation,pointwise_input_widening
+--quantized-operand-reuse batch-panel-cache
+--exponent-page-cache
+--staging-storage vmem-inputs
+--native-pipeline optimized
+--static-quantizer-sizing
+--exact-binary-routes
+--exact-binary-lane-groups
+--exact-binary-vector-preflight
+--exact-cast-vector-preflight
+--exact-float-unroll
+--execution-instruction-limit 128000000
+--io-memory-bytes 67108864
+```
+
+`looped_operand_reuse` retains its `ordered` default; post-spill capture and
+kernel-library publication remain disabled. Static quantizer sizing and exact
+binary route caching each require their own flag, independently of optimized
+pipeline scheduling. The complete recipe is recorded in shared `CodegenOptions`
+and partitions tuning, materialization, and tool caches.
+
 ### Private softmax result casts
 
 The opt-in `softmax_narrowing` composition pattern publishes the selected
@@ -86,11 +113,13 @@ The full-layer artifacts are `application-epilogue-narrowing` and
 
 ### Large static quantizer applications
 
-With `ATLAS_NATIVE_PIPELINE=optimized`, aligned BF16 static quantizers size
+With `--static-quantizer-sizing`, aligned BF16 static quantizers size
 counted bodies from the selected execution-instruction budget and I/O window.
-The default mandatory pipeline retains the old 524,288-element cutoff, sending
+Without this flag, static sizing retains the old 524,288-element cutoff, sending
 larger tensors through one launch per 2,048 elements regardless of those budgets. Actual instruction bounds, instruction-image capacity, native checks
 and the final partial-body offsets remain mandatory.
+Static sizing and `--exact-binary-routes` are independent of
+`--native-pipeline`; choosing `optimized` changes scheduling only.
 
 In the independently checked SmolVLA vision-layer run (batch 1, 1,024 tokens,
 768 channels), static quantization drops from 9,600 launches to seven.
@@ -355,8 +384,8 @@ adapter = AdjacentDeviceAdapter(
 )
 ```
 
-Use `ATLAS_QUANTIZED_OPERAND_REUSE=wide-cache`,
-`ATLAS_EXACT_BINARY_LANE_GROUPS=1`, `exact_float_unroll=True`, and the execution
+Use `--quantized-operand-reuse wide-cache`,
+`--exact-binary-lane-groups`, `exact_float_unroll=True`, and the execution
 budget shown above to reproduce the selected optimization settings. The default
 adapter is unchanged. Passing no `patterns` argument to `AdjacentDeviceAdapter`
 retains all its supported composition patterns; an explicit subset permits
@@ -397,7 +426,7 @@ one gate-projection compile took 35.57 seconds and exceeded that timeout. With
 the bitmap it took 2.26 seconds and emitted byte-identical machine IR. Neither
 change increases the one-million-step proof allowance or any hardware limit.
 
-Using the same narrowed layer and `ATLAS_QUANTIZED_OPERAND_REUSE=paired-cache`:
+Using the same narrowed layer and `--quantized-operand-reuse paired-cache`:
 
 | | Wide activation cache | Shared weight panels |
 | --- | ---: | ---: |
@@ -449,7 +478,7 @@ The paired-cache layer has not been included in this host comparison.
 
 ## Vector preflight for qualified binary tiles
 
-`ATLAS_EXACT_BINARY_VECTOR_PREFLIGHT=1` adds a sufficient-domain test before
+`--exact-binary-vector-preflight` adds a sufficient-domain test before
 BF16 add/sub's existing scalar input classification. VPU min/max reductions
 across both absolute operands prove that every lane is nonzero and has magnitude
 between `2**-32` and `2**32`. A successful proof selects the unchanged qualified
@@ -486,7 +515,7 @@ regression gate passed 27 tests with two optional runtime checks skipped.
 
 ## Exact vector admission for BF16 widening
 
-`ATLAS_EXACT_CAST_VECTOR_PREFLIGHT=1` replaces the per-lane scalar NaN scan in
+`--exact-cast-vector-preflight` replaces the per-lane scalar NaN scan in
 `bf16_to_f32` with an absolute-maximum VPU reduction. Under the selected ordered-bit
 min/max arithmetic, the reduced magnitude exceeds the infinity encoding exactly
 when an input is NaN. The conversion still shifts the original bits; subnormals,
@@ -646,22 +675,21 @@ skipped. Source replay and ordinary native instruction/image proofs remain activ
 
 `AtlasNativeBinding.application_adapter`, called by Merlin's existing
 `targetgen native-compile --application`, now accepts an explicit target-owned
-pattern list. The measured configuration can use the normal CLI with:
+pattern list. Add these explicit arguments to the normal `native-compile` command:
 
-```bash
-export ATLAS_ADJACENT_PATTERNS=adjacent_square_reduce,adjacent_reduction_scale,adjacent_pointwise_chain,pointwise_narrowing,quantized_narrowing,quantized_epilogue,expanded_silu,quantized_operand_permutation
-export ATLAS_QUANTIZED_OPERAND_REUSE=paired-cache
-export ATLAS_EXACT_BINARY_LANE_GROUPS=1
-export ATLAS_EXACT_BINARY_VECTOR_PREFLIGHT=1
-export ATLAS_EXACT_CAST_VECTOR_PREFLIGHT=1
+```text
+--adjacent-patterns adjacent_square_reduce,adjacent_reduction_scale,adjacent_pointwise_chain,pointwise_narrowing,quantized_narrowing,quantized_epilogue,expanded_silu,quantized_operand_permutation
+--quantized-operand-reuse paired-cache
+--exact-binary-lane-groups
+--exact-binary-vector-preflight
+--exact-cast-vector-preflight
 ```
 
 Keep the explicit exact-float unroll and execution-instruction-budget options
 from the earlier recipe. An unset/empty pattern list preserves the original
 adapter. Unknown, duplicate or empty names fail; no numerical policy is inferred
 from this selection. Six factory tests verify source translators, actual region
-selection, default behavior and invalid options. This requires no Merlin source
-change or modification to Nicolas's fork.
+selection, default behavior and invalid options. The recipe flags are recorded in Merlin's shared `CodegenOptions` identity.
 
 The Rust host-schedule replay of the 80-dispatch SiLU configuration also passes:
 all 12,750,848 initialized bytes in the compiler aperture match the generated-C
@@ -700,7 +728,7 @@ publication checks.
 ## Schedule independent cache traffic across DMA and compute
 
 With `enhanced-virtual-scheduling=true` (selected by
-`ATLAS_NATIVE_PIPELINE=optimized`), virtual saves, restores and slot copies carry
+`--native-pipeline optimized`), virtual saves, restores and slot copies carry
 read-after-write, write-after-read and write-after-write dependencies for their
 individual scratch buffers. By default they remain global barriers. In the
 opt-in mode, tensor saves/restores are costed as LSU work, allowing independent
@@ -718,11 +746,12 @@ address, timing and image proofs remain mandatory.
 The quantized mandatory pipeline is intentionally unscheduled. Enable the
 optimized pipeline to use this scheduling change for contractions:
 
-```bash
-export ATLAS_NATIVE_PIPELINE=optimized
+```text
+--native-pipeline optimized
 ```
 
-Use the preceding `ATLAS_ADJACENT_PATTERNS` and preflight/cache options, plus
+Use the preceding `--adjacent-patterns` and preflight/cache options, plus
+`--static-quantizer-sizing --exact-binary-routes` and
 `--exact-float-unroll --execution-instruction-limit 128000000 --io-memory-bytes 67108864`.
 Two fresh builds with the same Python source/options and old versus new compiler
 binaries isolate the scheduler change:

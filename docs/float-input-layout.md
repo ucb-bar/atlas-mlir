@@ -1,6 +1,6 @@
 # Fold dense input layouts into exact-float packing
 
-Opt into `float_input_layout` in `ATLAS_ADJACENT_PATTERNS` to absorb a private
+Opt into `float_input_layout` in `--adjacent-patterns` to absorb a private
 slice, broadcast, reversal or permutation into an exact-float consumer's
 existing input packing. The native arithmetic images, logical slice sizes,
 rounding and domain checks remain unchanged. No full-tensor layout temporary

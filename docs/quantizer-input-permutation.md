@@ -1,6 +1,6 @@
 # Fold private permutations into quantizer input packing
 
-Opt into `quantizer_input_permutation` in `ATLAS_ADJACENT_PATTERNS` to absorb
+Opt into `quantizer_input_permutation` in `--adjacent-patterns` to absorb
 eligible input permutations into exact activation quantization. The compiler
 replaces the quantizer's existing dense input copy with indexed byte packing.
 It does not allocate another full-tensor intermediate or change the native

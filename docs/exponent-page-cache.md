@@ -1,6 +1,6 @@
 # Keep invariant exponent pages in VMEM
 
-Set `ATLAS_EXPONENT_PAGE_CACHE=1` to load each scalar exponent page once per
+Set `--exponent-page-cache` to load each scalar exponent page once per
 invocation and each per-batch page once per batch. The default remains `0`.
 Row-varying exponent pages retain their existing tile loads. This applies to
 ordinary counted contractions, operand caches, bounded panels, shared-weight

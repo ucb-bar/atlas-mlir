@@ -1,7 +1,7 @@
 # Reuse operand panels across independent batches
 
-Set `ATLAS_QUANTIZED_OPERAND_REUSE=batch-panel-cache` to consider M/K panels
-inside a counted batch loop. `ATLAS_EXPONENT_PAGE_CACHE=1` also retains scalar
+Set `--quantized-operand-reuse batch-panel-cache` to consider M/K panels
+inside a counted batch loop. `--exponent-page-cache` also retains scalar
 and per-batch scale pages. The default operand policy is unchanged.
 
 Selection depends on tensor geometry, storage layout and resource limits. No
@@ -36,7 +36,7 @@ alignment of every interior value, and absence of arithmetic overflow. The
 complete DMA extent must still fit its declared memory window.
 
 With `enhanced-virtual-scheduling=true` (selected by
-`ATLAS_NATIVE_PIPELINE=optimized`), when early scheduling of address arithmetic
+`--native-pipeline optimized`), when early scheduling of address arithmetic
 creates scalar register pressure, the spiller can move a pure single-use
 expression and its single-use scalar operands next to their consumer in the
 same block. It preserves the expression

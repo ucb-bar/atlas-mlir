@@ -1,7 +1,7 @@
 # Output priority through scratch dependencies
 
 With `enhanced-virtual-scheduling=true` (selected by
-`ATLAS_NATIVE_PIPELINE=optimized`), the native Atlas scheduler propagates
+`--native-pipeline optimized`), the native Atlas scheduler propagates
 first-output priority through its existing dependency graph, including scratch
 RAW, WAR and WAW edges. The default heuristic follows only tensor SSA operands,
 so a cache save can lose its connection to the output served by a later restore.

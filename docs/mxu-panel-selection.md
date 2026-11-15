@@ -1,6 +1,6 @@
 # Shape-selected MXU1 operand panels
 
-Select `ATLAS_QUANTIZED_OPERAND_REUSE=panel-cache` to rank bounded activation
+Select `--quantized-operand-reuse panel-cache` to rank bounded activation
 panels by weight-read and partial-result traffic. This extends `paired-cache`,
 which retains its original two-row behavior. It does not change reduction
 order, quantization, numerical policy, or the physical memory reservation.

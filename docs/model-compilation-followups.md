@@ -8,7 +8,7 @@ These changes are part of Atlas PR #50 and Merlin PR #63.
 | Compose adjacent exact dense reshapes | Merlin | `--application-compose-reshapes` |
 | Bound invariant operand residency by caller-supplied storage and expansion limits | Atlas | Target-local API |
 | Remove per-element loop/address overhead in exact casts and sign flips | Atlas | `--exact-float-unroll` (off by default) |
-| Reuse quantized activation rows across output columns, with ordered K arithmetic and exponent restoration | Atlas MXU1 | `ATLAS_QUANTIZED_OPERAND_REUSE=row-cache` |
+| Reuse quantized activation rows across output columns, with ordered K arithmetic and exponent restoration | Atlas MXU1 | `--quantized-operand-reuse row-cache` |
 
 The Merlin flags apply to `native-compile --application` and the corresponding
 source verification. Both source transforms are off by default and preserve

@@ -1,6 +1,6 @@
 # Quantized activation-row reuse
 
-Set `ATLAS_QUANTIZED_OPERAND_REUSE=row-cache` before compiling the
+Set `--quantized-operand-reuse row-cache` before compiling the
 already-quantized workflow to retain an FP8 activation row across output-column
 tiles. The default, `ordered`, keeps the existing counted schedule. Unknown
 values are errors. The option selects a transport schedule; it does not select
@@ -59,7 +59,7 @@ are in https://github.com/ucb-bar/atlas-mlir/pull/44.
 
 ## Bounded prefixes for wider reductions
 
-`ATLAS_QUANTIZED_OPERAND_REUSE=prefix-cache` also admits rows wider than 64 K32
+`--quantized-operand-reuse prefix-cache` also admits rows wider than 64 K32
 tiles. It retains the first 64 tiles (64 KiB) across output columns and streams
 the remaining tiles through the existing ordered counted loop. For shorter rows
 it selects the existing full-row schedule. A single consumer still uses the
@@ -89,7 +89,7 @@ native sizing/binding/export with a changed environment policy.
 
 ## Wider bounded activation rows
 
-`ATLAS_QUANTIZED_OPERAND_REUSE=wide-cache` admits up to 192 resident K32
+`--quantized-operand-reuse wide-cache` admits up to 192 resident K32
 activation tiles (192 KiB). This covers the whole K=5632 down-projection row;
 longer reductions cache a bounded prefix and stream the remainder in order.
 The original `ordered`, `row-cache`, and `prefix-cache` policies are unchanged.
@@ -108,7 +108,7 @@ cached/streamed schedules and K unrolling.
 
 ## Share weight panels across token rows
 
-`ATLAS_QUANTIZED_OPERAND_REUSE=paired-cache` processes pairs of M32 tile rows.
+`--quantized-operand-reuse paired-cache` processes pairs of M32 tile rows.
 For each panel of up to 32 K32 tiles it loads both activation rows once, then
 loads each weight column once and uses it for both rows. The resident operand
 slots occupy at most 96 KiB: 64 KiB of activations and 32 KiB of weights. Normal

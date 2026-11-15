@@ -1,6 +1,6 @@
 # Private softmax input widening
 
-Select `softmax_input_widening` in `ATLAS_ADJACENT_PATTERNS` to consume original
+Select `softmax_input_widening` in `--adjacent-patterns` to consume original
 BF16 scores when a private exact BF16-to-f32 cast feeds a selected softmax.
 It composes with `softmax_narrowing` to keep both boundaries in BF16.
 

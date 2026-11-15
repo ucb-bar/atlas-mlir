@@ -1,6 +1,6 @@
 # Keep private staged BF16 values in VMEM
 
-Set `ATLAS_STAGING_STORAGE=vmem` when compiling to promote eligible private
+Set `--staging-storage vmem` when compiling to promote eligible private
 edges of a staged BF16 device graph into invocation-local VMEM slots. The
 default `dram` retains the previous staging schedule. The setting participates
 in both native tuning and application materialization identities.
@@ -33,7 +33,7 @@ outside this option's current scope.
 
 ## Repeated immutable inputs
 
-`ATLAS_STAGING_STORAGE=vmem-inputs` additionally caches repeatedly read input
+`--staging-storage vmem-inputs` additionally caches repeatedly read input
 and constant tiles. The checked source boundary identifies immutable full
 BF16 tiles; any writer, partial transfer, dynamic address or address outside
 that boundary is refused. Single-use tiles retain their original transfers.
