@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 
@@ -21,7 +22,6 @@ from test_activation_quantize_device import dynamic_source, host_reference
 
 
 import pytest
-from atlas_mlir_native.options import current_codegen_options, codegen_options
 
 
 @pytest.fixture(autouse=True)
