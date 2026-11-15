@@ -517,7 +517,7 @@ def compile_reduction(
         "semantic_qualification_pipeline": "mandatory",
         "native_snapshot_sha256": sha((snapshot.root / "manifest.json").read_bytes()),
         "io_memory_bytes": dram_slots() * TILE_BYTES,
-            **({"io_memory_base": io_memory_base} if io_memory_base != DRAM_BASE else {}),
+        **({"io_memory_base": io_memory_base} if io_memory_base != DRAM_BASE else {}),
         "reduction_lowering_source_sha256": sha(Path(__file__).read_bytes()),
         "target_inventory_sha256": sha((target_source / "docs/selected-variant-inventory.json").read_bytes()),
         "stage_artifacts": {

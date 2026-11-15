@@ -567,7 +567,7 @@ def compile_pointwise(
     ):
         raise NativeCompilationError("resource_limit", "pointwise buffers exceed the selected memory window")
     base = selected_io_base() if io_memory_base is None else io_memory_base
-    if type(base) is not int or base % 32:
+    if type(base) is not int or base < 0 or base % 32:
         raise NativeCompilationError("resource_limit", "pointwise buffers leave selected DMA memory windows")
     from .binding import validate_explicit_io_base
     validate_explicit_io_base(base)
@@ -672,7 +672,7 @@ def compile_pointwise(
         "pointwise_lowering_source_sha256": sha(Path(__file__).read_bytes()),
         "native_snapshot_sha256": sha((snapshot.root / "manifest.json").read_bytes()),
         "io_memory_bytes": dram_slots() * TILE_BYTES,
-            **({"io_memory_base": base} if base != DRAM_BASE else {}),
+        **({"io_memory_base": base} if base != DRAM_BASE else {}),
         "stage_artifacts": {
             path.relative_to(destination).as_posix(): sha(path.read_bytes())
             for path in sorted(destination.rglob("*"))

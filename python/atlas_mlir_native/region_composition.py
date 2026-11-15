@@ -6,7 +6,7 @@ host conversions, rewrite addresses, change arithmetic, or join program sets.
 
 from __future__ import annotations
 
-from .binding import io_memory_base as selected_io_base
+from .binding import DRAM_BASE, io_memory_base as selected_io_base
 
 import hashlib
 import io
@@ -314,7 +314,7 @@ def publish_adjacent_group(group, destination, *, kind, execution, enlargement):
         request_digest=region.digest(), target_identity=region.target_identity,
         binary_sha256=artifacts['program.bin'], execution_plan_sha256=artifacts['execution_plan.json'],
         stage_artifacts=artifacts, io_memory_bytes=dram_slots() * TILE_BYTES)
-    if selected_io_base() != 0x90000000:
+    if selected_io_base() != DRAM_BASE:
         manifest["io_memory_base"] = selected_io_base()
     (destination / 'manifest.json').write_text(json.dumps(manifest, sort_keys=True, indent=2) + '\n')
     return manifest

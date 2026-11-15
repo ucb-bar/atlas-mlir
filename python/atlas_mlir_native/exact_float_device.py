@@ -110,7 +110,7 @@ def prepare_source_plan(source, *, io_memory_base=None):
             v.type!=TensorType(n.type.shape,"bf16" if width==2 else "f32","raw-bit-pattern") for v in operands)):
         raise ValueError("exact float source types, maps, domain, or boundaries differ")
     plan=FloatPlan(source,n,operands,prod(n.type.shape),width,ow,io_memory_base)
-    if type(io_memory_base) is not int or io_memory_base % 32:
+    if type(io_memory_base) is not int or io_memory_base < 0 or io_memory_base % 32:
         raise ValueError("exact float buffers leave selected DMA memory windows")
     from .binding import validate_explicit_io_base
     validate_explicit_io_base(io_memory_base)

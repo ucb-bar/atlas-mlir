@@ -40,3 +40,19 @@ def test_exact_float_logical_prefill_is_sliced_before_physical_window_checks(bud
             assert base <= physical.io_memory_base < base + physical.workspace_bytes <= base + 786432
             assert dma_span_in_window(base, physical.workspace_bytes)
 
+
+def test_largest_f32_neg_leaf_refuses_default_window_before_tools():
+    from unittest.mock import patch
+
+    source = float_source("f32_neg", exact_float_device.MAX_LEAF_ELEMENTS["f32_neg"])
+    logical = exact_float_device.prepare_source_plan(source)
+    assert logical.count == 43008
+    assert logical.workspace_bytes == 344096
+    assert logical.descriptor()["io_memory_bytes"] == 262144
+    with patch("atlas_mlir_native.binding._run", side_effect=AssertionError("tool invoked")):
+        with pytest.raises(ValueError, match="^exact float buffers leave selected DMA memory windows$"):
+            exact_float_device.prepare_plan(source)
+    bounded_source = float_source("f32_neg", exact_float_device.chunk_elements(logical))
+    bounded = exact_float_device.prepare_plan(bounded_source)
+    assert bounded.count == 32256
+    assert bounded.workspace_bytes <= logical.descriptor()["io_memory_bytes"]
