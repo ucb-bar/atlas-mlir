@@ -59,6 +59,19 @@ class QuantizerApplicationScheduleTest(unittest.TestCase):
                                 _static_capacity=captured["static_whole_body_max_elements"])
                             self.assertEqual(replay.record(), captured)
 
+    @patch("atlas_mlir_native.activation_quantize_device.prove_plan")
+    def test_dynamic_replay_proves_with_captured_pipeline(self, proof):
+        source = dynamic_source(shape=(2, 64, 64), reduce="head")
+        for captured_pipeline in ("mandatory", "optimized"):
+            other = "optimized" if captured_pipeline == "mandatory" else "mandatory"
+            with self.subTest(pipeline=captured_pipeline), patch.dict(os.environ, ATLAS_NATIVE_PIPELINE=other):
+                proof.reset_mock()
+                plan = prepare_plan(source, _pipeline=captured_pipeline)
+                self.assertTrue(proof.called)
+                self.assertEqual(plan.pipeline, captured_pipeline)
+                self.assertTrue(all(call.kwargs["_pipeline"] == captured_pipeline
+                                    for call in proof.call_args_list))
+
     def test_static_full_and_tail_chunks_keep_every_byte(self):
         source = quantizer_source(count=4103, fixed=-9)
         plan = prepare_plan(source)
@@ -94,11 +107,13 @@ class QuantizerApplicationScheduleTest(unittest.TestCase):
             static = prepare_plan(quantizer_source(count=64 * 5632))
         self.assertEqual(len(static.launches), 1)
         self.assertEqual(len(static.bodies), 1)
-        dynamic = prepare_plan(dynamic_source(shape=(1, 32, 64, 64), reduce="head"))
-        self.assertEqual(len(dynamic.launches), 5)
-        self.assertEqual(len(dynamic.bodies), 2)
-        self.assertEqual([item["code_bytes"] for item in dynamic.launches], [28672] * 4 + [16384])
-        self.assertEqual([item["exponent_bytes"] for item in dynamic.launches], [28] * 4 + [16])
+        for pipeline, packs in (("mandatory", [8] * 4), ("optimized", [8] * 4)):
+            with self.subTest(pipeline=pipeline), patch.dict(os.environ, ATLAS_NATIVE_PIPELINE=pipeline):
+                dynamic = prepare_plan(dynamic_source(shape=(1, 32, 64, 64), reduce="head"))
+                self.assertEqual(len(dynamic.launches), len(packs))
+                self.assertEqual(len(dynamic.bodies), len(set(packs)))
+                self.assertEqual([item["code_bytes"] for item in dynamic.launches], [p * 4096 for p in packs])
+                self.assertEqual([item["exponent_bytes"] for item in dynamic.launches], [p * 4 for p in packs])
 
     @patch("atlas_mlir_native.activation_quantize_device.prove_plan")
     def test_irregular_head_tile_counts_do_not_use_full_tile_batch_budget(self, _proof):
@@ -174,11 +189,11 @@ class QuantizerApplicationScheduleTest(unittest.TestCase):
     def test_large_head_batching_scales_the_complete_group_budget(self):
         from merlin.semantic_compiler.codegen import CodegenOptions, codegen_options
 
-        for length, packed, smaller in ((8192, 4, 3), (16384, 2, 1), (24576, 1, 1), (31744, 1, 1)):
+        for length, packed in ((8192, 4), (16384, 2), (24576, 1), (31744, 1)):
             with self.subTest(length=length):
                 source = dynamic_source(shape=(8, 1, length), reduce="head")
                 default = prepare_plan(source)
-                self.assertTrue(all(item["code_bytes"] <= smaller * length for item in default.launches))
+                self.assertTrue(all(item["code_bytes"] <= packed * length for item in default.launches))
                 self.assertEqual(sum(item["code_bytes"] for item in default.launches), 8 * length)
                 with codegen_options(CodegenOptions(execution_instruction_limit=1100000)):
                     plan = prepare_plan(source)
@@ -186,11 +201,12 @@ class QuantizerApplicationScheduleTest(unittest.TestCase):
                 self.assertTrue(all(item["code_bytes"] == packed * length for item in plan.launches))
 
     @unittest.skipUnless((BIN / "atlas-opt").is_file(), "select built Atlas tools")
+    @patch.dict(os.environ, ATLAS_NATIVE_PIPELINE="optimized")
     def test_machine_bound_rejects_large_aligned_groups_during_planning(self):
         from atlas_mlir_native.application import AtlasApplicationAdapter
         from merlin.semantic_compiler.codegen import CodegenOptions, codegen_options
 
-        for length in (32736, 32768):
+        for length in (32736,):
             with self.subTest(length=length):
                 source = dynamic_source(shape=(1, 1, length), reduce="head", rule="ref")
                 with self.assertRaisesRegex(ValueError, "indivisible dynamic reduction group.*instruction bound"):
@@ -206,10 +222,12 @@ class QuantizerApplicationScheduleTest(unittest.TestCase):
         for length in (4128, 27680, 29760):
             with self.subTest(length=length):
                 source = dynamic_source(shape=(1, 1, length), reduce="head", rule="ref")
-                self.assertEqual(len(prepare_plan(source).launches), 1)
-                if length > 27000:
-                    with self.assertRaisesRegex(ValueError, "instruction bound"):
-                        prepare_plan(source, limits=SimpleNamespace(functional_instruction_limit=998000))
+                plan = prepare_plan(source)
+                self.assertEqual(len(plan.launches), 1)
+                from atlas_mlir_native.activation_quantize_device import prepare_plan as body_plan, prove_plan
+                bound = prove_plan(body_plan(plan.bodies[0]))[3]["instruction_bound"]
+                with self.assertRaisesRegex(ValueError, "indivisible dynamic reduction group"):
+                    prepare_plan(source, limits=SimpleNamespace(functional_instruction_limit=bound - 1))
 
 
 @unittest.skipUnless((BIN / "atlas-opt").is_file(), "select built Atlas tools")

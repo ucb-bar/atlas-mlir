@@ -221,7 +221,7 @@ def prepare_plan(source, *, limits=None, _pipeline=None, _static_capacity=None, 
                 if shape not in proven_bodies and shape not in refused_bodies:
                     body = _body(source, x, codes, exponents, attrs, shape)
                     try:
-                        prove_plan(device.prepare_plan(body), limits=limits)
+                        prove_plan(device.prepare_plan(body), limits=limits, _pipeline=pipeline)
                     except NativeCompilationError as error:
                         if error.status != "resource_limit":
                             raise

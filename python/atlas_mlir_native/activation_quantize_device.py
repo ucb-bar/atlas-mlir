@@ -125,7 +125,7 @@ def virtual_program(plan):
     return program(plan)
 
 
-def prove_plan(plan, *, target_source=None, limits=None):
+def prove_plan(plan, *, target_source=None, limits=None, _pipeline=None):
     """Lower and prove a body without publishing files or creating directories."""
     import json
     import os
@@ -136,7 +136,9 @@ def prove_plan(plan, *, target_source=None, limits=None):
         target_source = Path(__file__).resolve().parents[2]
     tools=Path(os.environ.get('ATLAS_OOT_BIN_DIR', Path(target_source)/'build/bin'))
     virtual=virtual_program(plan)
-    pipeline = _native_pipeline()
+    pipeline = _native_pipeline() if _pipeline is None else _pipeline
+    if pipeline not in ("mandatory", "optimized"):
+        raise ValueError("unknown quantizer proof pipeline")
     machine=_run([str(tools/'atlas-opt'),*_scheduled_virtual_pipeline(pipeline),'-'], input_text=virtual)
     _run([str(tools/'atlas-opt'),*NATIVE_CHECKS,'--verify-atlas-timing','-'], input_text=machine)
     emitted=_run([str(tools/'atlas-emit'),'--program-json','-'], input_text=machine)

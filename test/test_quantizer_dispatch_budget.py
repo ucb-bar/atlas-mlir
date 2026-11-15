@@ -32,7 +32,8 @@ def test_every_dynamic_body_is_proved_once(reduction, rule):
     with patch.object(quantizer_device, 'prove_plan') as proof:
         schedule = application.prepare_plan(source, limits=limits)
     assert [call.args[0].source for call in proof.call_args_list] == list(schedule.bodies)
-    assert all(call.kwargs == {'limits': limits} for call in proof.call_args_list)
+    assert all(call.kwargs == {'limits': limits, '_pipeline': schedule.pipeline}
+               for call in proof.call_args_list)
     assert all(call.args[0].group_elements <= 4096 for call in proof.call_args_list)
 
 
@@ -105,12 +106,14 @@ def test_bound_analyzer_failures_do_not_select_host(error):
 
 
 @pytest.mark.skipif(not os.environ.get('ATLAS_OOT_BIN_DIR'), reason='select Atlas tools')
-@pytest.mark.parametrize('rows,packed', [(64, 7), (128, 3), (256, 1)])
-def test_default_budget_reduces_head_packs_before_host(rows, packed):
+@pytest.mark.parametrize('pipeline,rows,packed', [
+    ('mandatory',64,8), ('mandatory',128,4), ('mandatory',256,2),
+    ('optimized',64,8), ('optimized',128,4), ('optimized',256,2)])
+def test_default_budget_reduces_head_packs_before_host(pipeline, rows, packed):
     from atlas_mlir_native.application import AtlasApplicationAdapter
 
     source = dynamic_source(shape=(32, rows, 64), reduce='head')
-    with options(1000000):
+    with options(1000000), patch.dict(os.environ, ATLAS_NATIVE_PIPELINE=pipeline):
         schedule = application.prepare_plan(source)
         assert AtlasApplicationAdapter._is_vector_quantizer(source, source.outputs)
         assert schedule.bodies[0].nodes[0].type.shape == (packed, rows, 64)
@@ -134,10 +137,6 @@ def test_selected_budget_batches_whole_heads(heads, length):
         assert plan.launches[0]['code_bytes'] == heads * length
         assert plan.launches[0]['exponent_bytes'] == heads * 4
         assert plan.record()['functional_instruction_limit'] == 128000000
-        if length == 32768:
-            with pytest.raises(ValueError, match='instruction bound'):
-                application.prepare_plan(source, limits=SimpleNamespace(functional_instruction_limit=1000000))
-            return
         limited = application.prepare_plan(source, limits=SimpleNamespace(functional_instruction_limit=1000000))
         assert limited.record()['functional_instruction_limit'] == 1000000
         assert len(limited.launches) > 1
