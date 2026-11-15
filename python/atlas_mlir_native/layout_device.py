@@ -470,7 +470,8 @@ def prepare_c_package(source, compiled, name, *, target_source, runtime_linkage=
     compiled, target_source = Path(compiled), Path(target_source)
     if (compiled / "layout-prefix-manifest.json").exists():
         from .layout_prefix_application import prepare_c_package as prepare_prefix
-        return prepare_prefix(source, compiled, name, target_source=target_source, runtime_linkage=runtime_linkage)
+        return prepare_prefix(source, compiled, name, target_source=target_source, runtime_linkage=runtime_linkage,
+                              io_memory_base=io_memory_base)
     manifest = json.loads((compiled / "manifest.json").read_text())
     verify_native_publication(compiled, manifest, engine="merlin_native", request_digest=source.digest(), target_identity=source.target_identity)
     from merlin.semantic_compiler.codegen import current_codegen_options

@@ -138,3 +138,11 @@ def test_window_context_controls_adjacent_and_leaf_plans(base, size):
         check_io_memory_manifest({'io_memory_bytes': size, 'io_memory_base': base})
         with pytest.raises(ValueError):
             check_io_memory_manifest({'io_memory_bytes': size})
+
+
+def test_row_explicit_base_cannot_escape_declared_capacity():
+    from atlas_mlir_native.row_loop import prepare_plan as row_plan
+    with codegen_options(CodegenOptions(io_memory_base=0xA0000000, io_memory_bytes=64 << 20,
+            io_memory_capacity_base=0xA0000000, io_memory_capacity_bytes=64 << 20)):
+        with pytest.raises(NativeCompilationError, match='capacity'):
+            row_plan(None, io_memory_base=DRAM_BASE)

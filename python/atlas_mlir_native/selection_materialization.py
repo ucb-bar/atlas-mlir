@@ -1,6 +1,6 @@
 """Independent source rebinding of retained native tile selection evidence."""
 
-from .binding import io_memory_base as selected_io_base
+from .binding import DRAM_BASE, io_memory_base as selected_io_base
 
 from dataclasses import replace
 from hashlib import sha256
@@ -193,8 +193,6 @@ def bind_pointwise(original, canonical, materialized, destination, capture, *, r
                         semantic_qualification_pipeline="mandatory", target_inventory_sha256=previous["target_inventory_sha256"],
                         pointwise_lowering_source_sha256=sha256(Path(module.__file__).read_bytes()).hexdigest(),
                         native_snapshot_sha256=previous["native_snapshot_sha256"], io_memory_bytes=dram_slots() * TILE_BYTES)
-    if selected_io_base() != DRAM_BASE:
-        manifest["io_memory_base"] = selected_io_base()
     if virtual.encode() != (materialized / "atlas-virtual.mlir").read_bytes():
         raise ValueError("rebound loop virtual program differs from checked canonical source")
     from .restoration_budget import instruction_bound
@@ -217,6 +215,8 @@ def bind_pointwise(original, canonical, materialized, destination, capture, *, r
     files = _inventory(destination)
     manifest.update(execution_plan_sha256=sha256(files["execution_plan.json"]).hexdigest(),
                     stage_artifacts={name: sha256(data).hexdigest() for name, data in files.items() if name != "program.bin"})
+    if selected_io_base() != DRAM_BASE:
+        manifest["io_memory_base"] = selected_io_base()
     (destination / "manifest.json").write_bytes(_json(manifest))
     verify_native_publication(destination, manifest, engine="merlin_native",
                               request_digest=original.digest(), target_identity=original.target_identity)
@@ -244,8 +244,6 @@ def bind_row_loop(original, canonical, materialized, destination, capture, *, ta
     explicit = _run([str(tools / "atlas-opt"), "--lower-atlas-virtual-boundary-to-dma", "-"],
                     input_text=(destination / "body/atlas-virtual.mlir").read_text())
     virtual = row_loop.virtual_program(plan, explicit)
-    if selected_io_base() != DRAM_BASE:
-        manifest["io_memory_base"] = selected_io_base()
     if virtual.encode() != (materialized / "atlas-virtual.mlir").read_bytes():
         raise ValueError("rebound row virtual program differs from checked canonical source")
     for name, data in _inventory(materialized).items():
@@ -266,6 +264,8 @@ def bind_row_loop(original, canonical, materialized, destination, capture, *, ta
                     target_inventory_sha256=previous["target_inventory_sha256"], atlas_opt_sha256=previous["atlas_opt_sha256"],
                     atlas_emit_sha256=previous["atlas_emit_sha256"], provider_sources_sha256=previous["provider_sources_sha256"],
                     stage_artifacts={name: sha256(data).hexdigest() for name, data in files.items()})
+    if selected_io_base() != DRAM_BASE:
+        manifest["io_memory_base"] = selected_io_base()
     (destination / "manifest.json").write_bytes(_json(manifest))
     row_loop.verify_row_loop(original, destination, target_source=target_source)
     return manifest
@@ -286,8 +286,6 @@ def bind_counted(original, canonical, materialized, destination, capture, *, tar
     layout = loop.execution_layout(plan, operand_reuse=execution.get("operand_reuse_requested", "ordered"),
                                    exponent_page_cache=recorded_enabled(execution))
     virtual = loop.virtual_source(plan, layout)
-    if selected_io_base() != DRAM_BASE:
-        manifest["io_memory_base"] = selected_io_base()
     if virtual.encode() != (materialized / "atlas-virtual.mlir").read_bytes():
         raise ValueError("rebound counted virtual program differs from checked canonical source")
     if json.loads((materialized / "source-request.json").read_bytes()) != canonical.record():
@@ -338,6 +336,8 @@ def bind_counted(original, canonical, materialized, destination, capture, *, tar
     destination.mkdir(parents=True, exist_ok=False)
     for name, data in files.items():
         (destination / name).write_bytes(data)
+    if selected_io_base() != DRAM_BASE:
+        manifest["io_memory_base"] = selected_io_base()
     (destination / "manifest.json").write_bytes(_json(manifest))
     sizing = json.loads((materialized / "quantized-sizing.json").read_bytes())
     if (sizing.get("source_request_digest") != canonical.digest()

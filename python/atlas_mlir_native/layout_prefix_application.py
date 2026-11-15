@@ -126,7 +126,7 @@ def compile_source(snapshot, source, schedule, *, target_source, destination, li
     for index, body in enumerate(schedule.bodies):
         relative = f"segments/body_{index:03d}"
         manifest = device.compile_source(snapshot, body, target_source=target_source,
-            destination=destination / relative, limits=limits)
+            destination=destination / relative, limits=limits, io_memory_base=schedule.plan.io_memory_base)
         segments.append(dict(index=index, path=relative, request_digest=body.digest(),
             binary_sha256=manifest["binary_sha256"],
             manifest_sha256=sha256((destination / relative / "manifest.json").read_bytes()).hexdigest()))
@@ -190,18 +190,18 @@ def _verify(root, source, schedule):
     return manifest
 
 
-def prepare_c_package(source, compiled, name, *, target_source, runtime_linkage="separate"):
+def prepare_c_package(source, compiled, name, *, target_source, runtime_linkage="separate", io_memory_base=None):
     from merlin.compile.c_sources import c_source_pair
     from merlin.compile.launch_schedule import make_launch_schedule
     from .c_runtime import RUNTIME_SHARED_FILES
     from .slice_dispatch import render_slice_dispatch
-    schedule = prepare_plan(device.prepare_source(source))
+    schedule = prepare_plan(device.prepare_source(source, io_memory_base=io_memory_base))
     if schedule is None or runtime_linkage != "separate":
         raise ValueError("layout prefix export requires the checked complete-prefix schedule")
     compiled = Path(compiled)
     manifest = _verify(compiled, source, schedule)
     leaves = [device.prepare_c_package(body, compiled / row["path"], name + f"_body_{index:03d}",
-        target_source=target_source, runtime_linkage=runtime_linkage)
+        target_source=target_source, runtime_linkage=runtime_linkage, io_memory_base=schedule.plan.io_memory_base)
         for index, (body, row) in enumerate(zip(schedule.bodies, manifest["segments"], strict=True))]
     maximum = max(record["workspace_bytes"] for record, _ in leaves)
     workspace_bytes = maximum + schedule.plan.output_bytes

@@ -242,3 +242,21 @@ int run(int mode,atlas_host_read32 read,atlas_host_write32 write,atlas_tile_writ
 
 
 if __name__=='__main__':unittest.main()
+
+
+def test_prefix_children_preserve_explicit_base(tmp_path):
+    if not (BIN / 'atlas-opt').is_file():
+        import pytest
+        pytest.skip('select built Atlas tools')
+    with codegen_options(CodegenOptions(io_memory_bytes=67108864)):
+        source = concat()
+        compiled = tmp_path / 'compiled'
+        base = 0x80000000
+        device.compile_source(None, source, target_source=ROOT, destination=compiled,
+                              limits=None, io_memory_base=base)
+        manifest = json.loads((compiled / 'layout-prefix-manifest.json').read_text())
+        for row in manifest['segments']:
+            execution = json.loads((compiled / row['path'] / 'execution_plan.json').read_text())
+            assert execution['input_addresses'][0] == base
+        device.prepare_c_package(source, compiled, 'relocated_prefix', target_source=ROOT,
+                                 io_memory_base=base)
