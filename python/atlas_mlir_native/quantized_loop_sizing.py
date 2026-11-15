@@ -201,8 +201,8 @@ def _size_counted(plan, *, target_source=None, limits=None, operand_reuse=None):
                '--lower-atlas-pack-relayout','--spill-atlas-virtual','--verify-atlas-virtual-stream']
               if identity['pipeline'] == 'mandatory' else
               ['--atlas-compile-verify',
-               '--atlas-compile-schedule=enhanced-virtual-scheduling=true',
-               '--atlas-compile-spill=enhanced-virtual-scheduling=true'])
+               '--atlas-compile-schedule=' + NATIVE_PIPELINES['optimized'][0].partition('=')[2],
+               '--atlas-compile-spill=' + NATIVE_PIPELINES['optimized'][0].partition('=')[2]])
     options = 'resource-planning-report='+str(report_path)
     if current_codegen_options().program_size_limit_bytes is not None:
         options += ' program-size-limit-bytes='+str(current_codegen_options().program_size_limit_bytes)
