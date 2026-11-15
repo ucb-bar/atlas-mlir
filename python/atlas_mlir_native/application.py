@@ -151,16 +151,8 @@ class AtlasApplicationAdapter:
         return dict(dma_base=0x80000000, dma_capacity=0x80000000, alignment=2048)
 
     @staticmethod
-    def _resident_input_module(region, alternative=None):
-        if alternative is None:
-            from .already_quantized import OPS
-
-            pure = [node for node in region.nodes if node.effect == "pure"]
-            kind = ("already_quantized" if any(node.op in OPS for node in pure)
-                    else "layout_device" if len(pure) == 1 and pure[0].op in {
-                        "reshape", "copy", "gather", "transpose", "concat"} else None)
-        else:
-            kind = dict(alternative.metadata)["kind"]
+    def _resident_input_module(region, alternative):
+        kind = dict(alternative.metadata)["kind"]
         if kind == "already_quantized":
             from . import quantized_resident
             return quantized_resident
@@ -170,12 +162,12 @@ class AtlasApplicationAdapter:
         return None
 
     @staticmethod
-    def inventory_resident_inputs(region, alternative=None):
+    def inventory_resident_inputs(region, alternative):
         module = AtlasApplicationAdapter._resident_input_module(region, alternative)
         return None if module is None else module.inventory_resident_inputs(region)
 
     @staticmethod
-    def pack_resident_input(region, node_id, dense_bytes, alternative=None):
+    def pack_resident_input(region, node_id, dense_bytes, alternative):
         module = AtlasApplicationAdapter._resident_input_module(region, alternative)
         if module is None:
             raise NativeCompilationError("unsupported_semantics", "selected region has no immutable residency ABI")

@@ -19,7 +19,7 @@ from test_layout_device import cases, request, ROOT
 
 
 def options(source, ids):
-    inventory = {item['node_id']: item for item in AtlasApplicationAdapter.inventory_resident_inputs(source)}
+    inventory = {item['node_id']: item for item in AtlasApplicationAdapter.inventory_resident_inputs(source, SimpleNamespace(metadata=(("kind", "layout_device"),)))}
     cursor = DRAM_BASE + 262144
     bindings = {}
     for node_id in ids:
@@ -41,7 +41,6 @@ class LayoutResidentTest(unittest.TestCase):
         # A fused normalization contains an internal reshape, but uses its own
         # compiler and has no dense-layout immutable ABI.
         self.assertIsNone(AtlasApplicationAdapter.inventory_resident_inputs(norm, alternative("rmsnorm")))
-        self.assertIsNone(AtlasApplicationAdapter.inventory_resident_inputs(norm))
         with self.assertRaisesRegex(NativeCompilationError, "no immutable residency ABI"):
             AtlasApplicationAdapter.pack_resident_input(norm, "gamma", bytes(256), alternative("rmsnorm"))
         # Recognition failures on an explicitly selected route remain errors.
@@ -62,14 +61,14 @@ class LayoutResidentTest(unittest.TestCase):
         for label, source in cases().items():
             with self.subTest(label=label):
                 plan = native.prepare_source(source)
-                inventory = AtlasApplicationAdapter.inventory_resident_inputs(source)
+                inventory = AtlasApplicationAdapter.inventory_resident_inputs(source, SimpleNamespace(metadata=(("kind", "layout_device"),)))
                 for node, item, size in zip(plan.operands, inventory, plan.input_bytes, strict=True):
                     raw = bytes(i % 256 for i in range(size))
-                    packed = AtlasApplicationAdapter.pack_resident_input(source, node.id, raw)
+                    packed = native.pack_resident_input(source, node.id, raw)
                     self.assertEqual(packed, raw + bytes(item['bytes'] - size))
                     self.assertEqual(item['layout']['source_dtype'], node.type.dtype)
                     with self.assertRaisesRegex(ValueError, 'byte length'):
-                        AtlasApplicationAdapter.pack_resident_input(source, node.id, raw[:-1])
+                        native.pack_resident_input(source, node.id, raw[:-1])
 
     def test_mixed_concat_keeps_staging_geometry_and_checks_bound_ranges(self):
         source = cases()['concat']
@@ -83,6 +82,12 @@ class LayoutResidentTest(unittest.TestCase):
             self.assertIn(str(DRAM_BASE+262144-(1 << 32)), native.virtual_program(plan))
             with self.assertRaises(NativeCompilationError):
                 native.prepare_source(source, io_memory_base=DRAM_BASE+262144)
+        # An offset layout frame must still protect the entire I/O window.
+        bindings = selected.resident_bindings[source.digest()]
+        changed = {'input_1': {**bindings['input_1'], 'address': DRAM_BASE}}
+        with codegen_options(replace(selected, resident_bindings={source.digest(): changed})):
+            with self.assertRaisesRegex(NativeCompilationError, 'overlaps'):
+                native.prepare_source(source, io_memory_base=DRAM_BASE+32)
         for update in (dict(address=DRAM_BASE), dict(address=DRAM_BASE+262145),
                        dict(address=DRAM_BASE+1048576), dict(bytes=1), dict(immutable=False)):
             bindings = selected.resident_bindings[source.digest()]

@@ -128,7 +128,7 @@ def validated_bindings(source, inventory, *, staging_base=None):
     staging, staging_bytes = validate_io_window()
     if staging_base is not None:
         from .binding import validate_explicit_io_base
-        staging = validate_explicit_io_base(staging_base)
+        validate_explicit_io_base(staging_base)
     options = current_codegen_options()
     capacity_base, capacity_bytes = options.io_memory_capacity_base, options.io_memory_capacity_bytes
     if capacity_base is None or capacity_bytes is None:
@@ -144,6 +144,7 @@ def validated_bindings(source, inventory, *, staging_base=None):
         if (address % entry['alignment'] or not dma_span_in_window(address, size)
                 or not capacity_base <= address < address+size <= capacity_base+capacity_bytes
                 or address < staging+staging_bytes and staging < address+size
+                or staging_base is not None and address < staging_base+staging_bytes and staging_base < address+size
                 or any(address < other['address']+other['bytes'] and other['address'] < address+size
                        for other in records)):
             raise NativeCompilationError('compile_error', 'resident input span is unaligned, outside capacity, or overlaps another range')
