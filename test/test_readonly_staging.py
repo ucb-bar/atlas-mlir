@@ -1,4 +1,7 @@
 """Immutable input caching is bounded and never absorbs a writer or bad span."""
+from merlin.semantic_compiler.codegen import codegen_options, current_codegen_options
+
+from dataclasses import replace
 import io
 import json
 import os
@@ -69,13 +72,13 @@ def test_writes_partial_transfers_and_dynamic_addresses_are_refused():
 
 @pytest.mark.skipif(not all(os.environ.get(key) for key in
     ('ATLAS_RUST_NPU_MODEL','ATLAS_OOT_BIN_DIR')),reason='select Rust and Atlas tools')
-def test_declined_private_candidate_keeps_complete_dram_execution(tmp_path,monkeypatch):
+def test_declined_private_candidate_keeps_complete_dram_execution(tmp_path,monkeypatch, select_codegen_options):
     from atlas_mlir_native import private_staging
-    from merlin.semantic_compiler.codegen import CodegenOptions,codegen_options
+
     from test_softmax_input_widening import test_generated_c_and_rust_preserve_score_codes_results_and_rejections
-    monkeypatch.setenv('ATLAS_STAGING_STORAGE','vmem-inputs')
+    select_codegen_options(staging_storage='vmem-inputs')
     monkeypatch.setattr(private_staging,'PRIVATE_STAGING_TILE_LIMIT',0)
-    with codegen_options(CodegenOptions(io_memory_bytes=67108864,execution_instruction_limit=128000000)):
+    with codegen_options(replace(current_codegen_options(), io_memory_bytes=67108864, execution_instruction_limit=128000000)):
         test_generated_c_and_rust_preserve_score_codes_results_and_rejections(
             tmp_path,(65,65),'masked_softmax','bf16')
     plan=json.loads((tmp_path/'compiled/body/execution_plan.json').read_text())['private_staging']

@@ -1,4 +1,5 @@
 """Batched panels preserve independent matrix products and scale ownership."""
+from dataclasses import replace
 import json
 from math import prod
 import os
@@ -8,12 +9,13 @@ from unittest.mock import patch
 
 import pytest
 
+from merlin.semantic_compiler.codegen import codegen_options, current_codegen_options
 from atlas_mlir_native.already_quantized import prepare_source
 from atlas_mlir_native.binding import DRAM_BASE
 from atlas_mlir_native.quantized_loop import execution_layout, virtual_source
 from atlas_mlir_native.quantized_loop_sizing import size_counted
 from atlas_mlir_native.restoration_budget import instruction_bound
-from merlin.semantic_compiler.codegen import codegen_options
+
 from merlin.semantic_compiler.target_binding import NativeCompilationError
 from test_exponent_page_cache import fixture, OPTIONS
 from test_exponent_restoration import compile_fixture
@@ -56,14 +58,14 @@ def run_program(program, layout, memory, root):
 
 def test_geometry_replay_and_only_proved_capacity_retry():
     plan = prepare_source(fixture(128, 128, 64, (2, 3), 'batch', 'batch', False))
-    with codegen_options(OPTIONS):
+    with codegen_options(replace(current_codegen_options(), io_memory_bytes=OPTIONS.io_memory_bytes, execution_instruction_limit=OPTIONS.execution_instruction_limit)):
         old = execution_layout(plan, operand_reuse='panel-cache', exponent_page_cache=True)
         layout = execution_layout(plan, operand_reuse='batch-panel-cache', exponent_page_cache=True)
         assert old['operand_reuse'] == 'row-cache'
         assert layout['operand_reuse'] == 'panel-cache'
         assert layout['operand_reuse_panel_m_tiles'] == 4
         expected = virtual_source(plan, layout)
-        with patch.dict(os.environ, ATLAS_QUANTIZED_OPERAND_REUSE='invalid', ATLAS_EXPONENT_PAGE_CACHE='invalid'):
+        with codegen_options(replace(current_codegen_options(), quantized_operand_reuse='ordered', exponent_page_cache=False)):
             assert virtual_source(plan, layout) == expected
         for key in ('operand_reuse_panel_m_tiles', 'operand_reuse_panel_k_tiles'):
             with pytest.raises(ValueError, match='schedule differs'):
@@ -98,7 +100,7 @@ def test_geometry_replay_and_only_proved_capacity_retry():
 ])
 def test_rust_batch_matches_independent_invocations(
         tmp_path, cached, m, n, k, batch, left, right, shared):
-    with codegen_options(OPTIONS):
+    with codegen_options(replace(current_codegen_options(), io_memory_bytes=OPTIONS.io_memory_bytes, execution_instruction_limit=OPTIONS.execution_instruction_limit)):
         plan = prepare_source(fixture(m, n, k, batch, left, right, shared))
         single = prepare_source(fixture(m, n, k, (), left, right, shared))
         layout = compile_program(plan, tmp_path / 'batched', 'batch-panel-cache', cached)
@@ -141,11 +143,11 @@ def test_rust_batch_matches_independent_invocations(
 @pytest.mark.skipif(not all(os.environ.get(key) for key in
     ('ATLAS_RUST_NPU_MODEL', 'ATLAS_OOT_BIN_DIR', 'ATLAS_TEST_NATIVE_SNAPSHOT')),
     reason='select Rust, Atlas and native snapshot')
-def test_generated_c_keeps_batched_epilogue_atomic(tmp_path, monkeypatch):
+def test_generated_c_keeps_batched_epilogue_atomic(tmp_path, monkeypatch, select_codegen_options):
     from test_quantized_epilogue_narrowing import test_generated_c_and_rust_preserve_every_output_and_guards
 
-    monkeypatch.setenv('ATLAS_QUANTIZED_OPERAND_REUSE', 'batch-panel-cache')
-    monkeypatch.setenv('ATLAS_EXPONENT_PAGE_CACHE', '1')
+    select_codegen_options(quantized_operand_reuse='batch-panel-cache')
+    select_codegen_options(exponent_page_cache=True)
     test_generated_c_and_rust_preserve_every_output_and_guards(tmp_path, 35, 65, 257, (2,), 0)
     layout = json.loads((tmp_path / 'compiled/execution_plan.json').read_text())
     assert layout['operand_reuse'] == 'panel-cache'
@@ -157,7 +159,7 @@ def test_generated_c_keeps_batched_epilogue_atomic(tmp_path, monkeypatch):
     (64, 35, 2049, 'batch', 'batch'), (65, 35, 65, 'batch', 'batch'),
 ])
 def test_ineligible_batch_geometry_retains_original_program(m, n, k, left, right):
-    with codegen_options(OPTIONS):
+    with codegen_options(replace(current_codegen_options(), io_memory_bytes=OPTIONS.io_memory_bytes, execution_instruction_limit=OPTIONS.execution_instruction_limit)):
         plan = prepare_source(fixture(m, n, k, (2,), left, right, False))
         old = execution_layout(plan, operand_reuse='panel-cache', exponent_page_cache=True)
         new = execution_layout(plan, operand_reuse='batch-panel-cache', exponent_page_cache=True)
@@ -165,7 +167,7 @@ def test_ineligible_batch_geometry_retains_original_program(m, n, k, left, right
         assert virtual_source(plan, old) == virtual_source(plan, new)
 
 
-def test_native_binding_replays_batched_panel_selection(tmp_path, monkeypatch):
+def test_native_binding_replays_batched_panel_selection(tmp_path, monkeypatch, select_codegen_options):
     from atlas_mlir_native import quantized_loop, quantized_loop_c
     from atlas_mlir_native.selection_materialization import SelectionCapture, bind_counted
     from merlin.semantic_compiler.materialization import canonical_request
@@ -175,14 +177,18 @@ def test_native_binding_replays_batched_panel_selection(tmp_path, monkeypatch):
 
     source = fixture(64, 35, 33, (2,), 'batch', 'batch', False)
     canonical = canonical_request(source, source_identity_policy='provenance')
-    with codegen_options(OPTIONS):
+    with codegen_options(replace(current_codegen_options(), io_memory_bytes=OPTIONS.io_memory_bytes, execution_instruction_limit=OPTIONS.execution_instruction_limit)):
         capture = SelectionCapture(build_snapshot(tmp_path / 'snapshot'))
-        monkeypatch.setenv('ATLAS_QUANTIZED_OPERAND_REUSE', 'batch-panel-cache')
-        monkeypatch.setenv('ATLAS_EXPONENT_PAGE_CACHE', '1')
+        select_codegen_options(quantized_operand_reuse='batch-panel-cache')
+        select_codegen_options(exponent_page_cache=True)
         quantized_loop.compile_source(capture, canonical, target_source=ROOT,
             destination=tmp_path / 'compiled', limits=SearchLimits())
-        monkeypatch.setenv('ATLAS_QUANTIZED_OPERAND_REUSE', 'invalid')
-        monkeypatch.setenv('ATLAS_EXPONENT_PAGE_CACHE', 'invalid')
+        select_codegen_options(quantized_operand_reuse='ordered')
+        select_codegen_options(exponent_page_cache=False)
+        with pytest.raises(ValueError, match='sizing context changed'):
+            bind_counted(source, canonical, tmp_path / 'compiled', tmp_path / 'different-options', capture, target_source=ROOT)
+        select_codegen_options(quantized_operand_reuse='batch-panel-cache')
+        select_codegen_options(exponent_page_cache=True)
         bind_counted(source, canonical, tmp_path / 'compiled', tmp_path / 'bound', capture, target_source=ROOT)
         record, files = quantized_loop_c.prepare_c_package(source, tmp_path / 'bound', 'batch', target_source=ROOT)
         assert record['output_node_ids'] == list(source.outputs) and files

@@ -1,4 +1,5 @@
 """Generic pointwise-chain enlargement with preserved internal admission."""
+
 from dataclasses import replace
 from hashlib import sha256
 from pathlib import Path
@@ -13,6 +14,7 @@ from unittest.mock import patch
 
 import numpy as np
 
+from merlin.semantic_compiler.codegen import codegen_options, current_codegen_options
 from atlas_mlir_native import adjacent_pointwise_chain as native
 from atlas_mlir_native.binding import TARGET_IDENTITY
 from merlin.semantic_compiler.model import KernelRequest, SemanticNode, TensorType, IndexMap, pointwise_identity_maps
@@ -53,8 +55,8 @@ def shared_source_case():
 
 class PointwiseChainTest(unittest.TestCase):
     def setUp(self):
-        from merlin.semantic_compiler.codegen import CodegenOptions, codegen_options
-        context=codegen_options(CodegenOptions(io_memory_bytes=67108864))
+
+        context=codegen_options(replace(current_codegen_options(), io_memory_bytes=67108864))
         context.__enter__()
         self.addCleanup(context.__exit__,None,None,None)
 
@@ -132,7 +134,7 @@ class PointwiseChainTest(unittest.TestCase):
         group = native.prepare(source, adapter)
         virtual = native.virtual_group(group, descriptors(group), tools=BIN)
         with tempfile.TemporaryDirectory() as temporary:
-            with patch.dict(os.environ, {'ATLAS_NATIVE_PIPELINE': 'optimized', 'ATLAS_CAPTURE_POSTSPILL': '1'}):
+            with codegen_options(replace(current_codegen_options(), native_pipeline='optimized', capture_postspill=True)):
                 with patch.object(binding, '_run', wraps=binding._run) as run:
                     compile_adjacent_virtual(virtual, destination=temporary, target_source=ROOT)
             compiles = [call.args[0] for call in run.call_args_list

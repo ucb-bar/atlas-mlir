@@ -1,15 +1,16 @@
 """A vector sufficient-domain proof retains scalar fallback and atomic rejection."""
+from dataclasses import replace
 import json
 import os
 import subprocess
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
 
+from merlin.semantic_compiler.codegen import codegen_options, current_codegen_options
 from atlas_mlir_native import exact_float_device as device
 from atlas_mlir_native.float_virtual import binary_vector_preflight
-from merlin.semantic_compiler.codegen import CodegenOptions, codegen_options
+
 from merlin.semantic_compiler.target_binding import NativeCompilationError
 from test_exact_float_device import host_reference, request
 
@@ -18,16 +19,15 @@ ROOT = Path(__file__).resolve().parents[1]
 
 class VectorPreflightTest(unittest.TestCase):
     def test_option_is_explicit_and_validated(self):
-        with patch.dict(os.environ, ATLAS_EXACT_BINARY_VECTOR_PREFLIGHT='0'):
+        with codegen_options(replace(current_codegen_options(), exact_binary_vector_preflight=False)):
             self.assertFalse(binary_vector_preflight())
             ordinary = device.virtual_program(device.prepare_plan(request('bf16_add', 1024)))
-        with patch.dict(os.environ, ATLAS_EXACT_BINARY_VECTOR_PREFLIGHT='1'):
+        with codegen_options(replace(current_codegen_options(), exact_binary_vector_preflight=True)):
             self.assertTrue(binary_vector_preflight())
             selected = device.virtual_program(device.prepare_plan(request('bf16_add', 1024)))
         self.assertNotIn('scalar_qualified_check', ordinary)
         self.assertIn('scalar_qualified_check', selected)
-        with patch.dict(os.environ, ATLAS_EXACT_BINARY_VECTOR_PREFLIGHT='true'), \
-                self.assertRaises(NativeCompilationError):
+        with self.assertRaises(ValueError), codegen_options(replace(current_codegen_options(), exact_binary_vector_preflight='true')):
             binary_vector_preflight()
 
     def test_every_input_encoding_has_exact_stronger_domain(self):
@@ -51,16 +51,15 @@ class VectorPreflightTest(unittest.TestCase):
     def test_widening_option_is_explicit_and_validated(self):
         from atlas_mlir_native.float_virtual import cast_vector_preflight
         source = device.prepare_plan(request('bf16_to_f32', 35))
-        with patch.dict(os.environ, ATLAS_EXACT_CAST_VECTOR_PREFLIGHT='0'):
+        with codegen_options(replace(current_codegen_options(), exact_cast_vector_preflight=False)):
             self.assertFalse(cast_vector_preflight())
             ordinary = device.virtual_program(source)
-        with patch.dict(os.environ, ATLAS_EXACT_CAST_VECTOR_PREFLIGHT='1'):
+        with codegen_options(replace(current_codegen_options(), exact_cast_vector_preflight=True)):
             self.assertTrue(cast_vector_preflight())
             selected = device.virtual_program(source)
         self.assertNotIn('col_max', ordinary)
         self.assertIn('col_max', selected)
-        with patch.dict(os.environ, ATLAS_EXACT_CAST_VECTOR_PREFLIGHT='true'), \
-                self.assertRaises(NativeCompilationError):
+        with self.assertRaises(ValueError), codegen_options(replace(current_codegen_options(), exact_cast_vector_preflight='true')):
             cast_vector_preflight()
 
     @unittest.skipUnless(os.environ.get('ATLAS_RUST_NPU_MODEL') and os.environ.get('ATLAS_OOT_BIN_DIR'),
@@ -71,9 +70,7 @@ class VectorPreflightTest(unittest.TestCase):
         codes = np.arange(65536, dtype='<u2')
         codes = codes[(codes & 0x7fff) <= 0x7f80]
         np.random.default_rng(1701).shuffle(codes)
-        with tempfile.TemporaryDirectory() as directory, codegen_options(CodegenOptions(
-                io_memory_bytes=67108864, execution_instruction_limit=128000000,
-                exact_float_unroll=True)):
+        with tempfile.TemporaryDirectory() as directory, codegen_options(replace(current_codegen_options(), io_memory_bytes=67108864, execution_instruction_limit=128000000, exact_float_unroll=True)):
             root = Path(directory)
             for count in (35, 512, 1025, len(codes)):
                 with self.subTest(count=count):
@@ -82,7 +79,7 @@ class VectorPreflightTest(unittest.TestCase):
                     programs = []
                     for enabled in ('0', '1'):
                         compiled = root / f'widen-{count}-{enabled}'
-                        with patch.dict(os.environ, ATLAS_EXACT_CAST_VECTOR_PREFLIGHT=enabled):
+                        with codegen_options(replace(current_codegen_options(), exact_cast_vector_preflight=(enabled == '1'))):
                             device.compile_source(None, source, target_source=ROOT,
                                 destination=compiled, limits=None)
                         programs.append(compiled / 'program.bin')
@@ -97,8 +94,7 @@ class VectorPreflightTest(unittest.TestCase):
                          'select Rust simulator and Atlas tools')
     def test_rust_execution_covers_fast_fallback_tail_and_late_rejection(self):
         runner = os.environ['ATLAS_RUST_NPU_MODEL']
-        with tempfile.TemporaryDirectory() as directory, codegen_options(CodegenOptions(
-                io_memory_bytes=67108864, execution_instruction_limit=4000000)):
+        with tempfile.TemporaryDirectory() as directory, codegen_options(replace(current_codegen_options(), io_memory_bytes=67108864, execution_instruction_limit=4000000)):
             root = Path(directory)
             for operation in ('bf16_add', 'bf16_sub'):
                 for count in (35, 1024, 2048):
@@ -108,7 +104,7 @@ class VectorPreflightTest(unittest.TestCase):
                         programs = []
                         for enabled in ('0', '1'):
                             compiled = root / f'{operation}-{count}-{enabled}'
-                            with patch.dict(os.environ, ATLAS_EXACT_BINARY_VECTOR_PREFLIGHT=enabled):
+                            with codegen_options(replace(current_codegen_options(), exact_binary_vector_preflight=(enabled == '1'))):
                                 device.compile_source(None, source, target_source=ROOT,
                                     destination=compiled, limits=None)
                             programs.append(compiled / 'program.bin')

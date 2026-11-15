@@ -1,7 +1,9 @@
 """Exact binary lane grouping preserves rejection and publication boundaries."""
+
+from dataclasses import replace
 import os
 import unittest
-from unittest.mock import patch
+from merlin.semantic_compiler.codegen import CodegenOptions, codegen_options, current_codegen_options
 from test_exact_float_device import request, scalar_execute, host_reference
 
 
@@ -9,10 +11,9 @@ class BinaryLaneGroupTest(unittest.TestCase):
     def setUp(self):
         from float_isa_c import executor
         executor.cache_clear()
-        option = patch.dict(os.environ, ATLAS_EXACT_BINARY_LANE_GROUPS='1',
-                            ATLAS_EXACT_BINARY_VECTOR_PREFLIGHT='0', ATLAS_NATIVE_PIPELINE='mandatory')
-        option.start()
-        self.addCleanup(option.stop)
+        option = codegen_options(replace(current_codegen_options(), exact_binary_lane_groups=True, exact_binary_vector_preflight=False, native_pipeline='mandatory'))
+        option.__enter__()
+        self.addCleanup(option.__exit__, None, None, None)
         self.addCleanup(executor.cache_clear)
 
     def test_grouping_requires_explicit_option(self):
@@ -20,17 +21,17 @@ class BinaryLaneGroupTest(unittest.TestCase):
         from merlin.semantic_compiler.target_binding import NativeCompilationError
         plan = prepare_plan(request('bf16_add', 1024))
         grouped = virtual_program(plan)
-        with patch.dict(os.environ, ATLAS_EXACT_BINARY_LANE_GROUPS='0'):
+        with codegen_options(replace(current_codegen_options(), exact_binary_lane_groups=False)):
             compact = virtual_program(plan)
-        os.environ.pop('ATLAS_EXACT_BINARY_LANE_GROUPS')
-        self.assertEqual(virtual_program(plan), compact)
+        with codegen_options(CodegenOptions()):
+            self.assertEqual(virtual_program(plan), compact)
         self.assertEqual((compact.count('byte_offset = 6 '), grouped.count('byte_offset = 6 ')), (0, 4))
         # The default keeps its original validation/compute reloads; explicitly
         # grouped preflight retains a single immutable tile through computation.
         self.assertEqual((compact.count('virtual_dma_load'), grouped.count('virtual_dma_load')), (4, 2))
         self.assertNotIn('%routes =', compact)
         self.assertIn('%routes =', grouped)
-        with patch.dict(os.environ, ATLAS_EXACT_BINARY_LANE_GROUPS='yes'), self.assertRaises(NativeCompilationError):
+        with self.assertRaises(ValueError), codegen_options(replace(current_codegen_options(), exact_binary_lane_groups='yes')):
             virtual_program(plan)
 
     def test_group_boundaries_and_multitile_publication(self):
@@ -60,12 +61,25 @@ class BinaryPreflightTest(unittest.TestCase):
         from float_isa_c import executor
         executor.cache_clear()
         # Exercise cached scalar preflight independently of both vector
-        # preflight and grouped lanes, using the existing optimized opt-in.
-        option = patch.dict(os.environ, ATLAS_EXACT_BINARY_LANE_GROUPS='0',
-                            ATLAS_EXACT_BINARY_VECTOR_PREFLIGHT='0', ATLAS_NATIVE_PIPELINE='optimized')
-        option.start()
-        self.addCleanup(option.stop)
+        # preflight and grouped lanes, using the explicit route-cache opt-in.
+        option = codegen_options(replace(current_codegen_options(), exact_binary_lane_groups=False, exact_binary_vector_preflight=False, exact_binary_routes=True, native_pipeline='mandatory'))
+        option.__enter__()
+        self.addCleanup(option.__exit__, None, None, None)
         self.addCleanup(executor.cache_clear)
+
+    def test_route_cache_is_independent_of_native_pipeline(self):
+        from atlas_mlir_native.exact_float_device import prepare_plan, virtual_program
+        plan = prepare_plan(request('bf16_add', 1024))
+        for pipeline in ('mandatory', 'optimized'):
+            with self.subTest(pipeline=pipeline):
+                with codegen_options(replace(current_codegen_options(), native_pipeline=pipeline,
+                                             exact_binary_routes=False)):
+                    compact = virtual_program(plan)
+                with codegen_options(replace(current_codegen_options(), native_pipeline=pipeline,
+                                             exact_binary_routes=True)):
+                    cached = virtual_program(plan)
+                self.assertNotIn('%routes =', compact)
+                self.assertIn('%routes =', cached)
 
     def test_distinct_tile_routes_and_late_rejection(self):
         # The small pair is outside the qualified interval; the subnormal
@@ -85,13 +99,13 @@ class BinaryPreflightTest(unittest.TestCase):
                 self.assertEqual(output, bytes([0xa5]) * len(output))
 
     def test_qualified_inputs_skip_exception_checks(self):
-        with patch.dict(os.environ, ATLAS_EXACT_BINARY_LANE_GROUPS='0'):
+        with codegen_options(replace(current_codegen_options(), exact_binary_lane_groups=False)):
             source = request('bf16_add', 1024)
             raw = [bytes.fromhex('803f') * 1024, bytes.fromhex('003f') * 1024]
             output, status, instructions = scalar_execute(source, raw)
             self.assertEqual((output, status), host_reference(source, raw))
             # The preserved default reloads and reclassifies; this explicitly
-            # optimized scalar preflight skips unnecessary exception checks.
+            # selected scalar preflight skips unnecessary exception checks.
             self.assertLess(instructions, 80000)
 
 

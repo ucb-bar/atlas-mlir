@@ -12,9 +12,10 @@ import unittest
 from unittest.mock import patch
 
 import numpy as np
+from merlin.semantic_compiler.codegen import codegen_options, current_codegen_options
 from atlas_mlir_native import layout_device as device
 from atlas_mlir_native import layout_prefix_application as prefix
-from merlin.semantic_compiler.codegen import CodegenOptions, codegen_options
+
 from merlin.semantic_compiler.model import ConstantBinding, IndexMap
 from test_layout_device import request
 
@@ -48,7 +49,7 @@ def expected(source, raw):
 
 class PrefixCase(unittest.TestCase):
     def setUp(self):
-        context = codegen_options(CodegenOptions(io_memory_bytes=59768832))
+        context = codegen_options(replace(current_codegen_options(), io_memory_bytes=59768832))
         context.__enter__()
         self.addCleanup(context.__exit__, None, None, None)
 
@@ -118,7 +119,7 @@ class PrefixCompilationTest(PrefixCase):
             return original_run(command,**kwargs)
         for pipeline in ('mandatory','optimized'):
             with self.subTest(pipeline=pipeline), tempfile.TemporaryDirectory(prefix='atlas-layout-finalizer-') as directory, \
-                    patch.dict(os.environ,{'ATLAS_NATIVE_PIPELINE':pipeline}), \
+                    codegen_options(replace(current_codegen_options(), native_pipeline=pipeline)), \
                     patch.object(device,'_run',side_effect=guarded_run):
                 destination=Path(directory)/'compiled'
                 if pipeline == 'optimized':

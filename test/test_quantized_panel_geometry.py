@@ -1,4 +1,5 @@
 """Shape-selected panels preserve ordered results, bounds and replay identity."""
+from merlin.semantic_compiler.codegen import codegen_options, current_codegen_options
 from dataclasses import replace
 import json
 import os
@@ -14,7 +15,7 @@ from atlas_mlir_native.quantized_loop import execution_layout, virtual_source
 from atlas_mlir_native.quantized_loop_sizing import size_counted
 from atlas_mlir_native.quantized_panel_geometry import panel_geometry
 from atlas_mlir_native.restoration_budget import instruction_bound
-from merlin.semantic_compiler.codegen import CodegenOptions, codegen_options
+
 from merlin.semantic_compiler.target_binding import NativeCompilationError
 from test_already_quantized import source_request
 from test_exponent_restoration import compile_fixture
@@ -42,11 +43,11 @@ def test_geometry_accounts_for_partial_traffic_and_keeps_frame_reserve():
 
 
 def test_recorded_geometry_is_independent_of_environment_and_not_mutable():
-    with codegen_options(CodegenOptions(io_memory_bytes=67108864)):
+    with codegen_options(replace(current_codegen_options(), io_memory_bytes=67108864)):
         plan = plan_for(97, 35, 768)
         layout = execution_layout(plan, operand_reuse='panel-cache')
         expected = virtual_source(plan, layout)
-        with patch.dict(os.environ, ATLAS_QUANTIZED_OPERAND_REUSE='invalid'):
+        with codegen_options(replace(current_codegen_options(), quantized_operand_reuse='ordered')):
             assert virtual_source(plan, layout) == expected
         for key in ('operand_reuse_panel_m_tiles', 'operand_reuse_panel_k_tiles', 'operand_reuse_cached_tiles'):
             with pytest.raises(ValueError, match='schedule differs'):
@@ -83,12 +84,15 @@ def test_selected_panels_survive_native_rebinding_and_c_export(tmp_path):
 
     source = source_request(m=97, n=35, k=257, batch=())
     canonical = canonical_request(source, source_identity_policy='provenance')
-    with codegen_options(CodegenOptions(io_memory_bytes=67108864, execution_instruction_limit=128000000)):
+    with codegen_options(replace(current_codegen_options(), io_memory_bytes=67108864, execution_instruction_limit=128000000)):
         capture = SelectionCapture(build_snapshot(tmp_path/'snapshot'))
-        with patch.dict(os.environ, ATLAS_QUANTIZED_OPERAND_REUSE='panel-cache'):
+        with codegen_options(replace(current_codegen_options(), quantized_operand_reuse='panel-cache')):
             quantized_loop.compile_source(capture, canonical, target_source=ROOT,
                 destination=tmp_path/'compiled', limits=SearchLimits())
-        with patch.dict(os.environ, ATLAS_QUANTIZED_OPERAND_REUSE='invalid'):
+        with codegen_options(replace(current_codegen_options(), quantized_operand_reuse='ordered')):
+            with pytest.raises(ValueError, match='sizing context changed'):
+                bind_counted(source, canonical, tmp_path/'compiled', tmp_path/'different-options', capture, target_source=ROOT)
+        with codegen_options(replace(current_codegen_options(), quantized_operand_reuse='panel-cache')):
             bind_counted(source, canonical, tmp_path/'compiled', tmp_path/'bound', capture, target_source=ROOT)
             record, files = quantized_loop_c.prepare_c_package(source, tmp_path/'bound', 'panels', target_source=ROOT)
         assert record['output_node_ids'] == list(source.outputs) and files
@@ -101,8 +105,7 @@ def test_real_oversized_panel_uses_checked_paired_candidate():
     from atlas_mlir_native.quantized_loop_sizing import _size_counted
     from test_exponent_restoration import ROOT
 
-    with codegen_options(CodegenOptions(io_memory_bytes=67108864, execution_instruction_limit=128000000,
-                                       program_size_limit_bytes=100000)):
+    with codegen_options(replace(current_codegen_options(), io_memory_bytes=67108864, execution_instruction_limit=128000000, program_size_limit_bytes=100000)):
         plan = plan_for(225, 65, 5632)
         refused = _size_counted(plan, target_source=ROOT, operand_reuse='panel-cache')
         assert refused.record()['route'] == 'k32_tiles'
@@ -116,7 +119,7 @@ def test_real_oversized_panel_uses_checked_paired_candidate():
                     reason='select Rust simulator and native tools')
 @pytest.mark.parametrize('m,n,k,row_scales', [(97, 35, 257, True), (225, 65, 768, False), (225, 35, 3073, False)])
 def test_rust_panels_preserve_all_memory_and_late_rejection(tmp_path, m, n, k, row_scales):
-    with codegen_options(CodegenOptions(io_memory_bytes=67108864, execution_instruction_limit=128000000)):
+    with codegen_options(replace(current_codegen_options(), io_memory_bytes=67108864, execution_instruction_limit=128000000)):
         source = source_request(m=m, n=n, k=k, batch=())
         if row_scales:
             source = replace(source, nodes=tuple(replace(node, type=replace(node.type, shape=(m, 1)))

@@ -9,7 +9,8 @@ import numpy as np
 import pytest
 from atlas_mlir_native import activation_quantize_application as application
 from atlas_mlir_native import vector_quantize as device
-from merlin.semantic_compiler.codegen import CodegenOptions, codegen_options
+from dataclasses import replace
+from merlin.semantic_compiler.codegen import codegen_options, current_codegen_options
 from merlin.semantic_compiler.target_binding import NativeCompilationError
 from test_activation_quantize_device import dynamic_source, host_reference
 
@@ -17,7 +18,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def options(budget=128000000, memory=67108864, **kwargs):
-    return codegen_options(CodegenOptions(execution_instruction_limit=budget,
+    return codegen_options(replace(current_codegen_options(), execution_instruction_limit=budget,
                                          io_memory_bytes=memory, **kwargs))
 
 

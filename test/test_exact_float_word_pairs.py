@@ -1,14 +1,15 @@
 """Paired raw-word unary kernels preserve every encoding and atomic rejection."""
+from dataclasses import replace
 import json
 import os
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
 
 import numpy as np
+from merlin.semantic_compiler.codegen import codegen_options, current_codegen_options
 from atlas_mlir_native import exact_float_device as device
-from merlin.semantic_compiler.codegen import CodegenOptions, codegen_options
+
 from test_exact_float_device import request
 from test_exact_float_vector_preflight import VectorPreflightTest
 
@@ -26,15 +27,14 @@ class UnaryWordPairTest(unittest.TestCase):
             if operation == 'bf16_to_f32':
                 codes = codes[(codes & 0x7fff) <= 0x7f80]
             np.random.default_rng(80321).shuffle(codes)
-            with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, ATLAS_EXACT_CAST_VECTOR_PREFLIGHT='1'):
+            with tempfile.TemporaryDirectory() as directory, codegen_options(replace(current_codegen_options(), exact_cast_vector_preflight=True)):
                 root = Path(directory)
                 for count in (1, 35, 1025, len(codes)):
                     with self.subTest(operation=operation, count=count):
                         source = request(operation, count)
                         programs = []
                         for expanded in (False, True):
-                            with codegen_options(CodegenOptions(io_memory_bytes=67108864,
-                                    execution_instruction_limit=128000000, exact_float_unroll=expanded)):
+                            with codegen_options(replace(current_codegen_options(), io_memory_bytes=67108864, execution_instruction_limit=128000000, exact_float_unroll=expanded)):
                                 plan = device.prepare_plan(source)
                                 target = root / f'{count}-{expanded}'
                                 device.compile_source(None, source, target_source=ROOT,

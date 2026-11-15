@@ -1,4 +1,6 @@
 """Explicit activation reuse keeps typed programs and ordered BF16 panels."""
+from merlin.semantic_compiler.codegen import codegen_options, current_codegen_options
+
 from dataclasses import replace
 import hashlib
 import json
@@ -24,11 +26,10 @@ class ResidentLoopedMNKTest(unittest.TestCase):
         with patch.dict(os.environ, {}, clear=True):
             self.assertEqual(_operand_reuse_policy(), "ordered")
         for policy in ("ordered", "resident-a"):
-            with patch.dict(os.environ, {"ATLAS_LOOPED_OPERAND_REUSE": policy}):
+            with codegen_options(replace(current_codegen_options(), looped_operand_reuse=policy)):
                 self.assertEqual(_operand_reuse_policy(), policy)
-        with patch.dict(os.environ, {"ATLAS_LOOPED_OPERAND_REUSE": "unknown"}):
-            with self.assertRaisesRegex(NativeCompilationError, "ordered or resident-a"):
-                _operand_reuse_policy()
+        with self.assertRaises(ValueError), codegen_options(replace(current_codegen_options(), looped_operand_reuse="unknown")):
+            _operand_reuse_policy()
 
     def test_panels_exceed_dma_windows_and_preserve_exact_bounded_allocation(self):
         for shape, seeded, relu in (((33, 35, 777), False, True),
@@ -63,18 +64,18 @@ class ResidentLoopedMNKTest(unittest.TestCase):
         for n in (7, 35):
             plan = prepare_plan(source_request(3, n, 777))
             addresses, output = (0x90000000, 0x90010000), 0x90030000
-            with patch.dict(os.environ, {"ATLAS_LOOPED_OPERAND_REUSE": "ordered"}):
+            with codegen_options(replace(current_codegen_options(), looped_operand_reuse="ordered")):
                 virtual, record = _virtual_schedule(plan, addresses, output, k_unroll=4)
                 self.assertEqual(virtual, _virtual(plan, addresses, output, k_unroll=4))
                 self.assertEqual(record["operand_reuse"], "ordered")
-            with patch.dict(os.environ, {"ATLAS_LOOPED_OPERAND_REUSE": "resident-a", "ATLAS_NATIVE_PIPELINE": "mandatory"}):
+            with codegen_options(replace(current_codegen_options(), looped_operand_reuse="resident-a", native_pipeline="mandatory")):
                 virtual, record = _virtual_schedule(plan, addresses, output, k_unroll=4)
                 self.assertEqual(record["operand_reuse"], "ordered" if n == 7 else "resident-a")
                 if n == 7:
                     self.assertIn("operand_reuse_fallback", record)
                     self.assertEqual(virtual, _virtual(plan, addresses, output, k_unroll=4))
             if n > 32:
-                with patch.dict(os.environ, {"ATLAS_LOOPED_OPERAND_REUSE": "resident-a", "ATLAS_NATIVE_PIPELINE": "optimized"}):
+                with codegen_options(replace(current_codegen_options(), looped_operand_reuse="resident-a", native_pipeline="optimized")):
                     with self.assertRaisesRegex(NativeCompilationError, "mandatory only"):
                         _virtual_schedule(plan, addresses, output, k_unroll=4)
 
@@ -92,8 +93,7 @@ class ResidentLoopedMNKTest(unittest.TestCase):
             (root / "manifest.json").write_text("snapshot identity")
             keys = []
             for policy in ("ordered", "resident-a"):
-                with patch.dict(os.environ, {"ATLAS_LOOPED_OPERAND_REUSE": policy,
-                                             "ATLAS_NATIVE_PIPELINE": "mandatory", "ATLAS_OOT_BIN_DIR": str(BIN)}):
+                with codegen_options(replace(current_codegen_options(), looped_operand_reuse=policy, native_pipeline="mandatory")), patch.dict(os.environ, {"ATLAS_OOT_BIN_DIR": str(BIN)}):
                     keys.append(tuning_key(SimpleNamespace(root=root), source_request(3, 35, 777),
                                            {"a": 0, "w": 25}, (50,), SearchLimits()))
             self.assertNotEqual(keys[0], keys[1])
@@ -185,7 +185,7 @@ class ResidentLoopedCPackageTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         from atlas_mlir_native.binding import AtlasNativeBinding
-        from merlin.semantic_compiler.codegen import CodegenOptions, codegen_options
+
         from merlin.semantic_compiler.search import SearchLimits
         from merlin.semantic_compiler.snapshot import build_native_snapshot, packaged_egg_bridge_path
 
@@ -197,8 +197,8 @@ class ResidentLoopedCPackageTest(unittest.TestCase):
             source_revision="resident-looped-c-export-test")
         request = seeded_source_request((3, 35, 777), True)
         abi = AtlasNativeBinding.plan_boundary_abi(request)
-        with patch.dict(os.environ, {"ATLAS_LOOPED_OPERAND_REUSE": "resident-a", "ATLAS_NATIVE_PIPELINE": "mandatory"}), \
-                codegen_options(CodegenOptions(reduction_unroll="4")):
+        with codegen_options(replace(current_codegen_options(), looped_operand_reuse="resident-a", native_pipeline="mandatory")), \
+                codegen_options(replace(current_codegen_options(), reduction_unroll="4")):
             AtlasNativeBinding.compile(snapshot, request, fixed_inputs=abi["fixed_inputs"],
                 fixed_outputs=tuple(abi["fixed_outputs"]), target_source=ROOT, destination=cls.compiled,
                 limits=SearchLimits())
@@ -211,8 +211,8 @@ class ResidentLoopedCPackageTest(unittest.TestCase):
         from atlas_mlir_native.looped_c import prepare_c_package
 
         # Export must replay the authenticated publication rather than the
-        # current environment, which may belong to a different compilation.
-        with patch.dict(os.environ, {"ATLAS_LOOPED_OPERAND_REUSE": "unknown", "ATLAS_NATIVE_PIPELINE": "optimized"}):
+        # current options, which may belong to a different compilation.
+        with codegen_options(replace(current_codegen_options(), looped_operand_reuse="ordered", native_pipeline="optimized")):
             record, files = prepare_c_package(self.compiled / "source-request.json", self.compiled,
                                               "resident", target_source=ROOT)
         self.assertTrue(record)

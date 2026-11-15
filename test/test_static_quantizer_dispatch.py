@@ -17,17 +17,17 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 @pytest.fixture(autouse=True)
-def optimized_pipeline(monkeypatch):
-    monkeypatch.setenv('ATLAS_NATIVE_PIPELINE', 'optimized')
+def static_quantizer_sizing(select_codegen_options):
+    select_codegen_options(static_quantizer_sizing=True)
 
 
-def test_default_partitioning_retains_legacy_chunks_until_optimized_is_selected(monkeypatch):
+@pytest.mark.parametrize('pipeline', ['mandatory', 'optimized'])
+def test_static_partitioning_is_independent_of_native_pipeline(pipeline):
     source = quantizer_source(count=524320)
-    with options(1000000):
-        monkeypatch.setenv('ATLAS_NATIVE_PIPELINE', 'mandatory')
+    with options(1000000, native_pipeline=pipeline, static_quantizer_sizing=False):
         legacy = application.prepare_plan(source)
         assert [row['code_bytes'] for row in legacy.launches] == [2048] * 256 + [32]
-        monkeypatch.setenv('ATLAS_NATIVE_PIPELINE', 'optimized')
+    with options(1000000, native_pipeline=pipeline, static_quantizer_sizing=True):
         enhanced = application.prepare_plan(source)
         assert [row['code_bytes'] for row in enhanced.launches] == [524320]
 

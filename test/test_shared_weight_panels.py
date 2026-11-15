@@ -1,4 +1,5 @@
 """Tile-aligned independent batches share weights without changing source math."""
+from merlin.semantic_compiler.codegen import codegen_options, current_codegen_options
 from dataclasses import replace
 import json
 import os
@@ -12,7 +13,7 @@ from atlas_mlir_native.binding import DRAM_BASE
 from atlas_mlir_native.quantized_loop import execution_layout, virtual_source
 from atlas_mlir_native.quantized_panel_geometry import panel_geometry, shared_weight_panel_plan
 from atlas_mlir_native.restoration_budget import instruction_bound
-from merlin.semantic_compiler.codegen import CodegenOptions, codegen_options
+
 from test_already_quantized import source_request
 from test_exponent_restoration import compile_fixture
 from test_quantized_prefix_reuse import memory_fixture
@@ -33,7 +34,7 @@ def test_only_physical_traversal_changes(batch, scales):
     assert physical.source is plan.source
     assert physical.m == prod(batch) * plan.m and physical.batch_shape == ()
     assert physical.operand_ids == plan.operand_ids and physical.exponent_ids == plan.exponent_ids
-    with codegen_options(CodegenOptions(io_memory_bytes=67108864)):
+    with codegen_options(replace(current_codegen_options(), io_memory_bytes=67108864)):
         layout = execution_layout(plan, operand_reuse='panel-cache')
         assert layout['operand_reuse_flattened_batches'] == prod(batch)
         with pytest.raises(ValueError, match='schedule differs'):
@@ -56,10 +57,10 @@ def test_tail_batch_scales_and_batched_rhs_keep_original_traversal():
 @pytest.mark.skipif(not all(os.environ.get(key) for key in
     ('ATLAS_RUST_NPU_MODEL', 'ATLAS_OOT_BIN_DIR', 'ATLAS_TEST_NATIVE_SNAPSHOT')),
     reason='select Rust simulator, Atlas tools and native snapshot')
-def test_generated_batched_binding_replays_panels_and_refuses_atomically(tmp_path, monkeypatch):
+def test_generated_batched_binding_replays_panels_and_refuses_atomically(tmp_path, monkeypatch, select_codegen_options):
     from test_quantized_epilogue_narrowing import test_generated_c_and_rust_preserve_every_output_and_guards
 
-    monkeypatch.setenv('ATLAS_QUANTIZED_OPERAND_REUSE', 'panel-cache')
+    select_codegen_options(quantized_operand_reuse='panel-cache')
     test_generated_c_and_rust_preserve_every_output_and_guards(tmp_path, 64, 35, 257, (2,), 0)
     execution = json.loads((tmp_path/'compiled/execution_plan.json').read_text())
     assert execution['operand_reuse'] == 'panel-cache'
@@ -71,7 +72,7 @@ def test_generated_batched_binding_replays_panels_and_refuses_atomically(tmp_pat
 @pytest.mark.parametrize('batch,m,n,k,scales', [
     ((2,), 64, 35, 257, 'row'), ((4,), 32, 65, 513, 'scalar'), ((2, 4), 32, 35, 257, 'row')])
 def test_rust_shared_panels_preserve_every_word_and_late_refusals(tmp_path, batch, m, n, k, scales):
-    with codegen_options(CodegenOptions(io_memory_bytes=67108864, execution_instruction_limit=128000000)):
+    with codegen_options(replace(current_codegen_options(), io_memory_bytes=67108864, execution_instruction_limit=128000000)):
         plan = prepare_source(source_for(batch, m, n, k, scales=scales))
         programs = []
         for policy in ('wide-cache', 'panel-cache'):

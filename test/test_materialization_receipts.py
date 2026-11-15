@@ -10,12 +10,12 @@ from atlas_mlir_native.quantized_loop_sizing import publication_record
 from atlas_mlir_native.publication_options import publication_options, valid_receipt_timing
 
 
-def test_pure_pipeline_receipt_is_byte_identical_across_invocations(tmp_path, monkeypatch):
+def test_pure_pipeline_receipt_is_byte_identical_across_invocations(tmp_path, monkeypatch, select_codegen_options):
     tools = tmp_path / "tools"
     tools.mkdir()
     for name in ("atlas-opt", "atlas-emit"):
         (tools / name).write_bytes(name.encode())
-    monkeypatch.delenv("ATLAS_CAPTURE_POSTSPILL", raising=False)
+    select_codegen_options(capture_postspill=False)
     monkeypatch.setattr(binding, "_run", lambda *args, **kwargs: "identical checked machine\n")
     results = []
     for index in range(2):
@@ -52,12 +52,12 @@ def test_native_sizing_publication_preserves_facts_and_not_operational_cache(tmp
     assert results[0]["resource_command"][1].endswith("resource-planning-report=resource.json program-size-limit-bytes=100")
 
 
-def test_default_receipt_retains_bounded_elapsed_time(tmp_path, monkeypatch):
+def test_default_receipt_retains_bounded_elapsed_time(tmp_path, monkeypatch, select_codegen_options):
     tools = tmp_path / "tools"
     tools.mkdir()
     for name in ("atlas-opt", "atlas-emit"):
         (tools / name).write_bytes(name.encode())
-    monkeypatch.delenv("ATLAS_CAPTURE_POSTSPILL", raising=False)
+    select_codegen_options(capture_postspill=False)
     monkeypatch.setattr(binding, "_run", lambda *args, **kwargs: "machine")
     times = iter((10.0, 11.25))
     monkeypatch.setattr("time.perf_counter", lambda: next(times))

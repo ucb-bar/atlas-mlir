@@ -1,4 +1,5 @@
 """Counted contraction admission includes every selected DRAM frame byte."""
+from merlin.semantic_compiler.codegen import codegen_options, current_codegen_options
 
 from dataclasses import replace
 from pathlib import Path
@@ -13,7 +14,7 @@ from atlas_mlir_native import quantized_loop as loop, quantized_loop_c as native
 from atlas_mlir_native.already_quantized import prepare_source
 from atlas_mlir_native.binding import DRAM_BASE
 from atlas_mlir_native.quantized_loop_sizing import size_counted, untimed_bound
-from merlin.semantic_compiler.codegen import CodegenOptions, codegen_options
+
 from merlin.semantic_compiler.target_binding import NativeCompilationError
 from test_already_quantized import source_request
 from test_quantized_epilogue import case
@@ -70,8 +71,8 @@ class QuantizedLoopDramTest(unittest.TestCase):
         from atlas_mlir_native import quantized_loop_sizing as sizing
 
         plan = prepare_source(source_request(64, 65, 64, batch=()))
-        with codegen_options(CodegenOptions(io_memory_bytes=CACHE_DRAM, program_size_limit_bytes=131072)), \
-             patch.dict(os.environ, ATLAS_NATIVE_PIPELINE='optimized', ATLAS_CAPTURE_POSTSPILL='0'), \
+        with codegen_options(replace(current_codegen_options(), io_memory_bytes=CACHE_DRAM, program_size_limit_bytes=131072)), \
+             codegen_options(replace(current_codegen_options(), native_pipeline='optimized', capture_postspill=False)), \
              patch.object(sizing, '_CACHE', {}):
             selected = size_counted(plan, target_source=ROOT, operand_reuse='paired-cache')
         record = selected.record()
@@ -88,10 +89,10 @@ class QuantizedLoopDramTest(unittest.TestCase):
     def test_synthetic_small_profile_includes_complete_status_and_exponent_frame(self):
         for source,expected in ((cache_source(),4526080),(cache_source(k=5632),11980800)):
             plan = prepare_source(source)
-            with codegen_options(CodegenOptions(io_memory_bytes=CACHE_DRAM)):
+            with codegen_options(replace(current_codegen_options(), io_memory_bytes=CACHE_DRAM)):
                 layout = loop.execution_layout(plan)
                 self.assertEqual(layout['status_address']+layout['status_bytes']-DRAM_BASE,expected)
-            with codegen_options(CodegenOptions(io_memory_bytes=SMALL_DRAM)):
+            with codegen_options(replace(current_codegen_options(), io_memory_bytes=SMALL_DRAM)):
                 selection = size_counted(plan,target_source=ROOT).record()
                 self.assertEqual((selection['route'],selection['reason']),('k32_tiles','selected_dram_window'))
                 with self.assertRaisesRegex(NativeCompilationError,'selected DRAM window'):
@@ -99,7 +100,7 @@ class QuantizedLoopDramTest(unittest.TestCase):
 
     def test_tiny_frame_alignment_status_page_and_invalid_window(self):
         plan = prepare_source(source_request(1,1,1,batch=()))
-        with codegen_options(CodegenOptions(io_memory_bytes=12288)):
+        with codegen_options(replace(current_codegen_options(), io_memory_bytes=12288)):
             layout = loop.execution_layout(plan)
             self.assertEqual(layout['input_buffer_bytes'],[1024,1024])
             self.assertEqual(layout['input_addresses'],[DRAM_BASE,DRAM_BASE+2048])
@@ -107,19 +108,19 @@ class QuantizedLoopDramTest(unittest.TestCase):
             self.assertEqual(layout['output_addresses'],[DRAM_BASE+8192])
             self.assertEqual((layout['status_address'],layout['status_bytes']),(DRAM_BASE+10240,2048))
         for window in (2048,10240):
-            with self.subTest(window=window),codegen_options(CodegenOptions(io_memory_bytes=window)):
+            with self.subTest(window=window),codegen_options(replace(current_codegen_options(), io_memory_bytes=window)):
                 self.assertEqual(size_counted(plan,target_source=ROOT).record()['reason'],'selected_dram_window')
                 with self.assertRaisesRegex(NativeCompilationError,'selected DRAM window'):
                     loop.execution_layout(plan)
         for window in (12287,12289):
-            with self.subTest(window=window),codegen_options(CodegenOptions(io_memory_bytes=window)):
+            with self.subTest(window=window),codegen_options(replace(current_codegen_options(), io_memory_bytes=window)):
                 with self.assertRaisesRegex(NativeCompilationError,'whole tiles'):
                     size_counted(plan,target_source=ROOT)
 
     def test_only_epilogue_footprint_overflow_retains_original_device_operations(self):
         from atlas_mlir_native.quantized_epilogue import alternatives,prepare_source as prepare_epilogue
         source,contraction,choices = case(m=1,n=1,k=1,batch=())
-        with codegen_options(CodegenOptions(io_memory_bytes=12288)):
+        with codegen_options(replace(current_codegen_options(), io_memory_bytes=12288)):
             self.assertEqual(loop.execution_layout(prepare_source(contraction))['status_address']+2048-DRAM_BASE,12288)
             epilogue = prepare_epilogue(source)
             self.assertEqual(size_counted(epilogue,target_source=ROOT).record()['reason'],'selected_dram_window')
@@ -159,7 +160,7 @@ class QuantizedLoopDramTest(unittest.TestCase):
             path = Path(option.split('resource-planning-report=', 1)[1].split(' ', 1)[0])
             path.write_text(json.dumps({'cfg_contract': 'contract'}))
             return 'prepared virtual'
-        with codegen_options(CodegenOptions(io_memory_bytes=CACHE_DRAM)), \
+        with codegen_options(replace(current_codegen_options(), io_memory_bytes=CACHE_DRAM)), \
              patch.object(sizing, '_CACHE', {}), \
              patch.object(sizing, '_identity', return_value=identity), \
              patch.object(loop, 'virtual_source', return_value='source virtual'), \
@@ -203,7 +204,7 @@ class QuantizedLoopDramTest(unittest.TestCase):
                 size_counted(plan, target_source=ROOT)
             return 'checked machine with contract'
 
-        with codegen_options(CodegenOptions(io_memory_bytes=CACHE_DRAM)), \
+        with codegen_options(replace(current_codegen_options(), io_memory_bytes=CACHE_DRAM)), \
              patch.object(sizing, '_CACHE', {}), \
              patch.object(sizing, '_identity', return_value=identity), \
              patch.object(loop, 'virtual_source', return_value='source virtual'), \
@@ -232,12 +233,12 @@ class QuantizedLoopDramTest(unittest.TestCase):
                 planning_succeeded=False,machine_artifact_qualified=False,
                 untimed_words=dict(words=32769,limit=32768))))
             raise NativeCompilationError('compile_error','synthetic explicit IMEM refusal')
-        with codegen_options(CodegenOptions(io_memory_bytes=CACHE_DRAM)),patch.object(sizing,'_run',side_effect=refused):
+        with codegen_options(replace(current_codegen_options(), io_memory_bytes=CACHE_DRAM)),patch.object(sizing,'_run',side_effect=refused):
             result = size_counted(prepare_source(source),target_source=ROOT).record()
             self.assertEqual((result['route'],result['reason']),('k32_tiles','encoded_instruction_memory'))
             self.assertEqual((result['planned_words'],result['program_word_limit']),(32769,32768))
         source = replace(source,source_identity='timeout-is-not-an-IMEM-refusal')
-        with codegen_options(CodegenOptions(io_memory_bytes=CACHE_DRAM)),patch.object(sizing,'_run',
+        with codegen_options(replace(current_codegen_options(), io_memory_bytes=CACHE_DRAM)),patch.object(sizing,'_run',
                 side_effect=NativeCompilationError('search_timeout','synthetic timeout')):
             with self.assertRaisesRegex(NativeCompilationError,'synthetic timeout'):
                 size_counted(prepare_source(source),target_source=ROOT)
@@ -251,7 +252,7 @@ class QuantizedLoopDramTest(unittest.TestCase):
             ('PV',cache_source(n=64,k=4,batch=(1,32),op='atlas.pv_matmul',batched_rhs=True,scalar_lhs=True),299008),
             ('O',cache_source(),4526080),('up',cache_source(n=5632),12324864),
             ('gate',cache_source(n=5632),12324864),('down',cache_source(k=5632),11980800))
-        with codegen_options(CodegenOptions(io_memory_bytes=CACHE_DRAM)):
+        with codegen_options(replace(current_codegen_options(), io_memory_bytes=CACHE_DRAM)):
             for name,source,expected in cases:
                 with self.subTest(name=name):
                     selection = size_counted(prepare_source(source),target_source=ROOT).record()
@@ -266,7 +267,7 @@ class QuantizedLoopDramTest(unittest.TestCase):
 
     @unittest.skipUnless(os.environ.get('ATLAS_OOT_BIN_DIR'),'select native compiler tools')
     def test_shape_budget_rejects_large_image_before_full_proof_and_removes_old_cutoff(self):
-        with codegen_options(CodegenOptions(io_memory_bytes=CACHE_DRAM)):
+        with codegen_options(replace(current_codegen_options(), io_memory_bytes=CACHE_DRAM)):
             large = size_counted(prepare_source(source_request(512,5632,2048,batch=())),target_source=ROOT)
             record = large.record()
             self.assertEqual((record['route'],record['reason']),('k32_tiles','untimed_instruction_bound'))
@@ -286,7 +287,7 @@ class QuantizedLoopDramTest(unittest.TestCase):
     @unittest.skipUnless(os.environ.get('ATLAS_OOT_BIN_DIR'),'select native compiler tools')
     def test_checked_cache_is_profile_bound_and_detects_changed_files(self):
         plan = prepare_source(source_request())
-        with codegen_options(CodegenOptions(io_memory_bytes=CACHE_DRAM)):
+        with codegen_options(replace(current_codegen_options(), io_memory_bytes=CACHE_DRAM)):
             selected = size_counted(plan,target_source=ROOT)
             self.assertIs(size_counted(plan,target_source=ROOT),selected)
             path = selected.directory/'checked/atlas-machine.mlir'
@@ -297,7 +298,7 @@ class QuantizedLoopDramTest(unittest.TestCase):
                     size_counted(plan,target_source=ROOT)
             finally:
                 path.write_bytes(original);path.chmod(0o444)
-        with codegen_options(CodegenOptions(io_memory_bytes=SMALL_DRAM)):
+        with codegen_options(replace(current_codegen_options(), io_memory_bytes=SMALL_DRAM)):
             other = size_counted(plan,target_source=ROOT)
             self.assertNotEqual(other.record()['identity']['profile_sha256'],selected.record()['identity']['profile_sha256'])
             self.assertIsNot(other,selected)

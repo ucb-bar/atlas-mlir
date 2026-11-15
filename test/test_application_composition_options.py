@@ -1,12 +1,13 @@
 """Normal targetgen application factories expose explicit target-owned groups."""
+from dataclasses import replace
 import os
-from unittest.mock import patch
 
 import pytest
+from merlin.semantic_compiler.codegen import codegen_options, current_codegen_options
 from atlas_mlir_native.application import AtlasApplicationAdapter
 from atlas_mlir_native.binding import AtlasNativeBinding
 from atlas_mlir_native.composition_adapter import AdjacentDeviceAdapter
-from merlin.semantic_compiler.codegen import CodegenOptions, codegen_options
+
 from test_application_float_arithmetic import policy
 from test_expanded_silu import case
 
@@ -25,19 +26,19 @@ def factory():
 
 
 def test_default_factory_retains_original_regions():
-    with patch.dict(os.environ, ATLAS_ADJACENT_PATTERNS=''):
+    with codegen_options(replace(current_codegen_options(), adjacent_patterns='')):
         base = factory()
     assert type(base) is AtlasApplicationAdapter
-    with codegen_options(CodegenOptions(io_memory_bytes=67108864)):
+    with codegen_options(replace(current_codegen_options(), io_memory_bytes=67108864)):
         assert len(base.plan(case()).selected) == 7
 
 
 def test_factory_uses_the_same_proved_groups_and_preserves_base_capabilities():
-    with patch.dict(os.environ, ATLAS_ADJACENT_PATTERNS='pointwise_narrowing, expanded_silu'):
+    with codegen_options(replace(current_codegen_options(), adjacent_patterns='pointwise_narrowing, expanded_silu')):
         wrapper = factory()
     assert isinstance(wrapper, AdjacentDeviceAdapter)
     assert wrapper.source_operation_translators == wrapper.base.source_operation_translators
-    with codegen_options(CodegenOptions(io_memory_bytes=67108864)):
+    with codegen_options(replace(current_codegen_options(), io_memory_bytes=67108864)):
         selected, = wrapper.plan(case()).selected
         assert selected.nodes == tuple(range(7))
         assert dict(selected.metadata)['kind'] == 'expanded_silu'
@@ -48,5 +49,5 @@ def test_factory_uses_the_same_proved_groups_and_preserves_base_capabilities():
 
 @pytest.mark.parametrize('selection', ['unknown', 'expanded_silu,expanded_silu', ',expanded_silu', 'expanded_silu,'])
 def test_factory_rejects_unknown_duplicate_or_missing_pattern_names(selection):
-    with patch.dict(os.environ, ATLAS_ADJACENT_PATTERNS=selection), pytest.raises(ValueError):
+    with pytest.raises(ValueError), codegen_options(replace(current_codegen_options(), adjacent_patterns=selection)):
         factory()

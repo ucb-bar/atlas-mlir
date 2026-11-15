@@ -1,7 +1,9 @@
 """Wider bounded activation caching keeps the original ordered arithmetic."""
+from merlin.semantic_compiler.codegen import codegen_options, current_codegen_options
+
+from dataclasses import replace
 import os
 from math import prod
-from unittest.mock import patch
 import unittest
 
 from atlas_mlir_native.already_quantized import prepare_source
@@ -17,8 +19,8 @@ from test_quantized_operand_reuse import cycle
 
 class WideReuseTest(unittest.TestCase):
     def setUp(self):
-        from merlin.semantic_compiler.codegen import CodegenOptions, codegen_options
-        options = codegen_options(CodegenOptions(io_memory_bytes=64*1024*1024))
+
+        options = codegen_options(replace(current_codegen_options(), io_memory_bytes=64*1024*1024))
         options.__enter__()
         self.addCleanup(options.__exit__, None, None, None)
 
@@ -28,7 +30,7 @@ class WideReuseTest(unittest.TestCase):
             cache = activation_residency(plan, 'wide-cache')
             self.assertEqual(cache.tile_count, min((k+31)//32,WIDE_CACHE_TILES))
             layout = execution_layout(plan,operand_reuse='wide-cache')
-            with patch.dict(os.environ,ATLAS_QUANTIZED_OPERAND_REUSE='invalid'):
+            with codegen_options(replace(current_codegen_options(), quantized_operand_reuse='ordered')):
                 virtual_source(plan,layout)
             layout['operand_reuse_cached_tiles'] -= 1
             with self.assertRaisesRegex(ValueError,'schedule differs'):
@@ -50,10 +52,13 @@ class WideReuseTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             capture = SelectionCapture(build_snapshot(root/'snapshot'))
-            with patch.dict(os.environ,ATLAS_QUANTIZED_OPERAND_REUSE='wide-cache'):
+            with codegen_options(replace(current_codegen_options(), quantized_operand_reuse='wide-cache')):
                 quantized_loop.compile_source(capture,canonical,target_source=ROOT,
                     destination=root/'compiled',limits=SearchLimits())
-            with patch.dict(os.environ,ATLAS_QUANTIZED_OPERAND_REUSE='invalid'):
+            with codegen_options(replace(current_codegen_options(), quantized_operand_reuse='ordered')):
+                with self.assertRaisesRegex(ValueError, 'sizing context changed'):
+                    bind_counted(source,canonical,root/'compiled',root/'different-options',capture,target_source=ROOT)
+            with codegen_options(replace(current_codegen_options(), quantized_operand_reuse='wide-cache')):
                 bind_counted(source,canonical,root/'compiled',root/'bound',capture,target_source=ROOT)
                 record, files = quantized_loop_c.prepare_c_package(source,root/'bound','wide',target_source=ROOT)
                 self.assertEqual(record['output_node_ids'],list(source.outputs))

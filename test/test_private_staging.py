@@ -1,4 +1,6 @@
 """Private staging preserves public bytes, arithmetic and native admission."""
+from merlin.semantic_compiler.codegen import codegen_options, current_codegen_options
+
 from dataclasses import replace
 import io
 import json
@@ -92,15 +94,14 @@ def test_candidate_capacity_declines_without_changing_transfers(monkeypatch):
     assert 'virtual_dma_store_bf16' in result and 'virtual_dma_load_bf16' in result
 
 
-def test_policy_requires_an_explicit_supported_storage(monkeypatch):
+def test_policy_requires_an_explicit_supported_storage(monkeypatch, select_codegen_options):
     from merlin.semantic_compiler.target_binding import NativeCompilationError
-    monkeypatch.delenv('ATLAS_STAGING_STORAGE',raising=False)
+    select_codegen_options(staging_storage='dram')
     assert private_staging.storage_policy()=='dram'
-    monkeypatch.setenv('ATLAS_STAGING_STORAGE','vmem')
+    select_codegen_options(staging_storage='vmem')
     assert private_staging.storage_policy()=='vmem'
-    monkeypatch.setenv('ATLAS_STAGING_STORAGE','automatic')
-    with pytest.raises(NativeCompilationError):
-        private_staging.storage_policy()
+    with pytest.raises(ValueError):
+        select_codegen_options(staging_storage='automatic')
 
 
 @pytest.mark.skipif(not os.environ.get('ATLAS_OOT_BIN_DIR'),reason='select Atlas tools')
@@ -125,12 +126,11 @@ def test_native_checks_still_reject_uninitialized_slots_and_exhausted_capacity()
     ((65,65),'masked_softmax','bf16'), ((65,65),'guarded_softmax','bf16'),
     ((33,1024),'softmax','bf16')])
 @pytest.mark.parametrize('policy',['vmem','vmem-inputs'])
-def test_generated_c_rust_preserves_rows_tails_and_rejections(tmp_path,monkeypatch,shape,kind,dtype,policy):
-    from merlin.semantic_compiler.codegen import CodegenOptions,codegen_options
+def test_generated_c_rust_preserves_rows_tails_and_rejections(tmp_path,monkeypatch,shape,kind,dtype,policy, select_codegen_options):
+
     from test_softmax_input_widening import test_generated_c_and_rust_preserve_score_codes_results_and_rejections
-    monkeypatch.setenv('ATLAS_STAGING_STORAGE',policy)
-    with codegen_options(CodegenOptions(io_memory_bytes=67108864,
-                                       execution_instruction_limit=128000000)):
+    select_codegen_options(staging_storage=policy)
+    with codegen_options(replace(current_codegen_options(), io_memory_bytes=67108864, execution_instruction_limit=128000000)):
         test_generated_c_and_rust_preserve_score_codes_results_and_rejections(tmp_path,shape,kind,dtype)
     plan=json.loads((tmp_path/'compiled/body/execution_plan.json').read_text())
     assert plan['private_staging']['selected']==policy

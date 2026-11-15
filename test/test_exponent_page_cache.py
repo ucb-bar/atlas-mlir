@@ -9,12 +9,13 @@ from types import SimpleNamespace
 
 import pytest
 
+from merlin.semantic_compiler.codegen import CodegenOptions, codegen_options, current_codegen_options
 from atlas_mlir_native.already_quantized import prepare_source
 from atlas_mlir_native.binding import DRAM_BASE
 from atlas_mlir_native.exponent_page_cache import enabled
 from atlas_mlir_native.quantized_loop import execution_layout, virtual_source
 from atlas_mlir_native.restoration_budget import instruction_bound
-from merlin.semantic_compiler.codegen import CodegenOptions, codegen_options
+
 from merlin.semantic_compiler.target_binding import NativeCompilationError
 from test_already_quantized import source_request
 from test_exponent_restoration import compile_fixture
@@ -42,7 +43,7 @@ def fixture(m, n, k, batch, left, right, shared):
     return replace(source, nodes=nodes)
 
 
-def test_explicit_policy_identity_recorded_replay_and_scope_tampering(monkeypatch):
+def test_explicit_policy_identity_recorded_replay_and_scope_tampering(monkeypatch, select_codegen_options):
     from atlas_mlir_native.application import AtlasApplicationAdapter
 
     source = fixture(35, 65, 65, (2,), 'batch', 'batch', False)
@@ -50,24 +51,27 @@ def test_explicit_policy_identity_recorded_replay_and_scope_tampering(monkeypatc
     choice = SimpleNamespace(to_dict=lambda: dict(
         id='test', nodes=[], inputs=[], outputs=[], resident_inputs=[], resident_outputs=[]))
     adapter = AtlasApplicationAdapter.__new__(AtlasApplicationAdapter)
-    with codegen_options(OPTIONS):
-        monkeypatch.setenv('ATLAS_EXPONENT_PAGE_CACHE', '0')
+    with codegen_options(replace(current_codegen_options(), io_memory_bytes=OPTIONS.io_memory_bytes, execution_instruction_limit=OPTIONS.execution_instruction_limit)):
+        select_codegen_options(exponent_page_cache=False)
         old = execution_layout(plan)
         plain = virtual_source(plan, old)
         identity = adapter.materialization_identity(source, choice)
         assert not enabled() and 'exponent_page_cache' not in old
-        monkeypatch.setenv('ATLAS_EXPONENT_PAGE_CACHE', '1')
+        select_codegen_options(exponent_page_cache=True)
         cached = execution_layout(plan)
         selected = virtual_source(plan, cached)
         assert cached['exponent_page_cache_scopes'] == ['batch', 'batch']
         changed = adapter.materialization_identity(source, choice)
         assert changed['compilation_identity'].pop('exponent_page_cache') is True
+        assert changed['compilation_identity']['codegen'] == {
+            **identity['compilation_identity']['codegen'], 'exponent_page_cache': True}
+        changed['compilation_identity']['codegen'] = identity['compilation_identity']['codegen']
         assert changed == identity
         assert virtual_source(plan, old) == plain
-        monkeypatch.setenv('ATLAS_EXPONENT_PAGE_CACHE', 'invalid')
+        select_codegen_options(exponent_page_cache=False)
         assert virtual_source(plan, cached) == selected
-        with pytest.raises(NativeCompilationError):
-            execution_layout(plan)
+        with pytest.raises(ValueError):
+            select_codegen_options(exponent_page_cache='invalid')
         for key, value in (
                 ('exponent_page_cache', False), ('exponent_page_cache', 1),
                 ('exponent_page_cache_scopes', ['invocation', 'batch'])):
@@ -90,7 +94,7 @@ def test_explicit_policy_identity_recorded_replay_and_scope_tampering(monkeypatc
 ])
 def test_rust_cache_exact_memory_batch_scales_and_late_refusal(
         tmp_path, m, n, k, batch, left, right, shared, policy):
-    with codegen_options(OPTIONS):
+    with codegen_options(replace(current_codegen_options(), io_memory_bytes=OPTIONS.io_memory_bytes, execution_instruction_limit=OPTIONS.execution_instruction_limit)):
         plan = prepare_source(fixture(m, n, k, batch, left, right, shared))
         programs = []
         for selected in (False, True):
@@ -161,27 +165,27 @@ def test_rust_cache_exact_memory_batch_scales_and_late_refusal(
 @pytest.mark.skipif(not all(os.environ.get(key) for key in
     ('ATLAS_RUST_NPU_MODEL', 'ATLAS_OOT_BIN_DIR', 'ATLAS_TEST_NATIVE_SNAPSHOT')),
     reason='select Rust simulator, Atlas tools and native snapshot')
-def test_generated_c_panels_preserve_atomic_epilogue_guard(tmp_path, monkeypatch):
+def test_generated_c_panels_preserve_atomic_epilogue_guard(tmp_path, monkeypatch, select_codegen_options):
     from test_quantized_epilogue_narrowing import test_generated_c_and_rust_preserve_every_output_and_guards
 
-    monkeypatch.setenv('ATLAS_EXPONENT_PAGE_CACHE', '1')
-    monkeypatch.setenv('ATLAS_QUANTIZED_OPERAND_REUSE', 'panel-cache')
+    select_codegen_options(exponent_page_cache=True)
+    select_codegen_options(quantized_operand_reuse='panel-cache')
     test_generated_c_and_rust_preserve_every_output_and_guards(tmp_path, 64, 35, 257, (2,), 0)
     execution = json.loads((tmp_path / 'compiled/execution_plan.json').read_text())
     assert execution['exponent_page_cache_scopes'] == ['invocation', 'tile']
 
 
 @pytest.mark.parametrize('selected', ['0', '1'])
-def test_native_binding_and_export_replay_cache_selection(tmp_path, monkeypatch, selected):
+def test_native_binding_and_export_replay_cache_selection(tmp_path, monkeypatch, selected, select_codegen_options):
     from test_quantized_panel_geometry import test_selected_panels_survive_native_rebinding_and_c_export
     from atlas_mlir_native import quantized_loop_c
     from test_exponent_restoration import ROOT
 
-    monkeypatch.setenv('ATLAS_EXPONENT_PAGE_CACHE', selected)
+    select_codegen_options(exponent_page_cache=(selected == '1'))
     test_selected_panels_survive_native_rebinding_and_c_export(tmp_path)
     source = source_request(m=97, n=35, k=257, batch=())
-    monkeypatch.setenv('ATLAS_EXPONENT_PAGE_CACHE', 'invalid')
-    with codegen_options(OPTIONS):
+    select_codegen_options(exponent_page_cache=False)
+    with codegen_options(replace(current_codegen_options(), io_memory_bytes=OPTIONS.io_memory_bytes, execution_instruction_limit=OPTIONS.execution_instruction_limit)):
         record, files = quantized_loop_c.prepare_c_package(
             source, tmp_path / 'bound', 'replay', target_source=ROOT)
     assert files and record
@@ -196,7 +200,7 @@ def test_native_initialization_proof_rejects_missing_prefetch(monkeypatch):
                 f'  ^{prefix}_ready(%{output_state}: {STATE}):']
 
     monkeypatch.setattr(ExponentPageCache, 'prefetch', missing)
-    with codegen_options(OPTIONS):
+    with codegen_options(replace(current_codegen_options(), io_memory_bytes=OPTIONS.io_memory_bytes, execution_instruction_limit=OPTIONS.execution_instruction_limit)):
         plan = prepare_source(fixture(3, 35, 65, (), 'scalar', 'row', True))
         layout = execution_layout(plan, exponent_page_cache=True)
         with pytest.raises(AssertionError, match='initializ'):
