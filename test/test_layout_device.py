@@ -13,6 +13,7 @@ import unittest
 from atlas_mlir_native.binding import DRAM_BASE, TARGET_IDENTITY, _run
 from atlas_mlir_native.layout_device import compile_source, prepare_c_package, prepare_source, virtual_program
 from merlin.semantic_compiler.target_binding import NativeCompilationError
+from merlin.semantic_compiler.codegen import CodegenOptions, codegen_options
 from merlin.semantic_compiler.model import ConstantBinding, IndexMap, KernelRequest, SemanticNode, TensorType, pointwise_identity_maps
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -84,6 +85,102 @@ class LayoutDeviceRecognitionTest(unittest.TestCase):
         self.assertEqual(selected["concat"], ["dma", "dma"])
         self.assertEqual(selected["broadcast"], ["dma"])
 
+    def test_ragged_xlu_packs_arbitrary_bytes_without_padding(self):
+        from atlas_mlir_native.layout_device import _ragged_transpose_words
+        for rows in (1, 3, 31, 33, 65, 163):
+            raw = bytes((i * 37 + i // 64 * 11) % 256 for i in range(rows * 64))
+            actual = bytearray()
+            for column_base in (0, 32):
+                caches = []
+                for first in range(0, rows, 32):
+                    cache = bytearray(1024)
+                    for column in range(32):
+                        for row in range(min(32, rows - first)):
+                            cache[column * 32 + row] = raw[(first + row) * 64 + column_base + column]
+                    caches.append(cache)
+                for _, parts in _ragged_transpose_words(rows):
+                    word = 0
+                    for index, offset, shift, mask in parts:
+                        value = int.from_bytes(caches[index][offset:offset + 4], "little")
+                        word |= ((value << shift) if shift >= 0 else (value >> -shift)) & mask
+                    actual.extend(word.to_bytes(4, "little"))
+            expected = bytes(raw[row * 64 + column] for column in range(64) for row in range(rows))
+            self.assertEqual(bytes(actual), expected)
+
+    def test_ragged_xlu_keeps_complete_prefix_in_counted_device_image(self):
+        with codegen_options(CodegenOptions(io_memory_bytes=67108864)):
+            from atlas_mlir_native.restoration_budget import _source_loop_trips
+            for rows in (65, 163):
+                source = request("transpose", ((2, 16, rows, 64),), (2, 16, 64, rows), dtype="i8",
+                    mapping=IndexMap(4, ((1,0,0,0),(0,1,0,0),(0,0,0,1),(0,0,1,0)), (0,0,0,0)))
+                plan = prepare_source(source)
+                self.assertEqual(plan.segments[0]["mode"], "ragged_xlu")
+                text = virtual_program(plan)
+                self.assertEqual(sorted(trips for _, trips in _source_loop_trips(text)), [2, 2, 16])
+                self.assertEqual(text.count('"atlas.virtual_xlu_transpose"'), (rows + 31) // 32)
+                # Semantic eligibility requires the unchanged prefix permutation.
+                changed = replace(source.nodes[-1].index_maps[0], coefficients=((0,1,0,0),(1,0,0,0),(0,0,0,1),(0,0,1,0)))
+                swapped = request("transpose", ((2, 2, rows, 64),), (2, 2, 64, rows), dtype="i8", mapping=changed)
+                with self.assertRaisesRegex(ValueError, "default proof work budget"):
+                    prepare_source(swapped)
+
+    def test_ragged_provider_classifies_only_explicit_lowered_image_policy(self):
+        from unittest.mock import patch
+        from atlas_mlir_native.application import AtlasApplicationAdapter
+        from atlas_mlir_native.layout_device import prove_plan
+        source = request("transpose", ((511, 64),), (64, 511), dtype="i8",
+            mapping=IndexMap(2, ((0,1),(1,0)), (0,0)))
+        diagnostic = "Atlas tool rejected selected program: lowered program exceeds the 32768-word policy limit"
+        plan = prepare_source(source)
+        for status, reason, expected in (("compile_error", diagnostic, "resource_limit"),
+                ("compile_error", "unsupported virtual operation", "compile_error"),
+                ("search_timeout", diagnostic, "search_timeout")):
+            with self.subTest(status=status, reason=reason), patch("atlas_mlir_native.layout_device._run",
+                    side_effect=NativeCompilationError(status, reason)):
+                with self.assertRaises(NativeCompilationError) as failure:
+                    prove_plan(plan)
+                self.assertEqual(failure.exception.status, expected)
+        with patch("atlas_mlir_native.layout_device._run",
+                side_effect=NativeCompilationError("compile_error", diagnostic)):
+            self.assertFalse(AtlasApplicationAdapter._supports_device_source(source, source.nodes[-1], "layout_device"))
+
+    def test_ragged_provider_resource_refusal_preserves_host_layout(self):
+        from unittest.mock import patch
+        from atlas_mlir_native.application import AtlasApplicationAdapter
+        from atlas_mlir_native.already_quantized import POLICY
+        from atlas_mlir_native.application_precision import CONTRACTION_POLICY
+        from atlas_mlir_native.row_softmax import SOFTMAX_POLICY
+        from merlin.semantic_compiler.codegen import CodegenOptions, codegen_options
+        source = request("transpose", ((80, 65, 64),), (80, 64, 65), dtype="i8",
+            mapping=IndexMap(3, ((1,0,0),(0,0,1),(0,1,0)), (0,0,0)))
+        policy = dict(schema="atlas.diagnostic_application_precision.v1", source_sha256="0" * 64,
+            target_identity=TARGET_IDENTITY, contraction=CONTRACTION_POLICY, row_softmax=SOFTMAX_POLICY,
+            host_support=["transpose", "reshape", "copy"], already_quantized=POLICY)
+        adapter = AtlasApplicationAdapter(policy, original_source_sha256="0" * 64)
+        with codegen_options(CodegenOptions(io_memory_bytes=67108864)):
+            # Shape recognition stays tool-free even for an oversized prefix.
+            with patch("atlas_mlir_native.layout_device.prove_plan") as proof:
+                self.assertEqual(prepare_source(source).segments[0]["mode"], "ragged_xlu")
+                proof.assert_not_called()
+            refusal = NativeCompilationError("resource_limit", "complete prefix exceeds default instruction bound")
+            with patch("atlas_mlir_native.layout_device.prove_plan", side_effect=refusal):
+                self.assertFalse(adapter._supports_device_source(source, source.nodes[-1], "layout_device"))
+                selected, = adapter.plan(source).selected
+                self.assertEqual((selected.placement, dict(selected.metadata)["kind"]), ("host", "layout"))
+            for status in ("search_timeout", "compile_error", "tool_unavailable"):
+                with self.subTest(status=status), patch("atlas_mlir_native.layout_device.prove_plan",
+                        side_effect=NativeCompilationError(status, "native tool failure")):
+                    with self.assertRaises(NativeCompilationError) as failure:
+                        adapter._supports_device_source(source, source.nodes[-1], "layout_device")
+                    self.assertEqual(failure.exception.status, status)
+            with patch("atlas_mlir_native.layout_device.prove_plan", return_value=None) as proof:
+                self.assertTrue(adapter._supports_device_source(source, source.nodes[-1], "layout_device"))
+                proof.assert_called_once()
+            with patch("atlas_mlir_native.layout_device.prove_plan", side_effect=AssertionError("unexpected preflight")):
+                for name in ("xlu", "dense_dma", "ragged_scalar_transpose"):
+                    existing = cases()[name]
+                    self.assertTrue(adapter._supports_device_source(existing, existing.nodes[-1], "layout_device"))
+
     def test_refuses_changed_type_maps_attrs_and_incomplete_source(self):
         source = cases()["broadcast"]
         x, y = source.nodes
@@ -106,7 +203,7 @@ class LayoutDeviceRecognitionTest(unittest.TestCase):
                 source = request(shapes=shapes, shape=(0,))
                 prepare_source(source, io_memory_base=0x08000000)
 
-    def test_large_ragged_transpose_rejects_default_budget(self):
+    def test_oversized_ragged_xlu_slab_rejects_default_budget(self):
         source = request("transpose", ((513, 64),), (64, 513), dtype="i8", mapping=IndexMap(2, ((0, 1), (1, 0)), (0, 0)))
         with self.assertRaisesRegex(ValueError, "default proof work budget"):
             prepare_source(source)
@@ -147,6 +244,38 @@ class LayoutDeviceCompilationTest(unittest.TestCase):
                     (compiled / "manifest.json").write_text(json.dumps(manifest))
                     with self.assertRaisesRegex(ValueError, "source or execution plan"):
                         prepare_c_package(source, compiled, "layout_" + label, target_source=ROOT)
+
+    def test_ragged_xlu_native_default_bounds_and_source_contracts(self):
+        with codegen_options(CodegenOptions(io_memory_bytes=67108864)):
+            from atlas_mlir_native.binding import NATIVE_CHECKS
+            with tempfile.TemporaryDirectory(prefix="atlas-ragged-xlu-") as directory:
+                for heads, rows in ((32, 65), (15, 163)):
+                    source = request("transpose", ((heads, rows, 64),), (heads, 64, rows), dtype="i8",
+                        mapping=IndexMap(3, ((1,0,0),(0,0,1),(0,1,0)), (0,0,0)))
+                    compiled = Path(directory) / str(rows)
+                    compile_source(None, source, target_source=ROOT, destination=compiled, limits=None)
+                    bound = json.loads((compiled / "layout-instruction-bound.json").read_text())
+                    self.assertTrue(bound["admitted"])
+                    machine = (compiled / "atlas-machine.mlir").read_text()
+                    for contract in ("dma", "mxu", "tile", "cfg", "source_memory", "buffer"):
+                        self.assertIn("atlas.virtual_" + contract + "_contract", machine)
+                    # The retained source must authenticate the exact scalar word
+                    # shifts, independent of the unchanged machine instructions.
+                    altered, count = re.subn(r'constant = 8 : i32', 'constant = 9 : i32', machine, count=1)
+                    self.assertEqual(count, 1)
+                    with self.assertRaises(RuntimeError):
+                        _run([str(BIN / "atlas-opt"), *NATIVE_CHECKS, "-"], input_text=altered)
+
+    def test_ragged_xlu_oversized_complete_prefix_is_ineligible_before_compilation(self):
+        from atlas_mlir_native.application import AtlasApplicationAdapter
+        from merlin.compile.layout_c import emit_layout_c
+        from merlin.semantic_compiler.codegen import CodegenOptions, codegen_options
+        source = request("transpose", ((80, 65, 64),), (80, 64, 65), dtype="i8",
+            mapping=IndexMap(3, ((1,0,0),(0,0,1),(0,1,0)), (0,0,0)))
+        with codegen_options(CodegenOptions(io_memory_bytes=67108864)):
+            self.assertFalse(AtlasApplicationAdapter._supports_device_source(source, source.nodes[-1], "layout_device"))
+        record, _ = emit_layout_c(source, "oversized_transpose")
+        self.assertEqual(record["source_request_digest"], source.digest())
 
     def test_scratchpad_compile_and_memory_holes(self):
         source = cases()["dense_dma"]

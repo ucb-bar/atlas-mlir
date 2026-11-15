@@ -1438,9 +1438,19 @@ class AtlasApplicationAdapter:
 
         prepare = layout_device.prepare_source if kind == "layout_device" else exact_float_application.prepare_plan
         try:
-            prepare(extract_semantic_region(source, (node.id,)))
+            plan = prepare(extract_semantic_region(source, (node.id,)))
         except ValueError:
             return False
+        if kind == "layout_device" and any(segment["mode"] == "ragged_xlu" for segment in plan.segments):
+            # This new single-image route must prove the complete prefix before
+            # it replaces the existing host layout. Other device paths retain
+            # their established planning behavior. Tool failures are not refusals.
+            try:
+                layout_device.prove_plan(plan)
+            except NativeCompilationError as error:
+                if error.status != "resource_limit":
+                    raise
+                return False
         return True
 
     @staticmethod
