@@ -19,10 +19,10 @@ using namespace mlir;
 using namespace mlir::atlas;
 
 namespace {
-// Fresh mandatory lowering clears any previous provider, and delay insertion
-// produces a timed built-in stream. The machine verifier already includes all
-// generated contracts and strict timing, plus LLVM target checks. Repeating
-// those checks in two more passes adds no facts; retain their metadata update.
+// Fresh mandatory lowering clears any previous provider, and scheduling or
+// delay insertion produces a timed built-in stream. The machine verifier already
+// includes all generated contracts and strict timing, plus LLVM target checks.
+// Repeating those checks in two more passes adds no facts; retain their metadata update.
 // This private pass is not used by standalone or custom-provider pipelines.
 struct FinalizeAtlasMandatoryCompilationPass
     : PassWrapper<FinalizeAtlasMandatoryCompilationPass, OperationPass<ModuleOp>> {
@@ -100,10 +100,13 @@ void verifyTimedStream(OpPassManager &pm) {
 
 // The stream scheduler reorders each block and inserts the delays its order
 // needs.
-void buildTimeStage(OpPassManager &pm) {
+void buildTimeStage(OpPassManager &pm, bool mandatory = false) {
   insertDMAWaits(pm);
   pm.addPass(createScheduleAtlasStreamPass());
-  verifyTimedStream(pm);
+  if (mandatory)
+    pm.addPass(std::make_unique<FinalizeAtlasMandatoryCompilationPass>());
+  else
+    verifyTimedStream(pm);
 }
 } // namespace
 
@@ -113,7 +116,7 @@ void mlir::atlas::buildAtlasCompilePipeline(OpPassManager &pm,
   buildScheduleStage(pm, options.enhancedVirtualScheduling);
   buildSpillStage(pm, /*scheduled=*/true, options.enhancedVirtualScheduling);
   buildLowerStage(pm, options);
-  buildTimeStage(pm);
+  buildTimeStage(pm, /*mandatory=*/true);
 }
 
 void mlir::atlas::buildAtlasCompileUnscheduledPipeline(
@@ -161,5 +164,5 @@ void mlir::atlas::registerAtlasCompilePipelines() {
   PassPipelineRegistration<>(
       "atlas-compile-time",
       "atlas-compile stage 5: insert DMA waits, stream-schedule and verify timing",
-      buildTimeStage);
+      [](OpPassManager &pm) { buildTimeStage(pm); });
 }
