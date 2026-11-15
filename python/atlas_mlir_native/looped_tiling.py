@@ -642,13 +642,8 @@ def tuning_key(snapshot, request, fixed_inputs, fixed_outputs, limits):
 
 
 def _operand_reuse_policy():
-    policy = os.environ.get("ATLAS_LOOPED_OPERAND_REUSE", "ordered")
-    if policy not in ("ordered", "resident-a"):
-        raise NativeCompilationError(
-            "unsupported_semantics", "ATLAS_LOOPED_OPERAND_REUSE must be ordered or resident-a"
-        )
-    return policy
-
+    from merlin.semantic_compiler.codegen import current_codegen_options
+    return current_codegen_options().looped_operand_reuse
 
 def _virtual_schedule(plan, addresses, output, epilogue=None, *, seed_address=None, k_unroll=1):
     policy = _operand_reuse_policy()
@@ -659,7 +654,7 @@ def _virtual_schedule(plan, addresses, output, epilogue=None, *, seed_address=No
 
         if _native_pipeline() != "mandatory":
             raise NativeCompilationError(
-                "unsupported_semantics", "resident-a is qualified with ATLAS_NATIVE_PIPELINE=mandatory only"
+                "unsupported_semantics", "resident-a is qualified with native_pipeline=mandatory only"
             )
         record.update(schedule_record(plan))
         virtual = virtual_resident_a(plan, addresses, output, epilogue, seed_address=seed_address)
@@ -839,11 +834,12 @@ def compile_looped(snapshot, request, *, fixed_inputs, fixed_outputs, target_sou
             f"attributes {{atlas.program_size_limit_bytes = {codegen['program_size_limit_bytes']} : i64, ",
             1,
         )
-    from merlin.semantic_compiler.codegen import materialization_cache
+    from merlin.semantic_compiler.codegen import materialization_cache, current_codegen_options
 
     cache = materialization_cache()
     cache_key = (
         snapshot.profile.digest(),
+        json.dumps(current_codegen_options().identity_record(), sort_keys=True),
         pipeline,
         virtual,
         hashlib.sha256((tools / "atlas-opt").read_bytes()).hexdigest(),

@@ -7,6 +7,7 @@ host conversions, rewrite addresses, change arithmetic, or join program sets.
 from __future__ import annotations
 
 from .binding import DRAM_BASE, io_memory_base as selected_io_base
+from merlin.semantic_compiler.codegen import current_codegen_options
 
 import hashlib
 import io
@@ -376,7 +377,7 @@ def compile_virtual_with_receipt(virtual, *, tools, pipeline, destination):
     from .publication_options import deterministic_receipts_enabled
 
     destination, tools = Path(destination), Path(tools)
-    capture = os.environ.get('ATLAS_CAPTURE_POSTSPILL') == '1'
+    capture = current_codegen_options().capture_postspill
     capture_options = ['--mlir-disable-threading',
         '--mlir-print-ir-before=lower-atlas-virtual-to-machine',
         '--mlir-print-ir-module-scope'] if capture else []

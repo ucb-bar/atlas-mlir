@@ -106,7 +106,7 @@ def _identity(plan, virtual, target_source, tools, limits, operand_reuse):
     pipeline = _native_pipeline()
     arguments = _with_program_size_limit(
         NATIVE_PIPELINES[pipeline], options.program_size_limit_bytes)
-    capture = os.environ.get('ATLAS_CAPTURE_POSTSPILL') == '1'
+    capture = current_codegen_options().capture_postspill
     if capture:
         arguments = ['--mlir-disable-threading','--mlir-print-ir-before=lower-atlas-virtual-to-machine',
                      '--mlir-print-ir-module-scope',*arguments]

@@ -1,15 +1,10 @@
 """Keep tensor- and batch-invariant exponent pages in their existing VMEM slots."""
-import os
 
-from merlin.semantic_compiler.target_binding import NativeCompilationError
 
 
 def enabled():
-    value = os.environ.get('ATLAS_EXPONENT_PAGE_CACHE', '0')
-    if value not in ('0', '1'):
-        raise NativeCompilationError('unsupported_semantics', 'ATLAS_EXPONENT_PAGE_CACHE must be 0 or 1')
-    return value == '1'
-
+    from merlin.semantic_compiler.codegen import current_codegen_options
+    return current_codegen_options().exponent_page_cache
 
 def recorded_enabled(record):
     if 'exponent_page_cache' not in record:

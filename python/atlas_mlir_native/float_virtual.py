@@ -1,5 +1,4 @@
 """Exact float routes using counted tile and lane loops in common virtual IR."""
-import os
 from .scalar_ssa import ScalarBuilder
 from .binding import DRAM_BASE
 
@@ -158,31 +157,16 @@ def qualified_vector(b,p):
 
 
 def binary_lane_groups():
-    """Validate the opt-in before generating or caching target code."""
-    from merlin.semantic_compiler.target_binding import NativeCompilationError
-    value = os.environ.get('ATLAS_EXACT_BINARY_LANE_GROUPS', '0')
-    if value not in ('0', '1'):
-        raise NativeCompilationError('unsupported_semantics', 'ATLAS_EXACT_BINARY_LANE_GROUPS must be 0 or 1')
-    return value == '1'
-
+    from merlin.semantic_compiler.codegen import current_codegen_options
+    return current_codegen_options().exact_binary_lane_groups
 
 def binary_vector_preflight():
-    """Opt into a vector proof for nonzero operands in the qualified domain."""
-    from merlin.semantic_compiler.target_binding import NativeCompilationError
-    value = os.environ.get('ATLAS_EXACT_BINARY_VECTOR_PREFLIGHT', '0')
-    if value not in ('0', '1'):
-        raise NativeCompilationError('unsupported_semantics', 'ATLAS_EXACT_BINARY_VECTOR_PREFLIGHT must be 0 or 1')
-    return value == '1'
-
+    from merlin.semantic_compiler.codegen import current_codegen_options
+    return current_codegen_options().exact_binary_vector_preflight
 
 def cast_vector_preflight():
-    """Opt into an exact vector NaN check before BF16-to-FP32 widening."""
-    from merlin.semantic_compiler.target_binding import NativeCompilationError
-    value = os.environ.get('ATLAS_EXACT_CAST_VECTOR_PREFLIGHT', '0')
-    if value not in ('0', '1'):
-        raise NativeCompilationError('unsupported_semantics', 'ATLAS_EXACT_CAST_VECTOR_PREFLIGHT must be 0 or 1')
-    return value == '1'
-
+    from merlin.semantic_compiler.codegen import current_codegen_options
+    return current_codegen_options().exact_cast_vector_preflight
 
 def cast_vector_refusal(b):
     """Ordered-bit absolute maximum exceeds infinity exactly for a NaN.
@@ -265,7 +249,6 @@ def binary_slow_flags(b, left, right):
 
 def virtual_program(p):
     from .exact_float_device import _valid,_compute
-    from .binding import _native_pipeline
     from merlin.semantic_compiler.codegen import current_codegen_options
     # Preserve qualified compact images unless expansion is explicitly selected.
     expand_unary=current_codegen_options().exact_float_unroll
@@ -276,9 +259,8 @@ def virtual_program(p):
     b=Builder(lines);c=b.constant;op=b.binary;cmp=b.compare
     lanes=p.tile_lanes;tiles=p.input_bytes//(lanes*p.width)
     binary=p.op in ('bf16_add','bf16_sub')
-    # Keep the original compact path unless binary options or the optimized
-    # pipeline explicitly select cached preflight and per-tile route decisions.
-    binary_routes=binary and (group_binary or vector_preflight or _native_pipeline() == 'optimized')
+    # Binary route caching is selected independently of the lowering pipeline.
+    binary_routes=binary and (group_binary or vector_preflight or current_codegen_options().exact_binary_routes)
     # One word per tile retains route admission across the complete input
     # preflight. Arithmetic starts only after every tile passed validation.
     if binary_routes and tiles > 512:

@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import io
-import os
 
 from xdsl.dialects import arith
 from xdsl.dialects.builtin import IntegerAttr, StringAttr
@@ -20,12 +19,8 @@ _TILE_BYTES = 2048
 
 
 def storage_policy():
-    policy = os.environ.get('ATLAS_STAGING_STORAGE', 'dram')
-    if policy not in ('dram', 'vmem', 'vmem-inputs'):
-        raise NativeCompilationError('unsupported_semantics',
-                                     'ATLAS_STAGING_STORAGE must be dram, vmem or vmem-inputs')
-    return policy
-
+    from merlin.semantic_compiler.codegen import current_codegen_options
+    return current_codegen_options().staging_storage
 
 def _name(op):
     return op.op_name.data if op.name == 'builtin.unregistered' else op.name

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from merlin.semantic_compiler.codegen import current_codegen_options
+
 import json
 import hashlib
 import os
@@ -258,7 +260,8 @@ class AtlasApplicationAdapter:
                 "materialization_sources": provider_sources(),
                 "tools": tool_identities,
                 "pipeline": _native_pipeline(),
-                "capture_postspill": os.environ.get("ATLAS_CAPTURE_POSTSPILL") == "1",
+                "codegen": current_codegen_options().identity_record(),
+                "capture_postspill": current_codegen_options().capture_postspill,
                 "deterministic_receipts": deterministic_receipts_enabled(),
                 **({"exact_float_unroll": True} if current_codegen_options().exact_float_unroll else {}),
                 **({"exact_binary_lane_groups": True} if binary_lane_groups() else {}),
@@ -486,7 +489,7 @@ class AtlasApplicationAdapter:
             if len({item["source_output"] for item in schedules}) != len(schedules):
                 raise NativeCompilationError("unsupported_semantics", "duplicate contraction precision schedule")
             self.contraction_schedules = {item["source_output"]: {key: value for key, value in item.items() if key != "source_output"} for item in schedules}
-            if os.environ.get("ATLAS_KERNEL_LIBRARY"):
+            if current_codegen_options().kernel_library:
                 raise NativeCompilationError("unsupported_semantics", "column precision does not admit an executable library provider")
             return
         self.contraction_schedules = None

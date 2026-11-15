@@ -317,13 +317,8 @@ NATIVE_CHECKS = ("--verify-atlas-generated-schedule", "--verify-atlas-machine-st
 
 
 def _native_pipeline() -> str:
-    pipeline = os.environ.get("ATLAS_NATIVE_PIPELINE", "mandatory")
-    if pipeline not in NATIVE_PIPELINES:
-        raise NativeCompilationError(
-            "unsupported_semantics", "ATLAS_NATIVE_PIPELINE must be mandatory or optimized"
-        )
-    return pipeline
-
+    from merlin.semantic_compiler.codegen import current_codegen_options
+    return current_codegen_options().native_pipeline
 
 def _scheduled_virtual_pipeline(pipeline=None):
     """Schedule virtual IR, retaining the selected physical timing policy."""
@@ -2921,7 +2916,8 @@ class AtlasNativeBinding:
         from .application import AtlasApplicationAdapter
 
         base = AtlasApplicationAdapter(policy, original_source_sha256=original_source_sha256)
-        selected = os.environ.get("ATLAS_ADJACENT_PATTERNS", "").strip()
+        from merlin.semantic_compiler.codegen import current_codegen_options
+        selected = current_codegen_options().adjacent_patterns.strip()
         if not selected:
             return base
         from .composition_adapter import AdjacentDeviceAdapter

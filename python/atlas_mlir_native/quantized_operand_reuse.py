@@ -1,8 +1,6 @@
 """Selected-target limits for optional row-local quantized operand residency."""
 from dataclasses import dataclass
-import os
 
-from merlin.semantic_compiler.target_binding import NativeCompilationError
 
 POLICIES = ('ordered', 'row-cache', 'prefix-cache', 'wide-cache', 'paired-cache',
             'panel-cache', 'batch-panel-cache')
@@ -10,12 +8,8 @@ WIDE_CACHE_TILES = 192
 
 
 def reuse_policy():
-    """Validate the selected policy before generating or caching target code."""
-    policy = os.environ.get('ATLAS_QUANTIZED_OPERAND_REUSE', 'ordered')
-    if policy not in POLICIES:
-        raise NativeCompilationError('unsupported_semantics',
-                                     'ATLAS_QUANTIZED_OPERAND_REUSE must be one of ' + ', '.join(POLICIES))
-    return policy
+    from merlin.semantic_compiler.codegen import current_codegen_options
+    return current_codegen_options().quantized_operand_reuse
 
 
 @dataclass(frozen=True)
