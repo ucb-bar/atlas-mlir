@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from merlin.semantic_compiler.codegen import current_codegen_options
+from atlas_mlir_native.options import current_codegen_options
 
 import json
 import hashlib
@@ -256,7 +256,7 @@ class AtlasApplicationAdapter:
         from .private_staging import storage_policy
         from .exponent_page_cache import enabled as exponent_page_cache_enabled
         from .float_virtual import binary_lane_groups, binary_vector_preflight, cast_vector_preflight
-        from merlin.semantic_compiler.codegen import current_codegen_options
+        from atlas_mlir_native.options import current_codegen_options
 
         operand_reuse = reuse_policy()
         staging_storage = storage_policy()

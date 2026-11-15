@@ -208,7 +208,7 @@ def compile_source(snapshot,region,*,target_source,destination,limits,io_memory_
     io_memory_base = selected_io_base() if io_memory_base is None else io_memory_base
     import hashlib,json,os
     from pathlib import Path
-    from merlin.semantic_compiler.codegen import current_codegen_options
+    from atlas_mlir_native.options import current_codegen_options
     from merlin.semantic_compiler.target_binding import verify_native_publication
     from .binding import NATIVE_CHECKS,RTL_REVISION,_run
     p=prepare_plan(region,io_memory_base=io_memory_base)

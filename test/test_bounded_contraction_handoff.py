@@ -19,7 +19,7 @@ from atlas_mlir_native.row_softmax import SOFTMAX_POLICY
 from merlin.compile.application_handoff import application_handoff
 from merlin.compile.launch_schedule import expand_launch_schedule
 from merlin.semantic_compiler.search import SearchLimits
-from merlin.semantic_compiler.codegen import CodegenOptions, codegen_options
+from atlas_mlir_native.options import CodegenOptions, codegen_options
 from merlin.semantic_compiler.model import ConstantBinding
 from merlin.semantic_compiler.snapshot import build_native_snapshot, packaged_egg_bridge_path
 from merlin.semantic_compiler.target_binding import verify_native_publication

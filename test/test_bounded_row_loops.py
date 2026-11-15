@@ -14,14 +14,14 @@ from test_tiled_softmax import source_request
 
 class BoundedRowPlanTest(unittest.TestCase):
     def setUp(self):
-        from merlin.semantic_compiler.codegen import CodegenOptions, codegen_options
+        from atlas_mlir_native.options import CodegenOptions, codegen_options
         self.options = codegen_options(CodegenOptions(io_memory_bytes=67108864))
         self.options.__enter__()
         self.addCleanup(self.options.__exit__, None, None, None)
 
     def test_selected_base_offsets_and_explicit_plan_override(self):
         from atlas_mlir_native.binding import DRAM_BASE
-        from merlin.semantic_compiler.codegen import CodegenOptions, codegen_options
+        from atlas_mlir_native.options import CodegenOptions, codegen_options
 
         base = 0xa0000000
         source = source_request((65, 64))

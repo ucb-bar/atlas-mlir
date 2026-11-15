@@ -10,7 +10,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from merlin.semantic_compiler.codegen import codegen_options, current_codegen_options
+from atlas_mlir_native.options import codegen_options, current_codegen_options
 from test_looped_mnk import ROOT, build_snapshot
 
 BIN=Path(os.environ.get('ATLAS_OOT_BIN_DIR',ROOT/'build/bin'))

@@ -157,15 +157,15 @@ def qualified_vector(b,p):
 
 
 def binary_lane_groups():
-    from merlin.semantic_compiler.codegen import current_codegen_options
+    from atlas_mlir_native.options import current_codegen_options
     return current_codegen_options().exact_binary_lane_groups
 
 def binary_vector_preflight():
-    from merlin.semantic_compiler.codegen import current_codegen_options
+    from atlas_mlir_native.options import current_codegen_options
     return current_codegen_options().exact_binary_vector_preflight
 
 def cast_vector_preflight():
-    from merlin.semantic_compiler.codegen import current_codegen_options
+    from atlas_mlir_native.options import current_codegen_options
     return current_codegen_options().exact_cast_vector_preflight
 
 def cast_vector_refusal(b):
@@ -249,7 +249,7 @@ def binary_slow_flags(b, left, right):
 
 def virtual_program(p):
     from .exact_float_device import _valid,_compute
-    from merlin.semantic_compiler.codegen import current_codegen_options
+    from atlas_mlir_native.options import current_codegen_options
     # Preserve qualified compact images unless expansion is explicitly selected.
     expand_unary=current_codegen_options().exact_float_unroll
     group_binary=binary_lane_groups()

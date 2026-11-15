@@ -117,7 +117,7 @@ def virtual_program(plan, *, size_limit=None):
 
 
 def compile_source(snapshot, source, *, target_source, destination, limits):
-    from merlin.semantic_compiler.codegen import current_codegen_options
+    from atlas_mlir_native.options import current_codegen_options
 
     plan = prepare_source(source)
     virtual = virtual_program(plan, size_limit=current_codegen_options().program_size_limit_bytes)
@@ -163,7 +163,7 @@ def prepare_c_package(source, compiled, name, *, target_source, runtime_linkage=
     # Replay source lowering and final encoding, not only mutable manifest hashes.
     tools = Path(os.environ.get("ATLAS_OOT_BIN_DIR", target_source / "build/bin"))
     virtual = (compiled / "atlas-virtual.mlir").read_text()
-    from merlin.semantic_compiler.codegen import current_codegen_options
+    from atlas_mlir_native.options import current_codegen_options
     if virtual != virtual_program(plan, size_limit=current_codegen_options().program_size_limit_bytes):
         raise ValueError("scalar broadcast virtual source differs")
     machine = _run([str(tools / "atlas-opt"), *_scheduled_virtual_pipeline(manifest["lowering_pipeline"]), "-"], input_text=virtual)

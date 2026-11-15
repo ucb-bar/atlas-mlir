@@ -222,7 +222,7 @@ def test_raw_input_refuses_encoders_that_change_values(monkeypatch, change):
 @pytest.mark.skipif(not all(os.environ.get(key) for key in ('ATLAS_RUST_NPU_MODEL', 'ATLAS_OOT_BIN_DIR')),
                     reason='select Rust model and Atlas tools')
 def test_raw_input_streaming_keeps_tail_and_late_failure_atomic(tmp_path):
-    from merlin.semantic_compiler.codegen import CodegenOptions, codegen_options
+    from atlas_mlir_native.options import CodegenOptions, codegen_options
 
     with codegen_options(CodegenOptions(io_memory_bytes=65536)):
         test_generated_c_rust_all_codes_tails_and_atomic_refusals(

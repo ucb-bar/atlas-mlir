@@ -3,7 +3,7 @@
 from dataclasses import replace
 import os
 import unittest
-from merlin.semantic_compiler.codegen import CodegenOptions, codegen_options, current_codegen_options
+from atlas_mlir_native.options import CodegenOptions, codegen_options, current_codegen_options
 from test_exact_float_device import request, scalar_execute, host_reference
 
 

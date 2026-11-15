@@ -4,7 +4,7 @@ import pytest
 
 from atlas_mlir_native import exact_float_device
 from atlas_mlir_native.binding import DRAM_BASE
-from merlin.semantic_compiler.codegen import CodegenOptions, codegen_options
+from atlas_mlir_native.options import CodegenOptions, codegen_options
 from test_exact_float_device import request as float_source
 
 

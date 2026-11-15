@@ -11,7 +11,7 @@ import pytest
 from atlas_mlir_native import quantized_loop, quantized_loop_c
 from atlas_mlir_native.already_quantized import prepare_source
 from atlas_mlir_native.binding import DRAM_BASE
-from merlin.semantic_compiler.codegen import CodegenOptions, codegen_options
+from atlas_mlir_native.options import CodegenOptions, codegen_options
 from merlin.semantic_compiler.model import (
     IndexMap,
     SemanticNode,

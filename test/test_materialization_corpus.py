@@ -17,7 +17,7 @@ from atlas_mlir_native.pointwise import BF16_POINTWISE_POLICY
 from atlas_mlir_native.reduction import REDUCTION_POLICY
 from atlas_mlir_native.source_exp import POLICY as EXP_POLICY
 from merlin.compile.semantic_regions import extract_semantic_region
-from merlin.semantic_compiler.codegen import CodegenOptions, codegen_options
+from atlas_mlir_native.options import CodegenOptions, codegen_options
 from merlin.semantic_compiler.materialization import canonical_request_record, canonical_request, materialization_session
 from merlin.semantic_compiler.model import KernelRequest
 from merlin.semantic_compiler.search import SearchLimits

@@ -9,7 +9,7 @@ import json
 
 import pytest
 
-from merlin.semantic_compiler.codegen import codegen_options, current_codegen_options
+from atlas_mlir_native.options import codegen_options, current_codegen_options
 from atlas_mlir_native.application import AtlasApplicationAdapter
 from atlas_mlir_native import exact_float_application as application
 from atlas_mlir_native import exact_float_device as device

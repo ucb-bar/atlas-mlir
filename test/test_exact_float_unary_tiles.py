@@ -9,7 +9,7 @@ from test_exact_float_device import BIN, host_reference, request, scalar_execute
 
 class UnaryTileTest(unittest.TestCase):
     def setUp(self):
-        from merlin.semantic_compiler.codegen import CodegenOptions, codegen_options
+        from atlas_mlir_native.options import CodegenOptions, codegen_options
         from float_isa_c import executor
         executor.cache_clear()
         options = codegen_options(CodegenOptions(exact_float_unroll=True))
@@ -19,7 +19,7 @@ class UnaryTileTest(unittest.TestCase):
 
     def test_expansion_requires_explicit_option_independently_of_image_cap(self):
         from atlas_mlir_native.exact_float_device import prepare_plan, virtual_program
-        from merlin.semantic_compiler.codegen import CodegenOptions, codegen_options
+        from atlas_mlir_native.options import CodegenOptions, codegen_options
         for operation in ('bf16_to_f32', 'f32_to_bf16', 'bf16_neg', 'f32_neg'):
             plan = prepare_plan(request(operation, 35))
             for cap in (None, 131072):
@@ -30,7 +30,7 @@ class UnaryTileTest(unittest.TestCase):
 
     def test_explicit_image_cap_retains_compact_counted_kernels(self):
         from atlas_mlir_native.exact_float_device import prepare_plan, machine_program, virtual_program
-        from merlin.semantic_compiler.codegen import CodegenOptions, codegen_options
+        from atlas_mlir_native.options import CodegenOptions, codegen_options
         with codegen_options(CodegenOptions(program_size_limit_bytes=4096)):
             for operation in ('bf16_to_f32', 'f32_to_bf16', 'bf16_neg', 'f32_neg'):
                 plan = prepare_plan(request(operation, 2048))
@@ -85,7 +85,7 @@ class UnaryTileTest(unittest.TestCase):
         import tempfile
         from pathlib import Path
         from atlas_mlir_native.exact_float_device import MAX_LEAF_ELEMENTS, compile_source
-        from merlin.semantic_compiler.codegen import CodegenOptions, codegen_options
+        from atlas_mlir_native.options import CodegenOptions, codegen_options
         from test_exact_float_device import ROOT
 
         for operation in ('bf16_to_f32', 'f32_to_bf16', 'bf16_neg', 'f32_neg'):

@@ -88,7 +88,7 @@ class ResidentAllocationBudgetTest(unittest.TestCase):
 
     def test_actual_window512_uses_identical_checked_detailed_proposal(self):
         from atlas_mlir_native.row_softmax import prepare_row_softmax
-        from merlin.semantic_compiler.codegen import CodegenOptions, codegen_options
+        from atlas_mlir_native.options import CodegenOptions, codegen_options
         from test_tiled_softmax import source_request
         proposals = []; times = []
         first_fit = allocation.first_fit_buffer_assignment

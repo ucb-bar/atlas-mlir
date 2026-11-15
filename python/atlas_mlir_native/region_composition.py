@@ -7,7 +7,7 @@ host conversions, rewrite addresses, change arithmetic, or join program sets.
 from __future__ import annotations
 
 from .binding import DRAM_BASE, io_memory_base as selected_io_base
-from merlin.semantic_compiler.codegen import current_codegen_options
+from atlas_mlir_native.options import current_codegen_options
 
 import hashlib
 import io
@@ -288,7 +288,7 @@ def link_adjacent_stages(stages, *, buffers, initialized, outputs, destination, 
 
     destination = Path(destination)
     linked = destination / 'linked'
-    from merlin.semantic_compiler.codegen import current_codegen_options
+    from atlas_mlir_native.options import current_codegen_options
     compose_regions(stages, buffers=buffers, initialized=initialized, outputs=outputs,
         destination=linked, tools=os.environ.get('ATLAS_OOT_BIN_DIR', str(Path(target_source) / 'build/bin')),
         pipeline=_native_pipeline(), io_memory_bytes=dram_slots() * TILE_BYTES, rematerialize_constants=True,

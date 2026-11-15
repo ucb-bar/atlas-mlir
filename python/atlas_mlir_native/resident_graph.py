@@ -647,7 +647,7 @@ def compile_resident(
     destination,
     limits,
 ):
-    from merlin.semantic_compiler.codegen import (
+    from atlas_mlir_native.options import (
         choose_reduction_unroll,
         codegen_options,
         current_codegen_options,

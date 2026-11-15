@@ -1,5 +1,5 @@
 """MXU1 residency preserves transport, K order, exponent checks and memory."""
-from merlin.semantic_compiler.codegen import codegen_options, current_codegen_options
+from atlas_mlir_native.options import codegen_options, current_codegen_options
 
 from dataclasses import replace
 import json

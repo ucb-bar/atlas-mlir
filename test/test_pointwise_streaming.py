@@ -15,7 +15,7 @@ from atlas_mlir_native.binding import (
 )
 from atlas_mlir_native.pointwise import plan_abi, prepare_execution_plan
 from atlas_mlir_native.sigmoid import SILU_ATTRS
-from merlin.semantic_compiler.codegen import CodegenOptions, codegen_options
+from atlas_mlir_native.options import CodegenOptions, codegen_options
 from merlin.semantic_compiler.model import IndexMap, KernelRequest, SemanticNode, TensorType, pointwise_identity_maps
 
 ROOT = Path(__file__).resolve().parents[1]

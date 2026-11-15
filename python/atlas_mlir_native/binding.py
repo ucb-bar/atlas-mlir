@@ -237,7 +237,7 @@ DRAM_SLOTS = 128
 
 def io_memory_base():
     """Selected invocation base, with an optional nested tile override."""
-    from merlin.semantic_compiler.codegen import current_codegen_options
+    from atlas_mlir_native.options import current_codegen_options
 
     scoped = _tile_io_base.get()
     selected = current_codegen_options().io_memory_base
@@ -246,7 +246,7 @@ def io_memory_base():
 
 def validate_io_window(base=None, size=None):
     """Check the complete allocation window against DMA and installed capacity."""
-    from merlin.semantic_compiler.codegen import current_codegen_options
+    from atlas_mlir_native.options import current_codegen_options
     from .memory_windows import dma_span_in_window
 
     options = current_codegen_options()
@@ -275,7 +275,7 @@ def validate_explicit_io_base(base, *, alignment=32):
     Invocation geometry remains unchanged. A declared capacity contains the
     complete override window; legacy callers retain their actual-span checks.
     """
-    from merlin.semantic_compiler.codegen import current_codegen_options
+    from atlas_mlir_native.options import current_codegen_options
 
     options = current_codegen_options()
     _, size = validate_io_window()
@@ -317,7 +317,7 @@ NATIVE_CHECKS = ("--verify-atlas-generated-schedule", "--verify-atlas-machine-st
 
 
 def _native_pipeline() -> str:
-    from merlin.semantic_compiler.codegen import current_codegen_options
+    from atlas_mlir_native.options import current_codegen_options
     return current_codegen_options().native_pipeline
 
 def _scheduled_virtual_pipeline(pipeline=None):
@@ -1032,7 +1032,7 @@ def _with_program_size_limit(arguments, budget):
 
 
 def _run(command: list[str], *, input_text: str, diagnostics: list[str] | None = None) -> str:
-    from merlin.semantic_compiler.codegen import current_codegen_options
+    from atlas_mlir_native.options import current_codegen_options
 
     command = _with_program_size_limit(
         command, current_codegen_options().program_size_limit_bytes)
@@ -2899,6 +2899,9 @@ def _with_tile_io_base(function):
 
 
 class AtlasNativeBinding:
+    from .options import configure_codegen_parser, expand_codegen_arguments
+    configure_codegen_parser = staticmethod(configure_codegen_parser)
+    expand_codegen_arguments = staticmethod(expand_codegen_arguments)
     codegen_capabilities = ("reduction_unroll", "tuning_profile", "program_size_limit_bytes", "io_memory_bytes",
                            "execution_instruction_limit", "io_memory_base", "io_memory_alignment",
                            "io_memory_capacity_base", "io_memory_capacity_bytes")
@@ -2916,7 +2919,7 @@ class AtlasNativeBinding:
         from .application import AtlasApplicationAdapter
 
         base = AtlasApplicationAdapter(policy, original_source_sha256=original_source_sha256)
-        from merlin.semantic_compiler.codegen import current_codegen_options
+        from atlas_mlir_native.options import current_codegen_options
         selected = current_codegen_options().adjacent_patterns.strip()
         if not selected:
             return base
@@ -4451,7 +4454,7 @@ class AtlasNativeBinding:
         if constant_rows:
             plan["constant_inputs"] = constant_rows
         if mxu_dag:
-            from merlin.semantic_compiler.codegen import current_codegen_options
+            from atlas_mlir_native.options import current_codegen_options
 
             plan["codegen"] = {
                 "requested_reduction_unroll": current_codegen_options().reduction_unroll,

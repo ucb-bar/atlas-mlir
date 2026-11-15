@@ -3,7 +3,7 @@ from dataclasses import replace
 import os
 
 import pytest
-from merlin.semantic_compiler.codegen import codegen_options, current_codegen_options
+from atlas_mlir_native.options import codegen_options, current_codegen_options
 from atlas_mlir_native.application import AtlasApplicationAdapter
 from atlas_mlir_native.binding import AtlasNativeBinding
 from atlas_mlir_native.composition_adapter import AdjacentDeviceAdapter

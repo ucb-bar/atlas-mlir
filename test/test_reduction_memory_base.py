@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 from atlas_mlir_native.binding import AtlasNativeBinding, DRAM_BASE, dram_slots, validate_explicit_io_base, _tile_io_base, io_memory_base
 from atlas_mlir_native.reduction import compile_reduction, plan_abi, request_for
-from merlin.semantic_compiler.codegen import CodegenOptions, codegen_options
+from atlas_mlir_native.options import CodegenOptions, codegen_options
 from merlin.semantic_compiler.target_binding import NativeCompilationError
 
 ROOT = Path(__file__).resolve().parents[1]

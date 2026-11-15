@@ -93,7 +93,7 @@ def virtual_transition(*, source_address, destination_address, status_address,
     pages,ranges,pad,output_base,output_bytes = _configuration(
         source_address,destination_address,status_address,rows,columns,kind,
         admitted_code_ranges,pad,canonicalize_negative_zero,output_base,output_bytes)
-    from merlin.semantic_compiler.codegen import IO_MEMORY_OPTIONS, current_codegen_options
+    from atlas_mlir_native.options import IO_MEMORY_OPTIONS, current_codegen_options
     options = current_codegen_options()
     if io_memory_base is not None or any(getattr(options, name) is not None for name in IO_MEMORY_OPTIONS):
         from .binding import io_memory_base as selected_io_base, validate_explicit_io_base, dram_slots, TILE_BYTES

@@ -10,7 +10,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from merlin.semantic_compiler.codegen import codegen_options, current_codegen_options
+from atlas_mlir_native.options import codegen_options, current_codegen_options
 from merlin.semantic_compiler.target_binding import NativeCompilationError
 from atlas_mlir_native import layout_device as native
 from atlas_mlir_native.application import AtlasApplicationAdapter

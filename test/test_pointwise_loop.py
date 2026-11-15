@@ -210,7 +210,7 @@ class PointwiseLoopTest(unittest.TestCase):
         self._check_pointwise_cases(bf16_sources=False, affine_cast=True)
 
     def test_large_io_window_executes_in_one_launch_per_invocation(self):
-        from merlin.semantic_compiler.codegen import CodegenOptions, codegen_options
+        from atlas_mlir_native.options import CodegenOptions, codegen_options
 
         with codegen_options(CodegenOptions(io_memory_bytes=1048576)):
             self._check_pointwise_cases(bf16_sources=False, large=True)

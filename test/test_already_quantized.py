@@ -169,7 +169,7 @@ int restore(uint32_t word,int32_t lhs,int32_t rhs,uint32_t *out) {
         from test_activation_quantize_device import dynamic_source
         wide_exponents = dynamic_source(shape=(4096, 1), reduce='block', rows=4096)
         self.assertEqual(dict(adapter.plan(wide_exponents).selected[0].metadata)['kind'], 'dynamic_quantize')
-        from merlin.semantic_compiler.codegen import CodegenOptions, codegen_options
+        from atlas_mlir_native.options import CodegenOptions, codegen_options
         with codegen_options(CodegenOptions(io_memory_bytes=8192)):
             chunked = adapter.plan(quantizer_source(count=65536)).selected[0]
         self.assertEqual(chunked.placement, 'accelerator')

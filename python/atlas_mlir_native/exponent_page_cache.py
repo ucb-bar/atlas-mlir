@@ -3,7 +3,7 @@
 
 
 def enabled():
-    from merlin.semantic_compiler.codegen import current_codegen_options
+    from atlas_mlir_native.options import current_codegen_options
     return current_codegen_options().exponent_page_cache
 
 def recorded_enabled(record):

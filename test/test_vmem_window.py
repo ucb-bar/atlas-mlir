@@ -9,7 +9,7 @@ from atlas_mlir_native import quantized_loop as loop
 from atlas_mlir_native.already_quantized import prepare_source
 from atlas_mlir_native.binding import DRAM_BASE, _tile_io_base, _with_tile_io_base, io_memory_base
 from atlas_mlir_native.memory_windows import dma_span_in_window
-from merlin.semantic_compiler.codegen import CodegenOptions, codegen_options
+from atlas_mlir_native.options import CodegenOptions, codegen_options
 from merlin.semantic_compiler.target_binding import NativeCompilationError
 from test_already_quantized import source_request
 

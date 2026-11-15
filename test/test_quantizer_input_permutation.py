@@ -13,7 +13,7 @@ import pytest
 from atlas_mlir_native import activation_quantize_application as application
 from atlas_mlir_native import quantizer_input_permutation as folded
 from atlas_mlir_native.vector_quantize import prepare_plan as device_plan
-from merlin.semantic_compiler.codegen import CodegenOptions, codegen_options
+from atlas_mlir_native.options import CodegenOptions, codegen_options
 from merlin.semantic_compiler.model import IndexMap, SemanticNode, pointwise_identity_maps
 from test_activation_quantize_device import dynamic_source, host_reference
 from test_already_quantized import quantizer_source

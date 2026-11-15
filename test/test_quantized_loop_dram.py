@@ -1,5 +1,5 @@
 """Counted contraction admission includes every selected DRAM frame byte."""
-from merlin.semantic_compiler.codegen import codegen_options, current_codegen_options
+from atlas_mlir_native.options import codegen_options, current_codegen_options
 
 from dataclasses import replace
 from pathlib import Path

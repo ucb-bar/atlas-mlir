@@ -13,7 +13,7 @@ from pathlib import Path
 import tempfile
 
 from merlin.semantic_compiler.buffer_allocation import current_allocation_wall_budget_ms
-from merlin.semantic_compiler.codegen import current_codegen_options
+from atlas_mlir_native.options import current_codegen_options
 from merlin.semantic_compiler.search import SearchLimits
 from merlin.semantic_compiler.target_binding import NativeCompilationError, verify_native_publication
 

@@ -16,7 +16,7 @@ from atlas_mlir_native.already_quantized import prepare_source as prepare_dispat
 from atlas_mlir_native.binding import DRAM_BASE
 from atlas_mlir_native.quantized_epilogue import alternatives as epilogues, prepare_source as prepare_epilogue
 from atlas_mlir_native.quantized_epilogue_narrowing import alternatives, prepare_source
-from merlin.semantic_compiler.codegen import CodegenOptions, codegen_options
+from atlas_mlir_native.options import CodegenOptions, codegen_options
 from merlin.semantic_compiler.model import SemanticNode, pointwise_identity_maps
 from merlin.semantic_compiler.search import SearchLimits
 from merlin.semantic_compiler.snapshot import open_native_snapshot

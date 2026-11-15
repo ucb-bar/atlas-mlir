@@ -135,7 +135,7 @@ def _write_files(destination, files, manifest):
 
 
 def _publish_layout_leaf(original, canonical, materialized, destination):
-    from merlin.semantic_compiler.codegen import current_codegen_options
+    from atlas_mlir_native.options import current_codegen_options
     from . import layout_device as layout
     from .binding import RTL_REVISION, _native_pipeline
 

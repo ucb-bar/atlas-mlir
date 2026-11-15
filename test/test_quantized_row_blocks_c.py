@@ -18,7 +18,7 @@ from atlas_mlir_native import quantized_row_blocks_c as native
 from atlas_mlir_native.already_quantized import prepare_source
 from atlas_mlir_native.quantized_loop import execution_layout
 from merlin.compile.launch_schedule import expand_launch_schedule
-from merlin.semantic_compiler.codegen import CodegenOptions, codegen_options
+from atlas_mlir_native.options import CodegenOptions, codegen_options
 from merlin.semantic_compiler.search import SearchLimits
 from test_already_quantized import source_request
 from test_looped_mnk import build_snapshot

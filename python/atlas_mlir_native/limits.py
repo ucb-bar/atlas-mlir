@@ -10,7 +10,7 @@ def functional_instruction_limit(limits=None):
     accepted image still requires an independently proved finite dynamic bound
     and the unchanged RTL instruction-memory capacity check.
     """
-    from merlin.semantic_compiler.codegen import current_codegen_options
+    from atlas_mlir_native.options import current_codegen_options
     selected = current_codegen_options().execution_instruction_limit
     if selected is None:
         selected = DEFAULT_FUNCTIONAL_INSTRUCTION_LIMIT

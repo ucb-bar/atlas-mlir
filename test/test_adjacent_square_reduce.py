@@ -152,7 +152,7 @@ int domain(const uint8_t *data,const uint8_t *seed) { return fused_domain(data,s
         self.assertEqual(len(alternatives(adapter, source, choices)), 2)
 
     def test_large_square_keeps_original_device_regions(self):
-        from merlin.semantic_compiler.codegen import CodegenOptions, codegen_options
+        from atlas_mlir_native.options import CodegenOptions, codegen_options
         options = codegen_options(CodegenOptions(io_memory_bytes=67108864))
         options.__enter__()
         self.addCleanup(options.__exit__, None, None, None)

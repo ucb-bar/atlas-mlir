@@ -31,7 +31,7 @@ class DeviceInstructionBoundTest(unittest.TestCase):
     def setUp(self):
         selected = os.environ.get("ATLAS_TEST_NATIVE_SNAPSHOT")
         if selected:
-            from merlin.semantic_compiler.codegen import CodegenOptions, codegen_options
+            from atlas_mlir_native.options import CodegenOptions, codegen_options
             snapshot = self.native_snapshot()
             capacity = next(bank.capacity for bank in snapshot.profile.banks if bank.name == "external")
             options = codegen_options(CodegenOptions(io_memory_bytes=capacity * 2048))

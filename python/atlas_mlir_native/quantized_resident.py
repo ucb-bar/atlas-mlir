@@ -97,7 +97,7 @@ def pack_resident_input(source, node_id, dense_bytes):
 
 
 def requested_source_bindings(source):
-    from merlin.semantic_compiler.codegen import current_codegen_options
+    from atlas_mlir_native.options import current_codegen_options
     bindings = getattr(current_codegen_options(), 'resident_bindings', None)
     if bindings is None:
         return {}
@@ -115,7 +115,7 @@ def requested_bindings(plan):
 
 def validated_bindings(source, inventory, *, staging_base=None):
     """Validate exact immutable spans without changing the staging reservation."""
-    from merlin.semantic_compiler.codegen import current_codegen_options
+    from atlas_mlir_native.options import current_codegen_options
     from .binding import validate_io_window
     from .memory_windows import dma_span_in_window
 

@@ -8,7 +8,7 @@ WIDE_CACHE_TILES = 192
 
 
 def reuse_policy():
-    from merlin.semantic_compiler.codegen import current_codegen_options
+    from atlas_mlir_native.options import current_codegen_options
     return current_codegen_options().quantized_operand_reuse
 
 

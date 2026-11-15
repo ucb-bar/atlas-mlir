@@ -12,7 +12,7 @@ import pytest
 from atlas_mlir_native import exact_float_application as application
 from atlas_mlir_native import exact_float_device as device
 from atlas_mlir_native import float_input_layout as folded
-from merlin.semantic_compiler.codegen import CodegenOptions, codegen_options
+from atlas_mlir_native.options import CodegenOptions, codegen_options
 from merlin.semantic_compiler.model import IndexMap, SemanticNode, pointwise_identity_maps
 from test_exact_float_device import request, host_reference
 
