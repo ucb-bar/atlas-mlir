@@ -67,7 +67,8 @@ class QuantizerApplicationScheduleTest(unittest.TestCase):
         raw = np.resize(np.array([0, 0x8000, 1, 127, 0x3f88, 0x3ff8, 0x7f7f, 0x7f80, 0xff80, 0x7fc1], dtype="<u2"), 4103).tobytes()
         self.assertEqual(scheduled_reference(source, raw), host_reference(source, raw))
 
-    def test_dynamic_whole_groups_all_reductions_rules_and_tails(self):
+    @patch("atlas_mlir_native.activation_quantize_device.prove_plan")
+    def test_dynamic_whole_groups_all_reductions_rules_and_tails(self, _proof):
         for reduction in ("tensor", "head", "token", "block", "head_block"):
             for rule in ("ref", "nc"):
                 with self.subTest(reduction=reduction, rule=rule):
@@ -78,7 +79,8 @@ class QuantizerApplicationScheduleTest(unittest.TestCase):
         self.assertEqual([item["code_bytes"] for item in plan.launches], [21, 14, 21, 14])
         self.assertEqual([item["exponent_offset_bytes"] for item in plan.launches], [0, 12, 20, 32])
 
-    def test_f32_and_reversed_source_output_order(self):
+    @patch("atlas_mlir_native.activation_quantize_device.prove_plan")
+    def test_f32_and_reversed_source_output_order(self, _proof):
         source = dynamic_source(shape=(2, 3, 7), reduce="head", dtype="bf16")
         source = replace(source, outputs=tuple(reversed(source.outputs)))
         raw = np.resize(np.array([0, 0x80000000, 0x3f888000, 0x7f7fffff, 0x7f800000, 0x7f800001], dtype="<u4"), 42).tobytes()
@@ -92,9 +94,10 @@ class QuantizerApplicationScheduleTest(unittest.TestCase):
         self.assertEqual(len(static.launches), 1)
         self.assertEqual(len(static.bodies), 1)
         dynamic = prepare_plan(dynamic_source(shape=(1, 32, 64, 64), reduce="head"))
-        self.assertEqual(len(dynamic.launches), 4)
-        self.assertEqual(len(dynamic.bodies), 1)
-        self.assertTrue(all(item["code_bytes"] == 32768 and item["exponent_bytes"] == 32 for item in dynamic.launches))
+        self.assertEqual(len(dynamic.launches), 5)
+        self.assertEqual(len(dynamic.bodies), 2)
+        self.assertEqual([item["code_bytes"] for item in dynamic.launches], [28672] * 4 + [16384])
+        self.assertEqual([item["exponent_bytes"] for item in dynamic.launches], [28] * 4 + [16])
 
     def test_irregular_head_tile_counts_do_not_use_full_tile_batch_budget(self):
         for length in (1056, 2016, 4064):
@@ -168,14 +171,12 @@ class QuantizerApplicationScheduleTest(unittest.TestCase):
     def test_large_head_batching_scales_the_complete_group_budget(self):
         from merlin.semantic_compiler.codegen import CodegenOptions, codegen_options
 
-        for length, packed in ((8192, 4), (16384, 2), (24576, 1), (31744, 1)):
+        for length, packed, smaller in ((8192, 4, 3), (16384, 2, 1), (24576, 1, 1), (31744, 1, 1)):
             with self.subTest(length=length):
                 source = dynamic_source(shape=(8, 1, length), reduce="head")
-                if packed > 1:
-                    # The legacy batching estimate puts these bodies just over
-                    # the default machine limit; planning must catch that too.
-                    with self.assertRaisesRegex(ValueError, "instruction bound"):
-                        prepare_plan(source)
+                default = prepare_plan(source)
+                self.assertTrue(all(item["code_bytes"] <= smaller * length for item in default.launches))
+                self.assertEqual(sum(item["code_bytes"] for item in default.launches), 8 * length)
                 with codegen_options(CodegenOptions(execution_instruction_limit=1100000)):
                     plan = prepare_plan(source)
                 self.assertEqual(len(plan.launches), 8 // packed)

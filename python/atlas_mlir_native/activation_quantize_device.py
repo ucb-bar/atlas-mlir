@@ -130,6 +130,7 @@ def prove_plan(plan, *, target_source=None, limits=None):
     import json
     import os
     from pathlib import Path
+    from merlin.semantic_compiler.target_binding import NativeCompilationError
     from .binding import NATIVE_CHECKS, RTL_REVISION, _run, _native_pipeline, _scheduled_virtual_pipeline
     if target_source is None:
         target_source = Path(__file__).resolve().parents[2]
@@ -138,16 +139,21 @@ def prove_plan(plan, *, target_source=None, limits=None):
     pipeline = _native_pipeline()
     machine=_run([str(tools/'atlas-opt'),*_scheduled_virtual_pipeline(pipeline),'-'], input_text=virtual)
     _run([str(tools/'atlas-opt'),*NATIVE_CHECKS,'--verify-atlas-timing','-'], input_text=machine)
-    program=json.loads(_run([str(tools/'atlas-emit'),'--program-json','-'], input_text=machine))
+    emitted=_run([str(tools/'atlas-emit'),'--program-json','-'], input_text=machine)
+    try:
+        program=json.loads(emitted)
+    except json.JSONDecodeError as error:
+        raise NativeCompilationError('compile_error','activation quantizer emitter returned invalid program JSON: '+str(error)) from error
+    if not isinstance(program, dict):
+        raise NativeCompilationError('compile_error','activation quantizer emitter returned a non-object program')
     if program.get('selected_rtl_revision') != RTL_REVISION:
-        raise ValueError('activation quantizer emitter uses a different RTL revision')
+        raise NativeCompilationError('unqualified_target','activation quantizer emitter uses a different RTL revision')
     from .restoration_budget import instruction_bound
-    from merlin.semantic_compiler.target_binding import NativeCompilationError
     try:
         from .limits import functional_instruction_limit
         bound=instruction_bound(virtual,machine,program,max_instructions=functional_instruction_limit(limits))
     except (ValueError,KeyError,IndexError) as error:
-        raise NativeCompilationError('resource_limit','activation quantizer instruction bound is unproved: '+str(error)) from error
+        raise NativeCompilationError('compile_error','activation quantizer instruction bound is unproved: '+str(error)) from error
     if not bound['admitted']:
         raise NativeCompilationError('resource_limit','activation quantizer worst-case instruction bound exceeds '+str(bound['max_instructions'])+': '+str(bound['instruction_bound']))
     return virtual, machine, program, bound, pipeline
