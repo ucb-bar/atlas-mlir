@@ -35,9 +35,11 @@ independent captured-CFG verifier prove the unsigned range, at least 32-byte
 alignment of every interior value, and absence of arithmetic overflow. The
 complete DMA extent must still fit its declared memory window.
 
-When early scheduling of address arithmetic creates scalar register pressure,
-the spiller can move a pure single-use expression and its single-use scalar
-operands next to their consumer in the same block. It preserves the expression
+With `enhanced-virtual-scheduling=true` (selected by
+`ATLAS_NATIVE_PIPELINE=optimized`), when early scheduling of address arithmetic
+creates scalar register pressure, the spiller can move a pure single-use
+expression and its single-use scalar operands next to their consumer in the
+same block. It preserves the expression
 needed by the address proof, performs no memory spill or extra arithmetic, and
 uses the existing bounded rewrite budget. Each root is moved at most once per
 spill pass to prevent oscillation between expressions sharing a consumer.

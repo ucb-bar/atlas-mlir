@@ -86,10 +86,10 @@ The full-layer artifacts are `application-epilogue-narrowing` and
 
 ### Large static quantizer applications
 
-Aligned BF16 static quantizers now size counted bodies from the selected
-execution-instruction budget and I/O window. The old 524,288-element cutoff
-sent larger tensors through one launch per 2,048 elements, regardless of those
-budgets. Actual instruction bounds, instruction-image capacity, native checks
+With `ATLAS_NATIVE_PIPELINE=optimized`, aligned BF16 static quantizers size
+counted bodies from the selected execution-instruction budget and I/O window.
+The default mandatory pipeline retains the old 524,288-element cutoff, sending
+larger tensors through one launch per 2,048 elements regardless of those budgets. Actual instruction bounds, instruction-image capacity, native checks
 and the final partial-body offsets remain mandatory.
 
 In the independently checked SmolVLA vision-layer run (batch 1, 1,024 tokens,
@@ -699,10 +699,12 @@ publication checks.
 
 ## Schedule independent cache traffic across DMA and compute
 
-Virtual saves, restores and slot copies now carry read-after-write,
-write-after-read and write-after-write dependencies for their individual scratch
-buffers. They previously acted as global barriers. Tensor saves/restores are
-costed as LSU work, allowing independent DMA and MXU work to issue alongside
+With `enhanced-virtual-scheduling=true` (selected by
+`ATLAS_NATIVE_PIPELINE=optimized`), virtual saves, restores and slot copies carry
+read-after-write, write-after-read and write-after-write dependencies for their
+individual scratch buffers. By default they remain global barriers. In the
+opt-in mode, tensor saves/restores are costed as LSU work, allowing independent
+DMA and MXU work to issue alongside
 it. Scalar indexed accesses retain their conservative barriers. The existing
 verifier rejects overlapping assigned scratch slots and allocation keeps them
 separate from DMA staging.
@@ -734,9 +736,9 @@ binaries isolate the scheduler change:
 The isolated saving is **8,879,958 cycles (9.07%)**. Every output word matches the
 same independent FX reference in both optimized runs. More issued instructions
 are an explicit tradeoff of the overlapping schedule; measured cycles improve
-for every changed launch in this fixture. The mandatory pipeline with the new
-compiler alone measures 99,064,582 cycles, so its small improvement should not be
-confused with the optimized-pipeline result.
+for every changed launch in this fixture. The historical mandatory-pipeline
+measurement of 99,064,582 cycles predates the opt-in gate and is not reproducible with the current mandatory pipeline,
+which leaves `enhanced-virtual-scheduling` disabled.
 
 In the controlled optimized comparison, gate projection improves from
 15,083,179 to 12,931,167 cycles; up projection with its fused product from

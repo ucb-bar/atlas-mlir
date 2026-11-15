@@ -1,10 +1,12 @@
 # Output priority through scratch dependencies
 
-The native Atlas scheduler now propagates first-output priority through its
-existing dependency graph, including scratch RAW, WAR and WAW edges. Previously
-the heuristic followed only tensor SSA operands, so a cache save could lose its
-connection to the output served by a later restore. Among operations with equal
-earliest start times, work needed by the earliest output is preferred.
+With `enhanced-virtual-scheduling=true` (selected by
+`ATLAS_NATIVE_PIPELINE=optimized`), the native Atlas scheduler propagates
+first-output priority through its existing dependency graph, including scratch
+RAW, WAR and WAW edges. The default heuristic follows only tensor SSA operands,
+so a cache save can lose its connection to the output served by a later restore.
+Among operations with equal earliest start times, work needed by the earliest
+output is preferred.
 
 This changes ready-operation ranking, not dependencies or legality. Scratch
 alias checks, allocation, admission, machine verification and timing checks
