@@ -2,6 +2,7 @@
 
 Vector add/sub use FP32 then BF16 chop; multiply and row reduction use
 BF16 nearest even, matching the unchanged npu_model primitives.
+Control flow executes an architectural delay slot; timing is not modeled.
 """
 import ctypes
 import gzip
@@ -62,8 +63,8 @@ def executor(operation,count,shared=False,execution_limit=DEFAULT_FUNCTIONAL_INS
             c='for(unsigned r=0;r<32;r++){float v[32];for(unsigned i=0;i<32;i++)v[i]=decode(((uint16_t*)tensor[in.src])[i/16*512+r*16+i%16]);for(unsigned n=32;n>1;n/=2)for(unsigned i=0;i<n/2;i++)v[i]=v[2*i]+v[2*i+1];uint16_t code=rne(v[0]);for(unsigned h=0;h<2;h++)for(unsigned i=0;i<16;i++)temporary[h*512+r*16+i]=code;}memcpy(tensor[in.dst],temporary,2048);'
         elif op=='branch':
             condition={'beq':'a==b','bne':'a!=b','bgeu':'a>=b','bltu':'a<b','bge':'(int32_t)a>=(int32_t)b','blt':'(int32_t)a<(int32_t)b'}[mode]
-            c=f'if({condition})next=pc+in.offset_bytes/2;'
-        elif op=='jump':c='next=pc+in.offset/2;'
+            c=f'if(redirected)return 95;if({condition}){{pending_target=pc+in.offset_bytes/2;pending_redirect=1;}}'
+        elif op=='jump':c='if(redirected)return 95;pending_target=pc+in.offset/2;pending_redirect=1;'
         elif op=='trap':c='pc=sizeof(program)/sizeof(*program);continue;'
         elif op not in ('delay','dma_wait','dma_config','csr'):raise ValueError(name)
         cases.append(f'case {kind}: {c} break;')
@@ -84,11 +85,14 @@ int execute(const void *left,const void *right,void *output,unsigned *status){
  memset(dram,0,INPUT_COUNT*INPUT_BYTES);
  for(unsigned i=0;i<COUNT;i+=32){unsigned lanes=COUNT-i<32?COUNT-i:32;memcpy(dram+i*WIDTH,(const char*)left+i*WIDTH,lanes*WIDTH);
  if(INPUT_COUNT==2)memcpy(dram+INPUT_BYTES+i*WIDTH,(const char*)right+i*WIDTH,lanes*WIDTH);}
- unsigned pc=0,steps=0;
- while(pc<sizeof(program)/sizeof(*program)){if(++steps>INSTRUCTION_LIMIT)return 94;
- struct instruction in=program[pc];uint32_t a=x[in.lhs],b=x[in.rhs],address=0;int next=(int)pc+1;
+ int pc=0,pending_redirect=0,pending_target=0;unsigned steps=0;
+ while(pc>=0 && pc<(int)(sizeof(program)/sizeof(*program))){if(++steps>INSTRUCTION_LIMIT)return 94;
+ int redirected=pending_redirect,target=pending_target;pending_redirect=0;
+ struct instruction in=program[pc];uint32_t a=x[in.lhs],b=x[in.rhs],address=0;int next=pc+1;
  switch(in.kind){'''+''.join(cases)+'''}
- x[0]=0;pc=next;}
+ x[0]=0;pc=redirected?target:next;}
+ if(pending_redirect)return 97;
+ if(pc<0 || pc>(int)(sizeof(program)/sizeof(*program)))return 96;
  memcpy(status,dram+STATUS,4);
  for(unsigned i=0;i<COUNT;i+=32){unsigned lanes=COUNT-i<32?COUNT-i:32;memcpy((char*)output+i*OUT_WIDTH,dram+OUTPUT+i*OUT_WIDTH,lanes*OUT_WIDTH);}
  free(vm);free(tensor);free(dram);return steps;}
@@ -117,7 +121,8 @@ def execute(source,raw):
     inputs=[ctypes.create_string_buffer(a) for a in raw];output=ctypes.create_string_buffer(p.count*p.output_width);status=ctypes.c_uint()
     steps=fn(inputs[0],inputs[-1],output,ctypes.byref(status))
     if steps<0 or steps>limit:raise RuntimeError(steps)
-    if steps in (91,92,93,94,98):raise RuntimeError(('ISA interpreter fault',steps))
+    # 95: control flow in a delay slot; 96: invalid PC; 97: missing delay slot.
+    if steps in (91,92,93,94,95,96,97,98):raise RuntimeError(('ISA interpreter fault',steps))
     return output.raw,status.value,steps
 
 
