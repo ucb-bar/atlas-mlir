@@ -260,7 +260,6 @@ class AtlasApplicationAdapter:
                 "materialization_sources": provider_sources(),
                 "tools": tool_identities,
                 "pipeline": _native_pipeline(),
-                "codegen": current_codegen_options().identity_record(),
                 "capture_postspill": current_codegen_options().capture_postspill,
                 "deterministic_receipts": deterministic_receipts_enabled(),
                 **({"exact_float_unroll": True} if current_codegen_options().exact_float_unroll else {}),

@@ -194,26 +194,17 @@ class QuantizedOperandReuseTest(unittest.TestCase):
         with codegen_options(replace(current_codegen_options(), quantized_operand_reuse='ordered', exact_binary_lane_groups=True)):
             grouped = adapter.materialization_identity(source, choice)
         self.assertIs(grouped['compilation_identity'].pop('exact_binary_lane_groups'), True)
-        self.assertEqual(grouped['compilation_identity']['codegen'],
-                         {**original['compilation_identity']['codegen'], 'exact_binary_lane_groups': True})
-        grouped['compilation_identity']['codegen'] = original['compilation_identity']['codegen']
         self.assertEqual(grouped, original)
 
         with codegen_options(replace(current_codegen_options(), quantized_operand_reuse='ordered')), \
                 codegen_options(replace(current_codegen_options(), exact_float_unroll=True)):
             unrolled = adapter.materialization_identity(source, choice)
         self.assertIs(unrolled['compilation_identity'].pop('exact_float_unroll'), True)
-        self.assertEqual(unrolled['compilation_identity']['codegen'],
-                         {**original['compilation_identity']['codegen'], 'exact_float_unroll': True})
-        unrolled['compilation_identity']['codegen'] = original['compilation_identity']['codegen']
         self.assertEqual(unrolled, original)
         with codegen_options(replace(current_codegen_options(), quantized_operand_reuse='row-cache')):
             cached = adapter.materialization_identity(source, choice)
         self.assertEqual(cached['compilation_identity']['quantized_operand_reuse'], 'row-cache')
         del cached['compilation_identity']['quantized_operand_reuse']
-        self.assertEqual(cached['compilation_identity']['codegen'],
-                         {**original['compilation_identity']['codegen'], 'quantized_operand_reuse': 'row-cache'})
-        cached['compilation_identity']['codegen'] = original['compilation_identity']['codegen']
         self.assertEqual(cached, original)
 
     def test_native_sizing_binding_and_export_use_recorded_policy(self):

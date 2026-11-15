@@ -88,6 +88,10 @@ def test_materialization_identity_uses_effective_inputs_and_receipt_mode(tmp_pat
     select_codegen_options(capture_postspill=False)
     source, choice = request("bf16_neg", 3), Choice()
     original = adapter.materialization_identity(source, choice)
+    assert set(original["compilation_identity"]) == {
+        "schema", "policy", "application_sha256", "binding_sha256", "materialization_sources",
+        "tools", "pipeline", "capture_postspill", "deterministic_receipts",
+    }
     monkeypatch.setenv("UNRELATED_COMPILER_TEST", "changed")
     working = tmp_path / "working"
     working.mkdir()

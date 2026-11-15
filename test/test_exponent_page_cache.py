@@ -63,9 +63,6 @@ def test_explicit_policy_identity_recorded_replay_and_scope_tampering(monkeypatc
         assert cached['exponent_page_cache_scopes'] == ['batch', 'batch']
         changed = adapter.materialization_identity(source, choice)
         assert changed['compilation_identity'].pop('exponent_page_cache') is True
-        assert changed['compilation_identity']['codegen'] == {
-            **identity['compilation_identity']['codegen'], 'exponent_page_cache': True}
-        changed['compilation_identity']['codegen'] = identity['compilation_identity']['codegen']
         assert changed == identity
         assert virtual_source(plan, old) == plain
         select_codegen_options(exponent_page_cache=False)
