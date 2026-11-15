@@ -43,14 +43,24 @@ recipe. Tool and simulator paths remain environment configuration.
 --exact-cast-vector-preflight
 --exact-float-unroll
 --execution-instruction-limit 128000000
---io-memory-bytes 67108864
+--io-memory-bytes 786432
 ```
 
 `looped_operand_reuse` retains its `ordered` default; post-spill capture and
 kernel-library publication remain disabled. Static quantizer sizing and exact
 binary route caching each require their own flag, independently of optimized
 pipeline scheduling. The complete recipe is recorded in shared `CodegenOptions`
-and partitions tuning, materialization, and tool caches.
+and partitions materialization and tool caches; the tuning key records the
+fields that affect looped bodies.
+
+This recipe is qualified at the 768 KiB window above. At 64 MiB, decode65
+is refused by the spiller work limit (`search_timeout`); prefill64 packaging
+exceeds the existing 30-second tool limit.
+
+Pass the same recipe flags to `native-verify` as to `native-compile`.
+Verification rebuilds from its flags and does not read options from the artifact.
+C export and counted-publication binding also require the compile-time recipe
+options; a different options identity is refused as a changed sizing context.
 
 ### Private softmax result casts
 

@@ -9,7 +9,6 @@ from xdsl.dialects.func import FuncOp
 from xdsl.printer import Printer
 
 from merlin.frontends.linalg_mlir import make_context, parse_mlir_text
-from merlin.semantic_compiler.target_binding import NativeCompilationError
 
 _MARKER = 'atlas.private_staging_slot'
 # Candidate limit: reserve at most 192 KiB of the selected 240 KiB temporary

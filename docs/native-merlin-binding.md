@@ -68,8 +68,14 @@ sizing (`--static-quantizer-sizing`) and cached scalar binary routes
 (`--exact-binary-routes`) are independent of pipeline scheduling. Defaults retain
 the mandatory pipeline and existing lowering behavior. Recipe environment
 variables no longer select compilation behavior; paths to tools and simulators
-remain environment configuration. The complete options record partitions tuning,
-materialization, and pure tool caches.
+remain environment configuration. The complete options record partitions
+materialization and pure tool caches; the tuning key records the fields that
+affect looped bodies.
+
+Use the same recipe flags for `native-verify` as for `native-compile`. Verification
+rebuilds from its flags rather than reading options from the artifact. C export
+and counted-publication binding require the same compile-time recipe options;
+a changed options identity is refused as a changed sizing context.
 
 ## Compile a tile
 

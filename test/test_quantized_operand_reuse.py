@@ -236,6 +236,12 @@ class QuantizedOperandReuseTest(unittest.TestCase):
                                     destination=directory/'materialized', limits=SearchLimits())
             with codegen_options(replace(current_codegen_options(), quantized_operand_reuse='ordered')):
                 self.assertIsNot(size_counted(plan, target_source=ROOT, operand_reuse='row-cache'), sized)
+                recorded_layout = execution_layout(plan, operand_reuse=sized.record()['operand_reuse_requested'])
+                self.assertEqual(recorded_layout['operand_reuse_requested'], 'row-cache')
+                self.assertEqual(virtual_source(plan, recorded_layout).encode(),
+                                 (directory/'materialized/atlas-virtual.mlir').read_bytes())
+                self.assertNotEqual(virtual_source(plan, execution_layout(plan)),
+                                    virtual_source(plan, recorded_layout))
             with codegen_options(replace(current_codegen_options(), quantized_operand_reuse='row-cache')):
                 self.assertEqual(selected_route(plan, directory/'materialized'), 'counted')
                 bind_counted(source, canonical, directory/'materialized', directory/'bound',
