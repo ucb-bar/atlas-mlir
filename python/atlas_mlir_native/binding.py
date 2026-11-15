@@ -1059,7 +1059,7 @@ def _run(command: list[str], *, input_text: str, diagnostics: list[str] | None =
         stat = tool.stat()
         identity = dict(command=command, executable_sha256=_tool_digest(
             str(tool.resolve()), stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns),
-            timeout_seconds=30)
+            timeout_seconds=30, codegen=current_codegen_options().identity_record())
         payload = cached_tool_output(namespace="atlas.pure_tool.v1", input_bytes=input_text.encode(),
                                      compilation_identity=identity, invoke=invoke)
     else:
