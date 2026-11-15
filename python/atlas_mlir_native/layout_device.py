@@ -6,7 +6,7 @@ these operations and verifies its six ordinary source contracts.
 from __future__ import annotations
 
 from .binding import io_memory_base as selected_io_base
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from hashlib import sha256
 from math import prod, gcd
 from pathlib import Path
@@ -43,6 +43,7 @@ class LayoutPlan:
     width: int
     segments: tuple
     io_memory_base: int = DRAM_BASE
+    resident_bindings: tuple = ()
 
     @property
     def input_bytes(self):
@@ -51,7 +52,9 @@ class LayoutPlan:
     @property
     def input_addresses(self):
         sizes = self.input_bytes
-        return tuple(self.io_memory_base + sum(_aligned(n) for n in sizes[:i]) for i in range(len(sizes)))
+        resident = {entry['node_id']: entry['address'] for entry in self.resident_bindings}
+        return tuple(resident.get(node.id, self.io_memory_base + sum(_aligned(n) for n in sizes[:i]))
+                     for i, node in enumerate(self.operands))
 
     @property
     def output_bytes(self):
@@ -71,6 +74,7 @@ class LayoutPlan:
 
     def record(self):
         return dict(schema="atlas.layout_device.v1", source_request_digest=self.source.digest(),
+                    **(dict(resident_bindings=list(self.resident_bindings)) if self.resident_bindings else {}),
                     input_addresses=list(self.input_addresses), input_payload_bytes=[_aligned(n) for n in self.input_bytes],
                     input_logical_bytes=list(self.input_bytes), output_addresses=[self.output_address],
                     output_bytes=self.physical_bytes, logical_output_bytes=self.output_bytes,
@@ -202,7 +206,34 @@ def prepare_source(source, *, io_memory_base=None):
         raise ValueError("device layout buffers exceed selected I/O window")
     if not dma_span_in_window(plan.io_memory_base, plan.workspace_bytes):
         raise ValueError("device layout buffers leave selected DMA memory windows")
-    return plan
+    from .quantized_resident import validated_bindings
+    bindings = validated_bindings(source, _resident_inventory(plan), staging_base=io_memory_base)
+    return replace(plan, resident_bindings=tuple(bindings)) if bindings else plan
+
+
+def _resident_inventory(plan):
+    return [dict(node_id=node.id, bytes=_aligned(size), alignment=32, kind="dense",
+                 layout=dict(schema="atlas.resident_dense_bytes.v1", source_shape=list(node.type.shape),
+                             source_dtype=node.type.dtype, element_bytes=plan.width,
+                             logical_bytes=size, padding="zero_to_dma_beat"))
+            for node, size in zip(plan.operands, plan.input_bytes, strict=True)]
+
+
+def inventory_resident_inputs(source):
+    """Inventory unchanged dense operands for exact affine device layouts."""
+    plan = prepare_source(source)
+    return _resident_inventory(plan)
+
+
+def pack_resident_input(source, node_id, dense_bytes):
+    """Copy exact source bits and initialize private DMA tail bytes once."""
+    entry = next((entry for entry in inventory_resident_inputs(source) if entry["node_id"] == node_id), None)
+    if entry is None:
+        raise ValueError("input has no resident dense layout: " + str(node_id))
+    raw = bytes(dense_bytes)
+    if len(raw) != entry["layout"]["logical_bytes"]:
+        raise ValueError("resident input byte length differs from its source tensor")
+    return raw + bytes(entry["bytes"] - len(raw))
 
 
 def virtual_program(plan, *, size_limit=None):
@@ -421,6 +452,8 @@ def compile_source(snapshot, source, *, target_source, destination, limits, io_m
     from . import layout_prefix_application
     schedule = layout_prefix_application.prepare_plan(plan)
     if schedule is not None:
+        if plan.resident_bindings:
+            raise NativeCompilationError("unsupported_semantics", "resident layouts require an admitted single device program")
         return layout_prefix_application.compile_source(snapshot, source, schedule,
             target_source=target_source, destination=destination, limits=limits)
     from merlin.semantic_compiler.codegen import current_codegen_options
@@ -471,6 +504,8 @@ def prepare_c_package(source, compiled, name, *, target_source, runtime_linkage=
     plan = prepare_source(source, io_memory_base=io_memory_base)
     compiled, target_source = Path(compiled), Path(target_source)
     if (compiled / "layout-prefix-manifest.json").exists():
+        if plan.resident_bindings:
+            raise NativeCompilationError("unsupported_semantics", "resident layouts require an admitted single device program")
         from .layout_prefix_application import prepare_c_package as prepare_prefix
         return prepare_prefix(source, compiled, name, target_source=target_source, runtime_linkage=runtime_linkage,
                               io_memory_base=io_memory_base)
@@ -501,7 +536,10 @@ def prepare_c_package(source, compiled, name, *, target_source, runtime_linkage=
     buffers = [f"{{{address}ULL,{_aligned(size)}u,ATLAS_HOST_DEVICE_READ}}" for address, size in zip(plan.input_addresses, plan.input_bytes)]
     buffers.append(f"{{{plan.output_address}ULL,{plan.physical_bytes}u,ATLAS_HOST_DEVICE_WRITE}}")
     constants, writes, checks = [], [], []
+    resident_ids = {entry["node_id"] for entry in plan.resident_bindings}
     for index, node in enumerate(plan.operands):
+        if node.id in resident_ids:
+            continue
         size, address = plan.input_bytes[index], plan.input_addresses[index]
         if node.effect == "constant":
             raw = bytes.fromhex(bindings[node.id].data_hex)
@@ -515,7 +553,7 @@ def prepare_c_package(source, compiled, name, *, target_source, runtime_linkage=
         writes.append(f"if (region->io.write(region->io.context,{address}ULL,{pointer},{size}u)) return {upper}_MEMORY_ERROR;")
         if size % 32:
             writes.append(f"if (region->io.write(region->io.context,{address + size}ULL,{name}_zero,{_aligned(size)-size}u)) return {upper}_MEMORY_ERROR;")
-    for pointer in ["outputs[0]", *(f"inputs[{inputs.index(node.id)}]" for node in plan.operands if node.effect == "input")]:
+    for pointer in ["outputs[0]", *(f"inputs[{inputs.index(node.id)}]" for node in plan.operands if node.effect == "input" and node.id not in resident_ids)]:
         size = plan.output_bytes if pointer == "outputs[0]" else plan.input_bytes[next(i for i, n in enumerate(plan.operands) if n.effect == "input" and f"inputs[{inputs.index(n.id)}]" == pointer)]
         checks.extend(f"{name}_overlap({pointer},{size}u,{context},sizeof(*{context}))" for context in ("ctx", "region", "region->host"))
     declarations = f'''
@@ -532,7 +570,7 @@ int {name}_source_dispatch(void *,const void *const *,void *const *);
 #include <string.h>
 {program_array(name + '_words', binary)}
 {os.linesep.join(constants)}
-''' + (f"static const uint8_t {name}_zero[32]={{0}};\n" if any(size % 32 for size in plan.input_bytes) else "") + f'''
+''' + (f"static const uint8_t {name}_zero[32]={{0}};\n" if any(size % 32 and node.id not in resident_ids for node, size in zip(plan.operands, plan.input_bytes)) else "") + f'''
 static int {name}_valid(const void *p,size_t n) {{ return p && (uintptr_t)p<=UINTPTR_MAX-n; }}
 static int {name}_overlap(const void *a,size_t an,const void *b,size_t bn) {{
   return (uintptr_t)a<(uintptr_t)b+bn && (uintptr_t)b<(uintptr_t)a+an;
@@ -576,5 +614,6 @@ int {name}_source_dispatch(void *opaque,const void *const *inputs,void *const *o
                   binding_function=name + "_bind", source_binding_function=name + "_source_bind",
                   source_dispatch_function=name + "_source_dispatch", dispatch_function=name + "_source_dispatch",
                   input_node_ids=inputs, output_node_ids=list(source.outputs), launches_per_invocation=1,
+                  **(dict(resident_bindings=list(plan.resident_bindings)) if plan.resident_bindings else {}),
                   layout_device_plan=plan.record(), native_manifest_sha256=sha256((compiled / "manifest.json").read_bytes()).hexdigest(), **runtime)
     return record, files

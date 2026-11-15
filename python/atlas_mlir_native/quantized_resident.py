@@ -96,32 +96,39 @@ def pack_resident_input(source, node_id, dense_bytes):
     return bytes(packed)
 
 
-def requested_bindings(plan):
+def requested_source_bindings(source):
     from merlin.semantic_compiler.codegen import current_codegen_options
     bindings = getattr(current_codegen_options(), 'resident_bindings', None)
     if bindings is None:
         return {}
     if not isinstance(bindings, dict):
         raise NativeCompilationError('compile_error', 'resident bindings must be source-keyed mappings')
-    selected = bindings.get(plan.source.digest(), {})
+    selected = bindings.get(source.digest(), {})
     if not isinstance(selected, dict):
         raise NativeCompilationError('compile_error', 'resident input bindings must be node-keyed mappings')
     return selected
 
 
-def bind_geometry(plan, geometry):
-    """Apply authenticated compiler settings after validating all DMA ranges."""
+def requested_bindings(plan):
+    return requested_source_bindings(plan.source)
+
+
+def validated_bindings(source, inventory, *, staging_base=None):
+    """Validate exact immutable spans without changing the staging reservation."""
     from merlin.semantic_compiler.codegen import current_codegen_options
     from .binding import validate_io_window
     from .memory_windows import dma_span_in_window
 
-    selected = requested_bindings(plan)
+    selected = requested_source_bindings(source)
     if not selected:
-        return geometry
-    inventory = {entry['node_id']: entry for entry in _inventory(plan)}
+        return []
+    inventory = {entry['node_id']: entry for entry in inventory}
     if set(selected)-set(inventory):
-        raise NativeCompilationError('unsupported_semantics', 'resident binding has no counted input layout')
+        raise NativeCompilationError('unsupported_semantics', 'resident binding has no accepted input layout')
     staging, staging_bytes = validate_io_window()
+    if staging_base is not None:
+        from .binding import validate_explicit_io_base
+        staging = validate_explicit_io_base(staging_base)
     options = current_codegen_options()
     capacity_base, capacity_bytes = options.io_memory_capacity_base, options.io_memory_capacity_bytes
     if capacity_base is None or capacity_bytes is None:
@@ -141,6 +148,15 @@ def bind_geometry(plan, geometry):
                        for other in records)):
             raise NativeCompilationError('compile_error', 'resident input span is unaligned, outside capacity, or overlaps another range')
         records.append(dict(**entry, address=address, immutable=True))
+    return records
+
+
+def bind_geometry(plan, geometry):
+    """Apply authenticated compiler settings after validating all DMA ranges."""
+    selected = requested_bindings(plan)
+    if not selected:
+        return geometry
+    records = validated_bindings(plan.source, _inventory(plan))
     result = dict(geometry, input_addresses=list(geometry['input_addresses']),
                   exponent_addresses=list(geometry['exponent_addresses']), resident_bindings=records)
     for slot in _inputs(plan):

@@ -151,18 +151,35 @@ class AtlasApplicationAdapter:
         return dict(dma_base=0x80000000, dma_capacity=0x80000000, alignment=2048)
 
     @staticmethod
-    def inventory_resident_inputs(region):
-        from .already_quantized import OPS
-        from .quantized_resident import inventory_resident_inputs
+    def _resident_input_module(region, alternative=None):
+        if alternative is None:
+            from .already_quantized import OPS
 
-        if not any(node.effect == 'pure' and node.op in OPS for node in region.nodes):
-            return None
-        return inventory_resident_inputs(region)
+            pure = [node for node in region.nodes if node.effect == "pure"]
+            kind = ("already_quantized" if any(node.op in OPS for node in pure)
+                    else "layout_device" if len(pure) == 1 and pure[0].op in {
+                        "reshape", "copy", "gather", "transpose", "concat"} else None)
+        else:
+            kind = dict(alternative.metadata)["kind"]
+        if kind == "already_quantized":
+            from . import quantized_resident
+            return quantized_resident
+        if kind == "layout_device":
+            from . import layout_device
+            return layout_device
+        return None
 
     @staticmethod
-    def pack_resident_input(region, node_id, dense_bytes):
-        from .quantized_resident import pack_resident_input
-        return pack_resident_input(region, node_id, dense_bytes)
+    def inventory_resident_inputs(region, alternative=None):
+        module = AtlasApplicationAdapter._resident_input_module(region, alternative)
+        return None if module is None else module.inventory_resident_inputs(region)
+
+    @staticmethod
+    def pack_resident_input(region, node_id, dense_bytes, alternative=None):
+        module = AtlasApplicationAdapter._resident_input_module(region, alternative)
+        if module is None:
+            raise NativeCompilationError("unsupported_semantics", "selected region has no immutable residency ABI")
+        return module.pack_resident_input(region, node_id, dense_bytes)
 
     @staticmethod
     def supports_region_materialization(region, alternative):
