@@ -36,7 +36,136 @@ struct Derived {
   std::map<int32_t, SlotWrite> slotWrites, copyWrites;
   std::map<int32_t, uint32_t> scalarSlotLoads, scalarSlotStores;
   std::set<int32_t> zeroStores, indexedStores;
+  struct Initialization { int32_t block; uint32_t first, bytes; };
+  std::vector<Initialization> initializations;
 };
+
+// A counted, straight-line store loop can establish a complete footprint at
+// its unique exit. Check the captured source recurrence, not the widened
+// per-access address envelope: that envelope alone proves no byte was written.
+// CFG verification independently authenticates these source operations and
+// edges against the emitted machine stream.
+void deriveCountedInitializations(DictionaryAttr cfg, Derived &d) {
+  auto values = cfg.getAs<ArrayAttr>("values");
+  auto blocks = cfg.getAs<ArrayAttr>("blocks");
+  auto edges = cfg.getAs<ArrayAttr>("edges");
+  auto operations = cfg.getAs<ArrayAttr>("operations");
+  if (!values || !blocks || !edges || !operations) return;
+  auto record = [](ArrayAttr records, int32_t id) -> DictionaryAttr {
+    atlasProofRecord(AtlasProofKind::Buffer);
+    return id >= 0 && unsigned(id) < records.size()
+        ? dyn_cast<DictionaryAttr>(records[id]) : DictionaryAttr{};
+  };
+  auto constant = [&](int32_t id) -> std::optional<uint32_t> {
+    auto value = record(values, id);
+    if (!value || contractString(value, "def") != "arith.constant") return std::nullopt;
+    auto bits = contractI32(value, "constant");
+    return bits ? std::optional<uint32_t>(uint32_t(*bits)) : std::nullopt;
+  };
+  auto increment = [&](int32_t id, int32_t argument, uint32_t step, int32_t block) {
+    auto value = record(values, id);
+    if (!value || contractString(value, "def") != "arith.addi" ||
+        contractI32(value, "block") != block) return false;
+    auto operands = contractI32Array(value, "operands");
+    return operands.size() == 2 &&
+        ((operands[0] == argument && constant(operands[1]) == step) ||
+         (operands[1] == argument && constant(operands[0]) == step));
+  };
+  std::map<int32_t, DictionaryAttr> operationOf;
+  for (Attribute raw : operations) {
+    atlasProofRecord(AtlasProofKind::Buffer);
+    auto op = dyn_cast<DictionaryAttr>(raw);
+    auto id = op ? contractI32(op, "id") : std::nullopt;
+    if (!id) return;
+    operationOf[*id] = op;
+  }
+  std::map<int32_t, SmallVector<DictionaryAttr>> incoming;
+  for (Attribute raw : edges) {
+    atlasProofRecord(AtlasProofKind::Buffer);
+    auto edge = dyn_cast<DictionaryAttr>(raw);
+    auto target = edge ? contractI32(edge, "to") : std::nullopt;
+    if (!target) return;
+    incoming[*target].push_back(edge);
+  }
+  for (Attribute raw : blocks) {
+    atlasProofRecord(AtlasProofKind::Buffer);
+    auto header = dyn_cast<DictionaryAttr>(raw);
+    auto headerID = header ? contractI32(header, "id") : std::nullopt;
+    auto condition = header ? contractI32(header, "condition") : std::nullopt;
+    if (!headerID || !condition) continue;
+    auto comparison = record(values, *condition);
+    auto args = contractI32Array(header, "args"), exits = contractI32Array(header, "edges");
+    if (!comparison || contractI32(comparison, "block") != headerID ||
+        contractString(comparison, "def") != "arith.cmpi" ||
+        contractI32(comparison, "predicate") != 6 || exits.size() != 2) continue; // ult
+    auto operands = contractI32Array(comparison, "operands");
+    if (operands.size() != 2) continue;
+    auto count = constant(operands[1]);
+    auto counter = llvm::find(args, operands[0]);
+    if (!count || !*count || counter == args.end()) continue;
+    unsigned counterIndex = counter - args.begin();
+    auto bodyEdge = record(edges, exits[0]), exitEdge = record(edges, exits[1]);
+    auto bodyID = bodyEdge ? contractI32(bodyEdge, "to") : std::nullopt;
+    auto exitID = exitEdge ? contractI32(exitEdge, "to") : std::nullopt;
+    auto body = bodyID ? record(blocks, *bodyID) : DictionaryAttr{};
+    if (!body || !exitID || incoming[*bodyID].size() != 1 || incoming[*exitID].size() != 1 ||
+        !contractI32Array(body, "args").empty()) continue;
+    auto backedges = contractI32Array(body, "edges");
+    auto backedge = backedges.size() == 1 ? record(edges, backedges[0]) : DictionaryAttr{};
+    if (!backedge || contractI32(backedge, "to") != headerID) continue;
+    auto back = contractI32Array(backedge, "incoming");
+    auto &predecessors = incoming[*headerID];
+    if (predecessors.size() != 2 || back.size() != args.size() ||
+        !increment(back[counterIndex], args[counterIndex], 1, *bodyID)) continue;
+    DictionaryAttr seedEdge;
+    for (auto edge : predecessors)
+      if (contractI32(edge, "from") != bodyID) seedEdge = edge;
+    if (!seedEdge) continue;
+    auto seeds = contractI32Array(seedEdge, "incoming");
+    if (seeds.size() != args.size() || constant(seeds[counterIndex]) != 0) continue;
+    // The header is pure, and the body contains only scalar arithmetic plus
+    // a contiguous group of indexed word stores to one slot.
+    bool valid = true;
+    for (int32_t id : contractI32Array(header, "operations")) {
+      auto found = operationOf.find(id);
+      if (found == operationOf.end() || !contractString(found->second, "name").starts_with("arith.")) valid = false;
+    }
+    int32_t slot = -1, pointer = -1;
+    uint32_t slotWords = 0;
+    std::map<uint32_t, int32_t> stores;
+    for (int32_t id : contractI32Array(body, "operations")) {
+      auto found = operationOf.find(id);
+      if (found == operationOf.end()) { valid = false; break; }
+      auto op = found->second;
+      if (contractString(op, "name").starts_with("arith.")) continue;
+      auto access = contractI32Array(op, "operands"), commands = contractI32Array(op, "tile_commands");
+      auto word = contractI32(op, "slot_word"), words = contractI32(op, "slot_words");
+      auto offset = contractI32(op, "byte_offset");
+      if (contractString(op, "name") != "atlas.virtual_slot_store" ||
+          contractString(op, "kind") != "sw" || access.size() != 2 || commands.size() != 1 ||
+          !word || !words || *words <= 0 || !offset || *offset < 0 || *offset % 4 ||
+          !d.indexedStores.count(commands[0])) { valid = false; break; }
+      if (slot < 0) { slot = *word; slotWords = *words; pointer = access[1]; }
+      if (slot != *word || slotWords != uint32_t(*words) || pointer != access[1] ||
+          !stores.emplace(uint32_t(*offset), commands[0]).second) { valid = false; break; }
+    }
+    auto pointerArg = llvm::find(args, pointer);
+    if (!valid || stores.empty() || pointerArg == args.end()) continue;
+    unsigned pointerIndex = pointerArg - args.begin();
+    uint64_t stride = stores.size(), bytes = uint64_t(*count) * stride * 4;
+    if (stride > UINT32_MAX || bytes > uint64_t(slotWords) * 4 ||
+        constant(seeds[pointerIndex]) != 0 || !increment(back[pointerIndex], pointer, stride, *bodyID)) continue;
+    uint32_t expected = 0;
+    for (auto [offset, command] : stores) {
+      if (offset != expected) valid = false;
+      expected += 4;
+    }
+    if (!valid) continue;
+    for (auto [offset, command] : stores)
+      d.scalarSlotLoads.erase(command);
+    d.initializations.push_back({*exitID, uint32_t(slot) * 4, uint32_t(bytes)});
+  }
+}
 
 // Relayout word 8r+4h+l holds raw word 128h+4r+l, the selected PACK layout as
 // lowerPack describes it; this checks lowering against its own description,
@@ -284,6 +413,7 @@ FailureOr<Derived> derive(DictionaryAttr cfg, ArrayAttr records) {
       } else return failure();
     }
   }
+  deriveCountedInitializations(cfg, d);
   return d;
 }
 
@@ -310,8 +440,8 @@ struct Word {
 class InitializedRanges {
   std::map<uint32_t, uint32_t> ranges;
 public:
-  void insert(uint32_t byte) {
-    uint32_t first = byte, end = byte + 1;
+  void insert(uint32_t byte) { insert(byte, byte + 1); }
+  void insert(uint32_t first, uint32_t end) {
     auto next = ranges.lower_bound(first);
     if (next != ranges.begin() && std::prev(next)->second >= first) next = std::prev(next);
     while (next != ranges.end() && next->first <= end) {
@@ -625,6 +755,10 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedBufferContract(const AtlasVerific
     return success();
   };
   auto run = [&](size_t block, State &state, bool diagnose) -> LogicalResult {
+    auto sourceBlock = contractTag(s.ops[s.starts[block]], kAtlasTagCFGBlock);
+    for (const auto &initialization : derived->initializations)
+      if (sourceBlock == initialization.block)
+        state.initialized.insert(initialization.first, initialization.first + initialization.bytes);
     if (auto helper = helpers.find(block); helper != helpers.end()) return copyLoop(helper->second, state, diagnose);
     for (size_t pc = s.starts[block]; pc < s.blockEnd(block); ++pc)
       if (failed(step(pc, state, diagnose, nullptr))) return failure();

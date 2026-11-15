@@ -133,6 +133,24 @@ def _ragged_transpose_words(rows, columns=32):
         yield destination, tuple((*key, mask) for key, mask in parts.items())
 
 
+def _ragged_transpose_tile_words(rows, tile_rows):
+    """Splice four columns of one transposed tile into a dense slab."""
+    for column in range(4):
+        first, end = column * rows, column * rows + tile_rows
+        for destination in range(first // 4 * 4, (end + 3) // 4 * 4, 4):
+            parts, written = {}, 0
+            for byte in range(4):
+                row = destination + byte - first
+                if not 0 <= row < tile_rows:
+                    continue
+                offset = column * 32 + row
+                key = (offset // 4 * 4, (byte - offset % 4) * 8)
+                mask = 255 << (byte * 8)
+                parts[key] = parts.get(key, 0) | mask
+                written |= mask
+            yield destination, tuple((*key, mask) for key, mask in parts.items()), written
+
+
 def prepare_source(source, *, io_memory_base=None):
     """Plan byte transport in an explicitly selected device I/O window."""
     io_memory_base = selected_io_base() if io_memory_base is None else io_memory_base
@@ -204,11 +222,26 @@ def prepare_source(source, *, io_memory_base=None):
                 and shape[-2] % 32 == 0
                 and mapping.coefficients == tuple(tuple(int(j == (i if i < len(shape)-2 else 2*len(shape)-3-i))
                                                      for j in range(len(shape))) for i in range(len(shape)))):
-            # Limit unrolled initialization to 1304 logical slab words.
-            # The counted pack body has one eighth as many logical words;
-            # larger slabs keep the host layout route.
-            if 8 * shape[-1] > 1304:
-                raise ValueError("ragged XLU layout exceeds default proof work budget")
+            # Reject impossible images before constructing their source. Every
+            # assembled row needs eight word loads and stores; the retained
+            # four-column pack needs at least one load and store per word.
+            # A dense 32-byte source row bypasses assembly for complete tiles.
+            # These are necessary bounds only: admission still requires the
+            # completed image and dynamic instruction proofs below.
+            from merlin.semantic_compiler.codegen import current_codegen_options
+            from .limits import functional_instruction_limit
+            rows, columns = shape[-1], shape[-2]
+            assembled_rows = rows % 32 if columns == 32 else rows
+            assembly_words = 16 * assembled_rows
+            retained_rows = min(rows, 32) + (rows % 32 if rows > 32 else 0)
+            retained_assembly = (rows % 32) if columns == 32 else retained_rows
+            image_words = 16 * retained_assembly + 2 * retained_rows + 8 + 16
+            image_bytes = current_codegen_options().program_size_limit_bytes
+            word_limit = 32768 if image_bytes is None else image_bytes // 4
+            slabs = prod(shape[:-2]) * (columns // 32)
+            work = 8 * rows + slabs * (assembly_words + 32 * rows)
+            if image_words > word_limit or work > functional_instruction_limit():
+                raise ValueError("ragged XLU layout exceeds selected image or instruction budget")
             # Whole prefixes remain inside this device image. Each iteration
             # owns 32 dense output rows, hence both DMA pointer strides align.
             segments.append(dict(input=0, mode="ragged_xlu", counts=[*shape[:-2], shape[-2] // 32],
@@ -312,7 +345,6 @@ def virtual_program(plan, *, size_limit=None):
     source_slot, output_slot, transpose_slot = slot(), slot(), slot()
     ragged_rows = max((segment["output_row_bytes"] for segment in plan.segments
                        if segment["mode"] == "ragged_xlu"), default=0)
-    ragged_slots = [slot() for _ in range((ragged_rows + 31) // 32)]
     slab_words = (8 * ragged_rows + 255) // 256 * 256
     slab_slot = slot("raw", slab_words) if ragged_rows else None
 
@@ -404,26 +436,46 @@ def virtual_program(plan, *, size_limit=None):
 
     def ragged_transport(sp, dp, segment):
         rows = segment["output_row_bytes"]
-        for first in range(0, rows, 32):
-            value = xlu_tile(add(sp, first * segment["source_row_bytes"]),
-                             segment["source_row_bytes"], min(32, rows - first))
-            save(value, ragged_slots[first // 32])
-        # Four output rows always occupy a whole number of words. Their byte
-        # packing repeats eight times, advancing four columns in every cache.
-        # A separate slab preserves aligned DMA even when rows is odd.
-        def pack_rows(source_index, destination_index):
-            for destination, parts in _ragged_transpose_words(rows, 4):
-                packed = None
-                for index, offset, shift, mask in parts:
-                    word = scalar_word(ragged_slots[index], offset, source_index)
-                    if shift:
-                        word = binary("shli" if shift > 0 else "shrui", word, constant(abs(shift)))
-                    shifted_mask = ((0xffffffff << shift) & 0xffffffff) if shift >= 0 else (0xffffffff >> -shift)
-                    if shifted_mask != mask:
-                        word = binary("andi", word, constant(mask))
-                    packed = word if packed is None else binary("ori", packed, word)
-                put_word(packed, destination, slab_slot, destination_index)
-        repeat(8, constant(0), constant(0), 32, rows, pack_rows)
+
+        def tile_transport(source, destination_index, tile_rows):
+            value = xlu_tile(source, segment["source_row_bytes"], tile_rows)
+            save(value, transpose_slot)
+
+            def pack_rows(source_index, target_index):
+                cached_words = {}
+                for destination, parts, written in _ragged_transpose_tile_words(rows, tile_rows):
+                    packed = None
+                    for offset, shift, mask in parts:
+                        if offset not in cached_words:
+                            cached_words[offset] = scalar_word(transpose_slot, offset, source_index)
+                        word = cached_words[offset]
+                        if shift:
+                            word = binary("shli" if shift > 0 else "shrui", word, constant(abs(shift)))
+                        shifted_mask = ((0xffffffff << shift) & 0xffffffff) if shift >= 0 else (0xffffffff >> -shift)
+                        if shifted_mask != mask:
+                            word = binary("andi", word, constant(mask))
+                        packed = word if packed is None else binary("ori", packed, word)
+                    # With at least three rows remaining, a full tile's
+                    # trailing word cannot reach the next column. Its upper
+                    # bytes are supplied by a later tile of the same column.
+                    preserve = written != 0xffffffff and (
+                        tile_rows != 32 or rows % 32 < 3 or not written & 1)
+                    if preserve:
+                        previous = scalar_word(slab_slot, destination, target_index)
+                        previous = binary("andi", previous, constant(0xffffffff ^ written))
+                        packed = binary("ori", previous, packed)
+                    put_word(packed, destination, slab_slot, target_index)
+            # Four columns occupy R words; their tile rows advance by 32 words
+            # in the transposed cache. Tile iterations advance eight slab words.
+            repeat(8, constant(0), destination_index, 32, rows, pack_rows)
+
+        full_tiles, tail = divmod(rows, 32)
+        if full_tiles:
+            repeat(full_tiles, sp, constant(0), 32 * segment["source_row_bytes"], 8,
+                   lambda source, destination: tile_transport(source, destination, 32))
+        if tail:
+            tile_transport(add(sp, full_tiles * 32 * segment["source_row_bytes"]),
+                           constant(full_tiles * 8), tail)
 
         def publish(source_index, destination):
             for word in range(8):
@@ -461,8 +513,10 @@ def virtual_program(plan, *, size_limit=None):
         # Indexed writes preserve an initialized footprint under the buffer
         # contract. Establish it once before any counted prefix traversal.
         zero = constant(0)
-        for offset in range(0, 32 * ragged_rows, 4):
-            put_word(zero, offset, slab_slot)
+        def initialize(index, unused):
+            for word in range(8):
+                put_word(zero, word * 4, slab_slot, index if ragged_rows > 1 else None)
+        repeat(ragged_rows, zero, zero, 8, 0, initialize)
 
     for segment in plan.segments:
         source_base = plan.input_addresses[segment["input"]] + segment["source_offset"]
