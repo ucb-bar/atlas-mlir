@@ -754,10 +754,13 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedBufferContract(const AtlasVerific
     state = State();
     return success();
   };
+  std::map<int32_t, size_t> sourceEntry;
+  for (size_t pc = 0; pc < s.ops.size(); ++pc)
+    if (auto source = contractTag(s.ops[pc], kAtlasTagCFGBlock)) sourceEntry.emplace(*source, pc);
   auto run = [&](size_t block, State &state, bool diagnose) -> LogicalResult {
     auto sourceBlock = contractTag(s.ops[s.starts[block]], kAtlasTagCFGBlock);
     for (const auto &initialization : derived->initializations)
-      if (sourceBlock == initialization.block)
+      if (sourceBlock == initialization.block && sourceEntry.at(*sourceBlock) == s.starts[block])
         state.initialized.insert(initialization.first, initialization.first + initialization.bytes);
     if (auto helper = helpers.find(block); helper != helpers.end()) return copyLoop(helper->second, state, diagnose);
     for (size_t pc = s.starts[block]; pc < s.blockEnd(block); ++pc)

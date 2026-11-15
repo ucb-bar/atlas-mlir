@@ -216,6 +216,18 @@ class QuantizerApplicationScheduleTest(unittest.TestCase):
                     self.assertEqual(len(prepare_plan(source).launches), 1)
 
     @unittest.skipUnless((BIN / "atlas-opt").is_file(), "select built Atlas tools")
+    def test_full_tile_head32768_admits_under_default_bound(self):
+        from atlas_mlir_native.activation_quantize_device import prepare_plan as body_plan, prove_plan
+        source = dynamic_source(shape=(1, 1, 32768), reduce="head", rule="ref")
+        for pipeline in ("mandatory", "optimized"):
+            with self.subTest(pipeline=pipeline), patch.dict(os.environ, ATLAS_NATIVE_PIPELINE=pipeline):
+                plan = prepare_plan(source)
+                self.assertEqual(len(plan.launches), 1)
+                bound = prove_plan(body_plan(plan.bodies[0]))[3]
+                self.assertTrue(bound["admitted"])
+                self.assertLessEqual(bound["instruction_bound"], 1000000)
+
+    @unittest.skipUnless((BIN / "atlas-opt").is_file(), "select built Atlas tools")
     def test_large_irregular_groups_use_actual_bound_and_selected_limit(self):
         from types import SimpleNamespace
 

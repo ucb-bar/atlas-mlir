@@ -242,6 +242,16 @@ def prepare_source(source, *, io_memory_base=None):
             work = 8 * rows + slabs * (assembly_words + 32 * rows)
             if image_words > word_limit or work > functional_instruction_limit():
                 raise ValueError("ragged XLU layout exceeds selected image or instruction budget")
+            # Indexed scalar accesses retain their constant byte offset in a
+            # signed 12-bit immediate. The four-column template reaches the
+            # last word of column three in its complete or partial tile.
+            max_offset = (3 * rows + min(rows, 32) - 1) // 4 * 4
+            # The native spill bank has 2^16 words, after eight BF16 DMA
+            # staging tiles. Reserve the three FP8 transport slots as well.
+            slab_words = (8 * rows + 255) // 256 * 256
+            spill_words = (1 << 16) - 8 * (TILE_BYTES // 4)
+            if max_offset > (1 << (12 - 1)) - 1 or slab_words + 3 * 256 > spill_words:
+                raise ValueError("ragged XLU layout exceeds indexed slot encoding or scratch extent")
             # Whole prefixes remain inside this device image. Each iteration
             # owns 32 dense output rows, hence both DMA pointer strides align.
             segments.append(dict(input=0, mode="ragged_xlu", counts=[*shape[:-2], shape[-2] // 32],

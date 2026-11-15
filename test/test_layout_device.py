@@ -157,7 +157,7 @@ class LayoutDeviceRecognitionTest(unittest.TestCase):
     def test_ragged_xlu_image_does_not_grow_with_tile_count(self):
         counts = []
         with codegen_options(CodegenOptions(io_memory_bytes=67108864)):
-            for rows in (65, 1025):
+            for rows in (65, 513):
                 source = request("transpose", ((rows, 64),), (64, rows), dtype="i8",
                     mapping=IndexMap(2, ((0,1),(1,0)), (0,0)))
                 text = virtual_program(prepare_source(source))
@@ -369,6 +369,30 @@ class LayoutDeviceCompilationTest(unittest.TestCase):
                     with self.assertRaises(RuntimeError):
                         _run([str(BIN / "atlas-opt"), *NATIVE_CHECKS, "-"], input_text=altered)
 
+    def test_large_ragged_offsets_keep_generated_host_route(self):
+        from atlas_mlir_native.application import AtlasApplicationAdapter
+        from merlin.compile.layout_c import emit_layout_c
+        for heads, rows, columns in ((1, 673, 64), (1, 700, 64),
+                                     (2, 1000, 64), (1, 9000, 32)):
+            source = request("transpose", ((heads, rows, columns),),
+                (heads, columns, rows), dtype="i8",
+                mapping=IndexMap(3, ((1,0,0),(0,0,1),(0,1,0)), (0,0,0)))
+            with self.subTest(shape=source.nodes[0].type.shape), codegen_options(
+                    CodegenOptions(io_memory_bytes=67108864)):
+                self.assertFalse(AtlasApplicationAdapter._supports_device_source(
+                    source, source.nodes[-1], "layout_device"))
+                record, files = emit_layout_c(source, "large_transpose")
+                self.assertEqual(record["source_request_digest"], source.digest())
+                if shutil.which("cc"):
+                    with tempfile.TemporaryDirectory(prefix="atlas-large-host-layout-") as directory:
+                        for name, payload in files.items():
+                            path = Path(directory) / name
+                            path.parent.mkdir(parents=True, exist_ok=True)
+                            path.write_bytes(payload.encode() if isinstance(payload, str) else payload)
+                        subprocess.run(["cc", "-std=c11", "-Wall", "-Wextra", "-Werror",
+                            "-fsyntax-only", str(Path(directory) / "large_transpose.c"),
+                            "-I", directory], check=True, capture_output=True)
+
     def test_counted_slab_initialization_requires_complete_coverage(self):
         source = request("transpose", ((65, 64),), (64, 65), dtype="i8",
             mapping=IndexMap(2, ((0,1),(1,0)), (0,0)))
@@ -379,11 +403,13 @@ class LayoutDeviceCompilationTest(unittest.TestCase):
             ("arith.constant 65 : i32", "arith.constant 64 : i32"),
             ("arith.constant 8 : i32", "arith.constant 9 : i32"),
             ('kind = "sw", byte_offset = 28 : i32', 'kind = "sw", byte_offset = 24 : i32'),
+            ('kind = "sw", byte_offset = 28 : i32', 'kind = "sw", byte_offset = 32 : i32'),
         )
         for old, new in mutations:
             with self.subTest(mutation=new):
                 self.assertIn(old, virtual)
-                with self.assertRaises(NativeCompilationError):
+                with self.assertRaisesRegex(NativeCompilationError,
+                        "scalar slot load reads an uninitialized byte"):
                     _run([str(BIN / "atlas-opt"), "--atlas-compile", "-"],
                          input_text=virtual.replace(old, new, 1))
 
