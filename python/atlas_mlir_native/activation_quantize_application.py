@@ -17,10 +17,11 @@ from merlin.semantic_compiler.model import KernelRequest
 from merlin.semantic_compiler.target_binding import verify_native_publication
 
 from . import vector_quantize as device
-from .binding import TARGET_IDENTITY, TILE_BYTES, dram_slots
+from .binding import TARGET_IDENTITY, TILE_BYTES, dram_slots, _native_pipeline
 from .limits import functional_instruction_limit
 
 STATIC_CHUNK_ELEMENTS = 2048
+STATIC_WHOLE_BODY_MAX_ELEMENTS = 1 << 19
 # A static body has no amax or exceptional-lane scan. Use a conservative
 # envelope for the smallest supported (32-lane) tile, then independently prove
 # the actual generated machine bound during compilation and C export.
@@ -64,6 +65,8 @@ class QuantizerSchedule:
     bodies: tuple[KernelRequest, ...]
     launches: tuple[dict, ...]
     instruction_limit: int
+    pipeline: str
+    static_body_capacity: int
 
     @property
     def dynamic_groups_per_launch(self):
@@ -88,8 +91,10 @@ class QuantizerSchedule:
                     input_bytes=self.count * self.width, code_bytes=self.count,
                     exponent_bytes=prod(self.exponents.type.shape) * 4,
                     static_chunk_elements=STATIC_CHUNK_ELEMENTS,
-                    static_whole_body_max_elements=_static_body_capacity(self.instruction_limit),
-                    static_instruction_envelope="50 * ceil(elements / 32) + 128",
+                    static_whole_body_max_elements=self.static_body_capacity,
+                    **(dict(lowering_pipeline=self.pipeline,
+                            static_instruction_envelope="50 * ceil(elements / 32) + 128")
+                       if self.pipeline == "optimized" else {}),
                     max_dynamic_group_elements=self.max_dynamic_group_elements,
                     dynamic_groups_per_launch=self.dynamic_groups_per_launch,
                     dynamic_group_worst_instructions=DYNAMIC_GROUP_WORST_INSTRUCTIONS,
@@ -116,10 +121,21 @@ def _body(source, x, codes, exponents, attrs, shape):
     return body
 
 
-def prepare_plan(source, *, limits=None):
+def prepare_plan(source, *, limits=None, _pipeline=None, _static_capacity=None):
     from . import dynamic_quantize, static_quantize
 
     instruction_limit = functional_instruction_limit(limits)
+    pipeline = _native_pipeline() if _pipeline is None else _pipeline
+    if pipeline not in ("mandatory", "optimized"):
+        raise ValueError("unknown quantizer scheduling pipeline")
+    static_capacity = (_static_body_capacity(instruction_limit) if pipeline == "optimized"
+                       else STATIC_WHOLE_BODY_MAX_ELEMENTS)
+    if _static_capacity is not None:
+        if (type(_static_capacity) is not int or _static_capacity < 0
+                or _static_capacity % 32 or _static_capacity > static_capacity
+                or pipeline == "mandatory" and _static_capacity != static_capacity):
+            raise ValueError("saved quantizer static capacity exceeds selected admission")
+        static_capacity = _static_capacity
     max_group_elements = 4096 * (instruction_limit // DYNAMIC_GROUP_WORST_INSTRUCTIONS)
     code = next((node for node in source.nodes if node.op == "atlas.quantize_act.codes"), None)
     if code is None:
@@ -143,14 +159,17 @@ def prepare_plan(source, *, limits=None):
     spans = []
     if mode == "static":
         chunk = STATIC_CHUNK_ELEMENTS
-        if x.type.dtype == 'bf16' and count % 32 == 0:
-            capacity = _static_body_capacity(instruction_limit)
-            if capacity < 32:
+        if pipeline != "optimized":
+            chunk = (count if x.type.dtype == 'bf16' and count % 32 == 0
+                     and count <= STATIC_WHOLE_BODY_MAX_ELEMENTS
+                     and count * 3 + 32 <= dram_slots() * TILE_BYTES else STATIC_CHUNK_ELEMENTS)
+        elif x.type.dtype == 'bf16' and count % 32 == 0:
+            if static_capacity < 32:
                 raise ValueError("selected execution budget or I/O window cannot fit a static quantizer tile")
             # A large tensor uses bounded counted bodies, not thousands of
             # tiny fallback launches. Full-tile chunks also avoid making every
             # iteration use a prefix tile merely because the final tail is short.
-            chunk = count if count <= capacity else (capacity // 1024 * 1024 or capacity)
+            chunk = count if count <= static_capacity else (static_capacity // 1024 * 1024 or static_capacity)
         for first in range(0, count, chunk):
             length = min(chunk, count - first)
             spans.append((first, length, 0, 1, (length,)))
@@ -200,7 +219,8 @@ def prepare_plan(source, *, limits=None):
                              input_bytes=length * (2 if x.type.dtype == "bf16" else 4),
                              code_offset_bytes=first, code_bytes=length,
                              exponent_offset_bytes=exp_first * 4, exponent_bytes=exp_count * 4))
-    return QuantizerSchedule(source, x, codes, exponents, attrs, tuple(bodies), tuple(launches), instruction_limit)
+    return QuantizerSchedule(source, x, codes, exponents, attrs, tuple(bodies), tuple(launches),
+                             instruction_limit, pipeline, static_capacity)
 
 
 def compile_source(snapshot, region, *, target_source, destination, limits):
@@ -296,11 +316,13 @@ def prepare_c_package(region, compiled, name, *, target_source, runtime_linkage=
     from types import SimpleNamespace
 
     compiled = Path(compiled)
-    # Reconstruct the exact scheduling budget, including a stricter target-API
-    # limit. The resolver also prevents replay above the current invocation cap.
+    # Replay the captured partition policy and capacity, independently of the
+    # current pipeline selection. The resolver still enforces the invocation cap.
     saved = json.loads((compiled / "quantizer-schedule.json").read_text())
     plan = prepare_plan(region, limits=SimpleNamespace(
-        functional_instruction_limit=saved["functional_instruction_limit"]))
+        functional_instruction_limit=saved["functional_instruction_limit"]),
+        _pipeline=saved.get("lowering_pipeline", "mandatory"),
+        _static_capacity=saved["static_whole_body_max_elements"])
     manifest = json.loads((compiled / "quantizer-manifest.json").read_text())
     _verify_publication(compiled, manifest, plan)
     if (json.loads((compiled / "source-request.json").read_text()) != region.record()

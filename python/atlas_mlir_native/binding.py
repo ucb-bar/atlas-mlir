@@ -262,7 +262,7 @@ def check_io_memory_manifest(manifest):
 
 NATIVE_PIPELINES = {
     "mandatory": ("--atlas-compile-unscheduled",),
-    "optimized": ("--atlas-compile",),
+    "optimized": ("--atlas-compile=enhanced-virtual-scheduling=true",),
 }
 NATIVE_CHECKS = ("--verify-atlas-generated-schedule", "--verify-atlas-machine-stream")
 
@@ -955,17 +955,43 @@ def _tool_digest(path, device, inode, size, modified, changed):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
+def _with_program_size_limit(arguments, budget):
+    """Add the selected limit once, preserving all existing option text."""
+    if budget is None:
+        return list(arguments)
+    import shlex
+
+    budgeted_passes = ("--lower-atlas-virtual-to-machine", "--atlas-compile",
+                       "--atlas-compile-unscheduled", "--atlas-compile-lower")
+    result = []
+    for argument in arguments:
+        name, separator, options = argument.partition("=")
+        if name not in budgeted_passes:
+            result.append(argument)
+            continue
+        # Inspect only the dedicated budget option. Never reconstruct other
+        # options: quoted report paths and their original spelling stay intact.
+        try:
+            explicit = [option.partition("=")[2] for option in shlex.split(options)
+                        if option.startswith("program-size-limit-bytes=")]
+        except ValueError as error:
+            raise NativeCompilationError("compile_error", "invalid pass option quoting: " + str(error)) from error
+        if explicit:
+            if len(explicit) != 1 or explicit[0] != str(budget):
+                raise NativeCompilationError(
+                    "compile_error", "explicit program-size-limit-bytes must occur once and equal selected budget " + str(budget))
+            result.append(argument)
+        else:
+            result.append(argument + (" " if separator else "=")
+                          + "program-size-limit-bytes=" + str(budget))
+    return result
+
+
 def _run(command: list[str], *, input_text: str, diagnostics: list[str] | None = None) -> str:
     from merlin.semantic_compiler.codegen import current_codegen_options
 
-    budget = current_codegen_options().program_size_limit_bytes
-    if budget is not None:
-        command = [
-            f"{arg}=program-size-limit-bytes={budget}"
-            if arg in ("--lower-atlas-virtual-to-machine", "--atlas-compile", "--atlas-compile-unscheduled", "--atlas-compile-lower")
-            else arg
-            for arg in command
-        ]
+    command = _with_program_size_limit(
+        command, current_codegen_options().program_size_limit_bytes)
     def invoke():
         try:
             result = subprocess.run(command, input=input_text, text=True, capture_output=True, timeout=30, check=False)

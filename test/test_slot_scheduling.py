@@ -62,7 +62,7 @@ def test_every_random_order_retains_slot_hazards_but_allows_independent_dma():
                       if row.lstrip().startswith((f'%{key} =', f'%{key}, '))) for key in labels}
     moved = False
     for options in ((), *((f'random-seed={seed}',) for seed in range(32))):
-        order = {line: index for index, line in enumerate(scheduled_lines(source, *options))}
+        order = {line: index for index, line in enumerate(scheduled_lines(source, "enhanced-virtual-scheduling=true", *options))}
         at = {key: order[line] for key, line in lines.items()}
         for before, after in (('save_a', 'read_a'), ('save_a', 'copied'), ('read_a', 'overwrite_a'),
                               ('copied', 'overwrite_a'), ('copied', 'read_c'),
@@ -73,7 +73,8 @@ def test_every_random_order_retains_slot_hazards_but_allows_independent_dma():
     assert moved
     # The ordinary latency/pressure heuristic, not just the random audit,
     # should expose both loads before the first scratch save.
-    positions = {line: i for i, line in enumerate(scheduled_lines(source))}
+    positions = {line: i for i, line in enumerate(
+        scheduled_lines(source, "enhanced-virtual-scheduling=true"))}
     assert positions[lines['load_y']] < positions[lines['save_a']]
 
 
@@ -103,7 +104,8 @@ def test_cache_priority_reaches_first_output_through_mutable_slots():
     lines = {key: next(i for i, row in enumerate(source.splitlines(), 1)
                       if row.lstrip().startswith('%' + key + ','))
              for key in ('load_a', 'load_b')}
-    order = {line: index for index, line in enumerate(scheduled_lines(source))}
+    order = {line: index for index, line in enumerate(
+        scheduled_lines(source, "enhanced-virtual-scheduling=true"))}
     # Both loads are independent, but B is needed for the first output. The
     # original SSA-only priority could not follow save/restore through B's slot.
     assert order[lines['load_b']] < order[lines['load_a']]
@@ -124,7 +126,8 @@ def test_rust_random_schedules_preserve_whole_memory(tmp_path):
     config = tmp_path / 'config.json'
     config.write_text(json.dumps({'compute': 'cpu', 'dram_base': DRAM_BASE, 'dram_size': len(initial)}))
     for seed in (None, *range(8)):
-        source = schedule(fixture(), *((f'random-seed={seed}',) if seed is not None else ()))
+        source = schedule(fixture(), "enhanced-virtual-scheduling=true",
+                          *((f'random-seed={seed}',) if seed is not None else ()))
         assert source.returncode == 0, source.stderr
         machine = run('atlas-opt', source.stdout, *NATIVE_PIPELINES['mandatory'])
         assert machine.returncode == 0, machine.stderr
@@ -160,11 +163,11 @@ def test_bounded_operand_panels_keep_address_witnesses_and_restores_in_registers
         plan = prepare_source(source_request(m=64, n=65, k=k, batch=()))
         layout = execution_layout(plan, operand_reuse='paired-cache')
         original = virtual_source(plan, layout)
-        scheduled = schedule(original)
+        scheduled = schedule(original, "enhanced-virtual-scheduling=true")
         assert scheduled.returncode == 0, scheduled.stderr
         programs = []
         for index, virtual in enumerate((original, scheduled.stdout)):
-            machine, physical = compile_fixture(virtual)
+            machine, physical = compile_fixture(virtual, pipeline="optimized")
             assert instruction_bound(virtual, machine, physical)['admitted']
             program = tmp_path / f'{index}.bin'
             program.write_bytes(b''.join(row['word_u32'].to_bytes(4, 'little') for row in physical['instructions']))

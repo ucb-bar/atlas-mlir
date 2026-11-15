@@ -75,7 +75,7 @@ bool isImplicitMemory(Operation *op) {
 // other work can move across them. DMA ordering and slot limits are edges of
 // their own (buildGraph, SlotPool). An operation missing from the table is a
 // full barrier.
-Effects effectsOf(Operation *op) {
+Effects effectsOf(Operation *op, bool enhancedVirtualScheduling) {
   Effects e;
   e.reads = bit(kBarrier);
   if (isa<VirtualPackFP8Op, VirtualPackRoundTripBF16Op, VirtualRawPackFP8Op>(op))
@@ -96,10 +96,11 @@ Effects effectsOf(Operation *op) {
                 VirtualVPUUnaryOp, VirtualVPUBinaryOp, VirtualVPUReduceOp,
                 VirtualVPUSplatOp, VirtualXLUTransposeOp,
                 VirtualScaleConstantOp, VirtualSlotOp,
-                VirtualSaveOp, VirtualRestoreOp, VirtualSlotCopyOp,
                 arith::ConstantOp, arith::AddIOp, arith::CmpIOp,
                 arith::SubIOp, arith::AndIOp, arith::OrIOp, arith::XOrIOp,
-                arith::ShLIOp, arith::ShRUIOp, arith::ExtUIOp>(op))
+                arith::ShLIOp, arith::ShRUIOp, arith::ExtUIOp>(op) &&
+           !(enhancedVirtualScheduling &&
+             isa<VirtualSaveOp, VirtualRestoreOp, VirtualSlotCopyOp>(op)))
     e.writes = bit(kNumPseudo) - 1;
   return e;
 }
@@ -159,7 +160,7 @@ SmallVector<Operation *> freeOperations(Block &block) {
 
 // Fails, with an error, on a block whose transfers or MXU chains break the
 // rules the verifier enforces, since no order of it could be checked.
-FailureOr<BlockGraph> buildGraph(Block &block) {
+FailureOr<BlockGraph> buildGraph(Block &block, bool enhancedVirtualScheduling) {
   BlockGraph g;
   g.nodes = freeOperations(block);
   unsigned n = g.nodes.size();
@@ -190,7 +191,7 @@ FailureOr<BlockGraph> buildGraph(Block &block) {
   // does, orders after its last writer and every reader since.
   std::vector<Effects> effects;
   for (Operation *op : g.nodes)
-    effects.push_back(effectsOf(op));
+    effects.push_back(effectsOf(op, enhancedVirtualScheduling));
   for (unsigned r = 0; r < kNumPseudo; ++r) {
     std::optional<unsigned> writer;
     SmallVector<unsigned> readers;
@@ -209,39 +210,41 @@ FailureOr<BlockGraph> buildGraph(Block &block) {
       }
     }
   }
-  // Mutable VMEM slots are separate logical allocations for the entire
-  // invocation. The input verifier rejects overlapping assigned slots, and
-  // placement keeps unassigned slots disjoint from each other and DMA staging.
-  // Preserve RAW, WAR and WAW order on each slot, including both sides of a
-  // copy. Independent slot traffic need not serialize DMA or MXU work.
-  // Scalar indexed accesses remain full barriers, but participate here too so
-  // their dependencies stay explicit if their scheduling policy later changes.
-  struct SlotUses {
-    std::optional<unsigned> writer;
-    SmallVector<unsigned> readers;
-  };
-  llvm::DenseMap<Value, SlotUses> slots;
-  auto accessSlot = [&](Value slot, unsigned node, bool write) {
-    SlotUses &uses = slots[slot];
-    if (uses.writer)
-      edge(*uses.writer, node);
-    if (write) {
-      for (unsigned reader : uses.readers)
-        edge(reader, node);
-      uses.readers.clear();
-      uses.writer = node;
-    } else {
-      uses.readers.push_back(node);
+  if (enhancedVirtualScheduling) {
+    // Mutable VMEM slots are separate logical allocations for the entire
+    // invocation. The input verifier rejects overlapping assigned slots, and
+    // placement keeps unassigned slots disjoint from each other and DMA staging.
+    // Preserve RAW, WAR and WAW order on each slot, including both sides of a
+    // copy. Independent slot traffic need not serialize DMA or MXU work.
+    // Scalar indexed accesses remain full barriers, but participate here too so
+    // their dependencies stay explicit if their scheduling policy later changes.
+    struct SlotUses {
+      std::optional<unsigned> writer;
+      SmallVector<unsigned> readers;
+    };
+    llvm::DenseMap<Value, SlotUses> slots;
+    auto accessSlot = [&](Value slot, unsigned node, bool write) {
+      SlotUses &uses = slots[slot];
+      if (uses.writer)
+        edge(*uses.writer, node);
+      if (write) {
+        for (unsigned reader : uses.readers)
+          edge(reader, node);
+        uses.readers.clear();
+        uses.writer = node;
+      } else {
+        uses.readers.push_back(node);
+      }
+    };
+    for (unsigned i = 0; i < n; ++i) {
+      Operation *op = g.nodes[i];
+      if (!isAtlasSlotAccess(op))
+        continue;
+      accessSlot(atlasAccessedSlot(op), i,
+                 isa<VirtualSaveOp, VirtualSlotStoreOp>(op));
+      if (auto copy = dyn_cast<VirtualSlotCopyOp>(op))
+        accessSlot(copy.getDst(), i, true);
     }
-  };
-  for (unsigned i = 0; i < n; ++i) {
-    Operation *op = g.nodes[i];
-    if (!isAtlasSlotAccess(op))
-      continue;
-    accessSlot(atlasAccessedSlot(op), i,
-               isa<VirtualSaveOp, VirtualSlotStoreOp>(op));
-    if (auto copy = dyn_cast<VirtualSlotCopyOp>(op))
-      accessSlot(copy.getDst(), i, true);
   }
   auto cannotOrder = [](Operation *op, const Twine &why) {
     return op->emitError("schedule-atlas-virtual cannot order this block: ")
@@ -433,7 +436,7 @@ constexpr int kScalarSlotCycles = 8;
 
 // An operation costs the machine operations it lowers to, as they issue in
 // order on the unit doing its work.
-Cost costOf(Operation *op) {
+Cost costOf(Operation *op, bool enhancedVirtualScheduling) {
   static const MachineTiming vload = timingOf("vload");
   static const MachineTiming vstore = timingOf("vstore");
   static const int registerLoad = timing::dmaTransferCycles(kAtlasRegisterBytes, false);
@@ -474,7 +477,8 @@ Cost costOf(Operation *op) {
   if (isAtlasSlotAccess(op)) {
     auto slot = atlasAccessedSlot(op).getDefiningOp<VirtualSlotOp>();
     unsigned words = slot.getWords();
-    if (words > 1 && isa<VirtualSaveOp, VirtualRestoreOp>(op)) {
+    if (enhancedVirtualScheduling && words > 1 &&
+        isa<VirtualSaveOp, VirtualRestoreOp>(op)) {
       // A tile save/restore occupies LSU, not the DRAM engine. The frontend
       // can issue other work after its last register instruction; only users
       // of this slot/value wait for completion.
@@ -776,27 +780,43 @@ private:
 
 class BlockScheduler {
 public:
-  BlockScheduler(Block &block, const BlockGraph &g, const Liveness &liveness)
-      : block(block), g(g), liveness(liveness) {
+  BlockScheduler(Block &block, const BlockGraph &g, const Liveness &liveness,
+                 bool enhancedVirtualScheduling)
+      : block(block), g(g), liveness(liveness),
+        enhancedVirtualScheduling(enhancedVirtualScheduling) {
     unsigned n = g.nodes.size();
     for (Operation *op : g.nodes) {
-      Cost cost = costOf(op);
+      Cost cost = costOf(op, enhancedVirtualScheduling);
       cost.drains = isImplicitMemory(op);
       costs.push_back(cost);
     }
-    // The earliest output reachable through the actual dependency graph, or n
-    // for none. Include scratch hazards: a saved tile feeds its later restores
-    // without an SSA tensor edge. Among equal starts, prefer work needed by
-    // the first output, before advancing another tile's independent work.
+    // Default output priority follows SSA operands. The opt-in scheduler also
+    // follows scratch hazards, so a saved tile feeds its later restores without
+    // an SSA tensor edge. Among equal starts, prefer the earliest output.
     firstOutput.assign(n, n);
+    llvm::DenseMap<Operation *, unsigned> index;
+    if (!enhancedVirtualScheduling)
+      for (unsigned i = 0; i < n; ++i)
+        index[g.nodes[i]] = i;
     for (unsigned i = n; i-- > 0;) {
       Operation *op = g.nodes[i];
       if (isa<VirtualDMAStoreFP8Op, VirtualDMAStoreBF16Op,
               VirtualOutputBF16Op>(op))
         firstOutput[i] = i;
-      // Edges point forward, so each successor's priority is already known.
-      for (unsigned successor : g.succs[i])
-        firstOutput[i] = std::min(firstOutput[i], firstOutput[successor]);
+      if (enhancedVirtualScheduling) {
+        // Edges point forward, so each successor's priority is already known.
+        for (unsigned successor : g.succs[i])
+          firstOutput[i] = std::min(firstOutput[i], firstOutput[successor]);
+      } else {
+        for (Value operand : op->getOperands()) {
+          if (isa<VirtualStateType>(operand.getType()))
+            continue;
+          auto found = index.find(operand.getDefiningOp());
+          if (found != index.end())
+            firstOutput[found->second] =
+                std::min(firstOutput[found->second], firstOutput[i]);
+        }
+      }
     }
     // The longest path from each node to the block's end, counting its own
     // work. Edges point forward, so successors are done first.
@@ -841,9 +861,10 @@ public:
                                      unsigned lookahead) const {
     Pressure pressure(block, g.nodes, liveness, capacity);
     llvm::SmallDenseSet<Value> unused;
-    auto isLoad = [](Operation *op) {
-      if (auto restore = dyn_cast<VirtualRestoreOp>(op))
-        return isa<VirtualBF16Type, VirtualFP8Type>(restore.getValue().getType());
+    auto isLoad = [&](Operation *op) {
+      if (enhancedVirtualScheduling)
+        if (auto restore = dyn_cast<VirtualRestoreOp>(op))
+          return isa<VirtualBF16Type, VirtualFP8Type>(restore.getValue().getType());
       return isa<VirtualDMALoadFP8Op, VirtualDMALoadBF16Op>(op);
     };
     return build([&](const Machine &machine, ArrayRef<unsigned> ready) {
@@ -853,14 +874,16 @@ public:
       SmallVector<unsigned> eligible;
       llvm::copy_if(ready, std::back_inserter(eligible),
                     [&](unsigned node) {
-                      return !held(node) && pressure.fitsRegisters(g.nodes[node]);
+                      return !held(node) &&
+                             (!enhancedVirtualScheduling ||
+                              pressure.fitsRegisters(g.nodes[node]));
                     });
       // Computing future DMA addresses during a long transfer looks cheap,
       // but their proof witnesses cannot generally be spilled. Explicit
       // restores cannot be spilled recursively either. Prefer work that fits
       // the registers, even if it exceeds the soft prefetch lookahead. Only
       // relax this when every ready operation needs a spill.
-      if (eligible.empty())
+      if (enhancedVirtualScheduling && eligible.empty())
         llvm::copy_if(ready, std::back_inserter(eligible), [&](unsigned node) {
           return pressure.fitsRegisters(g.nodes[node]);
         });
@@ -928,6 +951,7 @@ private:
   Block &block;
   const BlockGraph &g;
   const Liveness &liveness;
+  bool enhancedVirtualScheduling;
   std::vector<Cost> costs;
   std::vector<int> heights;
   std::vector<unsigned> firstOutput;
@@ -959,12 +983,13 @@ void reorder(Block &block, ArrayRef<Operation *> ops) {
 LogicalResult scheduleBlock(Block &block, unsigned index,
                             const Liveness &liveness,
                             const KindCounts &capacity,
-                            std::optional<unsigned> randomSeed) {
-  FailureOr<BlockGraph> graph = buildGraph(block);
+                            std::optional<unsigned> randomSeed,
+                            bool enhancedVirtualScheduling) {
+  FailureOr<BlockGraph> graph = buildGraph(block, enhancedVirtualScheduling);
   if (failed(graph))
     return failure();
   const BlockGraph &g = *graph;
-  BlockScheduler scheduler(block, g, liveness);
+  BlockScheduler scheduler(block, g, liveness, enhancedVirtualScheduling);
   auto opsOf = [&](ArrayRef<unsigned> order) {
     SmallVector<Operation *> ops;
     for (unsigned node : order)
@@ -1010,6 +1035,9 @@ struct ScheduleAtlasVirtualPass
            "spilling and register allocation";
   }
 
+  Option<bool> enhancedVirtualScheduling{
+      *this, "enhanced-virtual-scheduling", llvm::cl::init(false),
+      llvm::cl::desc("Enable register-aware scheduling and address sinking")};
   Option<int> randomSeed{
       *this, "random-seed",
       llvm::cl::desc("Pick a random legal order instead, for soundness "
@@ -1032,7 +1060,8 @@ struct ScheduleAtlasVirtualPass
       Liveness liveness(function);
       unsigned index = 0;
       for (Block &block : function.getBody())
-        if (failed(scheduleBlock(block, index++, liveness, capacity, seed)))
+        if (failed(scheduleBlock(block, index++, liveness, capacity, seed,
+                                 enhancedVirtualScheduling)))
           return signalPassFailure();
     }
     // Every order the dependence graph allows must verify, so a failure here
@@ -1051,6 +1080,9 @@ void mlir::atlas::registerScheduleAtlasVirtualPass() {
   PassRegistration<ScheduleAtlasVirtualPass>();
 }
 
-std::unique_ptr<Pass> mlir::atlas::createScheduleAtlasVirtualPass() {
-  return std::make_unique<ScheduleAtlasVirtualPass>();
+std::unique_ptr<Pass>
+mlir::atlas::createScheduleAtlasVirtualPass(bool enhancedVirtualScheduling) {
+  auto pass = std::make_unique<ScheduleAtlasVirtualPass>();
+  pass->enhancedVirtualScheduling = enhancedVirtualScheduling;
+  return pass;
 }

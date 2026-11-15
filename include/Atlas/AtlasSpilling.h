@@ -41,7 +41,7 @@ LogicalResult spillAtlasMXUState(func::FuncOp function, unsigned maxSpills,
 void registerSpillAtlasMXUStatePass();
 std::unique_ptr<Pass> createSpillAtlasMXUStatePass();
 void registerSpillAtlasVirtualPass();
-std::unique_ptr<Pass> createSpillAtlasVirtualPass();
+std::unique_ptr<Pass> createSpillAtlasVirtualPass(bool enhancedVirtualScheduling = false);
 } // namespace mlir::atlas
 
 #endif

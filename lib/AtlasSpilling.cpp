@@ -618,6 +618,9 @@ struct SpillAtlasVirtualPass
   StringRef getDescription() const final {
     return "Spill MXU state, tensor and scalar values through shared VMEM temporaries";
   }
+  Option<bool> enhancedVirtualScheduling{
+      *this, "enhanced-virtual-scheduling", llvm::cl::init(false),
+      llvm::cl::desc("Enable register-aware scheduling and address sinking")};
   Option<unsigned> maxSpills{*this, "max-spills", llvm::cl::init(256),
       llvm::cl::desc("Bound pressure-driven spill rewrites")};
   Option<unsigned> frameWords{*this, "vmem-words", llvm::cl::init(0),
@@ -731,8 +734,9 @@ struct SpillAtlasVirtualPass
         orderBlocks(function);
         continue;
       }
-      if (scalar && sinkAddressExpression(function, protectedScalars, peakValues,
-                                         sunkAddresses)) {
+      if (enhancedVirtualScheduling && scalar &&
+          sinkAddressExpression(function, protectedScalars, peakValues,
+                                sunkAddresses)) {
         ++count;
         continue;
       }
@@ -859,6 +863,9 @@ void mlir::atlas::registerSpillAtlasVirtualPass() {
   PassRegistration<SpillAtlasVirtualPass>();
 }
 
-std::unique_ptr<Pass> mlir::atlas::createSpillAtlasVirtualPass() {
-  return std::make_unique<SpillAtlasVirtualPass>();
+std::unique_ptr<Pass>
+mlir::atlas::createSpillAtlasVirtualPass(bool enhancedVirtualScheduling) {
+  auto pass = std::make_unique<SpillAtlasVirtualPass>();
+  pass->enhancedVirtualScheduling = enhancedVirtualScheduling;
+  return pass;
 }

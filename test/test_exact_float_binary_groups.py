@@ -9,7 +9,8 @@ class BinaryLaneGroupTest(unittest.TestCase):
     def setUp(self):
         from float_isa_c import executor
         executor.cache_clear()
-        option = patch.dict(os.environ, ATLAS_EXACT_BINARY_LANE_GROUPS='1')
+        option = patch.dict(os.environ, ATLAS_EXACT_BINARY_LANE_GROUPS='1',
+                            ATLAS_EXACT_BINARY_VECTOR_PREFLIGHT='0', ATLAS_NATIVE_PIPELINE='mandatory')
         option.start()
         self.addCleanup(option.stop)
         self.addCleanup(executor.cache_clear)
@@ -24,7 +25,11 @@ class BinaryLaneGroupTest(unittest.TestCase):
         os.environ.pop('ATLAS_EXACT_BINARY_LANE_GROUPS')
         self.assertEqual(virtual_program(plan), compact)
         self.assertEqual((compact.count('byte_offset = 6 '), grouped.count('byte_offset = 6 ')), (0, 4))
-        self.assertEqual(compact.count('virtual_dma_load'), grouped.count('virtual_dma_load'))
+        # The default keeps its original validation/compute reloads; explicitly
+        # grouped preflight retains a single immutable tile through computation.
+        self.assertEqual((compact.count('virtual_dma_load'), grouped.count('virtual_dma_load')), (4, 2))
+        self.assertNotIn('%routes =', compact)
+        self.assertIn('%routes =', grouped)
         with patch.dict(os.environ, ATLAS_EXACT_BINARY_LANE_GROUPS='yes'), self.assertRaises(NativeCompilationError):
             virtual_program(plan)
 
@@ -54,6 +59,12 @@ class BinaryPreflightTest(unittest.TestCase):
     def setUp(self):
         from float_isa_c import executor
         executor.cache_clear()
+        # Exercise cached scalar preflight independently of both vector
+        # preflight and grouped lanes, using the existing optimized opt-in.
+        option = patch.dict(os.environ, ATLAS_EXACT_BINARY_LANE_GROUPS='0',
+                            ATLAS_EXACT_BINARY_VECTOR_PREFLIGHT='0', ATLAS_NATIVE_PIPELINE='optimized')
+        option.start()
+        self.addCleanup(option.stop)
         self.addCleanup(executor.cache_clear)
 
     def test_distinct_tile_routes_and_late_rejection(self):
@@ -79,7 +90,8 @@ class BinaryPreflightTest(unittest.TestCase):
             raw = [bytes.fromhex('803f') * 1024, bytes.fromhex('003f') * 1024]
             output, status, instructions = scalar_execute(source, raw)
             self.assertEqual((output, status), host_reference(source, raw))
-            # The prior compact implementation takes over 132k instructions.
+            # The preserved default reloads and reclassifies; this explicitly
+            # optimized scalar preflight skips unnecessary exception checks.
             self.assertLess(instructions, 80000)
 
 

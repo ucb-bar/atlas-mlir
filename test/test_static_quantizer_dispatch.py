@@ -16,6 +16,22 @@ from test_quantizer_dispatch_budget import options
 ROOT = Path(__file__).resolve().parents[1]
 
 
+@pytest.fixture(autouse=True)
+def optimized_pipeline(monkeypatch):
+    monkeypatch.setenv('ATLAS_NATIVE_PIPELINE', 'optimized')
+
+
+def test_default_partitioning_retains_legacy_chunks_until_optimized_is_selected(monkeypatch):
+    source = quantizer_source(count=524320)
+    with options(1000000):
+        monkeypatch.setenv('ATLAS_NATIVE_PIPELINE', 'mandatory')
+        legacy = application.prepare_plan(source)
+        assert [row['code_bytes'] for row in legacy.launches] == [2048] * 256 + [32]
+        monkeypatch.setenv('ATLAS_NATIVE_PIPELINE', 'optimized')
+        enhanced = application.prepare_plan(source)
+        assert [row['code_bytes'] for row in enhanced.launches] == [524320]
+
+
 @pytest.mark.parametrize('count', [1056, 524256, 786432, 12582912])
 def test_large_aligned_tensor_uses_selected_budget(count):
     source = quantizer_source(count=count)

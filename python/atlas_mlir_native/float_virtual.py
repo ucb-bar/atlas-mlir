@@ -265,6 +265,7 @@ def binary_slow_flags(b, left, right):
 
 def virtual_program(p):
     from .exact_float_device import _valid,_compute
+    from .binding import _native_pipeline
     from merlin.semantic_compiler.codegen import current_codegen_options
     # Preserve qualified compact images unless expansion is explicitly selected.
     expand_unary=current_codegen_options().exact_float_unroll
@@ -275,12 +276,15 @@ def virtual_program(p):
     b=Builder(lines);c=b.constant;op=b.binary;cmp=b.compare
     lanes=p.tile_lanes;tiles=p.input_bytes//(lanes*p.width)
     binary=p.op in ('bf16_add','bf16_sub')
+    # Keep the original compact path unless binary options or the optimized
+    # pipeline explicitly select cached preflight and per-tile route decisions.
+    binary_routes=binary and (group_binary or vector_preflight or _native_pipeline() == 'optimized')
     # One word per tile retains route admission across the complete input
     # preflight. Arithmetic starts only after every tile passed validation.
-    if binary and tiles > 512:
+    if binary_routes and tiles > 512:
         raise ValueError('exact binary route table exceeds one 2048-byte slot')
     slots=(('left','result','pairs','status') if expand_unary and not binary
-           else ('left','right','result','pairs','status')) + (('routes',) if binary else ())
+           else ('left','right','result','pairs','status')) + (('routes',) if binary_routes else ())
     for slot in slots:b.slot(slot)
     zero=b.splat(0)
     for slot in slots:b.save(slot,zero)
@@ -291,12 +295,12 @@ def virtual_program(p):
         def tile_body(tile,values):
             bad,ap,bp,out=values
             # A one-tile binary preflight leaves both immutable inputs in VMEM.
-            if not (binary and tiles == 1 and phase == 'compute'):
+            if not (binary_routes and tiles == 1 and phase == 'compute'):
                 a=b.dma_load(ap,lanes*p.width);b.save('left',a)
                 if binary or not expand_unary:
                     b.save('right',b.dma_load(bp,lanes*p.width) if len(p.operands)>1 else a)
             if phase=='check':
-                if binary:
+                if binary_routes:
                     if vector_preflight:
                         outside = binary_vector_refusal(b)
                         admitted = b.value(f'arith.cmpi eq, {outside}, {c(0)} : i32')
@@ -325,13 +329,27 @@ def virtual_program(p):
                     return [op('or',acc[0],_valid(b,p,a,d))]
                 if vector_cast:
                     bad=op('or',bad,cast_vector_refusal(b))
-                elif not binary:
-                    bad,=(b.loop('preflight_lane',lanes,[bad],validate) if not expand_unary
+                elif not binary_routes:
+                    bad,=(b.loop('preflight_lane',lanes,[bad],validate) if binary or not expand_unary
                           else b.unary_lanes(lanes,[bad],validate))
             else:
                 if binary:
-                    flags=b.load('routes',tile,4)
-                    qbad,rbad=op('and',flags,c(1)),op('and',flags,c(2))
+                    if binary_routes:
+                        flags=b.load('routes',tile,4)
+                        qbad,rbad=op('and',flags,c(1)),op('and',flags,c(2))
+                    else:
+                        def classify(index,acc):
+                            a,d=b.inputs(p,index);qbad,rbad=acc
+                            for value in (a,d):
+                                magnitude=op('and',value,c(32767))
+                                nonzero=cmp('ne',magnitude,c(0))
+                                outside=op('or',op('and',cmp('ult',magnitude,c(0x2f80)),nonzero),cmp('ult',c(0x4f80),magnitude))
+                                qbad=op('or',qbad,outside)
+                                exceptional=op('or',op('and',cmp('ult',magnitude,c(128)),nonzero),cmp('ule',c(32640),magnitude))
+                                rbad=op('or',rbad,exceptional)
+                            both_negative_zero=cmp('eq',op('or',op('xor',a,c(32768)),op('xor',d,c(32768))),c(0))
+                            return [qbad,op('or',rbad,both_negative_zero)]
+                        qbad,rbad=(b.checked_lane_groups if group_binary else b.loop)('classify_lane',lanes,[c(0),c(0)],classify)
                     qualified=b.value(f'arith.cmpi eq, {qbad}, {c(0)} : i32')
                     lines.append(f'    cf.cond_br {qualified}, ^qualified({b.state} : {S}), ^pair_test({b.state} : {S})')
                     lines.append(f'  ^qualified(%qualified_state: {S}):');b.state='%qualified_state'

@@ -44,6 +44,47 @@ def cache_source(m=4, n=2048, k=2048, *, batch=(1,), op='atlas.qlinear',
 
 
 class QuantizedLoopDramTest(unittest.TestCase):
+    def test_program_budget_options_preserve_text_and_are_idempotent(self):
+        from atlas_mlir_native.binding import _with_program_size_limit
+
+        arguments = ['atlas-opt', '--atlas-compile=enhanced-virtual-scheduling=true',
+                     '--lower-atlas-virtual-to-machine=resource-planning-report="/tmp/report with spaces.json"', '-']
+        expected = ['atlas-opt', '--atlas-compile=enhanced-virtual-scheduling=true program-size-limit-bytes=128',
+                    '--lower-atlas-virtual-to-machine=resource-planning-report="/tmp/report with spaces.json" program-size-limit-bytes=128', '-']
+        self.assertEqual(_with_program_size_limit(arguments, None), arguments)
+        self.assertEqual(_with_program_size_limit(arguments, 128), expected)
+        self.assertEqual(_with_program_size_limit(expected, 128), expected)
+        self.assertEqual(_with_program_size_limit(['--atlas-compile-unscheduled'], 128),
+                         ['--atlas-compile-unscheduled=program-size-limit-bytes=128'])
+        quoted = '--atlas-compile=allocation-report="/tmp/report program-size-limit-bytes=64.json"'
+        self.assertEqual(_with_program_size_limit([quoted], 128),
+                         [quoted + ' program-size-limit-bytes=128'])
+        for options in ('program-size-limit-bytes=64',
+                        'program-size-limit-bytes=128 program-size-limit-bytes=128'):
+            with self.subTest(options=options), self.assertRaisesRegex(
+                    NativeCompilationError, 'must occur once and equal selected budget'):
+                _with_program_size_limit(['--atlas-compile=' + options], 128)
+
+    @unittest.skipUnless(os.environ.get('ATLAS_OOT_BIN_DIR'), 'select native compiler tools')
+    def test_optimized_resource_probe_preserves_checked_cfg_and_budget(self):
+        from atlas_mlir_native import quantized_loop_sizing as sizing
+
+        plan = prepare_source(source_request(64, 65, 64, batch=()))
+        with codegen_options(CodegenOptions(io_memory_bytes=CACHE_DRAM, program_size_limit_bytes=131072)), \
+             patch.dict(os.environ, ATLAS_NATIVE_PIPELINE='optimized', ATLAS_CAPTURE_POSTSPILL='0'), \
+             patch.object(sizing, '_CACHE', {}):
+            selected = size_counted(plan, target_source=ROOT, operand_reuse='paired-cache')
+        record = selected.record()
+        self.assertEqual((record['route'], record['reason']), ('counted', 'physical_bound_admitted'))
+        command = record['resource_command']
+        for stage in ('schedule', 'spill'):
+            self.assertIn('--atlas-compile-' + stage + '=enhanced-virtual-scheduling=true', command)
+        self.assertEqual(record['identity']['effective_pipeline_arguments'],
+                         ['--atlas-compile=enhanced-virtual-scheduling=true program-size-limit-bytes=131072'])
+        report = json.loads(selected.read('resource.json'))
+        self.assertIn(report['cfg_contract'], selected.read('checked/atlas-machine.mlir').decode())
+        self.assertFalse(record['checks_covered_by_immutable_mandatory_result'])
+
     def test_synthetic_small_profile_includes_complete_status_and_exponent_frame(self):
         for source,expected in ((cache_source(),4526080),(cache_source(k=5632),11980800)):
             plan = prepare_source(source)

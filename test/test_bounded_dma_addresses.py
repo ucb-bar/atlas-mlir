@@ -107,14 +107,14 @@ class BoundedDMAAddressTest(unittest.TestCase):
         source = source.replace('  %s1, %x =', '\n'.join(loads) + '\n  %s1, %x =')
         source = source.replace('"atlas.virtual_dma_load_fp8"(%bs, %ap, %bytes)',
                                 f'"atlas.virtual_dma_load_fp8"(%{state}, %ap, %bytes)')
-        machine = run('atlas-opt', source, '--atlas-compile')
+        machine = run('atlas-opt', source, '--atlas-compile=enhanced-virtual-scheduling=true')
         self.assertEqual(machine.returncode, 0, machine.stderr[:2000])
         checked = run('atlas-opt', machine.stdout,
                       '--verify-atlas-generated-schedule', '--verify-atlas-timing')
         self.assertEqual(checked.returncode, 0, checked.stderr[:2000])
         # Scheduling pressure is still bounded by the selected rewrite budget.
-        bounded = run('atlas-opt', source, '--schedule-atlas-virtual',
-                      '--spill-atlas-virtual=max-spills=1')
+        bounded = run('atlas-opt', source, '--schedule-atlas-virtual=enhanced-virtual-scheduling=true',
+                      '--spill-atlas-virtual=enhanced-virtual-scheduling=true max-spills=1')
         self.assertNotEqual(bounded.returncode, 0)
         self.assertIn('spill rewrite work limit', bounded.stderr)
 

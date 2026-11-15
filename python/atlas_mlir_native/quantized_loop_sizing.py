@@ -18,7 +18,8 @@ from merlin.semantic_compiler.search import SearchLimits
 from merlin.semantic_compiler.target_binding import NativeCompilationError, verify_native_publication
 
 from .binding import (AtlasNativeBinding, DRAM_BASE, TILE_BYTES, NATIVE_CHECKS,
-                      NATIVE_PIPELINES, RTL_REVISION, _native_pipeline, _run, _tile_io_base, dram_slots)
+                      NATIVE_PIPELINES, RTL_REVISION, _native_pipeline, _run, _tile_io_base,
+                      _with_program_size_limit, dram_slots)
 from .restoration_budget import instruction_bound, fallback_tiles
 from .limits import functional_instruction_limit
 
@@ -103,9 +104,8 @@ def _identity(plan, virtual, target_source, tools, limits, operand_reuse):
     from .exponent_page_cache import enabled as exponent_page_cache_enabled
     options = current_codegen_options()
     pipeline = _native_pipeline()
-    arguments = list(NATIVE_PIPELINES[pipeline])
-    if options.program_size_limit_bytes is not None:
-        arguments = [arg+'=program-size-limit-bytes='+str(options.program_size_limit_bytes) for arg in arguments]
+    arguments = _with_program_size_limit(
+        NATIVE_PIPELINES[pipeline], options.program_size_limit_bytes)
     capture = os.environ.get('ATLAS_CAPTURE_POSTSPILL') == '1'
     if capture:
         arguments = ['--mlir-disable-threading','--mlir-print-ir-before=lower-atlas-virtual-to-machine',
@@ -200,7 +200,9 @@ def _size_counted(plan, *, target_source=None, limits=None, operand_reuse=None):
     prefix = (['--spill-atlas-virtual','--verify-atlas-virtual-stream',
                '--lower-atlas-pack-relayout','--spill-atlas-virtual','--verify-atlas-virtual-stream']
               if identity['pipeline'] == 'mandatory' else
-              ['--atlas-compile-verify','--atlas-compile-schedule','--atlas-compile-spill'])
+              ['--atlas-compile-verify',
+               '--atlas-compile-schedule=enhanced-virtual-scheduling=true',
+               '--atlas-compile-spill=enhanced-virtual-scheduling=true'])
     options = 'resource-planning-report='+str(report_path)
     if current_codegen_options().program_size_limit_bytes is not None:
         options += ' program-size-limit-bytes='+str(current_codegen_options().program_size_limit_bytes)

@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 
@@ -32,6 +33,24 @@ def scheduled_reference(source, raw):
 
 
 class QuantizerApplicationScheduleTest(unittest.TestCase):
+    def test_captured_schedule_record_and_replay_ignore_later_pipeline_selection(self):
+        from merlin.semantic_compiler.codegen import CodegenOptions, codegen_options
+        sources = (quantizer_source(count=524320),
+                   dynamic_source(shape=(1, 64, 64), reduce="head"))
+        for pipeline in ("mandatory", "optimized"):
+            with self.subTest(pipeline=pipeline), codegen_options(CodegenOptions(io_memory_bytes=67108864)):
+                for source in sources:
+                    with patch.dict(os.environ, ATLAS_NATIVE_PIPELINE=pipeline):
+                        plan = prepare_plan(source)
+                        captured = plan.record()
+                    other = "optimized" if pipeline == "mandatory" else "mandatory"
+                    with patch.dict(os.environ, ATLAS_NATIVE_PIPELINE=other):
+                        self.assertEqual(plan.record(), captured)
+                        replay = prepare_plan(source,
+                            _pipeline=captured.get("lowering_pipeline", "mandatory"),
+                            _static_capacity=captured["static_whole_body_max_elements"])
+                        self.assertEqual(replay.record(), captured)
+
     def test_static_full_and_tail_chunks_keep_every_byte(self):
         source = quantizer_source(count=4103, fixed=-9)
         plan = prepare_plan(source)
@@ -131,6 +150,7 @@ class QuantizerApplicationScheduleTest(unittest.TestCase):
 
 @unittest.skipUnless((BIN / "atlas-opt").is_file(), "select built Atlas tools")
 class QuantizerApplicationCompilationTest(unittest.TestCase):
+    @patch.dict(os.environ, ATLAS_NATIVE_PIPELINE="optimized")
     def test_multiple_bodies_default_proof_c_export_and_source_seal(self):
         from atlas_mlir_native.activation_quantize_application import _static_body_capacity
         from atlas_mlir_native.limits import functional_instruction_limit
@@ -141,7 +161,8 @@ class QuantizerApplicationCompilationTest(unittest.TestCase):
             manifest = compile_source(None, source, target_source=ROOT, destination=compiled, limits=None)
             self.assertEqual(manifest["artifact_kind"], "program_set")
             self.assertEqual(len(manifest["segments"]), 2)
-            region = prepare_c_package(source, compiled, "quant", target_source=ROOT)
+            with patch.dict(os.environ, ATLAS_NATIVE_PIPELINE="mandatory"):
+                region = prepare_c_package(source, compiled, "quant", target_source=ROOT)
             self.assertEqual(region.outputs, source.outputs)
             self.assertEqual(region.description["launches_per_invocation"], 2)
             self.assertEqual(region.description["device_launch_schedule"]["total_launches"], 2)
@@ -184,8 +205,10 @@ class QuantizerApplicationCompilationTest(unittest.TestCase):
         source = dynamic_source(shape=(1, 64, 64), reduce="head", dtype="bf16")
         with tempfile.TemporaryDirectory(prefix="atlas-quantizer-head4096-") as directory:
             compiled = Path(directory) / "compiled"
-            compile_source(None, source, target_source=ROOT, destination=compiled, limits=None)
-            region = prepare_c_package(source, compiled, "head4096", target_source=ROOT)
+            with patch.dict(os.environ, ATLAS_NATIVE_PIPELINE="mandatory"):
+                compile_source(None, source, target_source=ROOT, destination=compiled, limits=None)
+            with patch.dict(os.environ, ATLAS_NATIVE_PIPELINE="optimized"):
+                region = prepare_c_package(source, compiled, "head4096", target_source=ROOT)
             self.assertEqual(region.description["launches_per_invocation"], 1)
 
 

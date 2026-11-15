@@ -136,7 +136,8 @@ class PointwiseChainTest(unittest.TestCase):
                 with patch.object(binding, '_run', wraps=binding._run) as run:
                     compile_adjacent_virtual(virtual, destination=temporary, target_source=ROOT)
             compiles = [call.args[0] for call in run.call_args_list
-                        if any(option in {'--atlas-compile', '--atlas-compile-unscheduled'} for option in call.args[0])]
+                        if any(option.partition('=')[0] in {'--atlas-compile', '--atlas-compile-unscheduled'}
+                               for option in call.args[0])]
             self.assertEqual(len(compiles), 1)
             self.assertEqual(compiles[0][-2:], [*binding.NATIVE_PIPELINES['optimized'], '-'])
             self.assertIn('--mlir-print-ir-before=lower-atlas-virtual-to-machine', compiles[0])

@@ -69,6 +69,17 @@ class NativePipelinePackTest(unittest.TestCase):
             input_text=machine,
         )
 
+    def test_optimized_pipeline_enforces_selected_program_budget(self) -> None:
+        from merlin.semantic_compiler.codegen import CodegenOptions, codegen_options
+
+        with codegen_options(CodegenOptions(program_size_limit_bytes=4)):
+            with self.assertRaises(self.binding.NativeCompilationError):
+                self.binding._run(
+                    [str(Path(ATLAS_BIN) / "atlas-opt"),
+                     *self.binding.NATIVE_PIPELINES["optimized"], "-"],
+                    input_text=PACK_VIRTUAL,
+                )
+
     def test_optimized_pipeline_accepts_mxu_pressure(self) -> None:
         from test_mxu_spilling import mxu_pressure
 

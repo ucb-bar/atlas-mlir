@@ -57,24 +57,25 @@ void buildVerifyStage(OpPassManager &pm, const AtlasCompileOptions &options) {
 
 // Boundary tiles become explicit DMA, which the scheduler can queue and
 // overlap with other work.
-void buildScheduleStage(OpPassManager &pm) {
+void buildScheduleStage(OpPassManager &pm, bool enhancedVirtualScheduling) {
   pm.addPass(createLowerAtlasVirtualBoundaryToDMAPass());
-  pm.addPass(createScheduleAtlasVirtualPass());
+  pm.addPass(createScheduleAtlasVirtualPass(enhancedVirtualScheduling));
   pm.addPass(createVerifyAtlasVirtualStreamPass());
 }
 
 // The schedule may exceed the registers; spilling recovers it.
-void buildSpillStage(OpPassManager &pm, bool scheduled) {
-  pm.addPass(createSpillAtlasVirtualPass());
+void buildSpillStage(OpPassManager &pm, bool scheduled,
+                     bool enhancedVirtualScheduling) {
+  pm.addPass(createSpillAtlasVirtualPass(enhancedVirtualScheduling));
   pm.addPass(createVerifyAtlasVirtualStreamPass());
   pm.addPass(createLowerAtlasPackRelayoutPass());
   // The first schedule costed each PACK as its scalar relayout loop; order
   // the MXU round trips that replaced them by their own cost.
   if (scheduled)
-    pm.addPass(createScheduleAtlasVirtualPass());
+    pm.addPass(createScheduleAtlasVirtualPass(enhancedVirtualScheduling));
   // Keep the allocated helper values visible in the virtual stage artifact,
   // and recover any register pressure introduced by the quantized BF16 tile.
-  pm.addPass(createSpillAtlasVirtualPass());
+  pm.addPass(createSpillAtlasVirtualPass(enhancedVirtualScheduling));
   pm.addPass(createVerifyAtlasVirtualStreamPass());
 }
 
@@ -109,8 +110,8 @@ void buildTimeStage(OpPassManager &pm) {
 void mlir::atlas::buildAtlasCompilePipeline(OpPassManager &pm,
                                             const AtlasCompileOptions &options) {
   buildVerifyStage(pm, options);
-  buildScheduleStage(pm);
-  buildSpillStage(pm, /*scheduled=*/true);
+  buildScheduleStage(pm, options.enhancedVirtualScheduling);
+  buildSpillStage(pm, /*scheduled=*/true, options.enhancedVirtualScheduling);
   buildLowerStage(pm, options);
   buildTimeStage(pm);
 }
@@ -122,7 +123,7 @@ void mlir::atlas::buildAtlasCompileUnscheduledPipeline(
     pm.addPass(createLowerAtlasGuardedPackPass());
   }
   // Spilling admits MXU pressure, so it runs before strict verification.
-  buildSpillStage(pm, /*scheduled=*/false);
+  buildSpillStage(pm, /*scheduled=*/false, options.enhancedVirtualScheduling);
   buildLowerStage(pm, options);
   insertDMAWaits(pm);
   pm.addPass(createInsertAtlasDelaysPass());
@@ -142,13 +143,17 @@ void mlir::atlas::registerAtlasCompilePipelines() {
   PassPipelineRegistration<AtlasCompileOptions>("atlas-compile-verify",
                              "atlas-compile stage 1: spill MXU state and verify",
                              buildVerifyStage);
-  PassPipelineRegistration<>(
+  PassPipelineRegistration<AtlasCompileOptions>(
       "atlas-compile-schedule",
       "atlas-compile stage 2: expose boundary DMA and schedule",
-      buildScheduleStage);
-  PassPipelineRegistration<>("atlas-compile-spill",
-                             "atlas-compile stage 3: spill register pressure",
-                             [](OpPassManager &pm) { buildSpillStage(pm, /*scheduled=*/true); });
+      [](OpPassManager &pm, const AtlasCompileOptions &options) {
+        buildScheduleStage(pm, options.enhancedVirtualScheduling);
+      });
+  PassPipelineRegistration<AtlasCompileOptions>(
+      "atlas-compile-spill", "atlas-compile stage 3: spill register pressure",
+      [](OpPassManager &pm, const AtlasCompileOptions &options) {
+        buildSpillStage(pm, /*scheduled=*/true, options.enhancedVirtualScheduling);
+      });
   PassPipelineRegistration<AtlasCompileOptions>(
       "atlas-compile-lower",
       "atlas-compile stage 4: allocate and lower to machine IR",
