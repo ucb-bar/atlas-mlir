@@ -198,8 +198,11 @@ def prepare_plan(source, *, limits=None, _pipeline=None, _static_capacity=None, 
             length = (end - first) * k
             if length > max_group_elements:
                 raise ValueError(f"indivisible dynamic reduction group has {length} elements; selected device body supports at most {max_group_elements}")
-            if length > 4096 and length % 1024:
-                raise ValueError("indivisible dynamic reduction group above 4096 elements requires complete 1024-element tiles")
+            # The virtual body uses gcd(1024, length) lanes and reduces the
+            # complete group before packing. Irregular aligned heads stay
+            # unbatched below and retain the independent machine-bound proof.
+            if length > 4096 and length % 32:
+                raise ValueError("indivisible dynamic reduction group above 4096 elements requires complete 32-element tiles")
             packed = 1
             bounded_tiles = length % 1024 == 0 or length <= 1024
             if reduction == "head" and x.type.dtype == "bf16" and length % 32 == 0 and bounded_tiles:

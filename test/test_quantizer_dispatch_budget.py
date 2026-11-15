@@ -44,8 +44,8 @@ def test_exponent_slot_io_and_indivisible_group_limits_remain_active():
         assert [x['exponent_bytes'] for x in plan.launches] == [1024, 4]
         for length in (1056, 2016, 4064):
             assert len(application.prepare_plan(dynamic_source(shape=(10, 1, length), reduce='head')).launches) == 10
-        with pytest.raises(ValueError, match='complete 1024-element tiles'):
-            application.prepare_plan(dynamic_source(shape=(2, 1, 4128), reduce='head'))
+        with pytest.raises(ValueError, match='complete 32-element tiles'):
+            application.prepare_plan(dynamic_source(shape=(2, 1, 4129), reduce='head'))
     with options(memory=8192):
         assert len(application.prepare_plan(dynamic_source(shape=(10, 1, 1024), reduce='head')).launches) == 5
         with pytest.raises(ValueError, match='I/O window'):

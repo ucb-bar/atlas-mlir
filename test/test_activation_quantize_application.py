@@ -125,11 +125,25 @@ class QuantizerApplicationScheduleTest(unittest.TestCase):
 
     def test_oversized_dynamic_group_refused_without_splitting_amax(self):
         for source in (dynamic_source(shape=(2, 5000), reduce="token"),
-                       dynamic_source(shape=(2, 1, 4128), reduce="head"),
+                       dynamic_source(shape=(2, 1, 4129), reduce="head"),
                        dynamic_source(shape=(2, 33, 1024), reduce="head"),
                        dynamic_source(shape=(2, 17, 1024), reduce="tensor")):
             with self.assertRaisesRegex(ValueError, "indivisible dynamic reduction group"):
                 prepare_plan(source)
+
+    def test_decode_heads_preserve_complete_reduction_groups(self):
+        source = dynamic_source(shape=(1, 32, 65, 64), reduce="head", rule="ref", rows=32)
+        plan = prepare_plan(source)
+        self.assertEqual(len(plan.launches), 32)
+        self.assertEqual(len(plan.bodies), 1)
+        self.assertEqual(plan.bodies[0].nodes[0].type.shape, (1, 65, 64))
+        for head, launch in enumerate(plan.launches):
+            self.assertEqual(launch["input_offset_bytes"], head * 8320)
+            self.assertEqual(launch["input_bytes"], 8320)
+            self.assertEqual(launch["code_offset_bytes"], head * 4160)
+            self.assertEqual(launch["code_bytes"], 4160)
+            self.assertEqual(launch["exponent_offset_bytes"], head * 4)
+            self.assertEqual(launch["exponent_bytes"], 4)
 
     def test_window512_heads_keep_one_complete_group_per_launch(self):
         source = dynamic_source(shape=(1, 32, 512, 64), reduce="head")
@@ -214,6 +228,14 @@ class QuantizerApplicationCompilationTest(unittest.TestCase):
                 compile_source(None, source, target_source=ROOT, destination=compiled, limits=None)
             with codegen_options(replace(current_codegen_options(), native_pipeline="optimized")):
                 region = prepare_c_package(source, compiled, "head4096", target_source=ROOT)
+            self.assertEqual(region.description["launches_per_invocation"], 1)
+
+    def test_dynamic_head4160_under_default_proof_and_c_export(self):
+        source = dynamic_source(shape=(1, 65, 64), reduce="head", dtype="bf16")
+        with tempfile.TemporaryDirectory(prefix="atlas-quantizer-head4160-") as directory:
+            compiled = Path(directory) / "compiled"
+            compile_source(None, source, target_source=ROOT, destination=compiled, limits=None)
+            region = prepare_c_package(source, compiled, "head4160", target_source=ROOT)
             self.assertEqual(region.description["launches_per_invocation"], 1)
 
 
