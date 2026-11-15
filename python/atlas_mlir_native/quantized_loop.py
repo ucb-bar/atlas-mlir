@@ -11,7 +11,7 @@ from pathlib import Path
 from merlin.semantic_compiler.target_binding import NativeCompilationError
 from .already_quantized import prepare_source
 from .binding import (DRAM_BASE, TILE_BYTES, MXU1_CAP448_POLICY, NATIVE_CHECKS,
-                      RTL_REVISION, _native_pipeline, _tile_io_base, dram_slots, _run)
+                      RTL_REVISION, _native_pipeline, _tile_io_base, io_memory_base as selected_io_memory_base, validate_io_window, dram_slots, _run)
 from .looped_tiling import _virtual
 from .exponent_restoration import exponent_geometry, Restoration, fast_factor_range
 from .restoration_budget import fallback_tiles, instruction_bound
@@ -39,7 +39,7 @@ def _execution_geometry(plan):
     rhs = plan.source.node(plan.operand_ids[1])
     sizes = [batch*mc*kc*1024, (batch if rhs.type.shape[:-2] else 1)*nc*kc*1024]
     output_bytes = batch*mc*nc*2048
-    base = _tile_io_base.get()
+    base = selected_io_memory_base()
     addresses = [base, base + ((sizes[0]+2047)//2048)*2048]
     cursor = addresses[1] + ((sizes[1]+2047)//2048)*2048
     exponents = exponent_geometry(plan)
@@ -69,7 +69,7 @@ def execution_layout(plan, *, operand_reuse=None, exponent_page_cache=None):
     from .quantized_operand_reuse import schedule_record
     from .exponent_page_cache import record as page_cache_record
     geometry, end = _execution_geometry(plan)
-    if end > _tile_io_base.get() + dram_slots()*TILE_BYTES:
+    if end > selected_io_memory_base() + dram_slots()*TILE_BYTES:
         raise NativeCompilationError("resource_limit", "quantized loop buffers exceed selected DRAM window")
     return dict(schema="atlas.quantized_loop_execution.v1", operation="mxu1_cap448_looped_ordered",
                 **geometry, **schedule_record(plan, operand_reuse),
@@ -121,17 +121,16 @@ def virtual_source(plan, layout):
     return rematerialize_scalar_constants(virtual)
 
 
-def compile_source(snapshot, source, *, target_source, destination, limits, io_memory_base=DRAM_BASE):
-    """Compile with the counted frame at io_memory_base; only the counted route relocates."""
-    from .memory_windows import dma_span_in_window
+def compile_source(snapshot, source, *, target_source, destination, limits, io_memory_base=None):
+    """Compile with the selected frame at io_memory_base."""
 
+    io_memory_base = selected_io_memory_base() if io_memory_base is None else io_memory_base
     if type(io_memory_base) is not int or io_memory_base % TILE_BYTES:
         raise NativeCompilationError('compile_error', 'I/O base must be an aligned integer')
     token = _tile_io_base.set(io_memory_base)
     try:
         plan = prepare_source(source)
-        if io_memory_base != DRAM_BASE and not dma_span_in_window(io_memory_base, _execution_geometry(plan)[1]-io_memory_base):
-            raise NativeCompilationError('compile_error', 'complete quantized loop frame must fit one DMA window')
+        validate_io_window()
         return _compile_source(snapshot, source, plan, target_source=target_source,
                                destination=destination, limits=limits)
     finally:
@@ -143,8 +142,6 @@ def _compile_source(snapshot, source, plan, *, target_source, destination, limit
     from .quantized_loop_sizing import size_counted, publish_route
 
     sizing = size_counted(plan,target_source=target_source,limits=limits)
-    if sizing.record()['route'] != 'counted' and _tile_io_base.get() != DRAM_BASE:
-        raise NativeCompilationError('compile_error', 'custom I/O base requires the counted quantized loop route')
     if sizing.record()['route'] == 'k32_tiles':
         if plan.operand_permutation is not None:
             raise NativeCompilationError('resource_limit', 'overlarge contraction must retain its operand permutation')
@@ -252,6 +249,8 @@ def _compile_source(snapshot, source, plan, *, target_source, destination, limit
                     io_memory_bytes=dram_slots()*TILE_BYTES,
                     atlas_opt_sha256=sha256((tools/'atlas-opt').read_bytes()).hexdigest(),
                     atlas_emit_sha256=sha256((tools/'atlas-emit').read_bytes()).hexdigest())
+    if selected_io_memory_base() != DRAM_BASE:
+        manifest['io_memory_base'] = selected_io_memory_base()
     for name, data in {**artifacts, 'program.bin':binary, 'manifest.json':encoded(manifest)}.items():
         (destination/name).write_bytes(data)
     publish_route(plan,destination,sizing,target_source=target_source)

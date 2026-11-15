@@ -69,6 +69,8 @@ class AdjacentDeviceAdapter:
         if selected is None:
             return self.base.compile_region(snapshot, region, alternative, name, segments, target_source, limits)
         module, group = selected
+        from .binding import validate_io_window
+        validate_io_window()
         module.compile_group(group, snapshot, target_source=target_source, destination=segments / name, limits=limits)
         return module.export_group(group, segments / name, name, target_source=target_source)
 

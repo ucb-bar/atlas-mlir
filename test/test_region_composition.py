@@ -115,7 +115,7 @@ class RegionCompositionContractTest(unittest.TestCase):
         self.assertEqual((addresses, arena_bytes), ({"input": base, "result": base + 4096}, 6144))
         buffers = tuple(DeviceBuffer(name, addresses[name], sizes[name], "bf16_tiles") for name in names)
         stages = (VirtualStage("only", "", ("input",), ("result",)),)
-        _contract(stages, buffers, ("input",), ("result",), 1 << 20, base)
+        _contract(stages, buffers, ("input",), ("result",), 768 * 1024, base)
         with self.assertRaisesRegex(ValueError, "selected I/O"):
             _contract(stages, buffers, ("input",), ("result",), 1 << 20)
         with self.assertRaisesRegex(ValueError, "selected I/O window"):

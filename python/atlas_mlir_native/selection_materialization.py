@@ -1,5 +1,7 @@
 """Independent source rebinding of retained native tile selection evidence."""
 
+from .binding import io_memory_base as selected_io_base
+
 from dataclasses import replace
 from hashlib import sha256
 import json
@@ -153,7 +155,7 @@ def bind_pointwise(original, canonical, materialized, destination, capture, *, r
     checked_body = bind_tile(body, canonical_body, materialized / "body", destination / "body", capture)
     if reduction:
         slots = tuple(abi["fixed_inputs"][node.id] for node in original.nodes[:2]) + tuple(abi["fixed_outputs"])
-        addresses = tuple(DRAM_BASE + slot * TILE_BYTES for slot in slots)
+        addresses = tuple(selected_io_base() + slot * TILE_BYTES for slot in slots)
         descriptor = module.selected_body_descriptors(plan, destination / "body")
         virtual = module.virtual_program(plan, addresses[:2], addresses[2])
         execution = dict(schema="atlas.reduction_execution_plan.v1", input_addresses=list(addresses[:2]),
@@ -172,8 +174,8 @@ def bind_pointwise(original, canonical, materialized, destination, capture, *, r
                         reduction_lowering_source_sha256=sha256(Path(module.__file__).read_bytes()).hexdigest(),
                         target_inventory_sha256=previous["target_inventory_sha256"])
     else:
-        addresses = [DRAM_BASE + abi["fixed_inputs"][node.id] * TILE_BYTES for node in original.nodes[:-1]]
-        output = DRAM_BASE + abi["fixed_outputs"][0] * TILE_BYTES
+        addresses = [selected_io_base() + abi["fixed_inputs"][node.id] * TILE_BYTES for node in original.nodes[:-1]]
+        output = selected_io_base() + abi["fixed_outputs"][0] * TILE_BYTES
         descriptor = module.selected_body_descriptor(plan, destination / "body")
         virtual = module.virtual_program(plan, addresses, output, descriptor)
         execution = dict(schema="atlas.pointwise_execution_plan.v1", shape=list(plan.shape), input_addresses=addresses,
@@ -191,6 +193,8 @@ def bind_pointwise(original, canonical, materialized, destination, capture, *, r
                         semantic_qualification_pipeline="mandatory", target_inventory_sha256=previous["target_inventory_sha256"],
                         pointwise_lowering_source_sha256=sha256(Path(module.__file__).read_bytes()).hexdigest(),
                         native_snapshot_sha256=previous["native_snapshot_sha256"], io_memory_bytes=dram_slots() * TILE_BYTES)
+    if selected_io_base() != DRAM_BASE:
+        manifest["io_memory_base"] = selected_io_base()
     if virtual.encode() != (materialized / "atlas-virtual.mlir").read_bytes():
         raise ValueError("rebound loop virtual program differs from checked canonical source")
     from .restoration_budget import instruction_bound
@@ -240,6 +244,8 @@ def bind_row_loop(original, canonical, materialized, destination, capture, *, ta
     explicit = _run([str(tools / "atlas-opt"), "--lower-atlas-virtual-boundary-to-dma", "-"],
                     input_text=(destination / "body/atlas-virtual.mlir").read_text())
     virtual = row_loop.virtual_program(plan, explicit)
+    if selected_io_base() != DRAM_BASE:
+        manifest["io_memory_base"] = selected_io_base()
     if virtual.encode() != (materialized / "atlas-virtual.mlir").read_bytes():
         raise ValueError("rebound row virtual program differs from checked canonical source")
     for name, data in _inventory(materialized).items():
@@ -280,6 +286,8 @@ def bind_counted(original, canonical, materialized, destination, capture, *, tar
     layout = loop.execution_layout(plan, operand_reuse=execution.get("operand_reuse_requested", "ordered"),
                                    exponent_page_cache=recorded_enabled(execution))
     virtual = loop.virtual_source(plan, layout)
+    if selected_io_base() != DRAM_BASE:
+        manifest["io_memory_base"] = selected_io_base()
     if virtual.encode() != (materialized / "atlas-virtual.mlir").read_bytes():
         raise ValueError("rebound counted virtual program differs from checked canonical source")
     if json.loads((materialized / "source-request.json").read_bytes()) != canonical.record():

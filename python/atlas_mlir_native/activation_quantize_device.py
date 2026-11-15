@@ -1,6 +1,8 @@
 """Exact activation quantization through ordinary virtual source contracts."""
 from __future__ import annotations
 
+from .binding import io_memory_base as selected_io_base
+
 from dataclasses import dataclass
 from math import prod
 from .binding import DRAM_BASE
@@ -79,7 +81,8 @@ class QuantizePlan:
         return result
 
 
-def prepare_plan(source, *, io_memory_base=DRAM_BASE):
+def prepare_plan(source, *, io_memory_base=None):
+    io_memory_base = selected_io_base() if io_memory_base is None else io_memory_base
     if type(io_memory_base) is not int or io_memory_base % 32:
         raise ValueError("I/O memory base requires an aligned integer address")
     from .binding import TARGET_IDENTITY, TILE_BYTES, dram_slots
@@ -120,7 +123,8 @@ def virtual_program(plan):
     return program(plan)
 
 
-def compile_source(snapshot, region, *, target_source, destination, limits, io_memory_base=DRAM_BASE, _plan=None):
+def compile_source(snapshot, region, *, target_source, destination, limits, io_memory_base=None, _plan=None):
+    io_memory_base = selected_io_base() if io_memory_base is None else io_memory_base
     import hashlib
     import json
     import os
@@ -172,7 +176,8 @@ def compile_source(snapshot, region, *, target_source, destination, limits, io_m
     return manifest
 
 
-def prepare_c_package(region, compiled, name, *, target_source, runtime_linkage='separate', io_memory_base=DRAM_BASE, _plan=None, input_permutation=None):
+def prepare_c_package(region, compiled, name, *, target_source, runtime_linkage='separate', io_memory_base=None, _plan=None, input_permutation=None):
+    io_memory_base = selected_io_base() if io_memory_base is None else io_memory_base
     import hashlib
     import json
     import os

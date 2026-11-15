@@ -5,6 +5,8 @@ contains no assembly, physical register choices, schedules, or model execution.
 """
 from __future__ import annotations
 
+from .binding import io_memory_base as selected_io_base
+
 from dataclasses import dataclass
 from hashlib import sha256
 import json
@@ -17,7 +19,7 @@ from merlin.semantic_compiler.precision_values import FloatBoundarySpec, contrac
 from merlin.semantic_compiler.target_binding import verify_native_publication
 
 from .binding import (
-    AtlasNativeBinding, DRAM_BASE, MXU1_CAP448_INPUT_DOMAIN, MXU1_CAP448_POLICY,
+    AtlasNativeBinding, MXU1_CAP448_INPUT_DOMAIN, MXU1_CAP448_POLICY,
     TARGET_IDENTITY, TILE_BYTES, _mxu0_maps, _mxu0_accumulate_maps,
 )
 
@@ -191,8 +193,8 @@ def prepare_c_package(source, compiled, name, *, policy, target_source, runtime_
         raise ValueError("MXU1 source or precision provenance differs from its checked publication")
     execution = json.loads(member("execution_plan.json"))
     abi = AtlasNativeBinding.plan_boundary_abi(plan.body)
-    addresses = [DRAM_BASE+abi["fixed_inputs"][node.id]*TILE_BYTES for node in plan.body.nodes if node.effect == "input"]
-    output_address = DRAM_BASE+abi["fixed_outputs"][0]*TILE_BYTES
+    addresses = [selected_io_base()+abi["fixed_inputs"][node.id]*TILE_BYTES for node in plan.body.nodes if node.effect == "input"]
+    output_address = selected_io_base()+abi["fixed_outputs"][0]*TILE_BYTES
     if (execution["input_addresses"] != addresses or execution["output_addresses"] != [output_address]
             or execution.get("operation") != "mxu1_cap448_seeded_ordered" or execution["output_bytes"] != TILE_BYTES):
         raise ValueError("MXU1 body ABI differs from its regenerated exact native binding")

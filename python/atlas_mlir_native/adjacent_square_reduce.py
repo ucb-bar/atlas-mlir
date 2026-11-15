@@ -4,6 +4,8 @@ The removed reduction encoder is moved to an exactly equivalent admission
 test on the square input, under the selected reduction policy. No arithmetic
 or reduction ordering is changed.
 """
+from .binding import io_memory_base as selected_io_base
+
 from dataclasses import replace
 from functools import lru_cache
 from hashlib import sha256
@@ -21,7 +23,7 @@ from .region_composition import (
     verify_adjacent_group,
     export_adjacent_package,
 )
-from .binding import DRAM_BASE, TILE_BYTES
+from .binding import TILE_BYTES
 from .reduction import NONNEGATIVE_NORMAL_REDUCTION_POLICY, REDUCTION_POLICY
 
 PREIMAGE_POLICY = 'f32-to-bf16-square-reduction-exact-preimage-v1'
@@ -165,7 +167,7 @@ def compile_group(group, snapshot, *, target_source, destination, limits):
     destination.mkdir()
     stages, selections = [], []
     square_id, reduced_id = group['outputs']
-    base = DRAM_BASE if group['io_memory_base'] is None else group['io_memory_base']
+    base = selected_io_base() if group['io_memory_base'] is None else group['io_memory_base']
     for index, (precision, plan) in enumerate(zip(group['precisions'], group['plans'], strict=True)):
         keys = (group['data'],) if index == 0 else (square_id, group['seed'])
         addresses = tuple(group['addresses'][key] for key in keys)

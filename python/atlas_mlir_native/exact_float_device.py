@@ -4,6 +4,8 @@ Every checked operation scans its whole source domain before storing results.
 NaNs and invalid infinity cancellation produce a device status with no output
 writes. Sign flips accept all encodings and preserve NaN payloads.
 """
+from .binding import io_memory_base as selected_io_base
+
 from dataclasses import dataclass
 from math import prod
 from .binding import DRAM_BASE
@@ -85,7 +87,8 @@ class FloatPlan:
                     vector_admission={"qualified":"signed-zero or abs-code2f80..4f80",
                                       "pair":"normal-or-signed-zero inputs except both-negative-zero; private result must be normal or provably exact zero"} if self.op in ("bf16_add","bf16_sub") else None)
 
-def prepare_plan(source, *, io_memory_base=DRAM_BASE):
+def prepare_plan(source, *, io_memory_base=None):
+    io_memory_base = selected_io_base() if io_memory_base is None else io_memory_base
     from .binding import TARGET_IDENTITY,TILE_BYTES,dram_slots
     from merlin.semantic_compiler.model import TensorType,pointwise_identity_maps
     pure=[n for n in source.nodes if n.effect=="pure"]
@@ -188,7 +191,8 @@ def machine_program(p):
     return _run([str(tools/"atlas-opt"),*_scheduled_virtual_pipeline(),"-"],input_text=virtual_program(p))
 
 
-def compile_source(snapshot,region,*,target_source,destination,limits,io_memory_base=DRAM_BASE):
+def compile_source(snapshot,region,*,target_source,destination,limits,io_memory_base=None):
+    io_memory_base = selected_io_base() if io_memory_base is None else io_memory_base
     import hashlib,json,os
     from pathlib import Path
     from merlin.semantic_compiler.codegen import current_codegen_options
@@ -234,7 +238,8 @@ def compile_source(snapshot,region,*,target_source,destination,limits,io_memory_
     return manifest
 
 
-def prepare_c_package(region,compiled,name,*,target_source,runtime_linkage="separate",io_memory_base=DRAM_BASE,input_layout=None):
+def prepare_c_package(region,compiled,name,*,target_source,runtime_linkage="separate",io_memory_base=None,input_layout=None):
+    io_memory_base = selected_io_base() if io_memory_base is None else io_memory_base
     import hashlib,json,os
     from pathlib import Path
     from merlin.compile.c_sources import c_source_pair

@@ -4,6 +4,8 @@ The transition reproduces the removed division encoder on logical reduction
 values. Rejected values become admitted padding before device arithmetic, and
 the accumulated status is checked before any source result is published.
 """
+from .binding import io_memory_base as selected_io_base
+
 from dataclasses import replace
 from math import prod
 import os
@@ -21,7 +23,6 @@ from .region_composition import (
     verify_adjacent_group,
     export_adjacent_package,
 )
-from .binding import DRAM_BASE
 
 
 def prepare(region, adapter=None, io_memory_base=None):
@@ -64,7 +65,7 @@ def prepare(region, adapter=None, io_memory_base=None):
     prefix = {**prefix,
               'addresses': {key: addresses[key] for key in (*prefix['inputs'], *prefix['outputs'])},
               'arena_bytes': addresses[reduced.id] + sizes[reduced.id]
-                            - (DRAM_BASE if io_memory_base is None else io_memory_base)}
+                            - (selected_io_base() if io_memory_base is None else io_memory_base)}
     spec = precision.operand_specs[operand]
     proof = dict(square_preimage=prefix['proof'], consumer_operand=operand,
                  consumer_conversion=spec.record(), transition='column_to_row',

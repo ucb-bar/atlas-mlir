@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from .binding import io_memory_base as selected_io_base
+
 import hashlib
 import json
 from pathlib import Path
@@ -12,7 +14,6 @@ from merlin.semantic_compiler.model import KernelRequest
 from merlin.semantic_compiler.target_binding import verify_native_publication
 
 from .binding import (
-    DRAM_BASE,
     RTL_REVISION,
     TILE_BYTES,
     AtlasNativeBinding,
@@ -179,9 +180,9 @@ def _prepare_c_package(
         sources = [node.id for node in region.request.nodes if node.effect in {"input", "constant"}]
         abi = AtlasNativeBinding.plan_boundary_abi(region.request)
         # The native allocator uses tile slots; the host ABI uses byte addresses.
-        bindings = {key: DRAM_BASE + slot * TILE_BYTES for key, slot in abi["fixed_inputs"].items()}
+        bindings = {key: selected_io_base() + slot * TILE_BYTES for key, slot in abi["fixed_inputs"].items()}
         addresses = [bindings[key] for key in sources]
-        outputs = [DRAM_BASE + slot * TILE_BYTES for slot in abi["fixed_outputs"]]
+        outputs = [selected_io_base() + slot * TILE_BYTES for slot in abi["fixed_outputs"]]
         if (
             execution.get("schema") != "atlas.native_tile_execution_plan.v8"
             or execution.get("dtype") != "bf16"
@@ -194,7 +195,7 @@ def _prepare_c_package(
         ):
             raise ValueError("softmax physical boundary differs from the checked source ABI")
         if any(
-            address < DRAM_BASE or address + TILE_BYTES > DRAM_BASE + dram_slots() * TILE_BYTES
+            address < selected_io_base() or address + TILE_BYTES > selected_io_base() + dram_slots() * TILE_BYTES
             for address in addresses + outputs
         ):
             raise ValueError("softmax boundary exceeds the selected diagnostic window")
@@ -204,20 +205,20 @@ def _prepare_c_package(
         if is_staged_bf16(region.request):
             _, staged_slots, _, _ = staged_memory_plan(region.request)
             expected_staging = {
-                "address": DRAM_BASE + len(sources) * TILE_BYTES,
+                "address": selected_io_base() + len(sources) * TILE_BYTES,
                 "bytes": (max(staged_slots.values()) + 1 - len(sources)) * TILE_BYTES,
             }
             if staging != expected_staging:
                 raise ValueError("softmax staging workspace differs from its checked allocation")
         elif staging is not None:
             raise ValueError("unexpected softmax staging workspace")
-        arena_bytes = max(arena_bytes, max(addresses + outputs) + TILE_BYTES - DRAM_BASE)
+        arena_bytes = max(arena_bytes, max(addresses + outputs) + TILE_BYTES - selected_io_base())
         if staging is not None:
-            arena_bytes = max(arena_bytes, staging["address"] + staging["bytes"] - DRAM_BASE)
+            arena_bytes = max(arena_bytes, staging["address"] + staging["bytes"] - selected_io_base())
         if row_loop is not None:
             addresses = [row_loop.address(address, 0) for address in addresses]
             outputs = [row_loop.address(address, 0) for address in outputs]
-            arena_bytes = row_loop.end - DRAM_BASE
+            arena_bytes = row_loop.end - selected_io_base()
         constants = manifest.get("constant_inputs", [])
         expected_constants = []
         for ordinal, constant in enumerate(region.request.constants):
@@ -257,7 +258,7 @@ def _prepare_c_package(
         device_buffers = [(address, TILE_BYTES, "READ") for address in addresses]
         if row_loop is not None:
             device_buffers = [
-                (DRAM_BASE, row_loop.groups * row_loop.readonly_bytes, "READ"),
+                (selected_io_base(), row_loop.groups * row_loop.readonly_bytes, "READ"),
                 (row_loop.writable_base, row_loop.groups * row_loop.writable_bytes, "READ_WRITE"),
             ]
         elif staging is not None:
@@ -403,7 +404,7 @@ static void {name}_pack_keep_tile(uint8_t *out,const uint8_t *in,size_t start,si
 #define {upper}_COLUMNS {n}u
 #define {upper}_BYTES {output_bytes}u
 #define {upper}_WORKSPACE_BYTES {workspace}u
-#define {upper}_DEVICE_ARENA_BASE {DRAM_BASE}u
+#define {upper}_DEVICE_ARENA_BASE {selected_io_base()}u
 #define {upper}_DEVICE_ARENA_BYTES {arena_bytes}u
 #define {upper}_PROGRAM_COUNT {program_count}u
 typedef enum {{ {upper}_OK=0, {upper}_INVALID, {upper}_INPUT_DOMAIN,
@@ -604,7 +605,7 @@ Standalone-core evidence does not qualify an integrated SoC or FPGA bitstream.
         **({"row_loop": row_loop.record(), "launches_per_invocation": row_loop.launches,
             **({"groups_per_launch": row_loop.groups_per_launch} if batched_loop else {})} if row_loop is not None else {}),
         "workspace_bytes": workspace,
-        "device_arena_base": DRAM_BASE,
+        "device_arena_base": selected_io_base(),
         "device_arena_bytes": arena_bytes,
         "entry_function": name + "_run",
         "dispatch_function": name + "_dispatch",

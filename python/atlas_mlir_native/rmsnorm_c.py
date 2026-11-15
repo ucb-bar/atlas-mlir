@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from .binding import io_memory_base as selected_io_base
+
 import hashlib
 import json
 from pathlib import Path
@@ -10,7 +12,7 @@ from merlin.compile.c_conversions import render_f32_array_c
 from merlin.compile.c_sources import c_source_pair
 from merlin.semantic_compiler.target_binding import verify_native_publication
 
-from .binding import AtlasNativeBinding, DRAM_BASE, TILE_BYTES
+from .binding import AtlasNativeBinding, TILE_BYTES
 from .c_runtime import program_array, runtime_headers, runtime_members
 from .row_loop import verify_row_loop
 
@@ -87,16 +89,16 @@ def _render_package(precision, plan, binary, name, *, target_source, runtime_lin
                 paired[physical:physical + 2] = raw[logical:logical + 2]
         constant_arrays.append(f"static const uint8_t {name}_constant_{index}[2048]={{" +
                                ",".join(str(x) for x in paired) + "};")
-        address = DRAM_BASE + abi["fixed_inputs"][key] * TILE_BYTES
+        address = selected_io_base() + abi["fixed_inputs"][key] * TILE_BYTES
         constant_stages.append(f"    if (region->io.write(region->io.context,{address}ULL+group*{plan.readonly_bytes}u,"
                                f"{name}_constant_{index},2048u)) return {name.upper()}_MEMORY_ERROR;")
-    input_addresses = [DRAM_BASE + abi["fixed_inputs"][key] * TILE_BYTES for key in expected_inputs]
-    output_addresses = [DRAM_BASE + slot * TILE_BYTES for slot in abi["fixed_outputs"]]
+    input_addresses = [selected_io_base() + abi["fixed_inputs"][key] * TILE_BYTES for key in expected_inputs]
+    output_addresses = [selected_io_base() + slot * TILE_BYTES for slot in abi["fixed_outputs"]]
     # Every address is replayed through the checked row plan, including private
     # scratch. The C loop applies precisely these two selected frame strides.
     for group in range(plan.groups):
         for address in (*input_addresses, *output_addresses,
-                        *(DRAM_BASE + abi["fixed_inputs"][key] * TILE_BYTES for key in constants)):
+                        *(selected_io_base() + abi["fixed_inputs"][key] * TILE_BYTES for key in constants)):
             plan.address(address, group)
     raw_bytes, source_bytes = TILE_BYTES + 4 * counts[0], 2 * sum(counts)
     upper = name.upper()
@@ -149,7 +151,7 @@ static size_t {name}_pair(size_t r,size_t c) {{ return (c/16u)*1024u+(r*16u+c%16
       {name}_overlap(scratch,{raw_bytes}u,ctx,sizeof(*ctx)) || {name}_overlap(scratch,{raw_bytes}u,host,sizeof(*host)) ||
       {name}_overlap(ctx,sizeof(*ctx),host,sizeof(*host))) return {upper}_INVALID;
   *ctx=({name}_context){{host,io,scratch,polls,{{
-      {{{DRAM_BASE}ULL,{plan.groups * plan.readonly_bytes}u,ATLAS_HOST_DEVICE_READ}},
+      {{{selected_io_base()}ULL,{plan.groups * plan.readonly_bytes}u,ATLAS_HOST_DEVICE_READ}},
       {{{plan.writable_base}ULL,{plan.groups * plan.writable_bytes}u,ATLAS_HOST_DEVICE_READ_WRITE}}}}}};
   return {upper}_OK;
 }}

@@ -6,6 +6,8 @@ host conversions, rewrite addresses, change arithmetic, or join program sets.
 
 from __future__ import annotations
 
+from .binding import io_memory_base as selected_io_base
+
 import hashlib
 import io
 import json
@@ -31,10 +33,10 @@ class VirtualStage:
 
 
 def _contract(stages, buffers, initialized, outputs, io_memory_bytes, io_memory_base=None):
-    from .binding import DRAM_BASE, TILE_BYTES
+    from .binding import TILE_BYTES
 
     if io_memory_base is None:
-        io_memory_base = DRAM_BASE
+        io_memory_base = selected_io_base()
 
     if not stages or len({stage.name for stage in stages}) != len(stages):
         raise ValueError("composition requires nonempty stages with unique names")
@@ -42,6 +44,8 @@ def _contract(stages, buffers, initialized, outputs, io_memory_bytes, io_memory_
         raise ValueError("composition I/O window must contain whole positive slots")
     if type(io_memory_base) is not int or io_memory_base % TILE_BYTES or io_memory_base + io_memory_bytes > 1 << 32:
         raise ValueError("composition I/O window exceeds the 32-bit buffer ABI")
+    from .binding import validate_io_window
+    validate_io_window(io_memory_base, io_memory_bytes)
     by_name = {buffer.name: buffer for buffer in buffers}
     if len(by_name) != len(buffers) or any(not key for key in by_name):
         raise ValueError("composition buffers require unique nonempty names")
@@ -153,6 +157,7 @@ def compose_regions(
     from .binding import NATIVE_CHECKS, NATIVE_PIPELINES, RTL_REVISION, _run
     from .resident_graph import compose_fragments
 
+    io_memory_base = selected_io_base() if io_memory_base is None else io_memory_base
     stages, buffers = tuple(stages), tuple(buffers)
     initialized, outputs = tuple(initialized), tuple(outputs)
     by_name = _contract(stages, buffers, initialized, outputs, io_memory_bytes, io_memory_base)
@@ -217,10 +222,10 @@ def compose_regions(
 
 def allocate_adjacent_arena(sizes, names, io_memory_base=None):
     """Place whole tile buffers in one checked arena at the selected I/O base."""
-    from .binding import DRAM_BASE, TILE_BYTES, dram_slots
+    from .binding import TILE_BYTES, dram_slots
     from .memory_windows import dma_span_in_window
 
-    base = DRAM_BASE if io_memory_base is None else io_memory_base
+    base = selected_io_base() if io_memory_base is None else io_memory_base
     if type(base) is not int or base % TILE_BYTES:
         raise ValueError("adjacent arena base must be a tile-aligned integer")
     addresses, cursor = {}, base
@@ -237,10 +242,10 @@ def allocate_adjacent_arena(sizes, names, io_memory_base=None):
 def compile_pointwise_member(precision, plan, snapshot, *, addresses, output,
                              target_source, destination, limits, ordinary_abi=False, io_memory_base=None):
     """Qualify an unchanged child and return its selected body plus receipt."""
-    from .binding import DRAM_BASE, TILE_BYTES
+    from .binding import TILE_BYTES
     from .pointwise import compile_pointwise, plan_abi, selected_body_descriptor
 
-    base = DRAM_BASE if io_memory_base is None else io_memory_base
+    base = selected_io_base() if io_memory_base is None else io_memory_base
     abi = plan_abi(precision.request) if ordinary_abi else dict(
         fixed_inputs={node.id: (address - base) // TILE_BYTES
                       for node, address in zip(precision.request.nodes[:-1], addresses, strict=True)},
@@ -282,9 +287,11 @@ def link_adjacent_stages(stages, *, buffers, initialized, outputs, destination, 
 
     destination = Path(destination)
     linked = destination / 'linked'
+    from merlin.semantic_compiler.codegen import current_codegen_options
     compose_regions(stages, buffers=buffers, initialized=initialized, outputs=outputs,
         destination=linked, tools=os.environ.get('ATLAS_OOT_BIN_DIR', str(Path(target_source) / 'build/bin')),
         pipeline=_native_pipeline(), io_memory_bytes=dram_slots() * TILE_BYTES, rematerialize_constants=True,
+        program_size_limit_bytes=current_codegen_options().program_size_limit_bytes,
         io_memory_base=io_memory_base)
     for path in linked.iterdir():
         shutil.copyfile(path, destination / path.name)
@@ -307,6 +314,8 @@ def publish_adjacent_group(group, destination, *, kind, execution, enlargement):
         request_digest=region.digest(), target_identity=region.target_identity,
         binary_sha256=artifacts['program.bin'], execution_plan_sha256=artifacts['execution_plan.json'],
         stage_artifacts=artifacts, io_memory_bytes=dram_slots() * TILE_BYTES)
+    if selected_io_base() != 0x90000000:
+        manifest["io_memory_base"] = selected_io_base()
     (destination / 'manifest.json').write_text(json.dumps(manifest, sort_keys=True, indent=2) + '\n')
     return manifest
 

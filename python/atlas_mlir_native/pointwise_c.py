@@ -20,6 +20,7 @@ from .binding import (
     _run,
     check_io_memory_manifest,
     dram_slots,
+    io_memory_base,
 )
 from .memory_windows import dma_span_in_window
 from .pointwise import (
@@ -97,9 +98,11 @@ def prepare_precision_c_package(precision, compiled, name, *, target_source, run
         if (
             type(address) is not int
             or address % TILE_BYTES
+            or address < io_memory_base()
+            or address + size > io_memory_base() + dram_slots() * TILE_BYTES
             or not dma_span_in_window(address, size)
         ):
-            raise ValueError("pointwise byte address is unaligned or outside the selected window")
+            raise ValueError("pointwise byte address is unaligned or outside the selected memory window")
         ranges.append((address, address + size))
     if max(b for a, b in ranges) - min(a for a, b in ranges) > dram_slots() * TILE_BYTES:
         raise ValueError("pointwise buffers exceed the selected memory window")

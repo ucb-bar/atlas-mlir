@@ -676,6 +676,7 @@ def compile_looped(snapshot, request, *, fixed_inputs, fixed_outputs, target_sou
 
     from .binding import (
         DRAM_BASE,
+        io_memory_base,
         NATIVE_CHECKS,
         NATIVE_PIPELINES,
         RTL_REVISION,
@@ -685,6 +686,7 @@ def compile_looped(snapshot, request, *, fixed_inputs, fixed_outputs, target_sou
         dram_slots,
     )
 
+    io_base = io_memory_base()
     unroll, codegen = choose_reduction_unroll(tuning_key(snapshot, request, fixed_inputs, fixed_outputs, limits))
     geometry, seed = split_seeded_request(request)
     contraction, epilogue = split_epilogue(geometry)
@@ -715,7 +717,7 @@ def compile_looped(snapshot, request, *, fixed_inputs, fixed_outputs, target_sou
     ):
         raise NativeCompilationError("resource_limit", "loop buffers exceed the selected diagnostic DRAM window")
     ranges = [
-        (DRAM_BASE + slot * TILE_BYTES, DRAM_BASE + slot * TILE_BYTES + size)
+        (io_base + slot * TILE_BYTES, io_base + slot * TILE_BYTES + size)
         for slot, size in zip(slots, sizes, strict=True)
     ]
     if any(a < d and c < b for i, (a, b) in enumerate(ranges) for c, d in ranges[i + 1 :]):
@@ -962,6 +964,7 @@ def compile_looped(snapshot, request, *, fixed_inputs, fixed_outputs, target_sou
         "stage_artifacts": {name: sha(data) for name, data in artifacts.items() if name != "program.bin"},
         "tile_body_check_fingerprint": selected.check_fingerprint,
         "native_snapshot_sha256": sha((snapshot.root / "manifest.json").read_bytes()),
+        **({"io_memory_base": io_base} if io_base != DRAM_BASE else {}),
         "io_memory_bytes": dram_slots() * TILE_BYTES,
         "binding_source_sha256": sha(Path(__file__).with_name("binding.py").read_bytes()),
         "loop_lowering_source_sha256": sha(Path(__file__).read_bytes()),

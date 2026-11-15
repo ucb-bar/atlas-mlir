@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from .binding import io_memory_base as selected_io_base
+
 import hashlib
 import json
 import os
@@ -388,8 +390,9 @@ def compile_reduction(
     target_source,
     destination,
     limits,
-    io_memory_base=DRAM_BASE,
+    io_memory_base=None,
 ):
+    io_memory_base = selected_io_base() if io_memory_base is None else io_memory_base
     from .memory_windows import dma_span_in_window
 
     plan = prepare_plan(request)
@@ -512,6 +515,7 @@ def compile_reduction(
         "semantic_qualification_pipeline": "mandatory",
         "native_snapshot_sha256": sha((snapshot.root / "manifest.json").read_bytes()),
         "io_memory_bytes": dram_slots() * TILE_BYTES,
+            **({"io_memory_base": io_memory_base} if io_memory_base != DRAM_BASE else {}),
         "reduction_lowering_source_sha256": sha(Path(__file__).read_bytes()),
         "target_inventory_sha256": sha((target_source / "docs/selected-variant-inventory.json").read_bytes()),
         "stage_artifacts": {

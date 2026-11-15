@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from .binding import io_memory_base as selected_io_base
+
 import hashlib
 import io
 import json
@@ -99,7 +101,7 @@ class RowLoopPlan:
     def address(self, original, group):
         if type(group) is not int or not 0 <= group < self.groups:
             raise ValueError("row group is outside the selected loop")
-        offset = original - DRAM_BASE
+        offset = original - selected_io_base()
         if not 0 <= offset < self.readonly_bytes + self.output_bytes + self.scratch_bytes:
             raise ValueError("row-body address is outside its selected frame")
         if offset < self.readonly_bytes:
@@ -126,7 +128,8 @@ class RowLoopPlan:
         }
 
 
-def prepare_plan(source, *, io_memory_base=DRAM_BASE, instruction_budget=None):
+def prepare_plan(source, *, io_memory_base=None, instruction_budget=None):
+    io_memory_base = selected_io_base() if io_memory_base is None else io_memory_base
     if type(io_memory_base) is not int or io_memory_base % 32:
         raise ValueError("I/O memory base requires an aligned integer address")
     if instruction_budget is None:
@@ -200,7 +203,7 @@ def virtual_program(plan, body_text):
         if not isinstance(pointer.owner, arith.ConstantOp):
             raise ValueError("row-body DMA address must be a selected constant")
         original = int(pointer.owner.value.value.data) & 0xFFFFFFFF
-        offset = original - DRAM_BASE
+        offset = original - selected_io_base()
         base = plan.address(original, 0)
         if name.endswith("store_bf16") and offset < plan.readonly_bytes:
             raise ValueError("row body writes its immutable frame")
@@ -217,8 +220,7 @@ def virtual_program(plan, body_text):
         accesses += 1
     if not accesses:
         raise ValueError("row body contains no explicit DMA accesses")
-    if plan.io_memory_base != DRAM_BASE:
-        function.attributes["atlas.input_dram_base"] = IntegerAttr(plan.io_memory_base, 64)
+    function.attributes["atlas.input_dram_base"] = IntegerAttr(plan.io_memory_base, 64)
     function.attributes["atlas.output_dram_base"] = IntegerAttr(plan.writable_base, 64)
     function.attributes["atlas.output_dram_bytes"] = IntegerAttr(plan.end - plan.writable_base, 64)
     simplify_state_cfg(function)
@@ -228,7 +230,8 @@ def virtual_program(plan, body_text):
     return stream.getvalue()
 
 
-def compile_row_loop(snapshot, source, *, target_source, destination, limits, io_memory_base=DRAM_BASE):
+def compile_row_loop(snapshot, source, *, target_source, destination, limits, io_memory_base=None):
+    io_memory_base = selected_io_base() if io_memory_base is None else io_memory_base
     from .region_composition import compile_virtual_with_receipt
 
     plan = prepare_plan(source, io_memory_base=io_memory_base,
@@ -303,6 +306,7 @@ def compile_row_loop(snapshot, source, *, target_source, destination, limits, io
         "binary_sha256": _sha(binary),
         "execution_plan_sha256": _sha(files["execution_plan.json"]),
         "native_snapshot_sha256": _sha((snapshot.root / "manifest.json").read_bytes()),
+        **({"io_memory_base": io_memory_base} if io_memory_base != DRAM_BASE else {}),
         "io_memory_bytes": dram_slots() * TILE_BYTES,
         "lowering_pipeline": _native_pipeline(),
         "body_manifest_sha256": _sha((destination / "body/manifest.json").read_bytes()),
@@ -321,12 +325,13 @@ def compile_row_loop(snapshot, source, *, target_source, destination, limits, io
     return result
 
 
-def verify_row_loop(source, compiled, *, target_source, io_memory_base=DRAM_BASE):
+def verify_row_loop(source, compiled, *, target_source, io_memory_base=None):
     """Reconstruct the frame and check its original captured physical lowering."""
-    from .binding import check_io_memory_manifest
-
+    io_memory_base = selected_io_base() if io_memory_base is None else io_memory_base
     manifest = json.loads((compiled / "manifest.json").read_text())
-    check_io_memory_manifest(manifest)
+    if (manifest.get("io_memory_bytes") != dram_slots() * TILE_BYTES
+            or manifest.get("io_memory_base", DRAM_BASE) != io_memory_base):
+        raise ValueError("compiled I/O window differs from the selected memory configuration")
     if manifest.get("schema") != "atlas.row_loop_compilation.v1":
         raise ValueError("unsupported row-loop compilation")
     verify_native_publication(

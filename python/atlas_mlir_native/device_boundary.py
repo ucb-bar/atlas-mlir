@@ -80,7 +80,7 @@ def _admitted(e, code, ranges):
 def virtual_transition(*, source_address, destination_address, status_address,
                        rows, columns, kind='identity', admitted_code_ranges=(), pad=0,
                        canonicalize_negative_zero=False, output_base=None, output_bytes=None,
-                       initialize_status=True):
+                       initialize_status=True, io_memory_base=None):
     """Return one composable packed-tensor boundary program.
 
     ``rows`` and ``columns`` describe the producer's logical matrix. The two
@@ -93,6 +93,14 @@ def virtual_transition(*, source_address, destination_address, status_address,
     pages,ranges,pad,output_base,output_bytes = _configuration(
         source_address,destination_address,status_address,rows,columns,kind,
         admitted_code_ranges,pad,canonicalize_negative_zero,output_base,output_bytes)
+    from merlin.semantic_compiler.codegen import current_codegen_options
+    if io_memory_base is not None or current_codegen_options().io_memory_base is not None:
+        from .binding import validate_io_window
+        base, size = validate_io_window(io_memory_base)
+        if any(address < base or address + length > base + size for address, length in
+               ((source_address, pages * 2048), (destination_address, pages * 2048),
+                (status_address, 2048), (output_base, output_bytes))):
+            raise ValueError("device boundary exceeds selected I/O window")
     mc = (rows+31)//32
     nc = (columns+31)//32 if kind == 'identity' else 1
     e = Emitter('boundary')

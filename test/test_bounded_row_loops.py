@@ -19,6 +19,25 @@ class BoundedRowPlanTest(unittest.TestCase):
         self.options.__enter__()
         self.addCleanup(self.options.__exit__, None, None, None)
 
+    def test_selected_base_offsets_and_explicit_plan_override(self):
+        from atlas_mlir_native.binding import DRAM_BASE
+        from merlin.semantic_compiler.codegen import CodegenOptions, codegen_options
+
+        base = 0xa0000000
+        source = source_request((65, 64))
+        with codegen_options(CodegenOptions(io_memory_base=base, io_memory_bytes=67108864)):
+            plan = prepare_plan(source)
+            self.assertEqual(plan.address(base, 0), base)
+            self.assertEqual(plan.address(base, 1), base + plan.readonly_bytes)
+            self.assertEqual(plan.address(base + plan.readonly_bytes, 1),
+                             plan.writable_base + plan.writable_bytes)
+            # The body retains invocation addresses while an explicit plan
+            # override selects a separate destination frame.
+            override = prepare_plan(source, io_memory_base=DRAM_BASE)
+            self.assertEqual(override.address(base, 0), DRAM_BASE)
+            self.assertEqual(override.address(base + override.readonly_bytes, 1),
+                             override.writable_base + override.writable_bytes)
+
     def test_window512_keeps_rows_and_all_groups(self):
         plan = prepare_plan(source_request((16384, 512), masked=True))
         self.assertEqual((plan.groups, plan.groups_per_launch, plan.launches), (512, 32, 16))

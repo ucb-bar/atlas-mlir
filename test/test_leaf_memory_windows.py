@@ -69,12 +69,13 @@ class LeafMemoryWindowsTest(unittest.TestCase):
                                       destination=destination, limits=SearchLimits(), io_memory_base=base)
                 self.assertFalse(destination.exists())
 
-    def package_placement(self, addresses, output, *, shape=(32, 32)):
+    def package_placement(self, addresses, output, *, shape=(32, 32), memory_base=DRAM_BASE, memory_bytes=262144):
+        from merlin.semantic_compiler.codegen import CodegenOptions, codegen_options
         precision = prepare_source(precision_source(shape), bf16_policy=BF16_POINTWISE_POLICY)
         _, plan, _ = prepare_execution_plan(precision.request)
         # Isolate placement validation from earlier inventory/hash validation.
         # All address checks and subsequent source replay remain real.
-        with tempfile.TemporaryDirectory() as tmp, ExitStack() as stack:
+        with codegen_options(CodegenOptions(io_memory_base=memory_base, io_memory_bytes=memory_bytes)), tempfile.TemporaryDirectory() as tmp, ExitStack() as stack:
             compiled = Path(tmp)
             (compiled / "body").mkdir()
             (compiled / "body/manifest.json").write_text('{}')
@@ -105,14 +106,14 @@ class LeafMemoryWindowsTest(unittest.TestCase):
             with self.subTest(crossing=address), self.assertRaisesRegex(ValueError, "byte address"):
                 self.package_placement([address, 0x08002000], 0x08004000, shape=(32, 64))
         with self.assertRaisesRegex(ValueError, "overlap"):
-            self.package_placement([0x08000000, 0x08000000], 0x08004000)
+            self.package_placement([0x08000000, 0x08000000], 0x08004000, memory_base=0x08000000, memory_bytes=65536)
         with self.assertRaisesRegex(ValueError, "selected memory window"):
             self.package_placement([DRAM_BASE, DRAM_BASE + 0x40000], DRAM_BASE + 0x42000)
 
     def test_packaging_admits_dram_and_scratchpad_before_source_replay(self):
         for base in (DRAM_BASE, 0x80000000, 0x08000000, 0x0800e800):
             with self.subTest(base=base), self.assertRaises(ReplayReached):
-                self.package_placement([base, base + TILE_BYTES], base + 2 * TILE_BYTES)
+                self.package_placement([base, base + TILE_BYTES], base + 2 * TILE_BYTES, memory_base=base, memory_bytes=3*TILE_BYTES)
 
 
 class ReplayReached(Exception):
@@ -126,7 +127,8 @@ class ScratchpadPointwiseExportTest(unittest.TestCase):
         from atlas_mlir_native.pointwise_c import prepare_c_package
         source = precision_source()
         precision = prepare_source(source, bf16_policy=BF16_POINTWISE_POLICY)
-        with tempfile.TemporaryDirectory() as tmp:
+        from merlin.semantic_compiler.codegen import CodegenOptions, codegen_options
+        with codegen_options(CodegenOptions(io_memory_base=0x08000000, io_memory_bytes=65536)), tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             snapshot = build_snapshot(root / "native")
             compiled = root / "compiled"

@@ -5,6 +5,8 @@ MXU contraction restores their sum at readout. No weight encoder is involved.
 """
 from __future__ import annotations
 
+from .binding import io_memory_base as selected_io_base
+
 from dataclasses import dataclass
 from hashlib import sha256
 import json
@@ -15,7 +17,7 @@ import numpy as np
 from merlin.semantic_compiler.model import KernelRequest, SemanticNode, TensorType
 from merlin.semantic_compiler.target_binding import NativeCompilationError, verify_native_publication
 
-from .binding import (AtlasNativeBinding, DRAM_BASE, MXU1_CAP448_INPUT_DOMAIN,
+from .binding import (AtlasNativeBinding, MXU1_CAP448_INPUT_DOMAIN,
     MXU1_CAP448_POLICY, MXU1_CAP448_SEED_DOMAIN, TARGET_IDENTITY, TILE_BYTES,
     _mxu0_maps, _mxu0_accumulate_maps)
 
@@ -248,8 +250,8 @@ def prepare_c_package(source, compiled, name, *, target_source):
             raise ValueError("already-quantized native body differs from its publication")
         abi = AtlasNativeBinding.plan_boundary_abi(body)
         execution = json.loads((root/"execution_plan.json").read_text())
-        addresses = [DRAM_BASE+abi["fixed_inputs"][node.id]*TILE_BYTES for node in body.nodes if node.effect == "input"]
-        out = DRAM_BASE+abi["fixed_outputs"][0]*TILE_BYTES
+        addresses = [selected_io_base()+abi["fixed_inputs"][node.id]*TILE_BYTES for node in body.nodes if node.effect == "input"]
+        out = selected_io_base()+abi["fixed_outputs"][0]*TILE_BYTES
         if execution["input_addresses"] != addresses or execution["output_addresses"] != [out] or execution.get("operation") != "mxu1_cap448_seeded_ordered":
             raise ValueError("already-quantized native operand ABI differs")
         if sha256((target_source/"docs/selected-variant-inventory.json").read_bytes()).hexdigest() != manifest["target_inventory_sha256"]:
