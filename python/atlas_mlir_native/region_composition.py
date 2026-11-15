@@ -321,7 +321,7 @@ def verify_adjacent_group(group, compiled, *, precision_plan=None, plans=None):
 def export_adjacent_package(group, compiled, name, *, kind, target_source, execution,
                             input_sources, packed_sizes, helpers, metadata=None,
                             completion_check='', source_input_indices=None, input_guard=None):
-    """Export shared checked f32 boundary dispatch around a single device image."""
+    """Export checked f32 inputs and the source result type around one image."""
     from merlin.compile.semantic_application import CompiledCRegion
     from merlin.semantic_compiler.model import KernelRequest, SemanticNode, TensorType
     from .c_runtime import RUNTIME_SHARED_FILES
@@ -339,7 +339,7 @@ def export_adjacent_package(group, compiled, name, *, kind, target_source, execu
     record, files = render_tile_io_package(boundary, (compiled / 'program.bin').read_bytes(), execution, name,
         target_source=Path(target_source), runtime_linkage='separate', packed_sizes=packed_sizes,
         tile_bytes=2048, helpers='\n'.join(helpers), source_dtype='f32', completion_check=completion_check,
-        input_guard=input_guard, **options)
+        output_dtype=region.node(region.outputs[0]).type.dtype, input_guard=input_guard, **options)
     record.update(kind=kind, context_type=name + '_context', source_context_type=name + '_source_context',
         binding_function=name + '_bind', source_binding_function=name + '_source_bind',
         input_node_ids=list(group['inputs']), output_node_ids=list(region.outputs),

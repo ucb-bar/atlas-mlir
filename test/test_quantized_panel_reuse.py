@@ -115,7 +115,7 @@ class PanelReuseTest(unittest.TestCase):
                 mc,nc,kc=((v+31)//32 for v in (m,n,k))
                 phases=(kc+PANEL_K_TILES-1)//PANEL_K_TILES
                 saved_weights=(mc//2)*nc*kc*1024
-                partial_reads=phases*mc*nc*2048
+                partial_reads=(phases-1)*mc*nc*2048
                 self.assertEqual(32*(old.load_beats-new.load_beats),saved_weights-partial_reads)
                 self.assertEqual(32*(new.store_beats-old.store_beats),partial_reads)
                 self.assertLess(new.load_beats+new.store_beats,old.load_beats+old.store_beats)

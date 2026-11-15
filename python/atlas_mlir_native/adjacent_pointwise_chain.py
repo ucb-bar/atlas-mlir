@@ -36,7 +36,17 @@ def _column_view(plan, operand, producer):
 
 def prepare(region, adapter):
     from .pointwise import prepare_source, prepare_execution_plan
+    original = region
     pure=[node for node in region.nodes if node.effect=='pure']
+    narrowing = None
+    if len(pure) == 4:
+        from .pointwise_narrowing import prepare as prepare_narrowing
+        # Reuse the ordinary non-NaN result proof and exact private-cast check.
+        narrowing = prepare_narrowing(extract_semantic_region(region, (pure[-2].id, pure[-1].id)), adapter)
+        if region.outputs != (pure[-1].id,):
+            raise ValueError('pointwise chain narrowing requires only its final cast to escape')
+        region = extract_semantic_region(region, tuple(node.id for node in pure[:-1]))
+        pure = pure[:-1]
     if (len(pure)!=3 or region.outputs!=(pure[-1].id,) or any(node.type.dtype!='f32' for node in region.nodes)):
         raise ValueError('pointwise chain needs three f32 operations with only its final result escaping')
     if any(pure[i].id not in pure[i+1].inputs for i in range(2)) or pure[0].id in pure[2].inputs:
@@ -106,7 +116,9 @@ def prepare(region, adapter):
                 consumer_conversion=edge['spec'].record(),pad_code=edge['pad']) for edge in edges],
         rejection='invalid logical codes become admitted consumer padding and set shared invocation status; C checks status before output publication',
         operation_order='complete each unchanged selected pointwise child in source order; preserve both intermediate encoder checks on device')
-    return dict(region=region,precisions=tuple(precisions),plans=tuple(plans),inputs=inputs,views=tuple(views),
+    if narrowing is not None:
+        proof['output_narrowing'] = 'non-NaN BF16 result; exact widening followed by RNE is identity'
+    return dict(region=original,precisions=tuple(precisions),plans=tuple(plans),inputs=inputs,views=tuple(views),
                 bindings=tuple(bindings),edges=tuple(edges),mutable=mutable,sizes=sizes,addresses=addresses,
                 arena_bytes=arena_bytes,proof=proof)
 
@@ -118,10 +130,14 @@ def alternatives(adapter, source, choices):
     singles=sorted((row for row in choices if len(row.nodes)==1),key=lambda row:row.nodes)
     pure=[node for node in source.nodes if node.effect=='pure']
     adapter._pointwise_chain_groups={}
-    for children in zip(singles,singles[1:],singles[2:]):
+    candidates = [singles[start:start + width] for width in (3, 4)
+                  for start in range(len(singles) - width + 1)]
+    for children in candidates:
         nodes=tuple(row.nodes[0] for row in children)
-        if (nodes in excluded or nodes[1]!=nodes[0]+1 or nodes[2]!=nodes[1]+1
-                or any(row.placement!='accelerator' or dict(row.metadata).get('kind') not in {'pointwise','pointwise_math'} for row in children)):
+        if (nodes[:3] in excluded or any(b != a + 1 for a, b in zip(nodes, nodes[1:]))
+                or any(row.placement!='accelerator' for row in children)
+                or any(dict(row.metadata).get('kind') not in {'pointwise','pointwise_math'} for row in children[:3])
+                or len(children) == 4 and dict(children[-1].metadata).get('kind') != 'exact_float_device'):
             continue
         try:
             region=extract_semantic_region(source,tuple(pure[node].id for node in nodes))
@@ -130,7 +146,8 @@ def alternatives(adapter, source, choices):
             continue
         ports={port.buffer:port for row in children for port in (*row.inputs,*row.outputs)}
         adapter._pointwise_chain_groups[region.digest()]=group
-        choices.append(replace(children[0],id='pointwise_chain_'+children[0].id,nodes=nodes,
+        prefix = 'pointwise_chain_narrowing_' if len(children) == 4 else 'pointwise_chain_'
+        choices.append(replace(children[0],id=prefix+children[0].id,nodes=nodes,
             implementation='source_adjacent_pointwise_chain',inputs=tuple(ports[key] for key in group['inputs']),
             outputs=tuple(ports[key] for key in region.outputs),demands=(),occupancy=(),scratch_bytes=group['arena_bytes'],
             cycles=CycleInterval.unknown('device-checked pointwise chain; no measured cost'),metadata=(('kind','adjacent_pointwise_chain'),)))

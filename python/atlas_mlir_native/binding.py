@@ -2831,7 +2831,8 @@ def _with_tile_io_base(function):
 
 
 class AtlasNativeBinding:
-    codegen_capabilities = ("reduction_unroll", "tuning_profile", "program_size_limit_bytes", "io_memory_bytes")
+    codegen_capabilities = ("reduction_unroll", "tuning_profile", "program_size_limit_bytes", "io_memory_bytes",
+                           "execution_instruction_limit")
 
     @staticmethod
     def tuning_key(snapshot, request, fixed_inputs, fixed_outputs, limits):
@@ -2845,7 +2846,13 @@ class AtlasNativeBinding:
     def application_adapter(policy, *, original_source_sha256):
         from .application import AtlasApplicationAdapter
 
-        return AtlasApplicationAdapter(policy, original_source_sha256=original_source_sha256)
+        base = AtlasApplicationAdapter(policy, original_source_sha256=original_source_sha256)
+        selected = os.environ.get("ATLAS_ADJACENT_PATTERNS", "").strip()
+        if not selected:
+            return base
+        from .composition_adapter import AdjacentDeviceAdapter
+
+        return AdjacentDeviceAdapter(base, patterns=tuple(name.strip() for name in selected.split(",")))
 
     @staticmethod
     def plan_boundary_abi(request: KernelRequest) -> dict:

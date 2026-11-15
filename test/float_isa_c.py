@@ -15,10 +15,10 @@ import subprocess
 import sys
 import tempfile
 from atlas_mlir_native.binding import DRAM_BASE, _run
-from atlas_mlir_native.limits import DEFAULT_FUNCTIONAL_INSTRUCTION_LIMIT
+from atlas_mlir_native.limits import DEFAULT_FUNCTIONAL_INSTRUCTION_LIMIT, functional_instruction_limit
 
 @lru_cache(maxsize=32)
-def executor(operation,count,shared=False):
+def executor(operation,count,shared=False,execution_limit=DEFAULT_FUNCTIONAL_INSTRUCTION_LIMIT):
     from test_exact_float_device import request
     from atlas_mlir_native.exact_float_device import prepare_plan,machine_program
     p=prepare_plan(request(operation,count,shared));machine=machine_program(p)
@@ -93,7 +93,7 @@ int execute(const void *left,const void *right,void *output,unsigned *status){
  for(unsigned i=0;i<COUNT;i+=32){unsigned lanes=COUNT-i<32?COUNT-i:32;memcpy((char*)output+i*OUT_WIDTH,dram+OUTPUT+i*OUT_WIDTH,lanes*OUT_WIDTH);}
  free(vm);free(tensor);free(dram);return steps;}
 '''
-    constants=dict(INSTRUCTION_LIMIT=DEFAULT_FUNCTIONAL_INSTRUCTION_LIMIT,DRAM_BASE=DRAM_BASE,WORKSPACE=p.workspace_bytes,COUNT=count,INPUT_COUNT=len(p.operands),INPUT_BYTES=p.input_bytes,WIDTH=p.width,OUT_WIDTH=p.output_width,OUTPUT=p.output_address-DRAM_BASE,STATUS=p.status_address-DRAM_BASE)
+    constants=dict(INSTRUCTION_LIMIT=execution_limit,DRAM_BASE=DRAM_BASE,WORKSPACE=p.workspace_bytes,COUNT=count,INPUT_COUNT=len(p.operands),INPUT_BYTES=p.input_bytes,WIDTH=p.width,OUT_WIDTH=p.output_width,OUTPUT=p.output_address-DRAM_BASE,STATUS=p.status_address-DRAM_BASE)
     code=''.join(f'#define {key} {value}u\n' for key,value in constants.items())+code
     temporary=tempfile.TemporaryDirectory(prefix='float-isa-c-');directory=Path(temporary.name)
     (directory/'interpreter.c').write_text(code)
@@ -112,10 +112,11 @@ int execute(const void *left,const void *right,void *output,unsigned *status){
     return p,function,temporary
 
 def execute(source,raw):
-    p,fn,_=executor(source.nodes[-1].op,source.nodes[-1].type.shape[0],len(source.nodes)==2)
+    limit=functional_instruction_limit()
+    p,fn,_=executor(source.nodes[-1].op,source.nodes[-1].type.shape[0],len(source.nodes)==2,limit)
     inputs=[ctypes.create_string_buffer(a) for a in raw];output=ctypes.create_string_buffer(p.count*p.output_width);status=ctypes.c_uint()
     steps=fn(inputs[0],inputs[-1],output,ctypes.byref(status))
-    if steps<0 or steps>DEFAULT_FUNCTIONAL_INSTRUCTION_LIMIT:raise RuntimeError(steps)
+    if steps<0 or steps>limit:raise RuntimeError(steps)
     if steps in (91,92,93,94,98):raise RuntimeError(('ISA interpreter fault',steps))
     return output.raw,status.value,steps
 

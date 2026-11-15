@@ -65,13 +65,15 @@ def _execution_geometry(plan):
                 status_address=status, status_bytes=2048, **extra), end
 
 
-def execution_layout(plan, *, operand_reuse=None):
+def execution_layout(plan, *, operand_reuse=None, exponent_page_cache=None):
     from .quantized_operand_reuse import schedule_record
+    from .exponent_page_cache import record as page_cache_record
     geometry, end = _execution_geometry(plan)
     if end > _tile_io_base.get() + dram_slots()*TILE_BYTES:
         raise NativeCompilationError("resource_limit", "quantized loop buffers exceed selected DRAM window")
     return dict(schema="atlas.quantized_loop_execution.v1", operation="mxu1_cap448_looped_ordered",
                 **geometry, **schedule_record(plan, operand_reuse),
+                **page_cache_record(plan, selected=exponent_page_cache),
                 status_encoding='little-endian u32: 0=admitted; 1=exponent, readout, or fallback resource/domain refusal',
                 restoration_admission=dict(scalar_fallback_tile_budget=fallback_tiles(plan),
                     successful_exponent_domain=('full_scalar_admission' if fallback_tiles(plan) else 'vector_domain_only'),
@@ -92,12 +94,20 @@ def virtual_source(plan, layout):
     schedule = schedule_record(plan, layout.get('operand_reuse_requested', 'ordered'))
     if any(layout.get(key) != schedule.get(key) for key in (
             'operand_reuse_requested', 'operand_reuse', 'operand_reuse_cached_tiles',
-            'operand_reuse_panel_m_tiles', 'operand_reuse_panel_k_tiles')):
+            'operand_reuse_panel_m_tiles', 'operand_reuse_panel_k_tiles', 'operand_reuse_flattened_batches')):
         raise ValueError('recorded quantized operand reuse schedule differs')
     restoration = Restoration(plan, layout, scalar_fallback=bool(fallback_tiles(plan)))
     if schedule.get('operand_reuse') == 'paired-cache':
         from .quantized_panel_reuse import virtual_source as paired_source
         return rematerialize_scalar_constants(paired_source(plan, layout, restoration))
+    if schedule.get('operand_reuse') == 'panel-cache':
+        from .quantized_panel_reuse import virtual_source as panel_source
+        from .quantized_panel_geometry import shared_weight_panel_plan
+        physical = shared_weight_panel_plan(plan)
+        restoration = Restoration(physical, layout, scalar_fallback=bool(fallback_tiles(plan)))
+        geometry = (schedule['operand_reuse_panel_m_tiles'], schedule['operand_reuse_panel_k_tiles'])
+        return rematerialize_scalar_constants(panel_source(physical, layout, restoration, geometry=geometry,
+            allow_batches=schedule.get('operand_reuse_requested') == 'batch-panel-cache'))
     virtual = _virtual(Geometry(), tuple(layout['input_addresses'][:2]), layout['output_addresses'][0],
                        unit=1, k_unroll=8 if prod(plan.batch_shape) == 1 else 1,
                        batch_count=prod(plan.batch_shape),
@@ -106,7 +116,7 @@ def virtual_source(plan, layout):
                        output_window_bytes=layout['output_bytes']+layout['status_bytes'],
                        cache_a=schedule.get('operand_reuse', 'ordered') in ('row-cache', 'prefix-cache'),
                        cache_a_tiles=schedule.get('operand_reuse_cached_tiles'),
-                       wide_cache_a=(schedule.get('operand_reuse_requested') in ('wide-cache', 'paired-cache')
+                       wide_cache_a=(schedule.get('operand_reuse_requested') in ('wide-cache', 'paired-cache', 'panel-cache', 'batch-panel-cache')
                                      and 'operand_reuse_cached_tiles' in schedule))
     return rematerialize_scalar_constants(virtual)
 
@@ -129,12 +139,15 @@ def compile_source(snapshot, source, *, target_source, destination, limits, io_m
 
 
 def _compile_source(snapshot, source, plan, *, target_source, destination, limits):
+    from .exponent_restoration import guard_record
     from .quantized_loop_sizing import size_counted, publish_route
 
     sizing = size_counted(plan,target_source=target_source,limits=limits)
     if sizing.record()['route'] != 'counted' and _tile_io_base.get() != DRAM_BASE:
         raise NativeCompilationError('compile_error', 'custom I/O base requires the counted quantized loop route')
     if sizing.record()['route'] == 'k32_tiles':
+        if plan.operand_permutation is not None:
+            raise NativeCompilationError('resource_limit', 'overlarge contraction must retain its operand permutation')
         if plan.narrowing_input_id is not None:
             raise NativeCompilationError('resource_limit', 'overlarge contraction must retain its separate narrowing cast')
         if getattr(plan, 'epilogue_precision', None) is not None:
@@ -225,17 +238,7 @@ def _compile_source(snapshot, source, plan, *, target_source, destination, limit
                  'execution_plan.json': encoded(layout), 'tile-body-selection.json': encoded(selections),
                  'compilation-pipeline.json': (destination/'compilation-pipeline.json').read_bytes(),
                  'restoration-instruction-bound.json': encoded(bound),
-                 'restoration-guard.json': encoded(dict(schema='atlas.exponent_restoration_guard.v1',
-                     guard_block='restore_factor_done', vector_block='restore_vector', scalar_block='restore_scalar',
-                     factor_body='restore_factor_body', factor_done='restore_factor_done',
-                     exponent_modes=[geometry['mode'] for geometry in exponent_geometry(plan)],
-                     exponent_roles=['lhs','rhs'],
-                     scalar_factor_broadcast='sparse_pow2_s_minus_1_col_sum_then_row_sum',
-                     join_block='restore_join', factor_header='restore_factor_header', factor_bound=8,
-                     lhs_index_coefficient=4, lhs_index_offsets=[0,1,2,3],
-                     rhs_index_coefficient=2, rhs_index_offsets=[0,1,16,17],
-                     per_operand_range=list(fast_factor_range(plan)),
-                     raw_nonzero_abs_exp2_bounds=[-26,32], exponent_pages=layout['exponent_addresses'])),
+                 'restoration-guard.json': encoded(guard_record(plan, layout)),
                  'atlas-virtual.mlir': virtual.encode(), 'atlas-machine.mlir': machine.encode(),
                  'physical-program.json': encoded(program)}
     if (destination/'mandatory-spilled-virtual.mlir').is_file():

@@ -4,7 +4,8 @@ import os
 
 from merlin.semantic_compiler.target_binding import NativeCompilationError
 
-POLICIES = ('ordered', 'row-cache', 'prefix-cache', 'wide-cache', 'paired-cache')
+POLICIES = ('ordered', 'row-cache', 'prefix-cache', 'wide-cache', 'paired-cache',
+            'panel-cache', 'batch-panel-cache')
 WIDE_CACHE_TILES = 192
 
 
@@ -38,6 +39,11 @@ def activation_residency(plan, policy=None):
         raise ValueError('unsupported recorded quantized operand reuse policy')
     if policy == 'ordered':
         return None
+    if policy in ('panel-cache', 'batch-panel-cache'):
+        from .quantized_panel_geometry import panel_geometry
+        if panel_geometry(plan, allow_batches=policy == 'batch-panel-cache') is not None:
+            return None
+        policy = 'wide-cache'
     if policy == 'paired-cache':
         from .quantized_panel_reuse import admitted
         if admitted(plan):
@@ -59,6 +65,18 @@ def activation_residency(plan, policy=None):
 
 def schedule_record(plan, policy=None):
     requested = reuse_policy() if policy is None else policy
+    if requested in ('panel-cache', 'batch-panel-cache'):
+        from .quantized_panel_geometry import panel_geometry
+        geometry = panel_geometry(plan, allow_batches=requested == 'batch-panel-cache')
+        if geometry is not None:
+            from math import prod
+            from .quantized_panel_geometry import shared_weight_panel_plan
+            physical = shared_weight_panel_plan(plan)
+            extra = ({'operand_reuse_flattened_batches': prod(plan.batch_shape)}
+                     if physical.batch_shape != plan.batch_shape else {})
+            return dict(operand_reuse_requested=requested, operand_reuse='panel-cache',
+                        operand_reuse_panel_m_tiles=geometry[0], operand_reuse_panel_k_tiles=geometry[1], **extra)
+        return {**schedule_record(plan, 'wide-cache'), 'operand_reuse_requested': requested}
     if requested == 'paired-cache':
         from .quantized_panel_reuse import admitted, PANEL_K_TILES
         if admitted(plan):

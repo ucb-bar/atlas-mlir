@@ -132,8 +132,9 @@ class QuantizerApplicationScheduleTest(unittest.TestCase):
 @unittest.skipUnless((BIN / "atlas-opt").is_file(), "select built Atlas tools")
 class QuantizerApplicationCompilationTest(unittest.TestCase):
     def test_multiple_bodies_default_proof_c_export_and_source_seal(self):
-        from atlas_mlir_native.activation_quantize_application import STATIC_WHOLE_BODY_MAX_ELEMENTS
-        source = quantizer_source(count=STATIC_WHOLE_BODY_MAX_ELEMENTS + 32)
+        from atlas_mlir_native.activation_quantize_application import _static_body_capacity
+        from atlas_mlir_native.limits import functional_instruction_limit
+        source = quantizer_source(count=_static_body_capacity(functional_instruction_limit()) + 32)
         with tempfile.TemporaryDirectory(prefix="atlas-quantizer-schedule-") as directory:
             root = Path(directory)
             compiled = root / "compiled"
@@ -142,8 +143,8 @@ class QuantizerApplicationCompilationTest(unittest.TestCase):
             self.assertEqual(len(manifest["segments"]), 2)
             region = prepare_c_package(source, compiled, "quant", target_source=ROOT)
             self.assertEqual(region.outputs, source.outputs)
-            self.assertEqual(region.description["launches_per_invocation"], 257)
-            self.assertEqual(region.description["device_launch_schedule"]["total_launches"], 257)
+            self.assertEqual(region.description["launches_per_invocation"], 2)
+            self.assertEqual(region.description["device_launch_schedule"]["total_launches"], 2)
             self.assertNotIn("launches_per_call", region.description)
             self.assertEqual(region.programs, ("segments/quant/segments/body_000", "segments/quant/segments/body_001"))
             # An application flattens these image leaves. Its existing branch

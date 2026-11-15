@@ -172,7 +172,7 @@ def compile_source(snapshot, region, *, target_source, destination, limits, io_m
     return manifest
 
 
-def prepare_c_package(region, compiled, name, *, target_source, runtime_linkage='separate', io_memory_base=DRAM_BASE, _plan=None):
+def prepare_c_package(region, compiled, name, *, target_source, runtime_linkage='separate', io_memory_base=DRAM_BASE, _plan=None, input_permutation=None):
     import hashlib
     import json
     import os
@@ -215,6 +215,22 @@ def prepare_c_package(region, compiled, name, *, target_source, runtime_linkage=
         raise ValueError('activation quantizer instruction bound differs or exceeds default')
     upper=name.upper()
     input_bytes=plan.count*plan.width
+    source_bytes=input_bytes
+    source_field=source_init=packing_helper=''
+    pack_input=f'  __builtin_memcpy(region->workspace,inputs[0],{input_bytes}u);'
+    if input_permutation is not None:
+        from merlin.compile.layout_c import render_permutation_slice_copy
+        physical,logical=input_permutation
+        if ((logical.type.dtype,logical.type.numerical_policy) !=
+                (plan.x.type.dtype,plan.x.type.numerical_policy)
+                or plan.count > prod(logical.type.shape)):
+            raise ValueError('quantizer input slice differs from the logical permutation')
+        packing_helper=render_permutation_slice_copy(physical,logical,name+'_pack_input')
+        source_bytes=prod(physical.type.shape)*plan.width
+        source_field=' size_t input_first;'
+        source_init='ctx->input_first=0;'
+        pack_input=(f'  if ({name}_pack_input(region->workspace,inputs[0],ctx->input_first,{plan.count}u)) '
+                    f'return {upper}_INVALID;')
     exponent_bytes=prod(plan.exponents.type.shape)*4
     sizes={plan.codes.id:plan.count,plan.exponents.id:exponent_bytes}
     offsets={plan.codes.id:plan.code_address-plan.io_memory_base,plan.exponents.id:plan.exponent_address-plan.io_memory_base}
@@ -230,7 +246,7 @@ def prepare_c_package(region, compiled, name, *, target_source, runtime_linkage=
     for index,(pointer,size) in enumerate(states+tables):
         for other,other_size in (states+tables)[:index]:
             checks.append(f'  if ({name}_overlap({pointer},{size},{other},{other_size})) return {upper}_INVALID;')
-    values=[('inputs[0]',input_bytes)]+[(f'outputs[{index}]',sizes[key]) for index,key in enumerate(region.outputs)]
+    values=[('inputs[0]',source_bytes)]+[(f'outputs[{index}]',sizes[key]) for index,key in enumerate(region.outputs)]
     for index,(pointer,size) in enumerate(values):
         checks.append(f'  if (!{name}_range({pointer},{size}u)) return {upper}_INVALID;')
         for other,other_size in states+tables:
@@ -243,12 +259,13 @@ def prepare_c_package(region, compiled, name, *, target_source, runtime_linkage=
 #define {upper}_SOURCE_WORKSPACE_BYTES 1u
 typedef enum {{ {upper}_OK=0, {upper}_INVALID=1, {upper}_MEMORY_ERROR=3, {upper}_DEVICE_ERROR=4 }} {name}_status;
 typedef struct {{ atlas_host *host; atlas_tile_memory_io io; uint8_t *workspace; size_t max_polls; atlas_host_buffer buffers[3]; }} {name}_context;
-typedef struct {{ {name}_context *region; }} {name}_source_context;
+typedef struct {{ {name}_context *region;{source_field} }} {name}_source_context;
 {name}_status {name}_bind({name}_context *,atlas_host *,atlas_tile_memory_io,void *,size_t,size_t);
 {name}_status {name}_source_bind({name}_source_context *,{name}_context *,void *,size_t);
 int {name}_source_dispatch(void *,const void *const *,void *const *);
 '''
     implementation=program_array(name+'_words',binary)+f'''
+{packing_helper}
 static int {name}_range(const void *p,size_t n) {{ return p && n && n<=UINTPTR_MAX-(uintptr_t)p; }}
 static int {name}_overlap(const void *a,size_t an,const void *b,size_t bn) {{ return (uintptr_t)a<(uintptr_t)b+bn && (uintptr_t)b<(uintptr_t)a+an; }}
 {name}_status {name}_bind({name}_context *ctx,atlas_host *host,atlas_tile_memory_io io,void *workspace,size_t bytes,size_t polls) {{
@@ -271,7 +288,7 @@ static int {name}_overlap(const void *a,size_t an,const void *b,size_t bn) {{ re
       {name}_overlap(ctx,sizeof(*ctx),region,sizeof(*region)) ||
       {name}_overlap(ctx,sizeof(*ctx),region->host,sizeof(*region->host)) ||
       {name}_overlap(ctx,sizeof(*ctx),region->workspace,{plan.workspace_bytes}u) || region->host->active) return {upper}_INVALID;
-  ctx->region=region;return {upper}_OK;
+  ctx->region=region;{source_init}return {upper}_OK;
 }}
 int {name}_source_dispatch(void *opaque,const void *const *inputs,void *const *outputs) {{
   {name}_source_context *ctx=opaque;
@@ -279,7 +296,7 @@ int {name}_source_dispatch(void *opaque,const void *const *inputs,void *const *o
   {name}_context *region=ctx->region;
 {chr(10).join(checks)}
   if (region->host->active) return {upper}_DEVICE_ERROR;
-  __builtin_memcpy(region->workspace,inputs[0],{input_bytes}u);
+{pack_input}
   __builtin_memset(region->workspace+{input_bytes}u,0,{plan.input_bytes-input_bytes}u);
   atlas_host_result result=atlas_host_ensure_loaded(region->host,{name}_words,{len(binary)//4}u);
   if (result!=ATLAS_HOST_OK) return {upper}_DEVICE_ERROR;

@@ -27,6 +27,7 @@ from .binding import (
 )
 from .resident_graph import is_staged_bf16, staged_memory_plan
 from .row_softmax import prepare_row_softmax
+from .limits import DEFAULT_FUNCTIONAL_INSTRUCTION_LIMIT, functional_instruction_limit
 
 ROW_LOOP_COLUMN_TILES_PER_LAUNCH = 512
 
@@ -46,6 +47,7 @@ class RowLoopPlan:
     output_bytes: int
     scratch_bytes: int
     io_memory_base: int = DRAM_BASE
+    dispatch_instruction_budget: int = DEFAULT_FUNCTIONAL_INSTRUCTION_LIMIT
 
     @property
     def groups(self):
@@ -53,12 +55,15 @@ class RowLoopPlan:
 
     @property
     def groups_per_launch(self):
-        # Keep complete softmax rows together. A launch contains at most512
-        # column tiles, and its frame is reused only after synchronous readback.
-        # Pick a divisor so every invocation runs the identical checked image.
+        # Scale the legacy batching envelope with the selected execution budget.
+        # This selects a candidate; its exact native instruction bound and full
+        # frame must still pass. Pick a divisor to keep complete rows and run
+        # the same checked image in every synchronous invocation.
         if self.tiling.source.nodes[-1].op == "rmsnorm":
             return self.groups
-        limit = max(1, ROW_LOOP_COLUMN_TILES_PER_LAUNCH // self.tiling.column_tiles)
+        multiplier = max(1, self.dispatch_instruction_budget // DEFAULT_FUNCTIONAL_INSTRUCTION_LIMIT)
+        tiles = ROW_LOOP_COLUMN_TILES_PER_LAUNCH * multiplier
+        limit = max(1, tiles // self.tiling.column_tiles)
         return next(count for count in range(min(self.groups, limit), 0, -1)
                     if self.groups % count == 0)
 
@@ -67,7 +72,8 @@ class RowLoopPlan:
         return self.groups // self.groups_per_launch
 
     def execution_record(self):
-        result = {**self.record(), "schema": "atlas.row_loop_execution_plan.v1",
+        version = 1 if self.dispatch_instruction_budget == DEFAULT_FUNCTIONAL_INSTRUCTION_LIMIT else 2
+        result = {**self.record(), "schema": f"atlas.row_loop_execution_plan.v{version}",
                   "launches_per_invocation": self.launches}
         if self.launches > 1:
             result["groups_per_launch"] = self.groups_per_launch
@@ -101,8 +107,10 @@ class RowLoopPlan:
         return self.writable_base + group * self.writable_bytes + offset - self.readonly_bytes
 
     def record(self):
+        explicit = self.dispatch_instruction_budget != DEFAULT_FUNCTIONAL_INSTRUCTION_LIMIT
         return {
-            "schema": "atlas.row_loop_plan.v1",
+            "schema": "atlas.row_loop_plan.v2" if explicit else "atlas.row_loop_plan.v1",
+            **({"dispatch_instruction_budget": self.dispatch_instruction_budget} if explicit else {}),
             "source_request_digest": self.tiling.source.digest(),
             "body_request_digest": self.tiling.regions[0].request.digest(),
             "groups": self.groups,
@@ -118,9 +126,13 @@ class RowLoopPlan:
         }
 
 
-def prepare_plan(source, *, io_memory_base=DRAM_BASE):
+def prepare_plan(source, *, io_memory_base=DRAM_BASE, instruction_budget=None):
     if type(io_memory_base) is not int or io_memory_base % 32:
         raise ValueError("I/O memory base requires an aligned integer address")
+    if instruction_budget is None:
+        instruction_budget = functional_instruction_limit()
+    if type(instruction_budget) is not int or instruction_budget <= 0:
+        raise ValueError("row dispatch instruction budget must be a positive integer")
     if source.nodes[-1].op == "rmsnorm":
         from .rmsnorm import prepare_rmsnorm
 
@@ -141,7 +153,8 @@ def prepare_plan(source, *, io_memory_base=DRAM_BASE):
     if is_staged_bf16(body):
         _, slots, _, _ = staged_memory_plan(body)
         total = max(slots.values()) + 1
-    plan = RowLoopPlan(tiling, readonly * TILE_BYTES, outputs * TILE_BYTES, (total - readonly - outputs) * TILE_BYTES, io_memory_base)
+    plan = RowLoopPlan(tiling, readonly * TILE_BYTES, outputs * TILE_BYTES,
+                      (total - readonly - outputs) * TILE_BYTES, io_memory_base, instruction_budget)
     from .memory_windows import dma_span_in_window
     if (type(io_memory_base) is not int or io_memory_base % 32 or
         plan.end - io_memory_base > dram_slots() * TILE_BYTES or
@@ -218,7 +231,8 @@ def virtual_program(plan, body_text):
 def compile_row_loop(snapshot, source, *, target_source, destination, limits, io_memory_base=DRAM_BASE):
     from .region_composition import compile_virtual_with_receipt
 
-    plan = prepare_plan(source, io_memory_base=io_memory_base)
+    plan = prepare_plan(source, io_memory_base=io_memory_base,
+                        instruction_budget=functional_instruction_limit(limits))
     body = plan.tiling.regions[0].request
     abi = AtlasNativeBinding.plan_boundary_abi(body)
     destination.mkdir(parents=True, exist_ok=False)
@@ -258,7 +272,6 @@ def compile_row_loop(snapshot, source, *, target_source, destination, limits, io
     if program.get("selected_rtl_revision") != RTL_REVISION:
         raise NativeCompilationError("unqualified_target", "row loop emitter uses a different RTL revision")
     from .restoration_budget import instruction_bound
-    from .limits import functional_instruction_limit
     try:
         bound = instruction_bound(virtual, machine, program, max_instructions=functional_instruction_limit(limits))
     except (ValueError, KeyError, IndexError) as error:
@@ -312,7 +325,6 @@ def verify_row_loop(source, compiled, *, target_source, io_memory_base=DRAM_BASE
     """Reconstruct the frame and check its original captured physical lowering."""
     from .binding import check_io_memory_manifest
 
-    plan = prepare_plan(source, io_memory_base=io_memory_base)
     manifest = json.loads((compiled / "manifest.json").read_text())
     check_io_memory_manifest(manifest)
     if manifest.get("schema") != "atlas.row_loop_compilation.v1":
@@ -324,6 +336,11 @@ def verify_row_loop(source, compiled, *, target_source, io_memory_base=DRAM_BASE
         request_digest=source.digest(),
         target_identity=source.target_identity,
     )
+    execution = json.loads((compiled / "execution_plan.json").read_text())
+    # Historical artifacts used the fixed legacy envelope even if their
+    # execution proof selected a larger budget. Preserve that source replay.
+    plan = prepare_plan(source, io_memory_base=io_memory_base,
+        instruction_budget=execution.get("dispatch_instruction_budget", DEFAULT_FUNCTIONAL_INSTRUCTION_LIMIT))
     body = plan.tiling.regions[0].request
     body_manifest = json.loads((compiled / "body/manifest.json").read_text())
     verify_native_publication(
@@ -336,8 +353,7 @@ def verify_row_loop(source, compiled, *, target_source, io_memory_base=DRAM_BASE
     if (
         json.loads((compiled / "source-request.json").read_text()) != source.record()
         or json.loads((compiled / "row-softmax-plan.json").read_text()) != plan.tiling.record()
-        or json.loads((compiled / "execution_plan.json").read_text())
-        != plan.execution_record()
+        or execution != plan.execution_record()
         or manifest.get("body_manifest_sha256") != _sha((compiled / "body/manifest.json").read_bytes())
         or manifest.get("target_inventory_sha256")
         != _sha((target_source / "docs/selected-variant-inventory.json").read_bytes())
@@ -386,7 +402,6 @@ def verify_row_loop(source, compiled, *, target_source, io_memory_base=DRAM_BASE
     ):
         raise ValueError("row-loop program differs from its checked physical lowering")
     from .restoration_budget import instruction_bound
-    from .limits import functional_instruction_limit
     from types import SimpleNamespace
     saved_bound = json.loads((compiled / "row-loop-instruction-bound.json").read_text())
     cap = functional_instruction_limit(SimpleNamespace(functional_instruction_limit=saved_bound["max_instructions"]))

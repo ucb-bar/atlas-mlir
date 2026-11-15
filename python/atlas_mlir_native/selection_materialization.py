@@ -229,7 +229,10 @@ def bind_row_loop(original, canonical, materialized, destination, capture, *, ta
         raise ValueError("row loop rebinding requires identical lowered semantics")
     previous = json.loads((materialized / "manifest.json").read_bytes())
     row_loop.verify_row_loop(canonical, materialized, target_source=target_source)
-    plan, checked = row_loop.prepare_plan(original), row_loop.prepare_plan(canonical)
+    execution = json.loads((materialized / "execution_plan.json").read_text())
+    budget = execution.get("dispatch_instruction_budget", row_loop.DEFAULT_FUNCTIONAL_INSTRUCTION_LIMIT)
+    plan = row_loop.prepare_plan(original, instruction_budget=budget)
+    checked = row_loop.prepare_plan(canonical, instruction_budget=budget)
     body, canonical_body = plan.tiling.regions[0].request, checked.tiling.regions[0].request
     destination.mkdir(parents=True, exist_ok=False)
     bind_tile(body, canonical_body, materialized / "body", destination / "body", capture)
@@ -266,14 +269,16 @@ def bind_counted(original, canonical, materialized, destination, capture, *, tar
     from . import quantized_loop as loop
     from .quantized_loop_sizing import Sizing, publish_route, selected_route
     from .restoration_budget import instruction_bound, fallback_tiles
-    from .exponent_restoration import exponent_geometry, fast_factor_range
+    from .exponent_restoration import guard_record
 
     plan, checked = loop.prepare_source(original), loop.prepare_source(canonical)
     if selected_route(checked, materialized) != "counted":
         raise ValueError("only counted contraction materializations support binding")
     previous = json.loads((materialized / "manifest.json").read_bytes())
     execution = json.loads((materialized / "execution_plan.json").read_text())
-    layout = loop.execution_layout(plan, operand_reuse=execution.get("operand_reuse_requested", "ordered"))
+    from .exponent_page_cache import recorded_enabled
+    layout = loop.execution_layout(plan, operand_reuse=execution.get("operand_reuse_requested", "ordered"),
+                                   exponent_page_cache=recorded_enabled(execution))
     virtual = loop.virtual_source(plan, layout)
     if virtual.encode() != (materialized / "atlas-virtual.mlir").read_bytes():
         raise ValueError("rebound counted virtual program differs from checked canonical source")
@@ -311,14 +316,7 @@ def bind_counted(original, canonical, materialized, destination, capture, *, tar
         raise ValueError("rebound counted instruction bound exceeds unchanged policy")
     bound["scalar_fallback_tile_budget"] = fallback_tiles(plan)
     bound["restoration_admission"] = layout["restoration_admission"]
-    guard = dict(schema="atlas.exponent_restoration_guard.v1", guard_block="restore_factor_done",
-                 vector_block="restore_vector", scalar_block="restore_scalar", factor_body="restore_factor_body",
-                 factor_done="restore_factor_done", exponent_modes=[geometry["mode"] for geometry in exponent_geometry(plan)],
-                 exponent_roles=["lhs", "rhs"], scalar_factor_broadcast="sparse_pow2_s_minus_1_col_sum_then_row_sum",
-                 join_block="restore_join", factor_header="restore_factor_header", factor_bound=8,
-                 lhs_index_coefficient=4, lhs_index_offsets=[0, 1, 2, 3], rhs_index_coefficient=2,
-                 rhs_index_offsets=[0, 1, 16, 17], per_operand_range=list(fast_factor_range(plan)),
-                 raw_nonzero_abs_exp2_bounds=[-26, 32], exponent_pages=layout["exponent_addresses"])
+    guard = guard_record(plan, layout)
     files.update({name: _json(record) for name, record in {
         "source-request.json": original.record(), "already-quantized-plan.json": plan.record(), "execution_plan.json": layout,
         "tile-body-selection.json": selections, "restoration-instruction-bound.json": bound, "restoration-guard.json": guard}.items()})

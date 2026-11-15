@@ -99,6 +99,25 @@ private:
   std::optional<I32AddressSpan> derive(Value value) {
     if (auto constant = provenI32(value))
       return I32AddressSpan{*constant, *constant};
+    if (!scalar) {
+      if (auto shift = value.getDefiningOp<arith::ShLIOp>()) {
+        // A bounded index scaled by at least one DMA granule is aligned for
+        // every value, not merely at the endpoints of its range. Keep the
+        // ordinary scalar range proof separate: its unscaled interior values
+        // need not be aligned addresses.
+        auto bits = provenI32(shift.getRhs());
+        if (!bits || *bits < 5 || *bits >= 32 ||
+            shift.getOverflowFlags() != arith::IntegerOverflowFlags::none)
+          return std::nullopt;
+        auto function = use->getParentOfType<func::FuncOp>();
+        auto index = SourceAddressProof(function, use, /*scalar=*/true)
+                         .prove(shift.getLhs());
+        if (!index || (uint64_t(index->last) << *bits) > UINT32_MAX)
+          return std::nullopt;
+        return I32AddressSpan{uint32_t(index->first << *bits),
+                              uint32_t(index->last << *bits)};
+      }
+    }
     if (scalar) {
       if (value.getType().isInteger(1)) return I32AddressSpan{0,1};
       if (auto select = maskedSelect(value)) return select;

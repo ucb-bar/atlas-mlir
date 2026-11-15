@@ -2,14 +2,19 @@
 DEFAULT_FUNCTIONAL_INSTRUCTION_LIMIT = 1_000_000
 
 
-def functional_instruction_limit(limits):
-    """Use the Atlas default, optionally narrowed by a target API caller.
+def functional_instruction_limit(limits=None):
+    """Resolve a software execution budget, independently of physical IMEM.
 
-    Merlin SearchLimits contains search budgets only, so ordinary Merlin calls
-    always use DEFAULT_FUNCTIONAL_INSTRUCTION_LIMIT. An Atlas API caller may
-    supply a smaller functional_instruction_limit; this is not Merlin vocabulary.
+    Merlin owns the optional invocation setting; the target supplies the legacy
+    default. A target API caller can further constrain an invocation. Every
+    accepted image still requires an independently proved finite dynamic bound
+    and the unchanged RTL instruction-memory capacity check.
     """
-    value = getattr(limits, "functional_instruction_limit", DEFAULT_FUNCTIONAL_INSTRUCTION_LIMIT)
-    if type(value) is not int or value <= 0 or value > DEFAULT_FUNCTIONAL_INSTRUCTION_LIMIT:
-        raise ValueError("functional instruction limit must be positive and within the default cap")
-    return value
+    from merlin.semantic_compiler.codegen import current_codegen_options
+    selected = current_codegen_options().execution_instruction_limit
+    if selected is None:
+        selected = DEFAULT_FUNCTIONAL_INSTRUCTION_LIMIT
+    value = getattr(limits, "functional_instruction_limit", selected)
+    if type(value) is not int or value <= 0:
+        raise ValueError("functional instruction limit must be a positive integer")
+    return min(value, selected)

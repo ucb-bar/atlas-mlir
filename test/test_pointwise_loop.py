@@ -17,6 +17,7 @@ from test_looped_mnk import ROOT, build_snapshot
 
 def check_source_c_call(
     self, package, initial, binary, execute, values, wanted_bytes, invalid_values=(), *, source_dtype="f32",
+    output_dtype=None, expected_status=0, check_launch_inputs=None,
 ):
     from atlas_mlir_native.binding import DRAM_BASE
 
@@ -37,8 +38,15 @@ def check_source_c_call(
     if source_dtype == "bf16":
         client_source = client_source.replace("const float *const *inputs,float *output",
                                               "const uint8_t *const *inputs,uint8_t *output")
+    elif source_dtype == "opaque":
+        client_source = client_source.replace("const float *const *inputs,float *output",
+                                              "const void *const *inputs,void *output")
+        client_source = client_source.replace("return pointwise_source_run(&source,inputs,output,0);",
+            "void *outputs[]={output}; return pointwise_source_dispatch(&source,inputs,outputs);")
     elif source_dtype != "f32":
         raise ValueError("unsupported source test dtype")
+    if output_dtype == "bf16" and source_dtype == "f32":
+        client_source = client_source.replace("float *output", "uint8_t *output")
     (package / "client.c").write_text(client_source)
     subprocess.run(
         [
@@ -95,7 +103,10 @@ def check_source_c_call(
                     b"".join(words[i].to_bytes(4, "little") for i in range(len(words))),
                     binary,
                 )
-                self.assertEqual(memory, initial)
+                if check_launch_inputs is None:
+                    self.assertEqual(memory, initial)
+                else:
+                    check_launch_inputs(memory)
                 memory[:] = execute(memory)
                 polls = 0
         except (AssertionError, RuntimeError, ValueError, KeyError, OSError) as error:
@@ -138,10 +149,11 @@ def check_source_c_call(
                 inputs,
                 ctypes.addressof(result) + 16,
             ),
-            0,
+            expected_status,
         )
         self.assertEqual(errors, [])
-        self.assertEqual(result.raw[16 : 16 + len(wanted_bytes)], wanted_bytes)
+        self.assertEqual(result.raw[16 : 16 + len(wanted_bytes)],
+                         wanted_bytes if expected_status == 0 else bytes([0xA7]) * len(wanted_bytes))
         self.assertEqual(result.raw[:16], bytes([0xA7]) * 16)
         self.assertEqual(
             result.raw[16 + len(wanted_bytes) : -1],
@@ -159,6 +171,17 @@ def check_source_c_call(
         self.assertEqual(words, {})
         self.assertEqual(memory, initial)
         self.assertEqual(result.raw[:-1], bytes([0xA7]) * (len(wanted_bytes) + 32))
+    if source_dtype == "opaque" or output_dtype == "bf16" and source_dtype == "f32":
+        # Mixed-width publication must still refuse an output inside an input.
+        memory[:] = initial
+        words.clear()
+        polls = None
+        before = [value.tobytes() for value in values]
+        inputs = (ctypes.c_void_p * len(values))(*(value.ctypes.data for value in values))
+        self.assertEqual(client.call(*callbacks, inputs, values[0].ctypes.data), 1)
+        self.assertEqual([value.tobytes() for value in values], before)
+        self.assertEqual(words, {})
+        self.assertEqual(memory, initial)
 
 
 @unittest.skipUnless(
