@@ -40,7 +40,7 @@ def host_reference(source,raw):
         lib=ctypes.CDLL(str(path/"reference.so"));fn=lib.reference
         fn.argtypes=[ctypes.c_void_p,ctypes.POINTER(ctypes.c_void_p),ctypes.POINTER(ctypes.c_void_p)]
         inputs=[ctypes.create_string_buffer(data) for data in raw]
-        p=prepare_plan(source);out=ctypes.create_string_buffer(bytes([0xa5])*(p.count*p.output_width))
+        p=prepare_source_plan(source);out=ctypes.create_string_buffer(bytes([0xa5])*(p.count*p.output_width))
         status=fn(None,(ctypes.c_void_p*len(inputs))(*(ctypes.addressof(a) for a in inputs)),(ctypes.c_void_p*1)(ctypes.addressof(out)))
         return out.raw[:-1],status
 
