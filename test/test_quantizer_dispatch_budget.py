@@ -22,7 +22,8 @@ def options(budget=128000000, memory=67108864, **kwargs):
                                          io_memory_bytes=memory, **kwargs))
 
 
-@pytest.mark.parametrize('heads,length', [(32, 4096), (13, 1024), (10, 96), (9, 32768)])
+@pytest.mark.parametrize('heads,length', [(32, 4096), (13, 1024), (10, 96),
+    pytest.param(9, 32768, marks=pytest.mark.skipif(not os.environ.get('ATLAS_OOT_BIN_DIR'), reason='select Atlas tools'))])
 def test_selected_budget_batches_whole_heads(heads, length):
     source = dynamic_source(shape=(heads, 1, length), reduce='head')
     with options():
@@ -31,6 +32,10 @@ def test_selected_budget_batches_whole_heads(heads, length):
         assert plan.launches[0]['code_bytes'] == heads * length
         assert plan.launches[0]['exponent_bytes'] == heads * 4
         assert plan.record()['functional_instruction_limit'] == 128000000
+        if length == 32768:
+            with pytest.raises(ValueError, match='instruction bound'):
+                application.prepare_plan(source, limits=SimpleNamespace(functional_instruction_limit=1000000))
+            return
         limited = application.prepare_plan(source, limits=SimpleNamespace(functional_instruction_limit=1000000))
         assert limited.record()['functional_instruction_limit'] == 1000000
         assert len(limited.launches) > 1

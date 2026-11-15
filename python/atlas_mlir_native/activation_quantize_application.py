@@ -101,6 +101,7 @@ class QuantizerSchedule:
                     dynamic_group_worst_instructions=DYNAMIC_GROUP_WORST_INSTRUCTIONS,
                     dynamic_group_bound_block_elements=4096,
                     dynamic_group_bound_rule="119525 * ceil(group_elements / 4096)",
+                    dynamic_group_admission="legacy fields size the scheduling envelope; groups above 4096 require exact selected machine-bound planning admission",
                     functional_instruction_limit=self.instruction_limit,
                     bodies=[dict(index=index, path=f"segments/body_{index:03d}", request_digest=body.digest(),
                                  shape=list(body.node(self.x.id).type.shape)) for index, body in enumerate(self.bodies)],
@@ -199,7 +200,7 @@ def prepare_plan(source, *, limits=None, _pipeline=None, _static_capacity=None, 
             if length > max_group_elements:
                 raise ValueError(f"indivisible dynamic reduction group has {length} elements; selected device body supports at most {max_group_elements}")
             # The virtual body uses gcd(1024, length) lanes and reduces the
-            # complete group before packing. Irregular aligned heads stay
+            # complete group before packing. Irregular aligned groups stay
             # unbatched below and retain the independent machine-bound proof.
             if length > 4096 and length % 32:
                 raise ValueError("indivisible dynamic reduction group above 4096 elements requires complete 32-element tiles")
@@ -225,6 +226,23 @@ def prepare_plan(source, *, limits=None, _pipeline=None, _static_capacity=None, 
                              input_bytes=length * (2 if x.type.dtype == "bf16" else 4),
                              code_offset_bytes=first, code_bytes=length,
                              exponent_offset_bytes=exp_first * 4, exponent_bytes=exp_count * 4))
+    if mode == "dynamic":
+        from merlin.semantic_compiler.target_binding import NativeCompilationError
+        from .activation_quantize_device import prove_plan
+
+        for body in bodies:
+            plan = device.prepare_plan(body)
+            if plan.group_elements > 4096:
+                # Device eligibility routes on planning success. Large complete
+                # groups therefore need the actual selected machine bound here,
+                # rather than the legacy full-tile batching estimate above.
+                try:
+                    prove_plan(plan, limits=limits)
+                except NativeCompilationError as error:
+                    if error.status != "resource_limit":
+                        raise
+                    raise ValueError("indivisible dynamic reduction group exceeds the selected device instruction bound: "
+                                     + str(error)) from error
     return QuantizerSchedule(source, x, codes, exponents, attrs, tuple(bodies), tuple(launches),
                              instruction_limit, pipeline, static_capacity, static_sizing)
 

@@ -125,18 +125,14 @@ def virtual_program(plan):
     return program(plan)
 
 
-def compile_source(snapshot, region, *, target_source, destination, limits, io_memory_base=None, _plan=None):
-    io_memory_base = selected_io_base() if io_memory_base is None else io_memory_base
-    import hashlib
+def prove_plan(plan, *, target_source=None, limits=None):
+    """Lower and prove a body without publishing files or creating directories."""
     import json
     import os
     from pathlib import Path
-    from merlin.semantic_compiler.codegen import current_codegen_options
-    from merlin.semantic_compiler.target_binding import verify_native_publication
     from .binding import NATIVE_CHECKS, RTL_REVISION, _run, _native_pipeline, _scheduled_virtual_pipeline
-    plan=_plan or prepare_plan(region, io_memory_base=io_memory_base)
-    destination=Path(destination)
-    destination.mkdir(parents=True, exist_ok=False)
+    if target_source is None:
+        target_source = Path(__file__).resolve().parents[2]
     tools=Path(os.environ.get('ATLAS_OOT_BIN_DIR', Path(target_source)/'build/bin'))
     virtual=virtual_program(plan)
     pipeline = _native_pipeline()
@@ -154,6 +150,20 @@ def compile_source(snapshot, region, *, target_source, destination, limits, io_m
         raise NativeCompilationError('resource_limit','activation quantizer instruction bound is unproved: '+str(error)) from error
     if not bound['admitted']:
         raise NativeCompilationError('resource_limit','activation quantizer worst-case instruction bound exceeds '+str(bound['max_instructions'])+': '+str(bound['instruction_bound']))
+    return virtual, machine, program, bound, pipeline
+
+
+def compile_source(snapshot, region, *, target_source, destination, limits, io_memory_base=None, _plan=None):
+    io_memory_base = selected_io_base() if io_memory_base is None else io_memory_base
+    import hashlib
+    import json
+    from pathlib import Path
+    from merlin.semantic_compiler.codegen import current_codegen_options
+    from merlin.semantic_compiler.target_binding import verify_native_publication
+    plan=_plan or prepare_plan(region, io_memory_base=io_memory_base)
+    virtual,machine,program,bound,pipeline=prove_plan(plan,target_source=target_source,limits=limits)
+    destination=Path(destination)
+    destination.mkdir(parents=True, exist_ok=False)
     binary=b''.join(row['word_u32'].to_bytes(4,'little') for row in program['instructions'])
     budget=current_codegen_options().program_size_limit_bytes
     if budget is not None and len(binary)>budget:
