@@ -5,6 +5,7 @@
 // slots until the stream scheduler, which times the real instructions.
 
 #include "Atlas/AtlasVirtualScheduling.h"
+#include "Atlas/AtlasWorkBudget.h"
 #include "Atlas/AtlasImmutableWeightReuse.h"
 #include "Atlas/AtlasOps.h"
 #include "Atlas/AtlasSpilling.h"
@@ -160,9 +161,11 @@ SmallVector<Operation *> freeOperations(Block &block) {
 
 // Fails, with an error, on a block whose transfers or MXU chains break the
 // rules the verifier enforces, since no order of it could be checked.
-FailureOr<BlockGraph> buildGraph(Block &block, bool enhancedVirtualScheduling) {
+FailureOr<BlockGraph> buildGraph(Block &block, bool enhancedVirtualScheduling,
+                                 AtlasWorkBudget &work) {
   BlockGraph g;
   g.nodes = freeOperations(block);
+  if (failed(work.charge(g.nodes.size()))) return failure();
   unsigned n = g.nodes.size();
   g.preds.assign(n, {});
   g.succs.assign(n, {});
@@ -271,6 +274,7 @@ FailureOr<BlockGraph> buildGraph(Block &block, bool enhancedVirtualScheduling) {
   // used once, by the accumulate that replaces it or the readout.
   auto chainEnd = [&](Value acc) -> std::optional<unsigned> {
     while (acc.hasOneUse()) {
+      if (failed(work.charge())) return std::nullopt;
       Operation *user = *acc.user_begin();
       if (auto next = dyn_cast<VirtualMXUAccumulateOp>(user)) {
         acc = next.getNextAcc();
@@ -294,12 +298,16 @@ FailureOr<BlockGraph> buildGraph(Block &block, bool enhancedVirtualScheduling) {
       implicit.push_back(i);
   }
   for (unsigned m : implicit)
-    for (unsigned d : transfers)
+    for (unsigned d : transfers) {
+      if (failed(work.charge())) return failure();
       edge(std::min(m, d), std::max(m, d));
+    }
   for (unsigned a = 0; a < transfers.size(); ++a)
-    for (unsigned b = a + 1; b < transfers.size(); ++b)
+    for (unsigned b = a + 1; b < transfers.size(); ++b) {
+      if (failed(work.charge())) return failure();
       if (virtualDMAConflict(g.nodes[transfers[a]], g.nodes[transfers[b]]))
         edge(transfers[a], transfers[b]);
+    }
 
   // Slot limits. A weight is last used by its users, or by its load if it has
   // none, and an accumulator chain by the readout that ends it.
@@ -717,10 +725,11 @@ private:
 // is free.
 class Machine {
 public:
-  Machine(const BlockGraph &g, ArrayRef<Cost> costs)
-      : g(g), costs(costs), finished(g.nodes.size(), 0) {}
+  Machine(const BlockGraph &g, ArrayRef<Cost> costs, AtlasWorkBudget &work)
+      : g(g), work(work), costs(costs), finished(g.nodes.size(), 0) {}
 
   int start(unsigned node) const {
+    if (failed(work.charge(1 + g.preds[node].size() + transfers.size()))) return 0;
     const Cost &cost = costs[node];
     int cycle = cost.queuedDMA ? frontend : std::max(frontend, unitFree[unit(node)]);
     if (cost.drains)
@@ -770,6 +779,7 @@ private:
   }
 
   const BlockGraph &g;
+  AtlasWorkBudget &work;
   ArrayRef<Cost> costs;
   std::vector<int> finished;
   std::array<int, kUnits> unitFree{};
@@ -781,8 +791,8 @@ private:
 class BlockScheduler {
 public:
   BlockScheduler(Block &block, const BlockGraph &g, const Liveness &liveness,
-                 bool enhancedVirtualScheduling)
-      : block(block), g(g), liveness(liveness),
+                 bool enhancedVirtualScheduling, AtlasWorkBudget &work)
+      : block(block), g(g), liveness(liveness), work(work),
         enhancedVirtualScheduling(enhancedVirtualScheduling) {
     unsigned n = g.nodes.size();
     for (Operation *op : g.nodes) {
@@ -830,9 +840,11 @@ public:
   }
 
   int makespan(ArrayRef<unsigned> order) const {
-    Machine machine(g, costs);
-    for (unsigned node : order)
+    Machine machine(g, costs, work);
+    for (unsigned node : order) {
       machine.place(node);
+      if (work.exhausted()) return 0;
+    }
     return machine.makespan;
   }
 
@@ -934,9 +946,11 @@ private:
     for (unsigned i = 0; i < n; ++i)
       if ((waiting[i] = g.preds[i].size()) == 0)
         ready.push_back(i);
-    Machine machine(g, costs);
+    Machine machine(g, costs, work);
     while (!ready.empty()) {
+      if (failed(work.charge(ready.size()))) return {};
       unsigned node = pick(machine, ready);
+      if (work.exhausted()) return {};
       ready.erase(llvm::find(ready, node));
       machine.place(node);
       order.push_back(node);
@@ -951,6 +965,7 @@ private:
   Block &block;
   const BlockGraph &g;
   const Liveness &liveness;
+  AtlasWorkBudget &work;
   bool enhancedVirtualScheduling;
   std::vector<Cost> costs;
   std::vector<int> heights;
@@ -985,11 +1000,13 @@ LogicalResult scheduleBlock(Block &block, unsigned index,
                             const KindCounts &capacity,
                             std::optional<unsigned> randomSeed,
                             bool enhancedVirtualScheduling) {
-  FailureOr<BlockGraph> graph = buildGraph(block, enhancedVirtualScheduling);
+  AtlasWorkBudget work(block.getParentOp(), "virtual-scheduling");
+  FailureOr<BlockGraph> graph = buildGraph(block, enhancedVirtualScheduling, work);
   if (failed(graph))
     return failure();
   const BlockGraph &g = *graph;
-  BlockScheduler scheduler(block, g, liveness, enhancedVirtualScheduling);
+  if (work.exhausted()) return failure();
+  BlockScheduler scheduler(block, g, liveness, enhancedVirtualScheduling, work);
   auto opsOf = [&](ArrayRef<unsigned> order) {
     SmallVector<Operation *> ops;
     for (unsigned node : order)
@@ -997,7 +1014,9 @@ LogicalResult scheduleBlock(Block &block, unsigned index,
     return ops;
   };
   if (randomSeed) {
-    reorder(block, opsOf(scheduler.randomOrder(*randomSeed + index)));
+    auto order = scheduler.randomOrder(*randomSeed + index);
+    if (work.exhausted()) return failure();
+    reorder(block, opsOf(order));
     return success();
   }
 
@@ -1008,7 +1027,9 @@ LogicalResult scheduleBlock(Block &block, unsigned index,
   int best = 0;
   for (unsigned lookahead : {1u, 2u, 4u, kMaxQueuedDMA}) {
     std::vector<unsigned> candidate = scheduler.listSchedule(capacity, lookahead);
+    if (work.exhausted()) return failure();
     int estimate = cycles(candidate);
+    if (work.exhausted()) return failure();
     if (order.empty() || estimate < best) {
       order = std::move(candidate);
       best = estimate;
@@ -1016,7 +1037,9 @@ LogicalResult scheduleBlock(Block &block, unsigned index,
   }
   std::vector<unsigned> source(g.nodes.size());
   std::iota(source.begin(), source.end(), 0u);
-  if (best < cycles(source))
+  int sourceCycles = cycles(source);
+  if (work.exhausted()) return failure();
+  if (best < sourceCycles)
     reorder(block, opsOf(order));
   return success();
 }
@@ -1052,7 +1075,8 @@ struct ScheduleAtlasVirtualPass
     if (randomSeed >= 0)
       seed = static_cast<unsigned>(randomSeed);
     for (func::FuncOp function : module.getOps<func::FuncOp>()) {
-      reuseAtlasImmutableWeights(function);
+      if (failed(reuseAtlasImmutableWeights(function)))
+        return signalPassFailure();
       KindCounts capacity;
       RegisterCapacities capacities = registerCapacities(function);
       for (RegisterKind kind : kKinds)

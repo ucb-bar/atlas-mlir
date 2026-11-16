@@ -1,4 +1,5 @@
 #include "Atlas/AtlasStream.h"
+#include "Atlas/AtlasWorkBudget.h"
 #include "Atlas/AtlasBranchRelaxation.h"
 #include "Atlas/AtlasEncoding.h"
 #include "Atlas/AtlasGeneratedArtifact.h"
@@ -252,6 +253,7 @@ unsigned mlir::atlas::atlasStreamDecodeCount() { return decodeCount; }
 FailureOr<AtlasStream> mlir::atlas::readAtlasStream(
     ModuleOp module, AtlasStreamReadMode mode,
     llvm::SmallVectorImpl<uint32_t> *words) {
+  AtlasWorkBudget budget(module, "stream-scalar-dataflow");
   bool verification = mode == AtlasStreamReadMode::Verification;
   ++decodeCount;
   SmallVector<uint32_t> local;
@@ -364,11 +366,14 @@ FailureOr<AtlasStream> mlir::atlas::readAtlasStream(
   reached[0] = true;
   std::deque<size_t> work = {0};
   while (!work.empty()) {
+    if (failed(budget.charge())) return failure();
     size_t b = work.front();
     work.pop_front();
     RegValues regs = entry[b];
-    for (size_t i = starts[b]; i < s.blockEnd(b); ++i)
+    for (size_t i = starts[b]; i < s.blockEnd(b); ++i) {
+      if (failed(budget.charge())) return failure();
       applyScalar(instrs[i], regs);
+    }
     for (size_t next : succs[b]) {
       if (!reached[next]) {
         entry[next] = regs;
@@ -663,6 +668,7 @@ LogicalResult mlir::atlas::checkAtlasDMACFG(
     return failure();
   if (s.ops.empty())
     return failure();
+  AtlasWorkBudget budget(s.ops.front(), "dma-cfg-dataflow");
   std::string missing = validateTimingProvider(provider);
   if (!missing.empty())
     return s.ops.front()->emitOpError(missing);
@@ -741,12 +747,14 @@ LogicalResult mlir::atlas::checkAtlasDMACFG(
     blockOf[s.ops[s.starts[b]]] = b;
 
   while (!work.empty()) {
+    if (failed(budget.charge())) return failure();
     if (unsupportedWidening)
       return s.ops.front()->emitOpError("DMA CFG disjunction limit requires a provider with conservative interval footprints");
     auto [b, state] = std::move(work.front());
     work.pop_front();
     std::optional<bool> taken;
     for (size_t i = s.starts[b]; i < s.blockEnd(b); ++i) {
+      if (failed(budget.charge())) return failure();
       const Instr &in = s.instrs[i];
       const OpInfo &op = *in.op;
       Footprint temporary;
@@ -882,6 +890,7 @@ LogicalResult mlir::atlas::checkAtlasStream(
     const AtlasStream &s, const TimingProvider &provider) {
   if (s.ops.empty())
     return failure();
+  AtlasWorkBudget budget(s.ops.front(), "stream-dma-preflight");
   std::string missing = validateTimingProvider(provider);
   if (!missing.empty())
     return s.ops.front()->emitOpError(missing);
@@ -935,6 +944,7 @@ LogicalResult mlir::atlas::checkAtlasStream(
             "analyzed loop beside a pending DMA transfer has no decidable exit");
     }
     for (size_t i = s.starts[b]; i < s.blockEnd(b); ++i) {
+      if (failed(budget.charge())) return failure();
       const Instr &in = s.instrs[i];
       const OpInfo &op = *in.op;
       Footprint f = provider.footprint(in, regs);
@@ -1123,6 +1133,7 @@ LogicalResult mlir::atlas::verifyAtlasTimedStream(
     const AtlasStream &s, const TimingProvider &provider) {
   if (failed(checkAtlasDMACFG(s, provider)))
     return failure();
+  AtlasWorkBudget budget(s.ops.front(), "stream-timing-verification");
   struct Issued { size_t index; Footprint footprint; int cycle; };
   for (size_t block = 0; block < s.starts.size(); ++block) {
     RegValues regs = s.entry[block];
@@ -1143,6 +1154,7 @@ LogicalResult mlir::atlas::verifyAtlasTimedStream(
       if (f.doneAge < 0 || f.doneAge >= std::numeric_limits<int>::max() - cycle)
         return s.ops[i]->emitOpError("timing provider completion age exceeds nonnegative cycle domain");
       for (const Issued &prior : issued) {
+        if (failed(budget.charge())) return failure();
         auto rule = provider.dependence(s.instrs[prior.index], prior.footprint, in, f);
         if (!rule.error.empty())
           return s.ops[i]->emitOpError(rule.error);

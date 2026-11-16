@@ -1,4 +1,5 @@
 #include "Atlas/AtlasVirtualAllocation.h"
+#include "Atlas/AtlasWorkBudget.h"
 #include "Atlas/AtlasDMAAllocationVerification.h"
 #include "Atlas/AtlasMXUAllocationVerification.h"
 #include "Atlas/AtlasOps.h"
@@ -203,6 +204,7 @@ VirtualAllocationPlan::VirtualAllocationPlan()
 
 LogicalResult VirtualAllocationPlan::allocate(func::FuncOp function) {
   this->function = function;
+  workExhausted = false;
   tileRegs.clear();
   fp8Regs.clear();
   scalarRegs.clear();
@@ -452,6 +454,7 @@ Operation *VirtualAllocationPlan::stagingPoint(Value tile) const {
 }
 
 LogicalResult VirtualAllocationPlan::colorValues(RegisterKind kind) {
+  AtlasWorkBudget work(function, "register-allocation", &workExhausted);
   using Set = llvm::DenseSet<Value>;
   auto selected = [&](Value value) { return registerKindOf(value) == kind; };
   SmallVector<Value> values;
@@ -494,8 +497,12 @@ LogicalResult VirtualAllocationPlan::colorValues(RegisterKind kind) {
   do {
     changed = false;
     for (Block &block : llvm::reverse(function.getBody())) {
+      if (failed(work.charge())) return failure();
       Set out;
       auto edge = [&](Block *successor, ValueRange operands) {
+        // Charge the entire set before iteration so hash order cannot alter
+        // accounting or the exhaustion point.
+        if (failed(work.charge(liveIn[successor].size() + operands.size()))) return;
         for (Value value : liveIn[successor])
           out.insert(value);
         for (Value operand : operands)
@@ -509,6 +516,8 @@ LogicalResult VirtualAllocationPlan::colorValues(RegisterKind kind) {
         edge(branch.getTrueDest(), branch.getTrueDestOperands());
         edge(branch.getFalseDest(), branch.getFalseDestOperands());
       }
+      if (work.exhausted()) return failure();
+      if (failed(work.charge(out.size()))) return failure();
       Set in = uses[&block];
       for (Value value : out)
         if (!defs[&block].contains(value))
@@ -545,6 +554,7 @@ LogicalResult VirtualAllocationPlan::colorValues(RegisterKind kind) {
     neighbors[second].insert(first);
   };
   auto clique = [&](const Set &set) {
+    if (failed(work.charge(uint64_t(set.size()) * set.size()))) return;
     for (Value first : set)
       for (Value second : set)
         interfere(first, second);
@@ -552,9 +562,11 @@ LogicalResult VirtualAllocationPlan::colorValues(RegisterKind kind) {
   // Live values already form a clique. Removing values preserves it; only
   // newly inserted values need edges to the remaining live values.
   auto insertLive = [&](Set &live, Value value) {
-    if (live.insert(value).second)
+    if (live.insert(value).second) {
+      if (failed(work.charge(live.size()))) return;
       for (Value other : live)
         interfere(value, other);
+    }
   };
   // All runtime controls are loaded from the mailbox before the entry
   // block executes. Their physical registers therefore overlap at staging,
@@ -564,6 +576,7 @@ LogicalResult VirtualAllocationPlan::colorValues(RegisterKind kind) {
     for (BlockArgument arg : function.getArguments())
       if (selected(arg)) stagedArguments.insert(arg);
     clique(stagedArguments);
+    if (work.exhausted()) return failure();
   }
   // Staging VLOADs write a loaded tile's registers right before `op`, while
   // every value live there is held.
@@ -573,6 +586,7 @@ LogicalResult VirtualAllocationPlan::colorValues(RegisterKind kind) {
         continue;
       live.insert(tile);
       note(live, &op);
+      if (failed(work.charge(live.size()))) return;
       for (Value other : live)
         interfere(tile, other);
       live.erase(tile);
@@ -581,8 +595,10 @@ LogicalResult VirtualAllocationPlan::colorValues(RegisterKind kind) {
   for (Block &block : function.getBody()) {
     Set live = liveOut[&block];
     clique(live);
+    if (work.exhausted()) return failure();
     note(live, block.getTerminator());
     for (Operation &op : llvm::reverse(block.getOperations())) {
+      if (work.exhausted() || failed(work.charge())) return failure();
       if (auto branch = dyn_cast<cf::CondBranchOp>(op)) {
         Value condition = branch.getCondition();
         if (selected(condition)) {
@@ -609,6 +625,7 @@ LogicalResult VirtualAllocationPlan::colorValues(RegisterKind kind) {
       held.insert(results.begin(), results.end());
       held.insert(operands.begin(), operands.end());
       note(held, &op);
+      if (failed(work.charge(uint64_t(results.size()) * (live.size() + operands.size())))) return failure();
       for (Value result : results) {
         for (Value other : live)
           interfere(result, other);
@@ -625,6 +642,7 @@ LogicalResult VirtualAllocationPlan::colorValues(RegisterKind kind) {
     for (BlockArgument arg : block.getArguments())
       if (selected(arg))
         args.push_back(arg);
+    if (work.exhausted() || failed(work.charge(uint64_t(args.size()) * (live.size() + args.size())))) return failure();
     for (Value arg : args)
       for (Value other : live)
         interfere(arg, other);
@@ -648,6 +666,7 @@ LogicalResult VirtualAllocationPlan::colorValues(RegisterKind kind) {
   for (Value value : values) {
     bool assigned = false;
     for (unsigned color = 0; color < count; ++color) {
+      if (failed(work.charge(neighbors[value].size() + 1))) return failure();
       bool conflict = llvm::any_of(neighbors[value], [&](Value other) {
         auto found = colors.find(other);
         return found != colors.end() && found->second == color;

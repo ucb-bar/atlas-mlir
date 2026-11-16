@@ -17,6 +17,7 @@
 #include "Atlas/AtlasAddressAnalysis.h"
 #include "Atlas/AtlasSpilling.h"
 #include "Atlas/AtlasVirtualVerification.h"
+#include "Atlas/AtlasWorkBudget.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -69,22 +70,30 @@ bool foldBF16AccumulatorRoundTrips(func::FuncOp function) {
   return changed;
 }
 
-void retainBF16Accumulators(ModuleOp module, func::FuncOp function) {
+LogicalResult retainBF16Accumulators(ModuleOp module, func::FuncOp function) {
   // Extending an accumulator lifetime may cross a legacy matmul or exceed
   // the two physical slots. Trial the complete virtual contract and actual
   // allocator, then keep the original function if either rejects it.
   OwningOpRef<ModuleOp> trial(cast<ModuleOp>(module->clone()));
   auto candidate = *trial->getOps<func::FuncOp>().begin();
   if (!foldBF16AccumulatorRoundTrips(candidate))
-    return;
-  ScopedDiagnosticHandler suppress(function.getContext(), [](Diagnostic &) {
     return success();
-  });
   VirtualAllocationPlan allocation;
-  if (failed(verifyAtlasVirtualModule(*trial)) ||
-      failed(allocation.allocate(candidate)) || failed(allocation.verify()))
-    return;
+  LogicalResult fits = failure();
+  {
+    ScopedDiagnosticHandler suppress(function.getContext(), [](Diagnostic &) {
+      return success();
+    });
+    if (succeeded(verifyAtlasVirtualModule(*trial)) &&
+        succeeded(allocation.allocate(candidate)))
+      fits = allocation.verify();
+  }
+  if (allocation.workBudgetExhausted() || AtlasWorkBudget::anyExhausted())
+    return function.emitOpError("register-allocation work budget exhausted during accumulator retention trial");
+  if (failed(fits))
+    return success();
   function.getBody().takeBody(candidate.getBody());
+  return success();
 }
 
 class VirtualPlanner {
@@ -1244,9 +1253,11 @@ struct LowerAtlasVirtualToMachinePass
     }
     if (programSizeLimit)
       function->setAttr(kAtlasProgramSizeLimit, IntegerAttr::get(IntegerType::get(&getContext(), 64), programSizeLimit));
-    reuseAtlasImmutableWeights(function);
-    if (function->getAttrOfType<UnitAttr>("atlas.retain_bf16_accumulators"))
-      retainBF16Accumulators(module, function);
+    if (failed(reuseAtlasImmutableWeights(function)))
+      return signalPassFailure();
+    if (function->getAttrOfType<UnitAttr>("atlas.retain_bf16_accumulators") &&
+        failed(retainBF16Accumulators(module, function)))
+      return signalPassFailure();
     VirtualPlanner planner(module, function);
     if (allocationReport.empty() && resourcePlanningReport.empty()) {
       if (failed(planner.plan()) || failed(planner.materialize()))

@@ -1,4 +1,5 @@
 #include "Atlas/AtlasSpilling.h"
+#include "Atlas/AtlasWorkBudget.h"
 #include "Atlas/AtlasAddressAnalysis.h"
 #include "Atlas/AtlasOps.h"
 #include "Atlas/AtlasTarget.h"
@@ -241,6 +242,7 @@ bool overlap(const Slot &a, const Slot &b) {
 // Earliest aligned placement in the compiler-owned frame. Unlike textual
 // register reuse, a slot remains occupied through its last reload.
 LogicalResult placeSlots(func::FuncOp function, unsigned limit) {
+  AtlasWorkBudget work(function, "spill-slot-placement");
   auto fixed = VirtualAllocationPlan().fixed();
   auto slots = slotsOf(function);
   llvm::stable_sort(slots, [](const Slot &a, const Slot &b) { return a.pinned > b.pinned; });
@@ -252,6 +254,7 @@ LogicalResult placeSlots(func::FuncOp function, unsigned limit) {
       slot.word = word;
       bool occupied = false;
       for (unsigned j = 0; j < i; ++j) {
+        if (failed(work.charge())) return failure();
         if (!liveTogether(slot, slots[j]) || !overlap(slot, slots[j]))
           continue;
         if (slot.pinned)
@@ -644,7 +647,8 @@ struct SpillAtlasVirtualPass
       return signalPassFailure();
     }
     unsigned mxuSpills = 0;
-    if (failed(spillAtlasMXUState(function, maxSpills, mxuSpills)))
+    if (failed(spillAtlasMXUState(function, maxSpills, mxuSpills,
+                                  "spill-atlas-virtual.max-spills")))
       return signalPassFailure();
     if (!slotsOf(function).empty())
       orderBlocks(function);
@@ -656,8 +660,13 @@ struct SpillAtlasVirtualPass
     // FP8 has no register-to-register edge move in this selected lowering.
     // Transport its block arguments through checked raw slots instead.
     unsigned count = mxuSpills + spillBlockArguments(function, RegisterKind::FP8);
-    if (count > maxSpills || failed(placeSlots(function, limit))) {
-      function.emitError("FP8 edge spill work limit or VMEM budget exceeded");
+    if (count > maxSpills) {
+      function.emitError("FP8 edge spill work limit exceeded")
+          << " (budget=spill-atlas-virtual.max-spills, limit=" << unsigned(maxSpills)
+          << ", used=" << count << ")";
+      return signalPassFailure();
+    }
+    if (failed(placeSlots(function, limit))) {
       return signalPassFailure();
     }
     if (count) orderBlocks(function);
@@ -668,6 +677,10 @@ struct SpillAtlasVirtualPass
         // Allocation failure is feedback, not an error if a spill recovers it.
         ScopedDiagnosticHandler feedback(&getContext(), [](Diagnostic &) { return success(); });
         fits = plan.allocate(function);
+      }
+      if (plan.workBudgetExhausted()) {
+        function.emitError("register-allocation work budget exhausted during spill recovery");
+        return signalPassFailure();
       }
       if (succeeded(fits)) {
         if (failed(plan.verify()) || failed(verifyAtlasSpillSlots(function)))
@@ -703,15 +716,25 @@ struct SpillAtlasVirtualPass
       bool bf16 = !plan.registerPressure(RegisterKind::BF16).used;
       bool fp8 = !plan.registerPressure(RegisterKind::FP8).used;
       if ((!bf16 && !fp8 && !scalar) || count >= maxSpills) {
-        function.emitError(!bf16 && !fp8 && !scalar
-            ? "allocation failure is not recoverable by tensor spilling"
-            : "spill rewrite work limit reached");
+        if (!bf16 && !fp8 && !scalar)
+          function.emitError("allocation failure is not recoverable by tensor spilling");
+        else
+          function.emitError("spill rewrite work limit reached")
+              << " (budget=spill-atlas-virtual.max-spills, limit=" << unsigned(maxSpills)
+              << ", used=" << count << ", requested=1)";
         return signalPassFailure();
       }
       if (scalar && !function->hasAttr("atlas.memory_controls") &&
           function.getNumArguments() > registerCapacities(function)[2]) {
         if (function.getNumArguments() > 256 || count + function.getNumArguments() > maxSpills) {
-          function.emitError("entry control buffer or spill work limit exceeded");
+          if (function.getNumArguments() > 256)
+            function.emitError("entry control buffer limit exceeded")
+                << " (budget=entry-control-arguments, limit=256, used="
+                << function.getNumArguments() << ")";
+          else
+            function.emitError("entry control spill work limit exceeded")
+                << " (budget=spill-atlas-virtual.max-spills, limit=" << unsigned(maxSpills)
+                << ", used=" << count << ", requested=" << function.getNumArguments() << ")";
           return signalPassFailure();
         }
         spillEntryArguments(function);
@@ -727,8 +750,13 @@ struct SpillAtlasVirtualPass
                                              &peakValues);
       if (demoted) {
         count += demoted;
-        if (count > maxSpills || failed(placeSlots(function, limit))) {
-          function.emitError("spill rewrite work limit or VMEM budget exceeded");
+        if (count > maxSpills) {
+          function.emitError("spill rewrite work limit reached")
+              << " (budget=spill-atlas-virtual.max-spills, limit=" << unsigned(maxSpills)
+              << ", used=" << count << ")";
+          return signalPassFailure();
+        }
+        if (failed(placeSlots(function, limit))) {
           return signalPassFailure();
         }
         orderBlocks(function);

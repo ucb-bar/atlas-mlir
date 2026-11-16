@@ -142,6 +142,7 @@ public:
   // Query only mapped value kinds; placement references/views expire on rebuild.
   LogicalResult allocate(func::FuncOp function);
   LogicalResult verify() const;
+  bool workBudgetExhausted() const { return workExhausted; }
   unsigned tile(Value value) const;
   unsigned fp8(Value value) const;
   unsigned scalar(Value value) const;
@@ -175,6 +176,7 @@ private:
   llvm::DenseMap<Value, DMATransferPlacement> dmaTransfers;
   llvm::SmallVector<int32_t> scalarArgumentRegs;
   std::array<RegisterPressure, 3> pressure;
+  bool workExhausted = false;
   bool mixedFp8 = false;
   bool hasPack = false;
   const FixedResourcePlacement fixedResources;

@@ -1,4 +1,5 @@
 #include "Atlas/AtlasProofWork.h"
+#include "Atlas/AtlasWorkBudget.h"
 #include "Atlas/AtlasBufferContractVerification.h"
 #include "Atlas/AtlasContractAttr.h"
 #include "Atlas/AtlasGeneratedArtifact.h"
@@ -399,6 +400,7 @@ FailureOr<DictionaryAttr> mlir::atlas::buildAtlasBufferContract(
 }
 
 LogicalResult mlir::atlas::verifyAtlasGeneratedBufferContract(const AtlasVerificationContext &ctx) {
+  AtlasWorkBudget budget(ctx.module, "buffer-contract-dataflow");
   atlasProofInvocation(AtlasProofKind::Buffer);
   ModuleOp module = ctx.module;
   if (failed(requireAtlasGeneratedArtifact(module))) return failure();
@@ -635,7 +637,7 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedBufferContract(const AtlasVerific
     if (helpers.count(block)) next.erase(std::remove(next.begin(), next.end(), block), next.end());
     return next;
   };
-  auto paths = atlasForwardEntries(s, State(), [&](size_t block, State &state) { return run(block, state, false); }, merge, successors);
+  auto paths = atlasForwardEntries(s, State(), [&](size_t block, State &state) { return run(block, state, false); }, merge, successors, &budget);
   if (failed(paths)) return failure();
   for (size_t block = 0; block < s.starts.size(); ++block) {
     if (!paths->reached[block]) continue;

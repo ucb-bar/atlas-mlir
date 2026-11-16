@@ -8,7 +8,8 @@ namespace mlir::atlas {
 // inputs in a single block, only when the resulting source order allocates.
 // Boundary slots and explicit constant-address DMA loads remain separate.
 // No candidate, uncertain aliasing, or allocation failure leaves IR unchanged.
-void reuseAtlasImmutableWeights(func::FuncOp function);
+// Work exhaustion fails compilation rather than choosing the original IR.
+LogicalResult reuseAtlasImmutableWeights(func::FuncOp function);
 void registerReuseAtlasImmutableWeightsPass();
 } // namespace mlir::atlas
 

@@ -1,4 +1,5 @@
 #include "Atlas/AtlasProofWork.h"
+#include "Atlas/AtlasWorkBudget.h"
 #include "Atlas/AtlasProofLimits.h"
 #include "Atlas/AtlasAddressAnalysis.h"
 #include "Atlas/AtlasContractAttr.h"
@@ -35,7 +36,11 @@ struct SourceEdge { int32_t from, to; std::vector<int32_t> incoming; };
 // live-IR analysis that constructed the DMA record. No generated address or
 // solver assignment is used to decide the source interval.
 class CapturedAddressProof {
+  AtlasWorkBudget budget;
 public:
+  explicit CapturedAddressProof(Operation *operation)
+      : budget(operation, "captured-address-proof") {}
+  bool exhausted() const { return budget.exhausted(); }
   std::vector<SourceValue> values;
   std::vector<SourceBlock> blocks;
   std::vector<SourceEdge> edges;
@@ -47,6 +52,7 @@ public:
     auto er = cfg ? cfg.getAs<ArrayAttr>("edges") : ArrayAttr{};
     if (!vr || !br || br.empty() || !er) return false;
     for (Attribute a : vr) {
+      if (failed(budget.charge())) return false;
       atlasProofRecord(AtlasProofKind::CapturedAddress);
       auto d = dyn_cast<DictionaryAttr>(a);
       if (!d) return false;
@@ -60,6 +66,7 @@ public:
       if (values.back().def == "arith.constant" && !contractI32(d, "constant")) return false;
     }
     for (Attribute a : br) {
+      if (failed(budget.charge())) return false;
       atlasProofRecord(AtlasProofKind::CapturedAddress);
       auto d = dyn_cast<DictionaryAttr>(a);
       if (!d) return false;
@@ -72,6 +79,7 @@ public:
         if (!validValue(arg) || values[arg].block != *id || values[arg].def != "argument") return false;
     }
     for (Attribute a : er) {
+      if (failed(budget.charge())) return false;
       atlasProofRecord(AtlasProofKind::CapturedAddress);
       auto d = dyn_cast<DictionaryAttr>(a);
       if (!d) return false;
@@ -91,6 +99,7 @@ public:
     std::set<int> reached;
     std::vector<int> pending{0};
     while (!pending.empty()) {
+      if (failed(budget.charge())) return false;
       int b = pending.back(); pending.pop_back();
       if (!reached.insert(b).second) continue;
       for (int e : blocks[b].edges) pending.push_back(edges[e].to);
@@ -102,10 +111,12 @@ public:
     while (change) {
       change = false;
       for (unsigned b = 1; b < blocks.size(); ++b) {
+        if (failed(budget.charge())) return false;
         std::set<int> next = reached;
         for (int e : blocks[b].predecessors) {
           std::set<int> intersection;
           const auto &d = dominators[edges[e].from];
+          if (failed(budget.charge(next.size() + d.size()))) return false;
           std::set_intersection(next.begin(), next.end(), d.begin(), d.end(),
                                 std::inserter(intersection, intersection.end()));
           next = std::move(intersection);
@@ -118,11 +129,13 @@ public:
   }
 
   std::optional<I32AddressSpan> prove(int value, int useBlock) {
+    if (failed(budget.charge())) return std::nullopt;
     atlasProofTransfer(AtlasProofKind::CapturedAddress);
     if (!validValue(value) || values[value].type != "i32" || !validBlock(useBlock) || !active.insert(value).second)
       return std::nullopt;
     auto result = derive(value,useBlock);
     active.erase(value);
+    if (budget.exhausted()) return std::nullopt;
     return result;
   }
 
@@ -142,6 +155,7 @@ private:
   bool dominates(int a, int b) const { return dominators[b].count(a); }
 
   std::optional<uint32_t> literal(int id) {
+    if (failed(budget.charge())) return std::nullopt;
     atlasProofTransfer(AtlasProofKind::CapturedAddress);
     if (!validValue(id) || (values[id].type != "i32" && values[id].type != "i1") || !constants.insert(id).second) return std::nullopt;
     const auto &v = values[id];
@@ -623,7 +637,7 @@ LogicalResult mlir::atlas::verifyAtlasBoundedDMAAddresses(const AtlasVerificatio
         return module.emitOpError("explicit output buffer cannot contain indexed outputs");
     }
   }
-  CapturedAddressProof source;
+  CapturedAddressProof source(module);
   if (!source.parse(cfg)) return module.emitOpError("bounded DMA requires a valid source CFG");
   // Recheck the retained scalar language even when no dynamic memory address
   // uses the shift. Physical scalar shifts mask their distance; arith shifts
@@ -716,5 +730,5 @@ LogicalResult mlir::atlas::verifyAtlasBoundedDMAAddresses(const AtlasVerificatio
   }
   if (readsOutput && !initializedOutputReads(ctx, source, cfg, dma, outputFirst, outputEnd))
     return module.emitOpError("source CFG does not prove output reads initialized within the scalar work limit");
-  return success();
+  return failure(source.exhausted());
 }
