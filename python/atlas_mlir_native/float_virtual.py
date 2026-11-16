@@ -286,19 +286,20 @@ def virtual_program(p):
     b=Builder(lines);c=b.constant;op=b.binary;cmp=b.compare
     lanes=p.tile_lanes;tiles=p.input_bytes//(lanes*p.width)
     binary=p.op in ('bf16_add','bf16_sub')
+    private = p.private_output
     # Binary route caching is selected independently of the lowering pipeline.
     binary_routes=binary and (group_binary or vector_preflight or current_codegen_options().exact_binary_routes)
     # One word per tile retains route admission across the complete input
     # preflight. Arithmetic starts only after every tile passed validation.
-    if binary_routes and tiles > 512:
+    if binary_routes and not private and tiles > 512:
         raise ValueError('exact binary route table exceeds one 2048-byte slot')
     slots=(('left','result','pairs','status') if expand_unary and not binary
-           else ('left','right','result','pairs','status')) + (('routes',) if binary_routes else ())
+           else ('left','right','result','pairs','status')) + (('routes',) if binary_routes and not private else ())
     for slot in slots:b.slot(slot)
     zero=b.splat(0)
     for slot in slots:b.save(slot,zero)
     flag=c(0)
-    phases=('check','compute') if not p.op.endswith('_neg') else ('compute',)
+    phases = ('private',) if private else ('check','compute') if not p.op.endswith('_neg') else ('compute',)
     for phase in phases:
         pointers=[c(p.io_memory_base),c(p.io_memory_base+[n.id for n in p.operands].index(p.node.inputs[-1])*p.input_bytes),c(p.output_address)]
         def tile_body(tile,values):
@@ -308,7 +309,7 @@ def virtual_program(p):
                 a=b.dma_load(ap,lanes*p.width);b.save('left',a)
                 if binary or not expand_unary:
                     b.save('right',b.dma_load(bp,lanes*p.width) if len(p.operands)>1 else a)
-            if phase=='check':
+            if phase in ('check', 'private'):
                 if binary_routes:
                     if vector_preflight:
                         outside = binary_vector_refusal(b)
@@ -331,7 +332,8 @@ def virtual_program(p):
                     lines.append(f'    cf.br ^binary_checked({b.state},{flags} : {S},i32)')
                     lines.append(f'  ^binary_checked(%binary_checked_state: {S},%binary_flags: i32):')
                     b.state='%binary_checked_state';flags='%binary_flags'
-                    b.store('routes',tile,flags,4)
+                    if not private:
+                        b.store('routes',tile,flags,4)
                     bad=op('or',bad,op('shr',flags,c(2)))
                 def validate(index,acc):
                     a,d=b.inputs(p,index)
@@ -341,10 +343,19 @@ def virtual_program(p):
                 elif not binary_routes:
                     bad,=(b.loop('preflight_lane',lanes,[bad],validate) if binary or not expand_unary
                           else b.unary_lanes(lanes,[bad],validate))
-            else:
+            if phase != 'check':
+                if private:
+                    # Application output remains private until the status has
+                    # been checked. Validate this tile, consume it while still
+                    # resident, and skip publication after any invalid input.
+                    valid = b.value(f'arith.cmpi eq, {bad}, {c(0)} : i32')
+                    lines.append(f'    cf.cond_br {valid}, ^private_compute({b.state} : {S}), ^private_complete({b.state} : {S})')
+                    lines.append(f'  ^private_compute(%private_compute_state: {S}):')
+                    b.state = '%private_compute_state'
                 if binary:
                     if binary_routes:
-                        flags=b.load('routes',tile,4)
+                        if not private:
+                            flags=b.load('routes',tile,4)
                         qbad,rbad=op('and',flags,c(1)),op('and',flags,c(2))
                     else:
                         def classify(index,acc):
@@ -402,6 +413,10 @@ def virtual_program(p):
                     lines.append(f'    cf.br ^publish({b.state} : {S})')
                     lines.append(f'  ^publish(%publish_state: {S}):');b.state='%publish_state'
                 b.dma_store(out,b.restore('result'),lanes*p.output_width)
+                if private:
+                    lines.append(f'    cf.br ^private_complete({b.state} : {S})')
+                    lines.append(f'  ^private_complete(%private_complete_state: {S}):')
+                    b.state = '%private_complete_state'
             return [bad,op('add',ap,c(lanes*p.width)),op('add',bp,c(lanes*p.width)),op('add',out,c(lanes*p.output_width))]
         flag,*_=b.loop(phase+'_tile',tiles,[flag,*pointers],tile_body)
         if phase=='check':

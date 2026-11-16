@@ -44,8 +44,9 @@ def _json(value):
     return (json.dumps(value, sort_keys=True, indent=2) + "\n").encode()
 
 
-def _publish_leaf(original, canonical, materialized, destination):
-    plan, checked = device.prepare_plan(original), device.prepare_plan(canonical)
+def _publish_leaf(original, canonical, materialized, destination, *, private_output=False):
+    plan = device.prepare_plan(original, private_output=private_output)
+    checked = device.prepare_plan(canonical, private_output=private_output)
     manifest = json.loads((materialized / "manifest.json").read_bytes())
     verify_native_publication(materialized, manifest, engine="merlin_native",
                               request_digest=canonical.digest(), target_identity=canonical.target_identity)
@@ -81,7 +82,10 @@ def _publish_leaf(original, canonical, materialized, destination):
 def bind_exact_float(original, canonical, materialized, destination):
     """Publish a fresh original boundary against an authenticated checked body."""
     materialized, destination = Path(materialized), Path(destination)
-    plan, checked = application.prepare_plan(original), application.prepare_plan(canonical)
+    schedule = json.loads((materialized / "float-schedule.json").read_bytes())
+    private_output = schedule.get("private_output", False)
+    plan = application.prepare_plan(original, private_output=private_output)
+    checked = application.prepare_plan(canonical, private_output=private_output)
     manifest = json.loads((materialized / "float-manifest.json").read_bytes())
     application._verify_publication(materialized, manifest, checked)
     if plan.launches != checked.launches or len(plan.bodies) != len(checked.bodies):
@@ -94,7 +98,8 @@ def bind_exact_float(original, canonical, materialized, destination):
     segments = []
     for index, (body, canonical_body) in enumerate(zip(plan.bodies, checked.bodies, strict=True)):
         relative = f"segments/body_{index:03d}"
-        detail = _publish_leaf(body, canonical_body, materialized / relative, destination / relative)
+        detail = _publish_leaf(body, canonical_body, materialized / relative, destination / relative,
+                               private_output=private_output)
         segments.append(dict(index=index, path=relative, request_digest=body.digest(),
                              binary_sha256=detail["binary_sha256"],
                              manifest_sha256=sha256((destination / relative / "manifest.json").read_bytes()).hexdigest()))

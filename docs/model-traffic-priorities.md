@@ -38,7 +38,7 @@ required to isolate each new optimization from upstream changes.
 | --- | --- | --- | --- |
 | 1 — implemented | Admit valid zeros through the vector check for exact BF16 addition/subtraction | Saves 2.60M TinyLlama and 50.85M SmolVLA cycles in matched full-layer runs; details below. | Atlas: proof against the selected VPU primitives and native route selection. |
 | 2 — implemented | Fuse private softmax output with static activation quantization | SmolVLA writes a 25,165,824-byte BF16 probability tensor that its quantizer reads back. Removing that pair of transfers removes about 34.1M cycles of bandwidth demand at 1.477 B/cycle; actual saved cycles require simulation. | Merlin: reusable private producer/consumer ownership proofs. Atlas: row schedule, original BF16 rounding, exact FP8 conversion and exponent publication. |
-| 3 | Fold exact bias/residual additions into producer epilogues | SmolVLA's six projection bias additions still require 54 launches. Their producer results total 14,155,776 BF16 bytes; eliminating one write/read pair would remove 28.31 MB of traffic. This requires the original post-projection rounding and safe fallback/publication, not substitution of the VPU's truncated add for exact RNE. | Merlin: private result and broadcast-layout proofs. Atlas: exact arithmetic and producer-store fusion. |
+| 3 — traffic prerequisite implemented | Reduce exact bias/residual traffic, then consider producer epilogues | Single-pass validation/computation now saves 1.27M TinyLlama and 26.81M SmolVLA cycles. Projection-store fusion remains future work: it must preserve post-projection rounding, safe fallback/publication and operand reuse. | Merlin: existing private result and broadcast-layout proofs. Atlas: exact arithmetic, private device publication and producer-store fusion. |
 | 4 | Pipeline tile DMA with vector compute and validation | Before priority 1, exact-float and folded-layout kernels accounted for about 7.26M TinyLlama and 106.75M SmolVLA cycles in which DMA was inactive. Remeasure after scalar work removal before selecting schedules. Prefetch the next independent tile while processing the current one. | Atlas: VMEM lifetimes, register pressure, DMA slots and instruction timing. |
 | 5 | Compose compatible regions while keeping private intermediates on device | The current 56/113 launches include real data dependencies as well as image/resource limits. Composition must remove repeated publication/packing or enable overlap to reduce device cycles; merely concatenating launches chiefly changes host overhead. | Merlin: generic composition, ownership and lifetime contracts. Atlas: admitted schedules, memory placement and image bounds. |
 | 6 | Extend independent-request batching and weight reuse | B=2 already improves TinyLlama throughput. Further batching amortizes weights but increases activation storage and attention work per batch. Measure throughput separately from single-request latency. | Merlin: independent-request graph semantics. Atlas: panel selection and residency. |
@@ -198,10 +198,60 @@ Reproduction artifacts are in `out/traffic-audit/`:
 `rust-*` directories, and `softmax-quantize-comparison.json`. The fixture hashes,
 Rust commit/binary and numerical settings are unchanged from the first feature.
 
-The next investigation is the repeated input reads in exact bias/residual
+The third implementation addresses the repeated input reads in exact bias/residual
 kernels. They currently validate a whole chunk, then reload it for computation.
 Their application wrapper already stages outputs privately until every status
 succeeds. Proving that ownership for a fused validation/computation loop may
 remove the same traffic as a projection epilogue without first changing MXU
 partitioning or its weight reuse. Raw native calls must retain their existing
 failure-publication contract unless explicitly compiled for private results.
+
+## Third implementation: single-pass private exact additions
+
+The exact BF16 add/subtract application wrapper already retains leaf results
+in disjoint private scratch and checks every device status before publishing
+the logical output. Those application kernels now validate a tile and consume
+its operands while they are resident. They do not reload the complete input
+for a second computation pass. The vector, pair-row and scalar arithmetic
+routes are unchanged, including RNE, signed zero and exceptional-value rules.
+
+An invalid tile makes the status sticky and prevents subsequent result stores.
+Earlier private tiles may have been written; the wrapper discards the complete
+result on failure. Raw device compilation remains two-pass by default. Opting
+into private results is an explicit plan/manifest contract, authenticated in
+source replay and canonical materialization rebinding. It cannot be changed by
+rehashing only a parent schedule. Legacy raw application artifacts still replay.
+This is Atlas device scheduling and ABI work; it requires no new Merlin pass.
+
+Matched Rust results against the softmax-quantization implementation:
+
+| Layer | Before cycles | After cycles | Saved | Dispatches | DRAM reads removed |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| TinyLlama, B1/T64 | 71,126,873 | **69,857,257** | 1,269,616 (1.785%) | 55 → 55 | 1,638,400 |
+| SmolVLA vision, B1/T1024 | 402,703,972 | **375,891,604** | 26,812,368 (6.658%) | 112 → 112 | 34,603,008 |
+
+Every final BF16 word matches the retained independent reference. All 63
+TinyLlama and 62 SmolVLA retained region outputs also match their previous byte
+strings. The 51/46 unchanged launches retain identical cycles, instructions,
+busy counters and transfer counts. Only four TinyLlama and 66 SmolVLA exact-add
+launches change. DRAM writes are unchanged. Total instructions are 5,076,293
+and 24,121,344; total DRAM bytes are 77,318,944 and 374,874,688.
+
+The focused audit passes 37 tests covering native Rust arithmetic, generated C
+publication, canonical materialization and replay. Cases include partial and
+multiple tiles, shared operands, add/subtract, both vector-admission settings,
+signed zero, subnormals, infinities, early/late invalid inputs, output aliases,
+single/multiple dispatches, and execution/image-budget rejection. The broader
+exact-float and instruction-bound regressions pass; Python instruction-model
+tests remain skipped in favor of Rust execution.
+
+Artifacts: `out/traffic-audit/{tinyllama,smolvla}-private-float-v2`, matching
+`rust-*` directories, `private-float-comparison.json`, and the
+`private-float-{audit,final-tests,limits}.log` files. Compiler/tool/model options
+and reference hashes are unchanged. The serial same-work bounds are 52,495,677
+and 256,821,488 cycles; DMA busy fractions are 82.06% and 72.71%.
+
+Next: use the unused exact-binary execution budget to reduce sliced dispatches.
+The current 131,072-element body is bounded at 76.6M instructions against the
+128M application budget. Larger slices still need independent native bounds,
+the unchanged 128-KiB IMEM check and atomic publication across all slices.

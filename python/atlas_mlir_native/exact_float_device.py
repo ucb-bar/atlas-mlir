@@ -1,8 +1,10 @@
 """Exact source float operations through the common Atlas virtual pipeline.
 
-Every checked operation scans its whole source domain before storing results.
-NaNs and invalid infinity cancellation produce a device status with no output
-writes. Sign flips accept all encodings and preserve NaN payloads.
+By default, checked operations scan the whole source domain before storing
+results. NaNs and invalid infinity cancellation then return a device status
+without output writes. Explicitly private binary results allow tile-local
+validation; callers must discard the entire result on failure. Sign flips
+accept all encodings and preserve NaN payloads.
 """
 from .binding import io_memory_base as selected_io_base
 
@@ -57,6 +59,7 @@ class FloatPlan:
     width: int
     output_width: int
     io_memory_base: int = DRAM_BASE
+    private_output: bool = False
     @property
     def op(self): return self.node.op
     @property
@@ -75,7 +78,9 @@ class FloatPlan:
         from .binding import TILE_BYTES,dram_slots
         return dict(operation=self.op,count=self.count,input_count=len(self.operands),right_input=[n.id for n in self.operands].index(self.node.inputs[-1]),source_request_digest=self.source.digest(),io_memory_bytes=dram_slots()*TILE_BYTES)
     def record(self):
-        return dict(schema="atlas.exact_float.v1",source_request_digest=self.source.digest(),operation=self.op,
+        return dict(schema="atlas.exact_float.v1",
+                    **({"private_output": True, "publication_contract": "device result is private until zero status; discard all result bytes on failure"} if self.private_output else {}),
+                    source_request_digest=self.source.digest(),operation=self.op,
                     input_node_ids=[n.id for n in self.operands],output_node_ids=[self.node.id],
                     input_addresses=[self.io_memory_base+i*self.input_bytes for i in range(len(self.operands))],
                     input_payload_bytes=[self.input_bytes]*len(self.operands),output_addresses=[self.output_address],
@@ -117,11 +122,16 @@ def prepare_source_plan(source, *, io_memory_base=None):
     return plan
 
 
-def prepare_plan(source, *, io_memory_base=None):
+def prepare_plan(source, *, io_memory_base=None, private_output=False):
     """Admit a physical leaf only when its complete frame fits DMA memory."""
     from .binding import dram_slots, TILE_BYTES
 
     plan = prepare_source_plan(source, io_memory_base=io_memory_base)
+    if type(private_output) is not bool or private_output and plan.op not in ('bf16_add', 'bf16_sub'):
+        raise ValueError('private float publication currently requires an exact binary operation')
+    if private_output:
+        from dataclasses import replace
+        plan = replace(plan, private_output=True)
     if (plan.workspace_bytes > dram_slots() * TILE_BYTES
             or not dma_span_in_window(plan.io_memory_base, plan.workspace_bytes)):
         raise ValueError("exact float buffers leave selected DMA memory windows")
@@ -204,14 +214,14 @@ def machine_program(p):
     return _run([str(tools/"atlas-opt"),*_scheduled_virtual_pipeline(),"-"],input_text=virtual_program(p))
 
 
-def compile_source(snapshot,region,*,target_source,destination,limits,io_memory_base=None):
+def compile_source(snapshot,region,*,target_source,destination,limits,io_memory_base=None,private_output=False):
     io_memory_base = selected_io_base() if io_memory_base is None else io_memory_base
     import hashlib,json,os
     from pathlib import Path
     from merlin.semantic_compiler.codegen import current_codegen_options
     from merlin.semantic_compiler.target_binding import verify_native_publication
     from .binding import NATIVE_CHECKS,RTL_REVISION,_run
-    p=prepare_plan(region,io_memory_base=io_memory_base)
+    p=prepare_plan(region,io_memory_base=io_memory_base,private_output=private_output)
     maximum=max_leaf_elements(p)
     if p.count>maximum: raise ValueError(f"exact float leaf requires at most {maximum} elements")
     if p.workspace_bytes>p.descriptor()["io_memory_bytes"]: raise ValueError("exact float exceeds selected I/O window")
@@ -251,7 +261,7 @@ def compile_source(snapshot,region,*,target_source,destination,limits,io_memory_
     return manifest
 
 
-def prepare_c_package(region,compiled,name,*,target_source,runtime_linkage="separate",io_memory_base=None,input_layout=None):
+def prepare_c_package(region,compiled,name,*,target_source,runtime_linkage="separate",io_memory_base=None,input_layout=None,private_output=False):
     io_memory_base = selected_io_base() if io_memory_base is None else io_memory_base
     import hashlib,json,os
     from pathlib import Path
@@ -261,7 +271,7 @@ def prepare_c_package(region,compiled,name,*,target_source,runtime_linkage="sepa
     from .binding import NATIVE_CHECKS,_run
     from .c_runtime import RUNTIME_SHARED_FILES,program_array,runtime_headers,runtime_members
     if runtime_linkage!="separate":raise ValueError("exact float requires shared runtime linkage")
-    p=prepare_plan(region,io_memory_base=io_memory_base);compiled,target_source=Path(compiled),Path(target_source)
+    p=prepare_plan(region,io_memory_base=io_memory_base,private_output=private_output);compiled,target_source=Path(compiled),Path(target_source)
     manifest=json.loads((compiled/"manifest.json").read_text())
     verify_native_publication(compiled,manifest,engine="merlin_native",request_digest=region.digest(),target_identity=region.target_identity)
     if (json.loads((compiled/"source-request.json").read_text())!=region.record() or

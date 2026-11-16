@@ -86,16 +86,23 @@ def test_private_selection_and_refused_source_boundaries():
     ('f32_to_bf16','reverse',0),('f32_neg','transpose',0),
     ('bf16_to_f32','broadcast',0),('bf16_add','transpose',1),
 ])
-def test_c_rust_affine_slices_domain_and_atomic_output(tmp_path,op,layout,port):
+@pytest.mark.parametrize('window,budget,fast', [(8192,1000000,False),(32768,2000000,True)])
+def test_c_rust_affine_slices_domain_and_atomic_output(tmp_path,op,layout,port,window,budget,fast):
     logical,source=fixture(op,layout,port)
-    with codegen_options(CodegenOptions(io_memory_bytes=8192,exact_float_unroll=True)):
+    with codegen_options(CodegenOptions(io_memory_bytes=window,execution_instruction_limit=budget,
+            exact_float_unroll=True,exact_binary_lane_groups=fast,exact_binary_vector_preflight=fast,exact_binary_routes=fast)):
         group=folded.prepare_source(source)
         schedule=application.prepare_plan(group.arithmetic)
-        assert len(schedule.launches)>1
+        if window==8192:
+            assert len(schedule.launches)>1
+        else:
+            assert len(schedule.launches)==1
         compiled=tmp_path/'compiled'
         folded.compile_group(group,None,target_source=ROOT,destination=compiled,limits=None)
         exported=folded.export_group(group,compiled,'packed',target_source=ROOT)
-        plans=[device.prepare_plan(body) for body in schedule.bodies]
+        plans=[device.prepare_plan(body,private_output=json.loads((compiled/f'float/segments/body_{i:03d}/float-plan.json').read_text()).get('private_output',False))
+               for i,body in enumerate(schedule.bodies)]
+        memory_bytes=((max(p.workspace_bytes for p in plans)+4095)//4096+1)*4096
         programs=[compiled/f'float/segments/body_{i:03d}/program.bin' for i in range(len(plans))]
         assert exported.inputs[port]=='physical'
         assert all(p.stat().st_size<=131072 for p in programs)
@@ -104,7 +111,7 @@ def test_c_rust_affine_slices_domain_and_atomic_output(tmp_path,op,layout,port):
         (tmp_path/'shim.c').write_text('''#include "packed.h"
 #include <string.h>
 static atlas_host host; static packed_context region; static packed_source_context source;
-static unsigned char scratch[PACKED_WORKSPACE_BYTES],memory[12288];
+static unsigned char scratch[PACKED_WORKSPACE_BYTES],memory[@MEMORY_BYTES@];
 static uint32_t image[32768]; static size_t words; static unsigned starts,transfers;
 static void (*execute)(const uint32_t *,size_t,unsigned char *,size_t);
 static uint32_t rd(void *c,uintptr_t a){(void)c;return a==0x40004u?starts:5u;}
@@ -126,7 +133,7 @@ int invoke(const void *const *inputs,void *output,void (*run)(const uint32_t *,s
  if(packed_source_bind(&source,&region,0,0))return 7;
  void *outputs[]={output};return packed_source_dispatch(&source,inputs,outputs);
 }
-''')
+'''.replace('@MEMORY_BYTES@',str(memory_bytes)))
         subprocess.run(['cc','-std=c11','-O2','-Wall','-Wextra','-Werror','-Wno-misleading-indentation',
             '-shared','-fPIC','packed.c','runtime/atlas_host.c','shim.c','-o','packed.so'],
             cwd=tmp_path,check=True,capture_output=True)
