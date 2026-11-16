@@ -22,11 +22,12 @@ from merlin.sched.ir.kernel import concretize
 from merlin.transforms.dense_planning import DenseProblem, DenseResources
 from merlin.transforms.ordered_float_dense import OrderedFloatPolicy, read_ordered_float_dense
 
+from .shared_dense_io import SLOT_BYTES, pack_inputs as pack_inputs
+
 RTL_REVISION = "0079c0541111197741a231c002e3843fa6f545b2"
 MODEL_REVISION = "47b8599d8ffbe5ddd96059ffe2b5be2427a410f5"
 POLICY = OrderedFloatPolicy("f8E4M3FN", "bf16", "mxu0-e4m3-ordered-bf16-finite-v1",
                             "finite-normal-e4m3-or-positive-zero")
-SLOT_BYTES = 2048
 INPUT_BASE = 0x90000000
 OUTPUT_BASE = 0x90080000
 MAX_TILE_PRODUCTS = 64
@@ -37,13 +38,15 @@ def plan(source, *, entry):
     return selected, schedule_dense(selected)
 
 
-def schedule_dense(selected):
+def schedule_dense(selected, *, max_tile_products=MAX_TILE_PRODUCTS):
     if selected.policy != POLICY:
         raise ValueError("unqualified Atlas dense numerical policy")
     if any(d % 32 for d in (selected.m, selected.k, selected.n)):
         raise ValueError("initial Atlas dense path requires full 32x32 tiles; padding is not admitted")
     mt, kt, nt = selected.m // 32, selected.k // 32, selected.n // 32
-    if mt * kt * nt > MAX_TILE_PRODUCTS:
+    if type(max_tile_products) is not int or max_tile_products <= 0:
+        raise ValueError("positive explicit expansion budget required")
+    if mt * kt * nt > max_tile_products:
         raise ValueError("initial Atlas dense path exceeds its finite instruction expansion budget")
     problem = DenseProblem(selected.m, selected.k, selected.n, 32, 32, 32, 1, 1, 2)
     # A row view of one assigned tile per role. The physical accumulator is a
@@ -128,11 +131,14 @@ def expand_dense(selected, scheduled, builder, input_tile, output_tile):
         raise ValueError("Atlas dense expansion left live state")
 
 
-def virtual_program(selected, scheduled):
+def virtual_program(selected, scheduled, *, input_base=INPUT_BASE, output_base=OUTPUT_BASE):
     """Expand the checked dense schedule using the standalone tile ABI."""
     from .virtual_builder import VirtualBuilder
 
-    builder = VirtualBuilder(INPUT_BASE, OUTPUT_BASE)
+    slots = (selected.m // 32 + selected.n // 32) * (selected.k // 32)
+    if output_base < input_base + slots * SLOT_BYTES:
+        raise ValueError("input slots overlap outputs")
+    builder = VirtualBuilder(input_base, output_base)
     kt, nt = selected.k // 32, selected.n // 32
     rhs_base = selected.m // 32 * kt
     def input_tile(role, row, col):
@@ -143,23 +149,6 @@ def virtual_program(selected, scheduled):
                      attrs=f" {{index = {row * nt + col} : i32}}")
     expand_dense(selected, scheduled, builder, input_tile, output_tile)
     return builder.text()
-
-
-def pack_inputs(selected, lhs: bytes, rhs: bytes):
-    """Enforce the source domain and map row-major inputs to Atlas tile slots."""
-    if len(lhs) != selected.m * selected.k or len(rhs) != selected.k * selected.n:
-        raise ValueError("input byte extent differs from source")
-    if any(v and (v & 0x78 == 0 or v & 0x7f == 0x7f) for v in lhs + rhs):
-        raise ValueError("input outside finite-normal E4M3 or positive-zero domain")
-    payloads = []
-    for m in range(0, selected.m, 32):
-        for k in range(0, selected.k, 32):
-            payloads.append(b"".join(lhs[(m+r)*selected.k+k:(m+r)*selected.k+k+32] for r in range(32)))
-    for k in range(0, selected.k, 32):
-        for n in range(0, selected.n, 32):
-            payloads.append(bytes(rhs[(n+c)*selected.k+k+r] if selected.rhs_transposed else
-                                  rhs[(k+r)*selected.n+n+c] for c in range(32) for r in range(32)))
-    return tuple((i*SLOT_BYTES, payload) for i, payload in enumerate(payloads))
 
 
 def compile_dense(source, *, entry, destination, atlas_bin_dir, pipeline="source-order"):

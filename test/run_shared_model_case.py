@@ -46,6 +46,9 @@ def instructions(binary):
         elif fmt == "SBType":
             values["imm"] = signed((((word >> 31)&1)<<12) | (((word >> 7)&1)<<11) |
                                    (((word >> 25)&63)<<5) | (((word >> 8)&15)<<1), 13)
+        elif fmt == "UJType":
+            values["imm"] = signed((((word >> 31)&1)<<20) | (((word >> 12)&255)<<12) |
+                                   (((word >> 20)&1)<<11) | (((word >> 21)&1023)<<1), 21)
         instruction = cls(**{f.repr: f.inner(values[f.repr]) for f in _fields(cls)})
         if instruction.to_bytecode() != word:
             raise ValueError(f"decoded instruction differs at word {row['word_index']}")

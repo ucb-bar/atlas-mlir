@@ -1,6 +1,7 @@
 """One resident image for explicitly ordered virtual regions, including K loops."""
 
 import dataclasses
+import importlib.util
 import json
 import os
 import struct
@@ -9,12 +10,11 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from test_looped_mnk import source_request
-
 ROOT = Path(__file__).resolve().parents[1]
 
 
 def composed_source(factor, k=65):
+    from test_looped_mnk import source_request
     from atlas_mlir_native.looped_tiling import _virtual, prepare_plan
 
     plan = prepare_plan(source_request(1, 1, k))
@@ -26,8 +26,9 @@ def composed_source(factor, k=65):
 
 
 @unittest.skipUnless(
-    os.environ.get("ATLAS_OOT_BIN_DIR") and os.environ.get("MERLIN_NATIVE_ROOT"),
-    "select Atlas tools and Merlin",
+    os.environ.get("ATLAS_OOT_BIN_DIR") and os.environ.get("MERLIN_NATIVE_ROOT")
+    and importlib.util.find_spec("atlas_mlir_native.looped_tiling"),
+    "select Atlas tools and the optional looped_tiling provider with its Merlin baseline",
 )
 class ProgramCompositionTest(unittest.TestCase):
     def compile(self, source, pipeline="optimized"):
@@ -130,6 +131,7 @@ class ProgramCompositionTest(unittest.TestCase):
 
     @unittest.skipUnless(os.environ.get("ATLAS_RUN_NPU_MODEL") == "1", "enable the pinned model")
     def test_whole_program_unroll_variants_execute_in_one_launch(self):
+        from test_looped_mnk import source_request
         import torch
         from atlas_mlir_native.looped_tiling import prepare_plan
         from npu_model.configs import isa_definition as isa

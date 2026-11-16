@@ -233,3 +233,10 @@ This is not a general model compiler. It handles static 32×32 tiles and the
 graphs listed in the binding doc, with FP8/BF16 precision policies that change
 results relative to f32. Programs have run on a standalone Atlas core built
 from the pinned RTL, not on an integrated Shuttle + Atlas SoC or an FPGA.
+
+## Generalized Merlin layer integration
+
+See [the TinyLlama layer walkthrough](docs/generalized-tinyllama-layer.md) for the
+separate generalized-pass path, explicit precision policy, simulator checks and
+reproduction commands. It combines a compiled f32 host graph with Atlas device
+contractions; no OOT generation loop is needed.
