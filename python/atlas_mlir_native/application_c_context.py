@@ -12,10 +12,16 @@ def application_binding(name, regions, interface):
     deployment = interface.get("deployment")
     fixed = {}
     if deployment is not None:
+        provider = deployment["provider"]
+        alignment = provider["allocation_alignment"]
+        context_bytes = provider["host_context_reservation_bytes"]
+        if (type(alignment) is not int or alignment <= 0 or alignment & (alignment - 1)
+                or type(context_bytes) is not int or context_bytes <= 0):
+            raise ValueError("invalid deployment provider context budget or alignment")
         for key, size in sizes.items():
             matches = [row for row in deployment["allocations"] if row["name"] == key]
             if (len(matches) != 1 or type(matches[0].get("address")) is not int
-                    or matches[0]["address"] <= 0 or matches[0]["address"] % 64
+                    or matches[0]["address"] <= 0 or matches[0]["address"] % alignment
                     or type(matches[0].get("bytes")) is not int or matches[0]["bytes"] < size
                     or matches[0]["address"] + matches[0]["bytes"] > 1 << 32):
                 raise ValueError("deployment allocation differs for " + key)
@@ -38,7 +44,7 @@ def application_binding(name, regions, interface):
     fields = "\n".join(declarations)
     scratch_fields = ("\n".join(f"  unsigned char *{key};" for key in sizes) if deployment is not None else
                       "\n".join(f"  _Alignas(64) unsigned char {key}[{size}];" for key, size in sizes.items()))
-    context_assert = (f'_Static_assert(sizeof({name}_context)<=4096u,"deployment host context exceeds reservation");\n'
+    context_assert = (f'_Static_assert(sizeof({name}_context)<={context_bytes}u,"deployment host context exceeds reservation");\n'
                       if deployment is not None else "")
     scratch_note = ("It points to private region scratch in the published deployment window."
                     if deployment is not None else
@@ -115,7 +121,7 @@ int {name}_recover({name}_context *ctx) {{
             "completion": "synchronous",
             "host_float_abi": "lp64d",
             "device_context_ownership": "caller",
-            **({"host_context_reservation_bytes": 4096,
+            **({"host_context_reservation_bytes": context_bytes,
                 "private_region_scratch_storage": "published_deployment_window"}
                if deployment is not None else {}),
             **({"bind_parameters": name + "_bind_parameters"} if external else {}),

@@ -12,12 +12,25 @@ from pathlib import Path
 from merlin.semantic_compiler.target_binding import NativeCompilationError
 
 
+WINDOW_ADDRESS = 0x200C0000
+WINDOW_BYTES = 786432
+IMEM_BYTES = 131072
+HOST_CONTEXT_BYTES = 4096
+ALLOCATION_ALIGNMENT = 64
+
+
 def deployment_requirements(regions, native_root):
     from .binding import validate_io_window
+    from .options import current_codegen_options
 
+    options = current_codegen_options()
+    if (options.io_memory_base != WINDOW_ADDRESS or options.io_memory_bytes != WINDOW_BYTES
+            or options.io_memory_capacity_base != WINDOW_ADDRESS
+            or options.io_memory_capacity_bytes != WINDOW_BYTES):
+        return None
     base, size = validate_io_window()
     root = Path(native_root).resolve()
-    reservations, images, seen = [], [], set()
+    reservations, images, seen, calls = [], [], set(), []
 
     def refuse(message):
         raise NativeCompilationError("unsupported_semantics", "deployment: " + message)
@@ -29,10 +42,13 @@ def deployment_requirements(regions, native_root):
         reservations.append(dict(name=name, address=address, bytes=count, role=role,
                                  lifetime=lifetime, promotion_receipts=list(promotions)))
 
-    for region in regions:
+    for index, region in enumerate(regions):
+        call = dict(context_index=region.get("context_index", index), placement=region["placement"])
+        calls.append(call)
         if region["placement"] == "host":
             if region.get("native_programs"):
                 refuse("host region unexpectedly contains native programs")
+            call["launches_per_invocation"] = 0
             continue
         if region["placement"] != "accelerator":
             refuse("unsupported provider region placement: " + str(region["placement"]))
@@ -107,12 +123,12 @@ def deployment_requirements(regions, native_root):
             physical = json.loads((folder / "physical-program.json").read_bytes())
             if physical.get("schema") != "atlas.physical_program.v1":
                 refuse("unsupported provider physical schema: " + str(physical.get("schema")))
-            if (not binary or len(binary) > 131072 or len(binary) % 4
+            if (not binary or len(binary) > IMEM_BYTES or len(binary) % 4
                     or binary != b"".join(row["word_u32"].to_bytes(4, "little")
                                           for row in physical["instructions"])):
                 refuse("provider image differs from physical program or exceeds IMEM capacity")
             images.append(dict(path=relative + "/program.bin", sha256=sha256(binary).hexdigest(),
-                               bytes=len(binary), imem_offset_bytes=0, capacity_bytes=131072,
+                               bytes=len(binary), imem_offset_bytes=0, capacity_bytes=IMEM_BYTES,
                                upload_convention="counted_ensure_loaded"))
         if len(programs) > 1 and region["description"].get("kind") == "exact_float_device":
             # Reconstruct the source-bound schedule, rather than treating an
@@ -160,8 +176,45 @@ def deployment_requirements(regions, native_root):
                 lifetime=call_lifetime,
                 promotion_receipts=[receipt for row in sources for receipt in row["promotion_receipts"]],
                 source_reservations=sources, sequential_images=proof)]
-    return dict(schema="atlas.provider_deployment.v1", window=dict(address=base, bytes=size),
+        description = region["description"]
+        schedule = description.get("device_launch_schedule")
+        count = description.get("launches_per_invocation", description.get("launches_per_call"))
+        if schedule is not None:
+            from merlin.compile.launch_schedule import validate_launch_schedule
+
+            image_hashes = {row["path"]: row["sha256"] for row in images}
+            try:
+                checked = validate_launch_schedule(schedule,
+                    image_sha256s=[image_hashes[path + "/program.bin"] for path in programs],
+                    placement=region["placement"])
+            except ValueError as error:
+                refuse(str(error))
+            if count is not None and (type(count) is not int or count != checked["total_launches"]):
+                refuse("provider launch count differs from device launch schedule")
+            count = checked["total_launches"]
+            call["device_launch_schedule"] = checked
+        elif count is None:
+            count = description.get("streaming", description.get("native_export", {}).get("streaming", {})).get(
+                "launch_count", 1 if len(programs) == 1 else None)
+        if type(count) is not int or count <= 0:
+            refuse("provider region requires an explicit positive launch count")
+        call["launches_per_invocation"] = count
+    return dict(schema="merlin.provider_deployment.v1", window=dict(address=base, bytes=size),
                 reservations=reservations, images=images,
+                regions=calls,
+                allocation_alignment=ALLOCATION_ALIGNMENT,
+                host_context_reservation_bytes=HOST_CONTEXT_BYTES,
+                host_map=dict(imem_address=0x20000, imem_bytes=IMEM_BYTES, csr_address=0x40000),
+                imem_address_convention="host_map.imem_address + image.imem_offset_bytes",
+                max_polls=10000000,
+                runtime=dict(host_type="atlas_host", io_type="atlas_tile_memory_io",
+                             start="atlas_host_start", wait="atlas_host_wait"),
+                host_allocation=dict(address=0x08000000, bytes=65536, measurement="declared_reservations",
+                    declared_reservations=[
+                        dict(name="code", bytes=36864, includes="embedded instruction images and constants"),
+                        dict(name="data", bytes=8192), dict(name="context", bytes=HOST_CONTEXT_BYTES),
+                        dict(name="stack", bytes=12288), dict(name="heap", bytes=4096)],
+                    reserved_bytes=65536),
                 raw_scratch_bytes=max(1, *(row["description"].get("workspace_bytes", 0) for row in regions)),
                 conversion_scratch_bytes=max(1, *(row["description"].get("source_workspace_bytes", 0)
                                                   for row in regions)))

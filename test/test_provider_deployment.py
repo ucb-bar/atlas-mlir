@@ -42,14 +42,15 @@ def counted():
 
 
 def requirements(root, rows=None):
-    with codegen_options(CodegenOptions(io_memory_base=BASE, io_memory_bytes=786432)):
+    with codegen_options(CodegenOptions(io_memory_base=BASE, io_memory_bytes=786432,
+            io_memory_capacity_base=BASE, io_memory_capacity_bytes=786432)):
         return AtlasApplicationAdapter.deployment_requirements(rows or regions(), root)
 
 
 def test_counted_reservations_and_relative_exact_image(tmp_path):
     publish(tmp_path, counted())
     result = requirements(tmp_path)
-    assert result["schema"] == "atlas.provider_deployment.v1"
+    assert result["schema"] == "merlin.provider_deployment.v1"
     assert result["window"] == dict(address=BASE, bytes=786432)
     assert [row["bytes"] for row in result["reservations"]] == [1024, 1024, 2048, 2048, 2048, 2048]
     assert all(row["lifetime"] == dict(scope="region_call", context_index=0)
@@ -58,6 +59,56 @@ def test_counted_reservations_and_relative_exact_image(tmp_path):
         sha256=hashlib.sha256(b"\x73\0\0\0").hexdigest(), imem_offset_bytes=0,
         capacity_bytes=131072, upload_convention="counted_ensure_loaded")]
     assert (result["raw_scratch_bytes"], result["conversion_scratch_bytes"]) == (4096, 1024)
+    assert result["regions"] == [dict(context_index=0, placement="accelerator", launches_per_invocation=1),
+                                  dict(context_index=1, placement="host", launches_per_invocation=0)]
+    assert result["host_map"] == dict(imem_address=0x20000, imem_bytes=131072, csr_address=0x40000)
+    assert result["host_allocation"]["measurement"] == "declared_reservations"
+    assert sum(row["bytes"] for row in result["host_allocation"]["declared_reservations"]) == 65536
+    assert result["host_context_reservation_bytes"] == 4096
+    assert result["allocation_alignment"] == 64
+    assert result["imem_address_convention"] == "host_map.imem_address + image.imem_offset_bytes"
+
+
+def test_deployment_selection_is_explicit_and_default_identity_is_unchanged():
+    from argparse import ArgumentParser
+    from atlas_mlir_native.options import configure_codegen_parser, expand_codegen_arguments, options_from_args
+
+    parser = ArgumentParser()
+    configure_codegen_parser(parser)
+    ordinary = parser.parse_args([])
+    expand_codegen_arguments(ordinary)
+    assert options_from_args(ordinary).application_deployment is None
+    assert "application_deployment" not in options_from_args(ordinary).identity_record()
+    chosen = parser.parse_args(["--application-deployment", "onchip"])
+    expand_codegen_arguments(chosen)
+    assert options_from_args(chosen).identity_record()["application_deployment"] == "onchip"
+    with pytest.raises(ValueError, match="application deployment"):
+        CodegenOptions(application_deployment="other")
+
+
+def test_provider_declines_unsupported_geometry(tmp_path):
+    with codegen_options(CodegenOptions(io_memory_base=BASE, io_memory_bytes=786432)):
+        assert AtlasApplicationAdapter.deployment_requirements(regions(), tmp_path) is None
+
+
+@pytest.mark.parametrize("description,expected", [
+    ({"launches_per_invocation": 3}, 3),
+    ({"streaming": {"launch_count": 4}}, 4),
+    ({"native_export": {"streaming": {"launch_count": 5}}}, 5),
+])
+def test_provider_publishes_explicit_region_launch_counts(tmp_path, description, expected):
+    publish(tmp_path, counted())
+    rows = regions()
+    rows[0]["description"].update(description)
+    assert requirements(tmp_path, rows)["regions"][0]["launches_per_invocation"] == expected
+
+
+def test_provider_refuses_invalid_region_launch_count(tmp_path):
+    publish(tmp_path, counted())
+    rows = regions()
+    rows[0]["description"]["launches_per_invocation"] = True
+    with pytest.raises(NativeCompilationError, match="explicit positive launch count"):
+        requirements(tmp_path, rows)
 
 
 def test_lifetime_and_promotion_join_preserves_shared_reservations(tmp_path):
@@ -166,7 +217,8 @@ def test_default_binding_byte_identical(external, expected):
 
 def fixed_binding():
     contract = interface()
-    contract["deployment"] = dict(allocations=[dict(name=key, address=BASE + offset, bytes=size)
+    contract["deployment"] = dict(provider=dict(allocation_alignment=64, host_context_reservation_bytes=4096),
+        allocations=[dict(name=key, address=BASE + offset, bytes=size)
         for key, offset, size in (("device_scratch", 0, 4096), ("conversion_scratch", 4096, 1024),
                                  ("workspace", 8192, 512))])
     return application_binding("sample", regions(), contract)
@@ -221,7 +273,8 @@ int main(void) {
 
 def test_fixed_binding_refuses_undersized_allocation():
     contract = interface()
-    contract["deployment"] = dict(allocations=[dict(name="device_scratch", address=BASE, bytes=8)])
+    contract["deployment"] = dict(provider=dict(allocation_alignment=64, host_context_reservation_bytes=4096),
+                                 allocations=[dict(name="device_scratch", address=BASE, bytes=8)])
     with pytest.raises(ValueError, match="deployment allocation differs for device_scratch"):
         application_binding("sample", regions(), contract)
 
@@ -235,7 +288,7 @@ def test_real_exact_float_full_and_tail_placement(tmp_path):
     from pathlib import Path
 
     source = request('bf16_add', 1025)
-    options = CodegenOptions(io_memory_base=BASE, io_memory_bytes=786432,
+    options = CodegenOptions(application_deployment="onchip", io_memory_base=BASE, io_memory_bytes=786432,
         io_memory_capacity_base=BASE, io_memory_capacity_bytes=786432)
     with codegen_options(options):
         compiled = tmp_path / 'segments' / 'float'

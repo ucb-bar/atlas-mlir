@@ -17,6 +17,7 @@ QUANTIZED_OPERAND_REUSE = (
 
 @dataclass(frozen=True)
 class CodegenOptions(GenericCodegenOptions):
+    application_deployment: str | None = None
     native_pipeline: str = "mandatory"
     adjacent_patterns: str = ""
     exponent_page_cache: bool = False
@@ -34,6 +35,8 @@ class CodegenOptions(GenericCodegenOptions):
 
     def __post_init__(self):
         super().__post_init__()
+        if self.application_deployment not in (None, "onchip"):
+            raise ValueError("application deployment must be onchip or unset")
         for name, choices in (
             ("native_pipeline", NATIVE_PIPELINES),
             ("staging_storage", STAGING_STORAGE),
@@ -56,6 +59,8 @@ class CodegenOptions(GenericCodegenOptions):
 
     def identity_record(self):
         record = super().identity_record()
+        if self.application_deployment is None:
+            del record["application_deployment"]
         for name in (
             "native_pipeline", "adjacent_patterns", "exponent_page_cache", "staging_storage",
             "looped_operand_reuse", "quantized_operand_reuse", "exact_binary_lane_groups",
@@ -126,6 +131,8 @@ SOPHIALAKE = BoardDescription()
 def configure_codegen_parser(parser):
     """Register Atlas-only switches after Merlin's target-neutral arguments."""
     from argparse import BooleanOptionalAction
+    parser.add_argument("--application-deployment", choices=("onchip",), default=None,
+                        help="publish fixed deployment bindings for the Atlas on-chip memory map")
     for name, choices in (
         ("native_pipeline", NATIVE_PIPELINES), ("staging_storage", STAGING_STORAGE),
         ("looped_operand_reuse", LOOPED_OPERAND_REUSE),
