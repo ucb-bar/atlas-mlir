@@ -54,8 +54,8 @@ endif()
 set(atlas_model_python_path
   "PYTHONPATH=path_list_prepend:${ATLAS_NPU_MODEL_ROOT}")
 # One test per Python test module, run from test/ as discovery would, with the
-# native binding package importable. Modules of plain test functions use
-# pytest; the rest are unittest suites.
+# native binding package importable. Modules with test functions or pytest
+# fixtures use pytest; the rest are unittest suites.
 file(GLOB atlas_python_tests CONFIGURE_DEPENDS ${PROJECT_SOURCE_DIR}/test/test_*.py)
 set(atlas_python_paths
   PYTHONPATH=path_list_prepend:${PROJECT_SOURCE_DIR}/python
@@ -66,7 +66,8 @@ foreach(test_file IN LISTS atlas_python_tests)
   get_filename_component(module ${test_file} NAME_WE)
   file(STRINGS ${test_file} unittest_suite REGEX "unittest\\.TestCase")
   file(STRINGS ${test_file} pytest_suite REGEX "^def test_")
-  if(unittest_suite AND NOT pytest_suite)
+  file(STRINGS ${test_file} pytest_fixtures REGEX "^@pytest\\.fixture")
+  if(unittest_suite AND NOT pytest_suite AND NOT pytest_fixtures)
     set(runner unittest -v ${module})
   else()
     set(runner pytest -v -p no:cacheprovider ${module}.py)
