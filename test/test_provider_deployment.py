@@ -67,6 +67,8 @@ def test_counted_reservations_and_relative_exact_image(tmp_path):
     assert result["host_context_reservation_bytes"] == 4096
     assert result["allocation_alignment"] == 64
     assert result["imem_address_convention"] == "host_map.imem_address + image.imem_offset_bytes"
+    assert result["runtime"]["image_completion"] == "ensure_loaded_before_start"
+    assert result["runtime"]["reload_policy"] == "generated counted ensure_loaded"
 
 
 def test_deployment_selection_is_explicit_and_default_identity_is_unchanged():

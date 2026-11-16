@@ -208,7 +208,9 @@ def deployment_requirements(regions, native_root):
                 imem_address_convention="host_map.imem_address + image.imem_offset_bytes",
                 max_polls=10000000,
                 runtime=dict(host_type="atlas_host", io_type="atlas_tile_memory_io",
-                             start="atlas_host_start", wait="atlas_host_wait"),
+                             start="atlas_host_start", wait="atlas_host_wait",
+                             image_completion="ensure_loaded_before_start",
+                             reload_policy="generated counted ensure_loaded"),
                 host_allocation=dict(address=0x08000000, bytes=65536, measurement="declared_reservations",
                     declared_reservations=[
                         dict(name="code", bytes=36864, includes="embedded instruction images and constants"),
