@@ -157,6 +157,13 @@ def expand_codegen_arguments(args):
         raise ValueError("unknown Atlas recipe: " + recipe)
     if board not in (None, "sophialake"):
         raise ValueError("unknown Atlas board: " + board)
+    if recipe and board:
+        raise ValueError(
+            "--recipe dispatch-reduction --board sophialake is unsupported: "
+            "known spill rewrite work limit reached at the 16 MiB staging window; "
+            "use --board sophialake without the recipe, or --recipe dispatch-reduction "
+            "without the board at its 768 KiB staging window"
+        )
     selected = dict(DISPATCH_REDUCTION) if recipe else {}
     reservation = getattr(args, "host_memory_reserved_bytes", None)
     if reservation is not None and board is None:
@@ -169,12 +176,6 @@ def expand_codegen_arguments(args):
         value = getattr(args, field.name, None)
         if value is None:
             setattr(args, field.name, selected.get(field.name, getattr(defaults, field.name)))
-    if recipe and board and args.io_memory_bytes == SOPHIALAKE.staging_bytes:
-        raise ValueError(
-            "--recipe dispatch-reduction --board sophialake is unsupported at the preset "
-            "16 MiB staging window: known spill rewrite work limit reached; use --board "
-            "sophialake without the recipe, or select the recipe's 786432-byte staging window"
-        )
     if board:
         # Overrides remain subject to the physical board and host exclusion range.
         start = description.ddr_base + description.host_reserved_bytes

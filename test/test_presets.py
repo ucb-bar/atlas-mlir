@@ -32,21 +32,32 @@ def test_board_matches_explicit_fields_and_excludes_host_reservation():
     assert preset.io_memory_bytes == 16 << 20
 
 
-@pytest.mark.parametrize("window", [None, 16 << 20])
-def test_recipe_board_refuses_known_spill_work_limit_at_preset_window(window):
-    with pytest.raises(ValueError, match="16 MiB staging window: known spill rewrite work limit reached"):
+@pytest.mark.parametrize("window", [None, 16 << 20, 786432])
+def test_recipe_board_refuses_known_spill_work_limit_before_memory_selection(monkeypatch, window):
+    def unexpected_memory_selection(self):
+        pytest.fail("unsupported preset combination reached board memory selection")
+    monkeypatch.setattr(type(SOPHIALAKE), "options", unexpected_memory_selection)
+    with pytest.raises(ValueError, match="known spill rewrite work limit reached at the 16 MiB staging window"):
         options_from_args(Namespace(recipe="dispatch-reduction", board="sophialake",
                                     io_memory_bytes=window))
 
 
-def test_explicit_flags_override_board_and_recipe():
-    override = options_from_args(Namespace(recipe="dispatch-reduction", board="sophialake",
+def test_explicit_flags_override_recipe():
+    override = options_from_args(Namespace(recipe="dispatch-reduction",
         native_pipeline="mandatory", device_kv_quantizer=False, application_residency=False,
         exponent_page_cache=False, io_memory_bytes=786432, quantized_operand_reuse="ordered"))
     assert override.native_pipeline == "mandatory"
     assert not override.device_kv_quantizer
     assert not override.application_residency
     assert not override.exponent_page_cache
+    assert override.io_memory_bytes == 786432
+    assert override.quantized_operand_reuse == "ordered"
+
+
+def test_explicit_flags_override_board():
+    override = options_from_args(Namespace(board="sophialake", application_residency=False,
+                                          io_memory_bytes=786432, quantized_operand_reuse="ordered"))
+    assert not override.application_residency
     assert override.io_memory_bytes == 786432
     assert override.quantized_operand_reuse == "ordered"
 
