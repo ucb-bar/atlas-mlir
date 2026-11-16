@@ -328,12 +328,13 @@ def _checked_pointwise_allocation(buffers, bank):
 
     All pointwise ABI buffers are live together in source order. A successful
     first-fit proposal has the same lexicographic addresses as the unpinned
-    solver, while avoiding repeated minimization queries under a wall budget.
+    solver, while avoiding repeated minimization queries under a work budget.
     Failure to propose a placement remains inconclusive.
     """
     from merlin.semantic_compiler.buffer_allocation import (
-        allocate_buffers, check_buffer_allocation, first_fit_buffer_assignment,
+        check_buffer_allocation, first_fit_buffer_assignment,
     )
+    from .work_budget import allocate_native_buffers as allocate_buffers
 
     if any(item.first_event != 0 or item.last_event != 1 or item.view_of is not None
            or item.persistent or item.fixed_start is not None for item in buffers):
@@ -342,8 +343,6 @@ def _checked_pointwise_allocation(buffers, bank):
     pinned = buffers if proposed is None else tuple(
         replace(item, fixed_start=proposed[item.name]) for item in buffers)
     solved = allocate_buffers(pinned, (bank,))
-    if solved.status == "unknown":
-        raise NativeCompilationError("search_timeout", "pointwise buffer allocation is unknown: " + solved.reason)
     if solved.status != "sat":
         raise NativeCompilationError("resource_limit", "pointwise packed buffers exceed the selected memory window: " + solved.reason)
     addresses = dict(solved.addresses)

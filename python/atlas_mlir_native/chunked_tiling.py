@@ -9,7 +9,6 @@ from pathlib import Path
 
 from merlin.semantic_compiler.buffer_allocation import (
     Buffer,
-    allocate_buffers,
     check_buffer_allocation,
 )
 from merlin.semantic_compiler.model import SemanticNode
@@ -17,6 +16,7 @@ from merlin.semantic_compiler.target_binding import (
     NativeCompilationError,
     verify_native_publication,
 )
+from .work_budget import allocate_native_buffers as allocate_buffers
 
 
 def chunk_bodies(request, plan):
@@ -72,7 +72,7 @@ def place_frames(request, plan, fixed_inputs, fixed_outputs):
     result = allocate_buffers(buffers, (bank,))
     if result.status != "sat":
         raise NativeCompilationError(
-            "infeasible_candidate" if result.status == "unsat" else "search_timeout",
+            "infeasible_candidate",
             "chunk buffer placement: " + result.reason,
         )
     frames = dict(result.addresses)

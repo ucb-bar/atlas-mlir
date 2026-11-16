@@ -1,4 +1,4 @@
-"""Both resident staging routes honor the caller's allocation wall budget."""
+"""Resident staging allocation uses fixed work and preserves independent checks."""
 import json
 import os
 from pathlib import Path
@@ -17,6 +17,7 @@ from merlin.semantic_compiler.model import KernelRequest, SemanticNode, TensorTy
 from merlin.semantic_compiler.target_binding import NativeCompilationError
 from test_mixed_tile_staging import request as mixed_request
 from atlas_mlir_native import resident_graph
+from atlas_mlir_native.work_budget import BUFFER_SOLVER_RLIMIT
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -37,27 +38,16 @@ class ResidentAllocationBudgetTest(unittest.TestCase):
         return (("mixed", mixed_memory_plan, mixed_request(expose=False, transpose=True)),
                 ("staged", staged_memory_plan, staged_request()))
 
-    def test_both_real_allocations_use_default_1000_without_override(self):
-        self.assertEqual(allocation.current_allocation_wall_budget_ms(), 1000)
+    def test_both_routes_check_proposals_without_consulting_wall_budget(self):
         for name, plan, source in self.cases():
             with self.subTest(route=name):
                 before = source.record()
-                selected = []
-                current_budget = allocation.current_allocation_wall_budget_ms
-                def read_budget():
-                    value = current_budget(); selected.append(value); return value
-                with allocation.allocation_wall_budget(1000), \
-                     patch.object(allocation, "current_allocation_wall_budget_ms",
-                                  side_effect=read_budget), \
+                with allocation.allocation_wall_budget(1), \
+                     patch.object(allocation, "current_allocation_wall_budget_ms", side_effect=AssertionError("wall budget")), \
                      patch.object(allocation, "allocate_buffers", side_effect=AssertionError("redundant solver")) as allocate, \
                      patch.object(allocation, "check_buffer_allocation", wraps=allocation.check_buffer_allocation) as check:
                     cuts, slots, sizes, buffers = plan(source)
-                # A 5000ms explicit override bypasses the context lookup. Check
-                # the lookup and checked allocation, rather than receipt metadata.
-                self.assertEqual(selected, [1000])
                 allocate.assert_not_called()
-                # First fit checks its proposal; staging then checks both
-                # the transformed views and the original logical buffers.
                 self.assertEqual(check.call_count, 3)
                 self.assertEqual(check.call_args_list[-2].args[0][0].name, "$readonly")
                 self.assertEqual(set(check.call_args_list[-1].args[2]), set(slots))
@@ -67,45 +57,37 @@ class ResidentAllocationBudgetTest(unittest.TestCase):
                 self.assertEqual(source.record(), before)
         self.assertTrue(is_staged_bf16(staged_request()))
 
-    def test_both_routes_inherit_a_smaller_context_and_keep_timeout_fail_closed(self):
+    def test_both_routes_use_fixed_work_and_unknown_aborts_without_retry(self):
         for name, plan, source in self.cases():
             with self.subTest(route=name):
-                selected = []
-                def timeout(*args, **kwargs):
-                    self.assertNotIn("timeout_ms", kwargs)
-                    selected.append(allocation.current_allocation_wall_budget_ms())
-                    return allocation.BufferAllocation("unknown", reason="test allocation wall exhausted")
                 with allocation.allocation_wall_budget(23), \
-                     patch.object(resident_graph, "monotonic", return_value=0), \
                      patch.object(allocation, "first_fit_buffer_assignment", return_value=None), \
-                     patch.object(allocation, "allocate_buffers", side_effect=timeout) as allocate, \
+                     patch.object(allocation, "allocate_buffers", return_value=allocation.BufferAllocation(
+                         "unknown", reason="test deterministic work exhausted")) as allocate, \
                      self.assertRaises(NativeCompilationError) as caught:
                     plan(source)
-                self.assertEqual(selected, [23])
                 allocate.assert_called_once()
-                self.assertEqual(caught.exception.status, "search_timeout")
-                self.assertIn("allocation wall exhausted", str(caught.exception))
+                self.assertEqual(allocate.call_args.kwargs, dict(timeout_ms=None, rlimit=BUFFER_SOLVER_RLIMIT))
+                self.assertEqual(caught.exception.status, "resource_limit")
+                self.assertIn("buffer_solver_rlimit_per_query", caught.exception.reason)
+                self.assertIn("test deterministic work exhausted", caught.exception.reason)
 
     def test_actual_window512_uses_identical_checked_detailed_proposal(self):
         from atlas_mlir_native.row_softmax import prepare_row_softmax
         from merlin.semantic_compiler.codegen import CodegenOptions, codegen_options
         from test_tiled_softmax import source_request
-        proposals = []; times = []
+        proposals = []
         first_fit = allocation.first_fit_buffer_assignment
-        clock = resident_graph.monotonic
         def proposal(buffers, banks):
             result = first_fit(buffers, banks); proposals.append((buffers, dict(result))); return result
-        def timestamp():
-            value = clock(); times.append(value); return value
         with codegen_options(CodegenOptions(io_memory_bytes=67108864)):
             source = source_request((16384, 512), masked=True)
             body = prepare_row_softmax(source).regions[0].request
             before = body.record()
-            with allocation.allocation_wall_budget(1000), \
+            with allocation.allocation_wall_budget(1), \
                  patch.object(allocation, "first_fit_buffer_assignment", side_effect=proposal), \
                  patch.object(allocation, "allocate_buffers", side_effect=AssertionError("redundant solver")) as allocate, \
-                 patch.object(allocation, "check_buffer_allocation", wraps=allocation.check_buffer_allocation) as check, \
-                 patch.object(resident_graph, "monotonic", side_effect=timestamp):
+                 patch.object(allocation, "check_buffer_allocation", wraps=allocation.check_buffer_allocation) as check:
                 cuts, slots, _, _ = staged_memory_plan(body)
             self.assertEqual(len(cuts), 17)
             self.assertEqual(len(proposals[0][0]), 97)
@@ -115,7 +97,6 @@ class ResidentAllocationBudgetTest(unittest.TestCase):
             self.assertEqual(check.call_args_list[-2].args[0], proposals[0][0])
             self.assertEqual(check.call_args_list[-2].args[2], slots)
             self.assertEqual(check.call_args_list[-1].args[2], slots)
-            self.assertLessEqual((times[-1] - times[0]) * 1000, 1000)
             self.assertEqual(body.record(), before)
 
 
@@ -174,75 +155,52 @@ class ResidentFrameFailureTest(unittest.TestCase):
         with self.assertRaisesRegex(NativeCompilationError, "nonempty staging buffers"):
             resident_graph._allocate_staging_frame((), (), self.bank, "test staging")
 
-    def test_one_outer_deadline_covers_proposal_and_both_detailed_checks(self):
-        for phase in ("proposal", "transformed", "original"):
-            with self.subTest(phase=phase):
-                now = [0.0]
-                original_check = allocation.check_buffer_allocation
-                def propose(buffers, banks):
-                    if phase == "proposal": now[0] = 1.001
-                    return dict(self.proposal)
-                def check(buffers, banks, slots, **kwargs):
-                    original_check(buffers, banks, slots, **kwargs)
-                    selected = "transformed" if buffers[0].name == "$readonly" else "original"
-                    if phase == selected: now[0] = 1.001
-                with patch.object(resident_graph, "monotonic", side_effect=lambda:now[0]), \
-                     patch.object(allocation, "first_fit_buffer_assignment", side_effect=propose), \
-                     patch.object(allocation, "allocate_buffers") as allocate, \
-                     patch.object(allocation, "check_buffer_allocation", side_effect=check), \
-                     self.assertRaises(NativeCompilationError) as caught:
-                    self.allocate()
-                self.assertEqual(caught.exception.status, "search_timeout")
-                allocate.assert_not_called()
-
-    def test_smaller_context_bounds_checked_proposal_without_backend_import(self):
-        now = [0.0]
-        def propose(buffers, banks):
-            now[0] = .024
-            return dict(self.proposal)
-        with allocation.allocation_wall_budget(23), \
-             patch.object(resident_graph, "monotonic", side_effect=lambda:now[0]), \
-             patch.object(allocation, "first_fit_buffer_assignment", side_effect=propose), \
+    def test_proposal_and_both_detailed_checks_ignore_clock_progress(self):
+        original_check = allocation.check_buffer_allocation
+        checked = []
+        def check(buffers, banks, slots, **kwargs):
+            original_check(buffers, banks, slots, **kwargs)
+            checked.append(buffers)
+        with allocation.allocation_wall_budget(1), \
+             patch.object(allocation, "monotonic", side_effect=AssertionError("wall clock")), \
+             patch.object(allocation, "first_fit_buffer_assignment", return_value=dict(self.proposal)), \
              patch.object(allocation, "allocate_buffers") as allocate, \
-             self.assertRaises(NativeCompilationError) as caught:
-            self.allocate()
-        self.assertEqual(caught.exception.status, "search_timeout")
+             patch.object(allocation, "check_buffer_allocation", side_effect=check):
+            self.assertEqual(self.allocate(), self.proposal)
+        self.assertEqual(checked, [self.buffers, self.original])
         allocate.assert_not_called()
 
-    def test_solver_only_gets_remaining_smaller_context_without_retry(self):
-        now = [0.0]; observed = []
-        def propose(buffers, banks):now[0] = .005; return None
-        def solve(buffers, banks):
-            observed.append(allocation.current_allocation_wall_budget_ms())
-            return allocation.BufferAllocation("unknown", reason="bounded allocator refused")
-        with allocation.allocation_wall_budget(23), \
-             patch.object(resident_graph, "monotonic", side_effect=lambda:now[0]), \
-             patch.object(allocation, "first_fit_buffer_assignment", side_effect=propose), \
-             patch.object(allocation, "allocate_buffers", side_effect=solve) as allocate, \
-             self.assertRaises(NativeCompilationError):
-            self.allocate()
-        self.assertEqual(len(observed), 1)
-        self.assertTrue(0 < observed[0] <= 18)
-        allocate.assert_called_once()
+    def test_smaller_context_does_not_change_checked_proposal(self):
+        with allocation.allocation_wall_budget(1), \
+             patch.object(allocation, "allocate_buffers") as allocate:
+            self.assertEqual(self.allocate(), self.proposal)
+        allocate.assert_not_called()
 
-    def test_generic_late_sat_refuses_without_retry(self):
-        now = [0.0]
-        def solve(buffers, banks):
-            now[0] = 1.001
-            return allocation.BufferAllocation("sat", tuple(self.proposal.items()))
-        with patch.object(resident_graph, "monotonic", side_effect=lambda:now[0]), \
+    def test_solver_work_exhaustion_is_named_and_never_retried(self):
+        with allocation.allocation_wall_budget(1), \
              patch.object(allocation, "first_fit_buffer_assignment", return_value=None), \
-             patch.object(allocation, "allocate_buffers", side_effect=solve) as allocate, \
+             patch.object(allocation, "allocate_buffers", return_value=allocation.BufferAllocation(
+                 "unknown", reason="bounded allocator refused")) as allocate, \
              self.assertRaises(NativeCompilationError) as caught:
             self.allocate()
-        self.assertEqual(caught.exception.status, "search_timeout")
-        allocate.assert_called_once()
+        allocate.assert_called_once_with(self.buffers, (self.bank,), timeout_ms=None, rlimit=BUFFER_SOLVER_RLIMIT)
+        self.assertEqual(caught.exception.status, "resource_limit")
+        self.assertIn("buffer_solver_rlimit_per_query", caught.exception.reason)
+
+    def test_generic_sat_keeps_checked_placement_independent_of_clock(self):
+        with allocation.allocation_wall_budget(1), \
+             patch.object(allocation, "monotonic", side_effect=AssertionError("wall clock")), \
+             patch.object(allocation, "first_fit_buffer_assignment", return_value=None), \
+             patch.object(allocation, "allocate_buffers", return_value=allocation.BufferAllocation(
+                 "sat", tuple(self.proposal.items()))) as allocate:
+            self.assertEqual(self.allocate(), self.proposal)
+        allocate.assert_called_once_with(self.buffers, (self.bank,), timeout_ms=None, rlimit=BUFFER_SOLVER_RLIMIT)
 
 
 @unittest.skipUnless(os.environ.get("MERLIN_NATIVE_ROOT") and os.environ.get("ATLAS_OOT_BIN_DIR"),
                      "select native tools")
 class ResidentAllocationNativeTest(unittest.TestCase):
-    def test_mixed_and_staged_compile_at_default_search_and_1000ms_allocation(self):
+    def test_mixed_and_staged_compile_with_default_search_and_fixed_allocation_work(self):
         from merlin.semantic_compiler.search import SearchLimits
         from merlin.semantic_compiler.snapshot import build_native_snapshot, packaged_egg_bridge_path
         from merlin.semantic_compiler.target_binding import verify_native_publication
@@ -265,7 +223,8 @@ class ResidentAllocationNativeTest(unittest.TestCase):
                         request_digest=source.digest(), target_identity=source.target_identity)
                     execution = json.loads((destination/"execution_plan.json").read_text())
                     self.assertGreater(len(execution["regions"]), 1)
-                    self.assertTrue(all("timeout_ms" not in call.kwargs for call in allocate.call_args_list))
+                    self.assertTrue(all(call.kwargs == dict(timeout_ms=None, rlimit=BUFFER_SOLVER_RLIMIT)
+                                        for call in allocate.call_args_list))
 
 
 if __name__ == "__main__":
