@@ -40,9 +40,12 @@ def application_binding(name, regions, interface):
                       "\n".join(f"  _Alignas(64) unsigned char {key}[{size}];" for key, size in sizes.items()))
     context_assert = (f'_Static_assert(sizeof({name}_context)<=4096u,"deployment host context exceeds reservation");\n'
                       if deployment is not None else "")
+    scratch_note = ("It points to private region scratch in the published deployment window."
+                    if deployment is not None else
+                    "It contains all private region scratch; prefer static storage on bare metal.")
     public = f"""
 /* Zero-initialize and keep this context alive through completion or recovery.
- * It contains all private region scratch; prefer static storage on bare metal.
+ * {scratch_note}
  * Share one initialized atlas_host across applications using the same device. */
 typedef struct {{
   atlas_host *host;
@@ -106,13 +109,15 @@ int {name}_recover({name}_context *ctx) {{
             "bind": name + "_bind",
             "invoke": name + "_run",
             "recover": name + "_recover",
-            "private_region_scratch_included": True,
+            "private_region_scratch_included": deployment is None,
             "raw_scratch_bytes": raw,
             "conversion_scratch_bytes": converted,
             "completion": "synchronous",
             "host_float_abi": "lp64d",
             "device_context_ownership": "caller",
-            **({"host_context_reservation_bytes": 4096} if deployment is not None else {}),
+            **({"host_context_reservation_bytes": 4096,
+                "private_region_scratch_storage": "published_deployment_window"}
+               if deployment is not None else {}),
             **({"bind_parameters": name + "_bind_parameters"} if external else {}),
         },
     )

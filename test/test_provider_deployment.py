@@ -158,6 +158,8 @@ def test_default_binding_byte_identical(external, expected):
     if external:
         contract.update(model_parameters=dict(payload_bytes=128), pointer_abi="opaque_native_dense_buffers")
     binding = application_binding("sample", regions(), contract)
+    assert binding.interface["private_region_scratch_included"] is True
+    assert "private_region_scratch_storage" not in binding.interface
     assert tuple(hashlib.sha256(text.encode()).hexdigest() for text in
                  (binding.declarations, binding.implementation)) == expected
 
@@ -173,6 +175,9 @@ def fixed_binding():
 def test_fixed_context_compiles_and_passes_buffer_sizes(tmp_path):
     binding = fixed_binding()
     assert binding.interface["host_context_reservation_bytes"] == 4096
+    assert binding.interface["private_region_scratch_included"] is False
+    assert binding.interface["private_region_scratch_storage"] == "published_deployment_window"
+    assert "It points to private region scratch in the published deployment window." in binding.declarations
     assert "sizeof(ctx->device_scratch)" not in binding.implementation
     assert "sizeof(ctx->conversion_scratch)" not in binding.implementation
     assert "sizeof(ctx->workspace)" not in binding.implementation
