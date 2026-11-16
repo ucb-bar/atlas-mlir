@@ -148,6 +148,9 @@ def configure_codegen_parser(parser):
 
 
 def expand_codegen_arguments(args):
+    if not hasattr(args, "_explicit_codegen_fields"):
+        args._explicit_codegen_fields = frozenset(field.name for field in fields(CodegenOptions)
+            if getattr(args, field.name, None) is not None)
     recipe, board = getattr(args, "recipe", None), getattr(args, "board", None)
     if recipe not in (None, "dispatch-reduction"):
         raise ValueError("unknown Atlas recipe: " + recipe)
@@ -170,6 +173,9 @@ def expand_codegen_arguments(args):
         start = description.ddr_base + description.host_reserved_bytes
         end = description.ddr_base + description.ddr_capacity_bytes
         capacity_start, capacity_size = args.io_memory_capacity_base, args.io_memory_capacity_bytes
+        if (capacity_start < description.dma_base
+                or capacity_start + capacity_size > description.dma_base + description.dma_capacity_bytes):
+            raise ValueError("selected capacity leaves the board DMA aperture")
         if capacity_start < start or capacity_start + capacity_size > end:
             raise ValueError("selected capacity overlaps reserved host memory or leaves physical DDR")
         if not capacity_start <= args.io_memory_base < args.io_memory_base + args.io_memory_bytes <= capacity_start + capacity_size:

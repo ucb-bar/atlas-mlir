@@ -65,3 +65,28 @@ def test_install_snapshot_and_application_defaults(monkeypatch):
     prepare_native_arguments(args)
     assert args.snapshot == "installed-snapshot"
     assert args.mode == "diagnostic"
+
+
+@pytest.mark.parametrize("option,manifest", [
+    ("--no-exact-float-unroll", dict(exact_float_unroll=True, program_size_limit_bytes=None,
+                                   execution_instruction_limit=None)),
+    ("--no-application-residency", dict(application_residency=True)),
+])
+def test_verify_refuses_explicit_negative_override_of_published_policy(tmp_path, option, manifest):
+    import json
+    from atlas_mlir_native.binding import AtlasNativeBinding
+    from merlin.targetgen.cli import build_parser
+    from merlin.targetgen.native_codegen_cli import prepare_native_arguments
+    artifact = tmp_path / "artifact"
+    artifact.mkdir()
+    (artifact / "manifest.json").write_text(json.dumps(manifest))
+    output = tmp_path / "status.json"
+    binding = AtlasNativeBinding()
+    args = build_parser(binding=binding).parse_args([
+        "native-verify", "--engine", "merlin_native", "--support", "unused",
+        "--snapshot", str(tmp_path / "snapshot"), "--compile-inputs", "inputs",
+        "--application", "--artifact", str(artifact), "--out", str(output), option,
+    ])
+    prepare_native_arguments(args, binding)
+    assert args.func(args) == 2
+    assert "differs from compiled application" in json.loads(output.read_text())["reason"]
