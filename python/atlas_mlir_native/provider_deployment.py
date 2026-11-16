@@ -40,6 +40,8 @@ def deployment_requirements(regions, native_root):
         programs = region.get("native_programs", [])
         if not programs:
             refuse("device region has no published native program")
+        first_reservation = len(reservations)
+        first_image = len(images)
         for relative in programs:
             if not isinstance(relative, str):
                 refuse("provider native program path is not relative")
@@ -112,6 +114,52 @@ def deployment_requirements(regions, native_root):
             images.append(dict(path=relative + "/program.bin", sha256=sha256(binary).hexdigest(),
                                bytes=len(binary), imem_offset_bytes=0, capacity_bytes=131072,
                                upload_convention="counted_ensure_loaded"))
+        if len(programs) > 1 and region["description"].get("kind") == "exact_float_device":
+            # Reconstruct the source-bound schedule, rather than treating an
+            # arbitrary image list or a claimed lifetime as sequential proof.
+            from .exact_float_application import prepare_plan, _verify_publication
+            from merlin.semantic_compiler.model import KernelRequest
+            from merlin.compile.launch_schedule import make_launch_schedule
+
+            parent = (root / programs[0]).parent.parent
+            if not parent.is_relative_to(root):
+                refuse("exact float publication escapes deployment root")
+            source = KernelRequest.from_record(json.loads((parent / "source-request.json").read_bytes()))
+            schedule = prepare_plan(source)
+            manifest = json.loads((parent / "float-manifest.json").read_bytes())
+            _verify_publication(parent, manifest, schedule)
+            expected = [(parent / row["path"]).relative_to(root).as_posix()
+                        for row in schedule.record()["bodies"]]
+            runs = []
+            for launch in schedule.launches:
+                image = launch["body_index"]
+                if runs and runs[-1]["image"] == image:
+                    runs[-1]["count"] += 1
+                else:
+                    runs.append(dict(image=image, count=1))
+            proof = make_launch_schedule([row["sha256"] for row in images[first_image:]],
+                                         [dict(repeat=1, runs=runs)])
+            if (programs != expected or region["description"].get("float_schedule") != schedule.record()
+                    or region["description"].get("device_launch_schedule") != proof):
+                refuse("exact float sequential schedule differs from source publication")
+            sources = reservations[first_reservation:]
+            # A sequential proof permits reuse across images, never overlap
+            # between two buffers in the same image.
+            for relative in programs:
+                rows = [row for row in sources if row["name"].startswith(relative + "/")]
+                for i, left in enumerate(rows):
+                    for right in rows[i + 1:]:
+                        if (left["address"] < right["address"] + right["bytes"]
+                                and right["address"] < left["address"] + left["bytes"]):
+                            refuse("provider reservations overlap within an image")
+            start = min(row["address"] for row in sources)
+            end = max(row["address"] + row["bytes"] for row in sources)
+            reservations[first_reservation:] = [dict(
+                name=parent.relative_to(root).as_posix() + "/sequential_frame",
+                address=start, bytes=end - start, role="sequential_device_frame",
+                lifetime=call_lifetime,
+                promotion_receipts=[receipt for row in sources for receipt in row["promotion_receipts"]],
+                source_reservations=sources, sequential_images=proof)]
     return dict(schema="atlas.provider_deployment.v1", window=dict(address=base, bytes=size),
                 reservations=reservations, images=images,
                 raw_scratch_bytes=max(1, *(row["description"].get("workspace_bytes", 0) for row in regions)),

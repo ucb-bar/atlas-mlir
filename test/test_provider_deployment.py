@@ -224,3 +224,48 @@ def test_fixed_binding_refuses_undersized_allocation():
     contract["deployment"] = dict(allocations=[dict(name="device_scratch", address=BASE, bytes=8)])
     with pytest.raises(ValueError, match="deployment allocation differs for device_scratch"):
         application_binding("sample", regions(), contract)
+
+def test_real_exact_float_full_and_tail_placement(tmp_path):
+    from copy import deepcopy
+    from test_exact_float_device import request
+    from atlas_mlir_native import exact_float_application as exact
+    from merlin.compile.application_deployment import place
+    from merlin.semantic_compiler.target_binding import NativeCompilationError
+    from types import SimpleNamespace
+    from pathlib import Path
+
+    source = request('bf16_add', 1025)
+    options = CodegenOptions(io_memory_base=BASE, io_memory_bytes=786432,
+        io_memory_capacity_base=BASE, io_memory_capacity_bytes=786432)
+    with codegen_options(options):
+        compiled = tmp_path / 'segments' / 'float'
+        exact.compile_source(None, source, target_source=Path(__file__).resolve().parents[1],
+                             destination=compiled, limits=None)
+        package = exact.prepare_c_package(source, compiled, 'float',
+                                          target_source=Path(__file__).resolve().parents[1])
+        rows = [dict(id='float', placement='accelerator', context_index=0,
+            native_programs=['segments/float/' + body['path']
+                             for body in package.description['float_schedule']['bodies']],
+            description=package.description)]
+        assert len(rows[0]['native_programs']) == 2
+        assert [body.nodes[-1].type.shape for body in exact.prepare_plan(source).bodies] == [(1024,), (1,)]
+        provider = AtlasApplicationAdapter.deployment_requirements(rows, tmp_path)
+        (frame,) = provider['reservations']
+        assert frame['sequential_images']['total_launches'] == 2
+        assert len(frame['source_reservations']) == 6
+        assert frame['address'] == min(r['address'] for r in frame['source_reservations'])
+        assert frame['address'] + frame['bytes'] == max(
+            r['address'] + r['bytes'] for r in frame['source_reservations'])
+        interface = dict(inputs=[n.id for n in source.nodes[:-1]], outputs=list(source.outputs),
+                         workspace_bytes=package.description['workspace_bytes'], workspace_alignment=64)
+        deployment = place(source, AtlasApplicationAdapter, rows, interface, tmp_path)
+        assert deployment['allocations'][0]['address'] >= frame['address'] + frame['bytes']
+        # The identical reservations without a compiler sequential proof still refuse.
+        unproven = deepcopy(provider)
+        unproven['reservations'] = frame['source_reservations']
+        with pytest.raises(NativeCompilationError, match='reservations overlap within a call'):
+            place(source, SimpleNamespace(deployment_requirements=lambda *_: unproven),
+                  rows, interface, tmp_path)
+        rows[0]['description'] = {**package.description, 'device_launch_schedule': {}}
+        with pytest.raises(NativeCompilationError, match='sequential schedule differs'):
+            AtlasApplicationAdapter.deployment_requirements(rows, tmp_path)
