@@ -28,11 +28,23 @@ MAX_LEAF_ELEMENTS = {"bf16_to_f32": 20480, "f32_to_bf16": 18432,
                      "bf16_neg": 43008, "f32_neg": 43008,
                      "bf16_add": 1024, "bf16_sub": 1024}
 
+# Conservative scheduling envelope for private binary tiles, including the
+# scalar fallback. It only selects a candidate size: compilation and replay
+# independently prove the complete physical instruction bound and IMEM size.
+PRIVATE_BINARY_TILE_ELEMENTS = 1024
+PRIVATE_BINARY_TILE_INSTRUCTIONS = 640 * PRIVATE_BINARY_TILE_ELEMENTS
+PRIVATE_BINARY_FIXED_INSTRUCTIONS = 4096
+
 
 def max_leaf_elements(plan):
     """Scale the conservative slice policy; prove the actual image separately."""
     from .limits import DEFAULT_FUNCTIONAL_INSTRUCTION_LIMIT, functional_instruction_limit
-    factor = max(1, functional_instruction_limit() // DEFAULT_FUNCTIONAL_INSTRUCTION_LIMIT)
+    budget = functional_instruction_limit()
+    if plan.private_output:
+        tiles = max(1, (budget - PRIVATE_BINARY_FIXED_INSTRUCTIONS)
+                    // PRIVATE_BINARY_TILE_INSTRUCTIONS)
+        return tiles * PRIVATE_BINARY_TILE_ELEMENTS
+    factor = max(1, budget // DEFAULT_FUNCTIONAL_INSTRUCTION_LIMIT)
     maximum = MAX_LEAF_ELEMENTS[plan.op] * factor
     if plan.op in ('bf16_add', 'bf16_sub'):
         # One route word per tile in the private 2-KiB admission table.

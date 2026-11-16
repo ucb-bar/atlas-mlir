@@ -251,7 +251,71 @@ Artifacts: `out/traffic-audit/{tinyllama,smolvla}-private-float-v2`, matching
 and reference hashes are unchanged. The serial same-work bounds are 52,495,677
 and 256,821,488 cycles; DMA busy fractions are 82.06% and 72.71%.
 
-Next: use the unused exact-binary execution budget to reduce sliced dispatches.
+The fourth implementation uses the unused exact-binary execution budget to reduce sliced dispatches.
 The current 131,072-element body is bounded at 76.6M instructions against the
 128M application budget. Larger slices still need independent native bounds,
 the unchanged 128-KiB IMEM check and atomic publication across all slices.
+
+## Fourth implementation: bounded, equal private slices
+
+Atlas now sizes private binary candidates with a conservative per-tile
+instruction envelope instead of scaling the old 1,024-elements-per-million
+policy. The final emitted body still needs its independent worst-case native
+instruction proof and image-size check. Raw leaf sizing remains unchanged.
+The private route has no per-tile route table, so its old 512-tile table limit
+does not apply. I/O capacity still bounds every frame.
+
+Merlin's new `uniform_slice_elements` helper prefers equal, aligned slices
+only when they preserve the minimum invocation count. It contains no hardware
+or numeric policy. This avoids generating another body solely for the tail.
+The Atlas candidate capacity is 199,680 elements at the selected 128M budget;
+the SmolVLA additions divide into equal 196,608-element bodies. Each actual
+body is independently bounded at 114,906,530 instructions and occupies 6,328
+bytes of the unchanged 128-KiB IMEM. This requires companion Merlin commit
+`6f81ccd9b` on `perf/model-traffic-reduction`.
+
+Saved schedules replay their original checked slice size. Rebinding an older
+artifact does not silently reslice its code; malformed, misaligned or oversized
+saved chunks refuse, and every native child still undergoes source replay.
+
+| Layer | Before cycles | After cycles | Dispatches | Meaning |
+| --- | ---: | ---: | ---: | --- |
+| TinyLlama, B1/T64 | 69,857,257 | **69,857,257** | 55 → 55 | Additions already fit in one dispatch. |
+| SmolVLA vision, B1/T1024 | 375,891,604 | **375,876,512** | 112 → **90** | Bias launches 54 → 36; residual launches 12 → 8. |
+
+SmolVLA saves only 15,092 device cycles (0.0040%). This is principally a host
+dispatch reduction, not a large device speedup; host dispatch latency is not
+included in these cycle counts. It executes 24,119,210 instructions and removes
+704 bytes of status writes. All final words and all 63/62 retained region outputs
+remain exact. Every unchanged launch (55 TinyLlama, 46 SmolVLA) retains its
+cycles, instructions, busy counters and transfer counts.
+
+Using the largest candidate without balancing produced extra tail bodies:
+checked SmolVLA compilation took 545 seconds. Equal slices reduced this to
+358 seconds with the original number of compiler tool calls. The preceding
+smaller-slice control took 331 seconds. These are single wall-time observations
+on the shared machine, not repeated timing averages or a claimed compile-time
+improvement over that control.
+
+Validation includes 16 sizing tests spanning budgets, I/O capacities, full/tail
+slices, both native pipelines, mixed admission settings, shared operands,
+large private loops, legacy replay and resource refusal. The new Merlin helper
+passes 18 tests including exhaustive small partitions and malformed inputs.
+The exact-float, C/Rust layout and canonical-materialization regressions pass;
+the two Python instruction-model cases remain skipped. Merlin structure and
+target-name gates pass; the previously recorded three regex failures remain
+in the unchanged upstream file.
+
+Artifacts: `out/traffic-audit/snapshot-balanced-64m`, `compile_balanced_layer.py`,
+`{tinyllama,smolvla}-balanced-sizing`, corresponding `rust-*` directories,
+`balanced-sizing-comparison.json`, `private-sizing-tests.log` and
+`balanced-sizing-replay.log`. The naive larger-slice experiment is retained
+separately under `*-private-sizing` for its compile-time comparison.
+
+Next traffic investigations: repeated dense bias inputs still account for
+14,155,776 read bytes in SmolVLA; cache them within each device invocation where
+the source read map proves repetition and the scratch frame admits it. Merlin
+should own that indexing proof, Atlas its transport and VMEM schedule. Also
+investigate retaining QK scores through softmax and improving the remaining
+TinyLlama affine layout copies; do not assume those rewrites preserve layouts,
+rounding or operand reuse without native and full-layer verification.

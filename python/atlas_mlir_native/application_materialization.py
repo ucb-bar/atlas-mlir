@@ -84,8 +84,10 @@ def bind_exact_float(original, canonical, materialized, destination):
     materialized, destination = Path(materialized), Path(destination)
     schedule = json.loads((materialized / "float-schedule.json").read_bytes())
     private_output = schedule.get("private_output", False)
-    plan = application.prepare_plan(original, private_output=private_output)
-    checked = application.prepare_plan(canonical, private_output=private_output)
+    plan = application.prepare_plan(original, private_output=private_output,
+                                    _chunk_elements=schedule.get("chunk_elements"))
+    checked = application.prepare_plan(canonical, private_output=private_output,
+                                       _chunk_elements=schedule.get("chunk_elements"))
     manifest = json.loads((materialized / "float-manifest.json").read_bytes())
     application._verify_publication(materialized, manifest, checked)
     if plan.launches != checked.launches or len(plan.bodies) != len(checked.bodies):

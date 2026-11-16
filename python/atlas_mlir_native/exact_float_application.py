@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 from . import exact_float_device as device
 from merlin.semantic_compiler.model import pointwise_identity_maps
+from merlin.compile.slice_sizes import uniform_slice_elements
 
 def _json(r):return (json.dumps(r,sort_keys=True,indent=2)+"\n").encode()
 
@@ -13,10 +14,9 @@ class FloatSchedule:
     plan: object
     bodies: tuple
     launches: tuple
+    chunk_elements: int
     @property
     def source(self):return self.plan.source
-    @property
-    def chunk_elements(self):return device.chunk_elements(self.plan)
     def record(self):
         return dict(schema="atlas.exact_float_schedule.v1",
                     **({"private_output": True} if self.plan.private_output else {}),source_request_digest=self.source.digest(),
@@ -26,7 +26,7 @@ class FloatSchedule:
                     launches=list(self.launches),launches_per_invocation=len(self.launches),runtime_arithmetic="none",
                     publication="copy logical output only after every device status succeeds",weight_conversion="none")
 
-def prepare_plan(source, *, private_output=False):
+def prepare_plan(source, *, private_output=False, _chunk_elements=None):
     if type(private_output) is not bool:
         raise ValueError('private result selection must be Boolean')
     p=device.prepare_source_plan(source);bodies=[];sizes={};launches=[]
@@ -35,6 +35,15 @@ def prepare_plan(source, *, private_output=False):
             raise ValueError('private float publication currently requires an exact binary operation')
         p=replace(p,private_output=True)
     chunk=device.chunk_elements(p)
+    if _chunk_elements is not None:
+        # Replaying an older, smaller slice schedule must not silently repack
+        # its bodies. Every saved slice still needs the ordinary native proof.
+        if (type(_chunk_elements) is not int or _chunk_elements <= 0
+                or _chunk_elements % p.tile_lanes or _chunk_elements > chunk):
+            raise ValueError('exact float saved chunk exceeds the selected resource envelope')
+        chunk = _chunk_elements
+    elif private_output:
+        chunk = uniform_slice_elements(p.count, chunk, p.tile_lanes)
     for start in range(0,p.count,chunk):
         size=min(chunk,p.count-start)
         if size not in sizes:
@@ -45,7 +54,7 @@ def prepare_plan(source, *, private_output=False):
             device.prepare_plan(body,private_output=private_output);bodies.append(body)
         launches.append(dict(body_index=sizes[size],input_offset_bytes=start*p.width,input_bytes=size*p.width,
                              output_offset_bytes=start*p.output_width,output_bytes=size*p.output_width))
-    return FloatSchedule(p,tuple(bodies),tuple(launches))
+    return FloatSchedule(p,tuple(bodies),tuple(launches),chunk)
 
 def compile_source(snapshot,region,*,target_source,destination,limits,private_output=None):
     # These generated wrappers retain all leaf results in disjoint scratch and
@@ -109,7 +118,8 @@ def prepare_c_package(region,compiled,name,*,target_source,runtime_linkage="sepa
     if runtime_linkage!="separate":raise ValueError("scheduled exact float requires shared runtime linkage")
     compiled=Path(compiled)
     schedule=json.loads((compiled/"float-schedule.json").read_text())
-    p=prepare_plan(region,private_output=schedule.get("private_output",False))
+    p=prepare_plan(region,private_output=schedule.get("private_output",False),
+                   _chunk_elements=schedule.get("chunk_elements"))
     manifest=json.loads((compiled/"float-manifest.json").read_text());_verify_publication(compiled,manifest,p)
     paths=[f"segments/body_{i:03d}" for i in range(len(p.bodies))]
     leaves=[device.prepare_c_package(body,compiled/path,name+f"_body_{i:03d}",target_source=target_source,runtime_linkage=runtime_linkage,input_layout=input_layout,private_output=p.plan.private_output)
