@@ -38,11 +38,10 @@ useful for diagnosis; it can fail allocation or another backend check.
 
 ## Resident activation panels
 
-`ATLAS_LOOPED_OPERAND_REUSE=resident-a` explicitly selects activation reuse for admitted ordered FP8 contractions. The default is `ordered`; unknown values are rejected. Resident bodies currently require `ATLAS_NATIVE_PIPELINE=mandatory`, and requesting the optimized pipeline for a resident body produces a compilation error before publication.
+`--looped-operand-reuse resident-a` explicitly selects activation reuse for admitted ordered FP8 contractions. The default is `ordered`; unknown values are rejected. Resident bodies currently require `--native-pipeline mandatory`, and requesting the optimized pipeline for a resident body produces a compilation error before publication.
 
 ```sh
-ATLAS_LOOPED_OPERAND_REUSE=resident-a ATLAS_NATIVE_PIPELINE=mandatory \
-merlin-targetgen native-compile --engine merlin_native --support atlas \
+merlin-targetgen native-compile --looped-operand-reuse resident-a --native-pipeline mandatory --engine merlin_native --support atlas \
   --snapshot "$SNAPSHOT" --request "$REQUEST" --abi auto \
   --target-source "$ATLAS_ROOT" --mode diagnostic --out out/resident-compilation
 ```
@@ -51,7 +50,7 @@ Each M row group loads up to 24 activation tiles into the selected target's 32 F
 
 The execution plan's `codegen` record includes the requested and effective operand policies, resident panel width and count, and reduction scope. The operand policy and provider sources are part of the tuning identity. A body with one output-column tile uses the ordered policy and records the fallback reason because it cannot reuse activations across N. Register, address, program-size, physical, and timing checks still apply; a resident image that exceeds a bound is rejected. The mandatory pipeline retains checked ordered partial-state boundaries while avoiding the optimized scheduler's current scalar-spill address-proof limitation.
 
-C export uses the authenticated execution policy rather than the current environment. It recomputes the panel metadata and typed source, checks the resident provider fingerprint, and rejects inconsistent policy metadata even when its artifact hashes have been recomputed.
+C export uses the authenticated execution policy rather than the current compiler options. It recomputes the panel metadata and typed source, checks the resident provider fingerprint, and rejects inconsistent policy metadata even when its artifact hashes have been recomputed.
 
 The portable numerical regression is `test_resident_looped_mnk`. With compiler tools and the pinned npu_model checkout configured, set `ATLAS_RUN_NPU_MODEL=1` and `NPU_MODEL_ROOT` to the selected model checkout, then run the module from `test/`. It checks independent ordered arithmetic for two K panels, cancellation, external BF16 seeds, final-only ReLU, padded output lanes, unchanged operands, and surrounding DRAM guards.
 

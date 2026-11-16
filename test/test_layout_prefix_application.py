@@ -12,9 +12,10 @@ import unittest
 from unittest.mock import patch
 
 import numpy as np
+from merlin.semantic_compiler.codegen import CodegenOptions, codegen_options, current_codegen_options
 from atlas_mlir_native import layout_device as device
 from atlas_mlir_native import layout_prefix_application as prefix
-from merlin.semantic_compiler.codegen import CodegenOptions, codegen_options
+
 from merlin.semantic_compiler.model import ConstantBinding, IndexMap
 from test_layout_device import request
 
@@ -48,7 +49,7 @@ def expected(source, raw):
 
 class PrefixCase(unittest.TestCase):
     def setUp(self):
-        context = codegen_options(CodegenOptions(io_memory_bytes=59768832))
+        context = codegen_options(replace(current_codegen_options(), io_memory_bytes=59768832))
         context.__enter__()
         self.addCleanup(context.__exit__, None, None, None)
 
@@ -118,7 +119,7 @@ class PrefixCompilationTest(PrefixCase):
             return original_run(command,**kwargs)
         for pipeline in ('mandatory','optimized'):
             with self.subTest(pipeline=pipeline), tempfile.TemporaryDirectory(prefix='atlas-layout-finalizer-') as directory, \
-                    patch.dict(os.environ,{'ATLAS_NATIVE_PIPELINE':pipeline}), \
+                    codegen_options(replace(current_codegen_options(), native_pipeline=pipeline)), \
                     patch.object(device,'_run',side_effect=guarded_run):
                 destination=Path(directory)/'compiled'
                 if pipeline == 'optimized':
@@ -242,3 +243,21 @@ int run(int mode,atlas_host_read32 read,atlas_host_write32 write,atlas_tile_writ
 
 
 if __name__=='__main__':unittest.main()
+
+
+def test_prefix_children_preserve_explicit_base(tmp_path):
+    if not (BIN / 'atlas-opt').is_file():
+        import pytest
+        pytest.skip('select built Atlas tools')
+    with codegen_options(CodegenOptions(io_memory_bytes=67108864)):
+        source = concat()
+        compiled = tmp_path / 'compiled'
+        base = 0x80000000
+        device.compile_source(None, source, target_source=ROOT, destination=compiled,
+                              limits=None, io_memory_base=base)
+        manifest = json.loads((compiled / 'layout-prefix-manifest.json').read_text())
+        for row in manifest['segments']:
+            execution = json.loads((compiled / row['path'] / 'execution_plan.json').read_text())
+            assert execution['input_addresses'][0] == base
+        device.prepare_c_package(source, compiled, 'relocated_prefix', target_source=ROOT,
+                                 io_memory_base=base)

@@ -4,6 +4,8 @@ The removed reduction encoder is moved to an exactly equivalent admission
 test on the square input, under the selected reduction policy. No arithmetic
 or reduction ordering is changed.
 """
+from .binding import io_memory_base as selected_io_base
+
 from dataclasses import replace
 from functools import lru_cache
 from hashlib import sha256
@@ -21,7 +23,7 @@ from .region_composition import (
     verify_adjacent_group,
     export_adjacent_package,
 )
-from .binding import DRAM_BASE, TILE_BYTES
+from .binding import TILE_BYTES
 from .reduction import NONNEGATIVE_NORMAL_REDUCTION_POLICY, REDUCTION_POLICY
 
 PREIMAGE_POLICY = 'f32-to-bf16-square-reduction-exact-preimage-v1'
@@ -78,7 +80,7 @@ def input_spec(*, reduction_policy=REDUCTION_POLICY):
                    admitted_code_ranges=tuple(tuple(row) for row in proof['admitted_code_ranges']))
 
 
-def prepare(region, adapter=None):
+def prepare(region, adapter=None, io_memory_base=None):
     from .pointwise import prepare_source as square_precision, prepare_execution_plan
     from .reduction import prepare_source as reduction_precision, prepare_plan as reduction_plan
 
@@ -116,10 +118,10 @@ def prepare(region, adapter=None):
         raise ValueError('square/reduction needs distinct complete data and seed boundaries')
     sizes = {data: first_plan.input_packed_bytes[0], seed: second_plan.packed_sizes[1],
              square.id: first_plan.packed_bytes, reduced.id: second_plan.packed_sizes[2]}
-    addresses, arena_bytes = allocate_adjacent_arena(sizes, (*inputs, square.id, reduced.id))
+    addresses, arena_bytes = allocate_adjacent_arena(sizes, (*inputs, square.id, reduced.id), io_memory_base)
     return dict(region=region, precisions=(first, second), plans=(first_plan, second_plan),
                 inputs=inputs, outputs=(square.id, reduced.id), data=data, seed=seed,
-                addresses=addresses, sizes=sizes, arena_bytes=arena_bytes,
+                addresses=addresses, sizes=sizes, arena_bytes=arena_bytes, io_memory_base=io_memory_base,
                 reduction_policy=policy, proof=intermediate_domain_proof(policy))
 
 
@@ -165,6 +167,7 @@ def compile_group(group, snapshot, *, target_source, destination, limits):
     destination.mkdir()
     stages, selections = [], []
     square_id, reduced_id = group['outputs']
+    base = selected_io_base() if group['io_memory_base'] is None else group['io_memory_base']
     for index, (precision, plan) in enumerate(zip(group['precisions'], group['plans'], strict=True)):
         keys = (group['data'],) if index == 0 else (square_id, group['seed'])
         addresses = tuple(group['addresses'][key] for key in keys)
@@ -173,10 +176,10 @@ def compile_group(group, snapshot, *, target_source, destination, limits):
         member.parent.mkdir(exist_ok=True)
         compile_member = compile_pointwise if index == 0 else compile_reduction
         compile_member(snapshot, precision.request,
-            fixed_inputs={node.id: (address - DRAM_BASE) // TILE_BYTES
+            fixed_inputs={node.id: (address - base) // TILE_BYTES
                           for node, address in zip(precision.request.nodes[:-1], addresses, strict=True)},
-            fixed_outputs=((output - DRAM_BASE) // TILE_BYTES,), target_source=target_source,
-            destination=member, limits=limits)
+            fixed_outputs=((output - base) // TILE_BYTES,), target_source=target_source,
+            destination=member, limits=limits, io_memory_base=base)
         if index == 0:
             descriptor = selected_body_descriptor(plan, member / 'body')
             virtual = square_virtual(plan, addresses, output, descriptor)
@@ -190,7 +193,7 @@ def compile_group(group, snapshot, *, target_source, destination, limits):
                     'row_column_zero_bf16_pair_tiles' if key in (group['seed'], reduced_id)
                     else 'mn_tiles_bf16_pair_halves') for key, address in group['addresses'].items())
     link_adjacent_stages(stages, buffers=buffers, initialized=group['inputs'], outputs=group['region'].outputs,
-                         destination=destination, target_source=target_source)
+                         destination=destination, target_source=target_source, io_memory_base=group['io_memory_base'])
     execution = json.loads((destination / 'execution_plan.json').read_text())
     execution.update(input_addresses=[group['addresses'][key] for key in group['inputs']],
                      input_buffer_bytes=[group['sizes'][key] for key in group['inputs']],

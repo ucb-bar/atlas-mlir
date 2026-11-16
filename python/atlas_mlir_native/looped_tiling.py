@@ -344,6 +344,10 @@ def _virtual(
     w_row = "wrow" if nc > 1 else w_origin
     y_tile = "ytile" if nc > 1 else y_row
     page_origins = [page_name(i, "batch" if i in batch_pages else "base") for i in range(len(exponent_pages))]
+    batch_ready = 'batch_start'
+    if restoration is not None:
+        prefetch, batch_ready = restoration.batch_entry(batch_ready, page_origins)
+        lines.extend(prefetch)
     page_addresses = [page_name(i, "page") if page[1] and (mc if i == 0 else nc) > 1 else page_origins[i]
                       for i, page in enumerate(exponent_pages)]
     if seed_address is not None:
@@ -355,7 +359,7 @@ def _virtual(
     seed_n_parameter = ", %seed_tile: i32" if seed_address is not None else ""
     if mc > 1:
         lines += [
-            f"    cf.br ^m_header(%batch_start, %zero_m, %{a_origin}, %{y_origin}{seed_entry}{values([page_origins[0]]) if row_types else ""} : {state}, i32, i32, i32{seed_type}{row_types})",
+            f"    cf.br ^m_header(%{batch_ready}, %zero_m, %{a_origin}, %{y_origin}{seed_entry}{values([page_origins[0]]) if row_types else ""} : {state}, i32, i32, i32{seed_type}{row_types})",
             f"  ^m_header(%ms: {state}, %m: i32, %arow: i32, %yrow: i32{seed_m_parameter}{parameters([page_name(0, "page")]) if row_types else ""}):",
         ]
         c("m_count", mc)
@@ -367,7 +371,7 @@ def _virtual(
     else:
         if seed_address is not None:
             c("seed_row", seed_address)
-        lines += [f"    cf.br ^m_body(%batch_start : {state})", f"  ^m_body(%mb: {state}):"]
+        lines += [f"    cf.br ^m_body(%{batch_ready} : {state})", f"  ^m_body(%mb: {state}):"]
     row_ready = "mb"
     if cache_a:
         # A row is immutable across N. Refresh every slot for each M row
@@ -608,8 +612,11 @@ def tuning_key(snapshot, request, fixed_inputs, fixed_outputs, limits):
     from merlin.semantic_compiler import codegen
 
     from .binding import _native_pipeline
+    from .private_staging import storage_policy
+    from .exponent_page_cache import enabled as exponent_page_cache_enabled
 
     tool = Path(os.environ["ATLAS_OOT_BIN_DIR"]) / "atlas-opt"
+    staging_storage = storage_policy()
     return {
         "request_digest": request.digest(),
         "target_identity": request.target_identity,
@@ -625,19 +632,18 @@ def tuning_key(snapshot, request, fixed_inputs, fixed_outputs, limits):
         "fixed_outputs": list(fixed_outputs),
         "pipeline": _native_pipeline(),
         "operand_reuse": _operand_reuse_policy(),
+        **({"staging_storage": staging_storage} if staging_storage != "dram" else {}),
+        **({"exponent_page_cache": True} if exponent_page_cache_enabled() else {}),
         "search_limits": limits.record(),
         "program_size_limit_bytes": codegen.current_codegen_options().program_size_limit_bytes,
+        **({"execution_instruction_limit": codegen.current_codegen_options().execution_instruction_limit}
+           if codegen.current_codegen_options().execution_instruction_limit is not None else {}),
     }
 
 
 def _operand_reuse_policy():
-    policy = os.environ.get("ATLAS_LOOPED_OPERAND_REUSE", "ordered")
-    if policy not in ("ordered", "resident-a"):
-        raise NativeCompilationError(
-            "unsupported_semantics", "ATLAS_LOOPED_OPERAND_REUSE must be ordered or resident-a"
-        )
-    return policy
-
+    from merlin.semantic_compiler.codegen import current_codegen_options
+    return current_codegen_options().looped_operand_reuse
 
 def _virtual_schedule(plan, addresses, output, epilogue=None, *, seed_address=None, k_unroll=1):
     policy = _operand_reuse_policy()
@@ -648,7 +654,7 @@ def _virtual_schedule(plan, addresses, output, epilogue=None, *, seed_address=No
 
         if _native_pipeline() != "mandatory":
             raise NativeCompilationError(
-                "unsupported_semantics", "resident-a is qualified with ATLAS_NATIVE_PIPELINE=mandatory only"
+                "unsupported_semantics", "resident-a is qualified with native_pipeline=mandatory only"
             )
         record.update(schedule_record(plan))
         virtual = virtual_resident_a(plan, addresses, output, epilogue, seed_address=seed_address)
@@ -665,6 +671,7 @@ def compile_looped(snapshot, request, *, fixed_inputs, fixed_outputs, target_sou
 
     from .binding import (
         DRAM_BASE,
+        io_memory_base,
         NATIVE_CHECKS,
         NATIVE_PIPELINES,
         RTL_REVISION,
@@ -674,6 +681,7 @@ def compile_looped(snapshot, request, *, fixed_inputs, fixed_outputs, target_sou
         dram_slots,
     )
 
+    io_base = io_memory_base()
     unroll, codegen = choose_reduction_unroll(tuning_key(snapshot, request, fixed_inputs, fixed_outputs, limits))
     geometry, seed = split_seeded_request(request)
     contraction, epilogue = split_epilogue(geometry)
@@ -704,7 +712,7 @@ def compile_looped(snapshot, request, *, fixed_inputs, fixed_outputs, target_sou
     ):
         raise NativeCompilationError("resource_limit", "loop buffers exceed the selected diagnostic DRAM window")
     ranges = [
-        (DRAM_BASE + slot * TILE_BYTES, DRAM_BASE + slot * TILE_BYTES + size)
+        (io_base + slot * TILE_BYTES, io_base + slot * TILE_BYTES + size)
         for slot, size in zip(slots, sizes, strict=True)
     ]
     if any(a < d and c < b for i, (a, b) in enumerate(ranges) for c, d in ranges[i + 1 :]):
@@ -826,11 +834,12 @@ def compile_looped(snapshot, request, *, fixed_inputs, fixed_outputs, target_sou
             f"attributes {{atlas.program_size_limit_bytes = {codegen['program_size_limit_bytes']} : i64, ",
             1,
         )
-    from merlin.semantic_compiler.codegen import materialization_cache
+    from merlin.semantic_compiler.codegen import materialization_cache, current_codegen_options
 
     cache = materialization_cache()
     cache_key = (
         snapshot.profile.digest(),
+        json.dumps(current_codegen_options().identity_record(), sort_keys=True),
         pipeline,
         virtual,
         hashlib.sha256((tools / "atlas-opt").read_bytes()).hexdigest(),
@@ -951,6 +960,7 @@ def compile_looped(snapshot, request, *, fixed_inputs, fixed_outputs, target_sou
         "stage_artifacts": {name: sha(data) for name, data in artifacts.items() if name != "program.bin"},
         "tile_body_check_fingerprint": selected.check_fingerprint,
         "native_snapshot_sha256": sha((snapshot.root / "manifest.json").read_bytes()),
+        **({"io_memory_base": io_base} if io_base != DRAM_BASE else {}),
         "io_memory_bytes": dram_slots() * TILE_BYTES,
         "binding_source_sha256": sha(Path(__file__).with_name("binding.py").read_bytes()),
         "loop_lowering_source_sha256": sha(Path(__file__).read_bytes()),

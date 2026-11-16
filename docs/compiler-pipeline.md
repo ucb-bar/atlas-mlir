@@ -35,7 +35,7 @@ attributes must agree. See [single-program profiling](single-program-profiling.m
 for the supported interface and tests.
 
 Native Python compilation records the actual single registered pipeline invocation in
-`compilation-pipeline.json`. Set `ATLAS_CAPTURE_POSTSPILL=1` for audit runs that
+`compilation-pipeline.json`. Set `--capture-postspill` for audit runs that
 also need `mandatory-spilled-virtual.mlir`. Only that opt-in enables
 `--mlir-disable-threading` and the before-lowering IR dump; ordinary publication
 does not scrape diagnostic IR. Capture uses the same bounded compilation, with

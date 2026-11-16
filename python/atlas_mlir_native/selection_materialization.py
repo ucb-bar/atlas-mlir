@@ -1,5 +1,7 @@
 """Independent source rebinding of retained native tile selection evidence."""
 
+from .binding import DRAM_BASE, io_memory_base as selected_io_base
+
 from dataclasses import replace
 from hashlib import sha256
 import json
@@ -153,7 +155,7 @@ def bind_pointwise(original, canonical, materialized, destination, capture, *, r
     checked_body = bind_tile(body, canonical_body, materialized / "body", destination / "body", capture)
     if reduction:
         slots = tuple(abi["fixed_inputs"][node.id] for node in original.nodes[:2]) + tuple(abi["fixed_outputs"])
-        addresses = tuple(DRAM_BASE + slot * TILE_BYTES for slot in slots)
+        addresses = tuple(selected_io_base() + slot * TILE_BYTES for slot in slots)
         descriptor = module.selected_body_descriptors(plan, destination / "body")
         virtual = module.virtual_program(plan, addresses[:2], addresses[2])
         execution = dict(schema="atlas.reduction_execution_plan.v1", input_addresses=list(addresses[:2]),
@@ -172,8 +174,8 @@ def bind_pointwise(original, canonical, materialized, destination, capture, *, r
                         reduction_lowering_source_sha256=sha256(Path(module.__file__).read_bytes()).hexdigest(),
                         target_inventory_sha256=previous["target_inventory_sha256"])
     else:
-        addresses = [DRAM_BASE + abi["fixed_inputs"][node.id] * TILE_BYTES for node in original.nodes[:-1]]
-        output = DRAM_BASE + abi["fixed_outputs"][0] * TILE_BYTES
+        addresses = [selected_io_base() + abi["fixed_inputs"][node.id] * TILE_BYTES for node in original.nodes[:-1]]
+        output = selected_io_base() + abi["fixed_outputs"][0] * TILE_BYTES
         descriptor = module.selected_body_descriptor(plan, destination / "body")
         virtual = module.virtual_program(plan, addresses, output, descriptor)
         execution = dict(schema="atlas.pointwise_execution_plan.v1", shape=list(plan.shape), input_addresses=addresses,
@@ -213,6 +215,8 @@ def bind_pointwise(original, canonical, materialized, destination, capture, *, r
     files = _inventory(destination)
     manifest.update(execution_plan_sha256=sha256(files["execution_plan.json"]).hexdigest(),
                     stage_artifacts={name: sha256(data).hexdigest() for name, data in files.items() if name != "program.bin"})
+    if selected_io_base() != DRAM_BASE:
+        manifest["io_memory_base"] = selected_io_base()
     (destination / "manifest.json").write_bytes(_json(manifest))
     verify_native_publication(destination, manifest, engine="merlin_native",
                               request_digest=original.digest(), target_identity=original.target_identity)
@@ -229,7 +233,10 @@ def bind_row_loop(original, canonical, materialized, destination, capture, *, ta
         raise ValueError("row loop rebinding requires identical lowered semantics")
     previous = json.loads((materialized / "manifest.json").read_bytes())
     row_loop.verify_row_loop(canonical, materialized, target_source=target_source)
-    plan, checked = row_loop.prepare_plan(original), row_loop.prepare_plan(canonical)
+    execution = json.loads((materialized / "execution_plan.json").read_text())
+    budget = execution.get("dispatch_instruction_budget", row_loop.DEFAULT_FUNCTIONAL_INSTRUCTION_LIMIT)
+    plan = row_loop.prepare_plan(original, instruction_budget=budget)
+    checked = row_loop.prepare_plan(canonical, instruction_budget=budget)
     body, canonical_body = plan.tiling.regions[0].request, checked.tiling.regions[0].request
     destination.mkdir(parents=True, exist_ok=False)
     bind_tile(body, canonical_body, materialized / "body", destination / "body", capture)
@@ -257,6 +264,8 @@ def bind_row_loop(original, canonical, materialized, destination, capture, *, ta
                     target_inventory_sha256=previous["target_inventory_sha256"], atlas_opt_sha256=previous["atlas_opt_sha256"],
                     atlas_emit_sha256=previous["atlas_emit_sha256"], provider_sources_sha256=previous["provider_sources_sha256"],
                     stage_artifacts={name: sha256(data).hexdigest() for name, data in files.items()})
+    if selected_io_base() != DRAM_BASE:
+        manifest["io_memory_base"] = selected_io_base()
     (destination / "manifest.json").write_bytes(_json(manifest))
     row_loop.verify_row_loop(original, destination, target_source=target_source)
     return manifest
@@ -266,14 +275,16 @@ def bind_counted(original, canonical, materialized, destination, capture, *, tar
     from . import quantized_loop as loop
     from .quantized_loop_sizing import Sizing, publish_route, selected_route
     from .restoration_budget import instruction_bound, fallback_tiles
-    from .exponent_restoration import exponent_geometry, fast_factor_range
+    from .exponent_restoration import guard_record
 
     plan, checked = loop.prepare_source(original), loop.prepare_source(canonical)
     if selected_route(checked, materialized) != "counted":
         raise ValueError("only counted contraction materializations support binding")
     previous = json.loads((materialized / "manifest.json").read_bytes())
     execution = json.loads((materialized / "execution_plan.json").read_text())
-    layout = loop.execution_layout(plan, operand_reuse=execution.get("operand_reuse_requested", "ordered"))
+    from .exponent_page_cache import recorded_enabled
+    layout = loop.execution_layout(plan, operand_reuse=execution.get("operand_reuse_requested", "ordered"),
+                                   exponent_page_cache=recorded_enabled(execution))
     virtual = loop.virtual_source(plan, layout)
     if virtual.encode() != (materialized / "atlas-virtual.mlir").read_bytes():
         raise ValueError("rebound counted virtual program differs from checked canonical source")
@@ -311,14 +322,7 @@ def bind_counted(original, canonical, materialized, destination, capture, *, tar
         raise ValueError("rebound counted instruction bound exceeds unchanged policy")
     bound["scalar_fallback_tile_budget"] = fallback_tiles(plan)
     bound["restoration_admission"] = layout["restoration_admission"]
-    guard = dict(schema="atlas.exponent_restoration_guard.v1", guard_block="restore_factor_done",
-                 vector_block="restore_vector", scalar_block="restore_scalar", factor_body="restore_factor_body",
-                 factor_done="restore_factor_done", exponent_modes=[geometry["mode"] for geometry in exponent_geometry(plan)],
-                 exponent_roles=["lhs", "rhs"], scalar_factor_broadcast="sparse_pow2_s_minus_1_col_sum_then_row_sum",
-                 join_block="restore_join", factor_header="restore_factor_header", factor_bound=8,
-                 lhs_index_coefficient=4, lhs_index_offsets=[0, 1, 2, 3], rhs_index_coefficient=2,
-                 rhs_index_offsets=[0, 1, 16, 17], per_operand_range=list(fast_factor_range(plan)),
-                 raw_nonzero_abs_exp2_bounds=[-26, 32], exponent_pages=layout["exponent_addresses"])
+    guard = guard_record(plan, layout)
     files.update({name: _json(record) for name, record in {
         "source-request.json": original.record(), "already-quantized-plan.json": plan.record(), "execution_plan.json": layout,
         "tile-body-selection.json": selections, "restoration-instruction-bound.json": bound, "restoration-guard.json": guard}.items()})
@@ -332,6 +336,8 @@ def bind_counted(original, canonical, materialized, destination, capture, *, tar
     destination.mkdir(parents=True, exist_ok=False)
     for name, data in files.items():
         (destination / name).write_bytes(data)
+    if selected_io_base() != DRAM_BASE:
+        manifest["io_memory_base"] = selected_io_base()
     (destination / "manifest.json").write_bytes(_json(manifest))
     sizing = json.loads((materialized / "quantized-sizing.json").read_bytes())
     if (sizing.get("source_request_digest") != canonical.digest()

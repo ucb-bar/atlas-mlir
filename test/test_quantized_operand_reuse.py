@@ -1,4 +1,6 @@
 """MXU1 residency preserves transport, K order, exponent checks and memory."""
+from merlin.semantic_compiler.codegen import codegen_options, current_codegen_options
+
 from dataclasses import replace
 import json
 from math import prod
@@ -145,21 +147,21 @@ class QuantizedOperandReuseTest(unittest.TestCase):
         geometry = SimpleNamespace(counts=(1, 2, 1), tile_bytes=(1024, 1024, 2048),
                                    buffer_bytes=(1024, 2048, 4096))
         addresses, output = (DRAM_BASE, DRAM_BASE + 2048), DRAM_BASE + 4096
-        with patch.dict(os.environ, ATLAS_QUANTIZED_OPERAND_REUSE='ordered'):
+        with codegen_options(replace(current_codegen_options(), quantized_operand_reuse='ordered')):
             original = _virtual(geometry, addresses, output, unit=0)
-        with patch.dict(os.environ, ATLAS_QUANTIZED_OPERAND_REUSE='row-cache'):
+        with codegen_options(replace(current_codegen_options(), quantized_operand_reuse='row-cache')):
             self.assertEqual(_virtual(geometry, addresses, output, unit=0), original)
         with self.assertRaisesRegex(ValueError, 'requires MXU1'):
             _virtual(geometry, addresses, output, unit=0, cache_a=True)
 
-    def test_recorded_schedule_survives_environment_change(self):
+    def test_recorded_schedule_survives_option_change(self):
         plan = prepare_source(source_request(m=1, n=65, k=257, batch=()))
-        with patch.dict(os.environ, ATLAS_QUANTIZED_OPERAND_REUSE='row-cache'):
+        with codegen_options(replace(current_codegen_options(), quantized_operand_reuse='row-cache')):
             layout = execution_layout(plan)
             virtual = virtual_source(plan, layout)
         self.assertEqual(layout['operand_reuse_requested'], 'row-cache')
         self.assertEqual(layout['operand_reuse'], 'row-cache')
-        with patch.dict(os.environ, ATLAS_QUANTIZED_OPERAND_REUSE='unknown'):
+        with codegen_options(replace(current_codegen_options(), quantized_operand_reuse='ordered')):
             self.assertEqual(virtual_source(plan, layout), virtual)
         damaged = dict(layout, operand_reuse='ordered')
         with self.assertRaisesRegex(ValueError, 'schedule differs'):
@@ -169,7 +171,7 @@ class QuantizedOperandReuseTest(unittest.TestCase):
         from atlas_mlir_native.quantized_loop_sizing import _identity
         from merlin.semantic_compiler.search import SearchLimits
         plan = prepare_source(source_request(m=1, n=65, k=257, batch=()))
-        with patch.dict(os.environ, ATLAS_QUANTIZED_OPERAND_REUSE='ordered'):
+        with codegen_options(replace(current_codegen_options(), quantized_operand_reuse='ordered')):
             layout = execution_layout(plan)
         self.assertNotIn('operand_reuse_requested', layout)
         self.assertNotIn('operand_reuse', layout)
@@ -184,22 +186,22 @@ class QuantizedOperandReuseTest(unittest.TestCase):
                                                       resident_inputs=[], resident_outputs=[]))
         adapter = AtlasApplicationAdapter.__new__(AtlasApplicationAdapter)
         source = source_request(m=1, n=64, k=32, batch=())
-        with patch.dict(os.environ, ATLAS_QUANTIZED_OPERAND_REUSE='ordered'):
+        with codegen_options(replace(current_codegen_options(), quantized_operand_reuse='ordered')):
             original = adapter.materialization_identity(source, choice)
         self.assertNotIn('quantized_operand_reuse', original['compilation_identity'])
         self.assertNotIn('exact_float_unroll', original['compilation_identity'])
         self.assertNotIn('exact_binary_lane_groups', original['compilation_identity'])
-        with patch.dict(os.environ, ATLAS_QUANTIZED_OPERAND_REUSE='ordered', ATLAS_EXACT_BINARY_LANE_GROUPS='1'):
+        with codegen_options(replace(current_codegen_options(), quantized_operand_reuse='ordered', exact_binary_lane_groups=True)):
             grouped = adapter.materialization_identity(source, choice)
         self.assertIs(grouped['compilation_identity'].pop('exact_binary_lane_groups'), True)
         self.assertEqual(grouped, original)
-        from merlin.semantic_compiler.codegen import CodegenOptions, codegen_options
-        with patch.dict(os.environ, ATLAS_QUANTIZED_OPERAND_REUSE='ordered'), \
-                codegen_options(CodegenOptions(exact_float_unroll=True)):
+
+        with codegen_options(replace(current_codegen_options(), quantized_operand_reuse='ordered')), \
+                codegen_options(replace(current_codegen_options(), exact_float_unroll=True)):
             unrolled = adapter.materialization_identity(source, choice)
         self.assertIs(unrolled['compilation_identity'].pop('exact_float_unroll'), True)
         self.assertEqual(unrolled, original)
-        with patch.dict(os.environ, ATLAS_QUANTIZED_OPERAND_REUSE='row-cache'):
+        with codegen_options(replace(current_codegen_options(), quantized_operand_reuse='row-cache')):
             cached = adapter.materialization_identity(source, choice)
         self.assertEqual(cached['compilation_identity']['quantized_operand_reuse'], 'row-cache')
         del cached['compilation_identity']['quantized_operand_reuse']
@@ -209,22 +211,29 @@ class QuantizedOperandReuseTest(unittest.TestCase):
         from atlas_mlir_native import quantized_loop as loop, quantized_loop_c as native_c
         from atlas_mlir_native.quantized_loop_sizing import size_counted, selected_route
         from atlas_mlir_native.selection_materialization import SelectionCapture, bind_counted
-        from merlin.semantic_compiler.codegen import CodegenOptions, codegen_options
+
         from merlin.semantic_compiler.search import SearchLimits
         from test_looped_mnk import build_snapshot
         source = source_request(m=1, n=65, k=65, batch=())
         canonical = replace(source, source_identity='canonical-policy-test')
         plan = prepare_source(canonical)
         with tempfile.TemporaryDirectory(prefix='atlas-row-cache-policy-') as directory, \
-                codegen_options(CodegenOptions(io_memory_bytes=67108864)):
+                codegen_options(replace(current_codegen_options(), io_memory_bytes=67108864)):
             directory = Path(directory)
             capture = SelectionCapture(build_snapshot(directory/'native'))
-            with patch.dict(os.environ, ATLAS_QUANTIZED_OPERAND_REUSE='row-cache'):
+            with codegen_options(replace(current_codegen_options(), quantized_operand_reuse='row-cache')):
                 sized = size_counted(plan, target_source=ROOT)
                 loop.compile_source(capture, canonical, target_source=ROOT,
                                     destination=directory/'materialized', limits=SearchLimits())
-            with patch.dict(os.environ, ATLAS_QUANTIZED_OPERAND_REUSE='unknown'):
-                self.assertIs(size_counted(plan, target_source=ROOT, operand_reuse='row-cache'), sized)
+            with codegen_options(replace(current_codegen_options(), quantized_operand_reuse='ordered')):
+                self.assertIsNot(size_counted(plan, target_source=ROOT, operand_reuse='row-cache'), sized)
+                recorded_layout = execution_layout(plan, operand_reuse=sized.record()['operand_reuse_requested'])
+                self.assertEqual(recorded_layout['operand_reuse_requested'], 'row-cache')
+                self.assertEqual(virtual_source(plan, recorded_layout).encode(),
+                                 (directory/'materialized/atlas-virtual.mlir').read_bytes())
+                self.assertNotEqual(virtual_source(plan, execution_layout(plan)),
+                                    virtual_source(plan, recorded_layout))
+            with codegen_options(replace(current_codegen_options(), quantized_operand_reuse='row-cache')):
                 self.assertEqual(selected_route(plan, directory/'materialized'), 'counted')
                 bind_counted(source, canonical, directory/'materialized', directory/'bound',
                              capture, target_source=ROOT)
@@ -237,20 +246,19 @@ class QuantizedOperandReuseTest(unittest.TestCase):
     def test_capacity_single_consumer_and_expansion_refusals_keep_ordered_source(self):
         for k, n, admitted in ((1, 33, True), (2048, 64, True), (2049, 64, False), (32, 32, False)):
             plan = prepare_source(source_request(m=1, n=n, k=k, batch=()))
-            with patch.dict(os.environ, ATLAS_QUANTIZED_OPERAND_REUSE='row-cache'):
+            with codegen_options(replace(current_codegen_options(), quantized_operand_reuse='row-cache')):
                 self.assertEqual(activation_residency(plan) is not None, admitted)
         plan = prepare_source(source_request(m=1, k=2049, batch=()))
-        with patch.dict(os.environ, ATLAS_QUANTIZED_OPERAND_REUSE='row-cache'):
+        with codegen_options(replace(current_codegen_options(), quantized_operand_reuse='row-cache')):
             cached = virtual_source(plan, execution_layout(plan))
-        with patch.dict(os.environ, ATLAS_QUANTIZED_OPERAND_REUSE='ordered'):
+        with codegen_options(replace(current_codegen_options(), quantized_operand_reuse='ordered')):
             self.assertEqual(cached, virtual_source(plan, execution_layout(plan)))
-        with patch.dict(os.environ, ATLAS_QUANTIZED_OPERAND_REUSE='unknown'):
-            with self.assertRaises(NativeCompilationError):
-                activation_residency(plan)
+        with self.assertRaises(ValueError), codegen_options(replace(current_codegen_options(), quantized_operand_reuse='unknown')):
+            activation_residency(plan)
 
     def test_missing_cache_writer_is_rejected_by_standard_memory_proofs(self):
         plan = prepare_source(source_request(m=35, n=67, k=65, batch=()))
-        with patch.dict(os.environ, ATLAS_QUANTIZED_OPERAND_REUSE='row-cache'):
+        with codegen_options(replace(current_codegen_options(), quantized_operand_reuse='row-cache')):
             virtual = virtual_source(plan, execution_layout(plan))
         lines = virtual.splitlines()
         writer = next(line for line in lines if '"atlas.virtual_save"' in line and '%cached_a0,' in line)
@@ -270,8 +278,8 @@ class QuantizedOperandReuseTest(unittest.TestCase):
 
     @unittest.skipUnless(os.environ.get('ATLAS_RUN_NPU_MODEL') == '1', 'select the pinned cycle model explicitly')
     def test_functional_model_tinyllama_k2048_n64_tiles(self):
-        from merlin.semantic_compiler.codegen import CodegenOptions, codegen_options
-        with codegen_options(CodegenOptions(io_memory_bytes=67108864)):
+
+        with codegen_options(replace(current_codegen_options(), io_memory_bytes=67108864)):
             self.check_cycle_sources((source_request(m=1, n=2048, k=2048, batch=()),), execute=qualified_functional)
 
     def check_cycle_sources(self, sources, execute=cycle):
@@ -281,7 +289,7 @@ class QuantizedOperandReuseTest(unittest.TestCase):
             layout = execution_layout(plan)
             variants = []
             for policy in ('ordered', 'row-cache'):
-                with patch.dict(os.environ, ATLAS_QUANTIZED_OPERAND_REUSE=policy):
+                with codegen_options(replace(current_codegen_options(), quantized_operand_reuse=policy)):
                     selected_layout = execution_layout(plan)
                     virtual = virtual_source(plan, selected_layout)
                 machine, physical = compile_fixture(virtual)

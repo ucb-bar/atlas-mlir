@@ -29,6 +29,7 @@ from .binding import (
     BF16_ROW_REDUCTION_ATTRS,
     BF16_UNARY_ATTRS,
     DRAM_BASE,
+    io_memory_base,
     MXU0_INPUT_DOMAIN,
     MXU0_POLICY,
     NATIVE_CHECKS,
@@ -652,9 +653,13 @@ def compile_resident(
         current_codegen_options,
     )
 
+    io_base = io_memory_base()
     staged_bf16 = is_staged_bf16(request)
     staged_mixed = is_staged_mixed(request)
     staged_tiles = staged_bf16 or staged_mixed
+    from .private_staging import mark_fragment, promote, storage_policy
+    staging_storage = storage_policy()
+    promote_staging = staged_bf16 and staging_storage != 'dram'
     deadline = monotonic() + limits.wall_timeout_s if staged_tiles else None
     cuts, slots, sizes = memory_plan(request)
     abi = plan_abi(request)
@@ -737,17 +742,20 @@ def compile_resident(
             slots[k] + (sizes[k] + TILE_BYTES - 1) // TILE_BYTES for k in body.outputs
         )
         function.attributes["atlas.output_dram_base"] = IntegerAttr(
-            DRAM_BASE + start * TILE_BYTES, 64
+            io_base + start * TILE_BYTES, 64
         )
         function.attributes["atlas.output_dram_bytes"] = IntegerAttr(
             (end - start) * TILE_BYTES, 64
         )
         if staged_tiles:
             readonly = len(fixed_inputs)
-            function.attributes["atlas.output_dram_base"] = IntegerAttr(DRAM_BASE + readonly * TILE_BYTES, 64)
+            function.attributes["atlas.output_dram_base"] = IntegerAttr(io_base + readonly * TILE_BYTES, 64)
             function.attributes["atlas.output_dram_bytes"] = IntegerAttr(
                 (max(slots.values()) + 1 - readonly) * TILE_BYTES, 64
             )
+        if promote_staging:
+            mark_fragment(function, source=request, region=region, slots=slots,
+                          sizes=sizes, dram_base=io_base)
         stream = io.StringIO()
         Printer(stream=stream).print_op(module)
         fragments.append(stream.getvalue())
@@ -777,6 +785,11 @@ def compile_resident(
     # them as isolated entries would discard that context. The joined CFG is
     # checked by the normal lowering and memory-initialization passes below.
     virtual = compose_fragments(fragments, tools=tools, boundaries_lowered=staged_tiles)
+    staging_promotion = None
+    if promote_staging:
+        readonly_addresses = tuple(io_base + fixed_inputs[node.id] * TILE_BYTES for node in request.nodes
+                                   if node.effect in ('input', 'constant')) if staging_storage == 'vmem-inputs' else None
+        virtual, staging_promotion = promote(virtual, readonly_addresses=readonly_addresses)
     (destination / "atlas-virtual.mlir").write_text(virtual)
     pipeline = _native_pipeline()
     machine = _run(
@@ -804,7 +817,7 @@ def compile_resident(
         "inputs": [
             {
                 "node": n.id,
-                "address": DRAM_BASE + slots[n.id] * TILE_BYTES,
+                "address": io_base + slots[n.id] * TILE_BYTES,
                 "bytes": sizes[n.id],
                 "type": n.type.record(),
             }
@@ -814,14 +827,14 @@ def compile_resident(
         "outputs": [
             {
                 "node": k,
-                "address": DRAM_BASE + slots[k] * TILE_BYTES,
+                "address": io_base + slots[k] * TILE_BYTES,
                 "bytes": sizes[k],
                 "type": request.node(k).type.record(),
             }
             for k in request.outputs
         ],
         "buffers": [
-            {"node": k, "address": DRAM_BASE + slots[k] * TILE_BYTES, "bytes": sizes[k]}
+            {"node": k, "address": io_base + slots[k] * TILE_BYTES, "bytes": sizes[k]}
             for k in slots
         ],
         "regions": records,
@@ -836,13 +849,13 @@ def compile_resident(
     if staged_tiles:
         execution.update(
             schema="atlas.native_tile_execution_plan.v8", shape=[32, 32], dtype="bf16",
-            input_addresses=[DRAM_BASE + fixed_inputs[n.id] * TILE_BYTES
+            input_addresses=[io_base + fixed_inputs[n.id] * TILE_BYTES
                              for n in request.nodes if n.effect in {"input", "constant"}],
-            output_addresses=[DRAM_BASE + slot * TILE_BYTES for slot in fixed_outputs],
+            output_addresses=[io_base + slot * TILE_BYTES for slot in fixed_outputs],
             input_bytes=TILE_BYTES, output_bytes=TILE_BYTES,
             output_physical_layouts=["bf16_pair_halves"] * len(request.outputs),
             operation="bf16_staged", numerical_policy="per-operation-declared",
-            staging_workspace={"address": DRAM_BASE + len(fixed_inputs) * TILE_BYTES,
+            staging_workspace={"address": io_base + len(fixed_inputs) * TILE_BYTES,
                                "bytes": (max(slots.values()) + 1 - len(fixed_inputs)) * TILE_BYTES},
             limitations=["diagnostic_primitive_domains_require_execution_check"],
         )
@@ -857,6 +870,8 @@ def compile_resident(
             source_liveness_buffers=mixed_memory_plan(request)[3],
             limitations=["diagnostic_primitive_domains_require_execution_check", "completed_tile_byte_preserving_policy_transports"],
         )
+    if staging_promotion is not None:
+        execution['private_staging'] = staging_promotion
     for name, data in {
         "source-request.json": request.record(),
         "execution_plan.json": execution,
@@ -890,7 +905,7 @@ def compile_resident(
             constants.append(
                 {
                     "node_id": binding.node_id,
-                    "address": DRAM_BASE + slots[binding.node_id] * TILE_BYTES,
+                    "address": io_base + slots[binding.node_id] * TILE_BYTES,
                     "bytes": len(payload),
                     "encoding": binding.encoding,
                     "physical_layout": physical_layout,
@@ -924,6 +939,7 @@ def compile_resident(
         ),
         "constant_inputs": constants,
         "native_snapshot_sha256": sha((snapshot.root / "manifest.json").read_bytes()),
+        **({"io_memory_base": io_base} if io_base != DRAM_BASE else {}),
         "io_memory_bytes": dram_slots() * TILE_BYTES,
         "target_inventory_sha256": sha(
             (target_source / "docs/selected-variant-inventory.json").read_bytes()

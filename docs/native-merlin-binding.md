@@ -51,12 +51,31 @@ loads and observable invalidation through host counters and load state. Direct
 MMIO changes or host reinitialization require discarding slots first; an
 unobservable external reset cannot be inferred from the baseline host ABI.
 
-| Variable | Meaning |
+| Environment variable / compiler option | Meaning |
 | --- | --- |
 | `ATLAS_OOT_BIN_DIR` | Directory with `atlas-opt` and `atlas-emit`. Default `<target-source>/build/bin`. |
-| `ATLAS_NATIVE_PIPELINE` | `mandatory` (default, `atlas-opt --atlas-compile-unscheduled`) or `optimized` (`atlas-opt --atlas-compile`). `optimized` ships a rescheduled program that only the compiler verifiers and encoding checks have examined; the native semantic checks ran on the mandatory lowering of the same virtual program, saved beside it as `mandatory-qualification-*`. |
+| `--native-pipeline` | `mandatory` (default, `atlas-opt --atlas-compile-unscheduled`) or `optimized` (`atlas-opt --atlas-compile`). `optimized` ships a rescheduled program that only the compiler verifiers and encoding checks have examined; the native semantic checks ran on the mandatory lowering of the same virtual program, saved beside it as `mandatory-qualification-*`. |
 | `MERLIN_NATIVE_ROOT` | Merlin checkout, for tests. Native tests skip without it. |
 | `ATLAS_ARC_MODEL`, `ATLAS_ARC_STATE`, `ATLAS_MODELIR_ROOT` | AtlasCore simulator for opt-in core tests. |
+
+Compilation recipes are explicit `native-compile` arguments and shared
+`CodegenOptions` fields. `--adjacent-patterns`, `--quantized-operand-reuse`,
+`--looped-operand-reuse`, `--staging-storage`, and `--native-pipeline` select named
+policies. `--exponent-page-cache`, `--exact-binary-lane-groups`,
+`--exact-binary-vector-preflight`, `--exact-cast-vector-preflight`,
+`--capture-postspill`, and `--kernel-library` are Boolean flags. Static quantizer
+sizing (`--static-quantizer-sizing`) and cached scalar binary routes
+(`--exact-binary-routes`) are independent of pipeline scheduling. Defaults retain
+the mandatory pipeline and existing lowering behavior. Recipe environment
+variables no longer select compilation behavior; paths to tools and simulators
+remain environment configuration. The complete options record partitions
+materialization and pure tool caches; the tuning key records the fields that
+affect looped bodies.
+
+Use the same recipe flags for `native-verify` as for `native-compile`. Verification
+rebuilds from its flags rather than reading options from the artifact. C export
+and counted-publication binding require the same compile-time recipe options;
+a changed options identity is refused as a changed sizing context.
 
 ## Compile a tile
 
@@ -648,7 +667,7 @@ atlas.scalar.CompiledProgramScalarCoreDiagnosticTest`.
 
 ## Ordered contraction scheduling
 
-Use `ATLAS_NATIVE_PIPELINE=optimized` with the generic `native-compile --reduction-unroll 4` option to prefetch operands in bounded groups of four pairs. The default automatic policy still selects factor 1 without a matching measured tuning profile. This scheduling option applies to supported ordered contractions of arbitrary shapes.
+Use `--native-pipeline optimized` with the generic `native-compile --reduction-unroll 4` option to prefetch operands in bounded groups of four pairs. The default automatic policy still selects factor 1 without a matching measured tuning profile. This scheduling option applies to supported ordered contractions of arbitrary shapes.
 
 Unrolled loop functions request the unit attribute `atlas.retain_bf16_accumulators`. It permits the lowerer to remove a BF16 accumulator readout whose only use reloads the same MXU in the same block. Both instructions copy raw BF16 storage, and each matmul already writes its BF16 result. The rewrite retains K order, FP8 codes, scale exponents, and final conversion. CFG boundaries, FP8 conversions, multiple uses, and unit changes keep their materialization. The complete virtual contracts and actual allocator must accept the extended lifetime, or the original function is retained. Existing native proof templates do not request this transformation.
 

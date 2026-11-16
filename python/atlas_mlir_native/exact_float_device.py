@@ -4,6 +4,8 @@ Every checked operation scans its whole source domain before storing results.
 NaNs and invalid infinity cancellation produce a device status with no output
 writes. Sign flips accept all encodings and preserve NaN payloads.
 """
+from .binding import io_memory_base as selected_io_base
+
 from dataclasses import dataclass
 from math import prod
 from .binding import DRAM_BASE
@@ -25,6 +27,17 @@ MAX_LEAF_ELEMENTS = {"bf16_to_f32": 20480, "f32_to_bf16": 18432,
                      "bf16_add": 1024, "bf16_sub": 1024}
 
 
+def max_leaf_elements(plan):
+    """Scale the conservative slice policy; prove the actual image separately."""
+    from .limits import DEFAULT_FUNCTIONAL_INSTRUCTION_LIMIT, functional_instruction_limit
+    factor = max(1, functional_instruction_limit() // DEFAULT_FUNCTIONAL_INSTRUCTION_LIMIT)
+    maximum = MAX_LEAF_ELEMENTS[plan.op] * factor
+    if plan.op in ('bf16_add', 'bf16_sub'):
+        # One route word per tile in the private 2-KiB admission table.
+        maximum = min(maximum, 512 * plan.tile_lanes)
+    return maximum
+
+
 def chunk_elements(plan):
     """Respect both the operation policy and the selected I/O window."""
     available = plan.descriptor()["io_memory_bytes"] - 32
@@ -33,7 +46,7 @@ def chunk_elements(plan):
     capacity -= capacity % plan.tile_lanes
     if capacity <= 0:
         raise ValueError("exact float cannot fit a tile in selected I/O window")
-    return min(MAX_LEAF_ELEMENTS[plan.op], capacity)
+    return min(max_leaf_elements(plan), capacity)
 
 @dataclass(frozen=True)
 class FloatPlan:
@@ -74,8 +87,10 @@ class FloatPlan:
                     vector_admission={"qualified":"signed-zero or abs-code2f80..4f80",
                                       "pair":"normal-or-signed-zero inputs except both-negative-zero; private result must be normal or provably exact zero"} if self.op in ("bf16_add","bf16_sub") else None)
 
-def prepare_plan(source, *, io_memory_base=DRAM_BASE):
-    from .binding import TARGET_IDENTITY,TILE_BYTES,dram_slots
+def prepare_source_plan(source, *, io_memory_base=None):
+    """Validate logical source semantics before bounded physical slicing."""
+    io_memory_base = selected_io_base() if io_memory_base is None else io_memory_base
+    from .binding import TARGET_IDENTITY
     from merlin.semantic_compiler.model import TensorType,pointwise_identity_maps
     pure=[n for n in source.nodes if n.effect=="pure"]
     if len(pure)!=1 or pure[0].op not in OPS: raise ValueError("exact float needs one supported operation")
@@ -95,8 +110,20 @@ def prepare_plan(source, *, io_memory_base=DRAM_BASE):
             v.type!=TensorType(n.type.shape,"bf16" if width==2 else "f32","raw-bit-pattern") for v in operands)):
         raise ValueError("exact float source types, maps, domain, or boundaries differ")
     plan=FloatPlan(source,n,operands,prod(n.type.shape),width,ow,io_memory_base)
-    if (type(io_memory_base) is not int or io_memory_base % 32 or
-        not dma_span_in_window(io_memory_base, plan.workspace_bytes)):
+    if type(io_memory_base) is not int or io_memory_base < 0 or io_memory_base % 32:
+        raise ValueError("exact float buffers leave selected DMA memory windows")
+    from .binding import validate_explicit_io_base
+    validate_explicit_io_base(io_memory_base)
+    return plan
+
+
+def prepare_plan(source, *, io_memory_base=None):
+    """Admit a physical leaf only when its complete frame fits DMA memory."""
+    from .binding import dram_slots, TILE_BYTES
+
+    plan = prepare_source_plan(source, io_memory_base=io_memory_base)
+    if (plan.workspace_bytes > dram_slots() * TILE_BYTES
+            or not dma_span_in_window(plan.io_memory_base, plan.workspace_bytes)):
         raise ValueError("exact float buffers leave selected DMA memory windows")
     return plan
 
@@ -177,14 +204,15 @@ def machine_program(p):
     return _run([str(tools/"atlas-opt"),*_scheduled_virtual_pipeline(),"-"],input_text=virtual_program(p))
 
 
-def compile_source(snapshot,region,*,target_source,destination,limits,io_memory_base=DRAM_BASE):
+def compile_source(snapshot,region,*,target_source,destination,limits,io_memory_base=None):
+    io_memory_base = selected_io_base() if io_memory_base is None else io_memory_base
     import hashlib,json,os
     from pathlib import Path
     from merlin.semantic_compiler.codegen import current_codegen_options
     from merlin.semantic_compiler.target_binding import verify_native_publication
     from .binding import NATIVE_CHECKS,RTL_REVISION,_run
     p=prepare_plan(region,io_memory_base=io_memory_base)
-    maximum=MAX_LEAF_ELEMENTS[p.op]
+    maximum=max_leaf_elements(p)
     if p.count>maximum: raise ValueError(f"exact float leaf requires at most {maximum} elements")
     if p.workspace_bytes>p.descriptor()["io_memory_bytes"]: raise ValueError("exact float exceeds selected I/O window")
     tools=Path(os.environ.get("ATLAS_OOT_BIN_DIR",Path(target_source)/"build/bin"))
@@ -194,13 +222,14 @@ def compile_source(snapshot,region,*,target_source,destination,limits,io_memory_
     program=json.loads(_run([str(tools/"atlas-emit"),"--program-json","-"],input_text=machine))
     if program.get("selected_rtl_revision")!=RTL_REVISION: raise ValueError("exact float emitter RTL differs")
     from .restoration_budget import instruction_bound
+    from .limits import functional_instruction_limit
     from merlin.semantic_compiler.target_binding import NativeCompilationError
     try:
-        bound=instruction_bound(virtual,machine,program)
+        bound=instruction_bound(virtual,machine,program,max_instructions=functional_instruction_limit(limits))
     except (ValueError,KeyError,IndexError) as error:
         raise NativeCompilationError("resource_limit","exact float instruction bound is unproved: "+str(error)) from error
     if not bound["admitted"]:
-        raise NativeCompilationError("resource_limit","exact float worst-case instruction bound exceeds 1000000: "+str(bound["instruction_bound"]))
+        raise NativeCompilationError("resource_limit",f"exact float worst-case instruction bound exceeds {bound['max_instructions']}: "+str(bound["instruction_bound"]))
     binary=b"".join(r["word_u32"].to_bytes(4,"little") for r in program["instructions"])
     budget=current_codegen_options().program_size_limit_bytes
     if budget is not None and len(binary)>budget: raise ValueError("exact float exceeds selected program budget")
@@ -222,7 +251,8 @@ def compile_source(snapshot,region,*,target_source,destination,limits,io_memory_
     return manifest
 
 
-def prepare_c_package(region,compiled,name,*,target_source,runtime_linkage="separate",io_memory_base=DRAM_BASE):
+def prepare_c_package(region,compiled,name,*,target_source,runtime_linkage="separate",io_memory_base=None,input_layout=None):
+    io_memory_base = selected_io_base() if io_memory_base is None else io_memory_base
     import hashlib,json,os
     from pathlib import Path
     from merlin.compile.c_sources import c_source_pair
@@ -248,16 +278,31 @@ def prepare_c_package(region,compiled,name,*,target_source,runtime_linkage="sepa
     if binary!=(compiled/"program.bin").read_bytes():raise ValueError("exact float binary differs from source replay")
     from .restoration_budget import instruction_bound
     saved_bound = json.loads((compiled / "float-instruction-bound.json").read_text())
-    bound=instruction_bound(virtual_program(p),machine,program,schema=saved_bound["schema"])
+    from .limits import functional_instruction_limit
+    from types import SimpleNamespace
+    cap=functional_instruction_limit(SimpleNamespace(functional_instruction_limit=saved_bound['max_instructions']))
+    bound=instruction_bound(virtual_program(p),machine,program,schema=saved_bound["schema"],max_instructions=cap)
     if not bound["admitted"] or json.loads((compiled/"float-instruction-bound.json").read_text())!=bound:
-        raise ValueError("exact float instruction bound differs or exceeds default")
+        raise ValueError("exact float instruction bound differs or exceeds selected budget")
     upper=name.upper();n=len(p.operands);logical=p.count*p.width;obytes=p.count*p.output_width
+    input_sizes = [logical] * n
+    mapped_index, packing_helper = None, ""
+    if input_layout is not None:
+        from merlin.compile.layout_c import render_indexed_slice_copy
+        physical, view = input_layout
+        mapped_index = [operand.id for operand in p.operands].index(view.id)
+        if (p.operands[mapped_index].type.dtype != view.type.dtype
+                or p.operands[mapped_index].type.numerical_policy != view.type.numerical_policy
+                or p.count > prod(view.type.shape)):
+            raise ValueError("exact float input packing differs from its logical operand")
+        packing_helper = render_indexed_slice_copy(physical, view, name + "_pack_input")
+        input_sizes[mapped_index] = prod(physical.type.shape) * p.width
     states=[("ctx","sizeof(*ctx)"),("region","sizeof(*region)"),("region->host","sizeof(*region->host)"),
             ("region->workspace",f"{p.workspace_bytes}u"),("inputs",f"{n}u*sizeof(*inputs)"),("outputs","sizeof(*outputs)")]
     checks=[f"  if (!{name}_range({ptr},{size})) return {upper}_INVALID;" for ptr,size in states]
     for i,(ptr,size) in enumerate(states):
         for other,osize in states[:i]:checks.append(f"  if ({name}_overlap({ptr},{size},{other},{osize})) return {upper}_INVALID;")
-    values=[(f"inputs[{i}]",logical) for i in range(n)]+[("outputs[0]",obytes)]
+    values=[(f"inputs[{i}]",input_sizes[i]) for i in range(n)]+[("outputs[0]",obytes)]
     for i,(ptr,size) in enumerate(values):
         checks.append(f"  if (!{name}_range({ptr},{size}u)) return {upper}_INVALID;")
         for other,osize in states:checks.append(f"  if ({name}_overlap({ptr},{size}u,{other},{osize})) return {upper}_INVALID;")
@@ -271,18 +316,24 @@ def prepare_c_package(region,compiled,name,*,target_source,runtime_linkage="sepa
 #define {upper}_SOURCE_WORKSPACE_BYTES 1u
 typedef enum {{ {upper}_OK=0,{upper}_INVALID=1,{upper}_DOMAIN=2,{upper}_MEMORY_ERROR=3,{upper}_DEVICE_ERROR=4 }} {name}_status;
 typedef struct {{ atlas_host *host; atlas_tile_memory_io io; uint8_t *workspace; size_t max_polls; atlas_host_buffer buffers[{n+1}]; }} {name}_context;
-typedef struct {{ {name}_context *region; }} {name}_source_context;
+typedef struct {{ {name}_context *region; size_t input_first; }} {name}_source_context;
 {name}_status {name}_bind({name}_context *,atlas_host *,atlas_tile_memory_io,void *,size_t,size_t);
 {name}_status {name}_source_bind({name}_source_context *,{name}_context *,void *,size_t);
 int {name}_source_dispatch(void *,const void *const *,void *const *);
 '''
-    copies=[]
+    copies=[];transfers=[]
     for i in range(n):
         at=i*p.input_bytes
-        copies.append(f'''  __builtin_memcpy(region->workspace+{at}u,inputs[{i}],{logical}u);
-  __builtin_memset(region->workspace+{at+logical}u,0,{p.input_bytes-logical}u);
-  if (region->io.write(region->io.context,{p.io_memory_base+at}u,region->workspace+{at}u,{p.input_bytes}u)) return {upper}_MEMORY_ERROR;''')
-    implementation=program_array(name+"_words",binary)+f'''
+        if i == mapped_index:
+            copies.append(f"  if ({name}_pack_input(region->workspace+{at}u,inputs[{i}],ctx->input_first,{p.count}u)) return {upper}_INVALID;")
+        else:
+            copies.append(f"  __builtin_memcpy(region->workspace+{at}u,inputs[{i}],{logical}u);")
+        copies.append(f"  __builtin_memset(region->workspace+{at+logical}u,0,{p.input_bytes-logical}u);")
+        transfer=f"  if (region->io.write(region->io.context,{p.io_memory_base+at}u,region->workspace+{at}u,{p.input_bytes}u)) return {upper}_MEMORY_ERROR;"
+        # Validate every packed slice before any device I/O.
+        (transfers if input_layout is not None else copies).append(transfer)
+    copies.extend(transfers)
+    implementation=packing_helper+program_array(name+"_words",binary)+f'''
 static int {name}_range(const void *p,size_t n) {{ return p && n && n<=UINTPTR_MAX-(uintptr_t)p; }}
 static int {name}_overlap(const void *a,size_t an,const void *b,size_t bn) {{ return (uintptr_t)a<(uintptr_t)b+bn && (uintptr_t)b<(uintptr_t)a+an; }}
 {name}_status {name}_bind({name}_context *ctx,atlas_host *host,atlas_tile_memory_io io,void *workspace,size_t bytes,size_t polls) {{
@@ -296,7 +347,7 @@ static int {name}_overlap(const void *a,size_t an,const void *b,size_t bn) {{ re
   if (!{name}_range(ctx,sizeof(*ctx)) || !{name}_range(region,sizeof(*region)) || !{name}_range(region->host,sizeof(*region->host)) ||
       !{name}_range(region->workspace,{p.workspace_bytes}u) || {name}_overlap(ctx,sizeof(*ctx),region,sizeof(*region)) ||
       {name}_overlap(ctx,sizeof(*ctx),region->host,sizeof(*region->host)) || {name}_overlap(ctx,sizeof(*ctx),region->workspace,{p.workspace_bytes}u) || region->host->active) return {upper}_INVALID;
-  ctx->region=region;return {upper}_OK;
+  ctx->region=region;ctx->input_first=0;return {upper}_OK;
 }}
 int {name}_source_dispatch(void *opaque,const void *const *inputs,void *const *outputs) {{
   {name}_source_context *ctx=opaque;

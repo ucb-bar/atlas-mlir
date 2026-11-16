@@ -2,10 +2,12 @@
 #include "Atlas/AtlasProofLimits.h"
 #include "Atlas/AtlasAddressAnalysis.h"
 #include "Atlas/AtlasOps.h"
+#include "mlir/Analysis/Liveness.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/DenseSet.h"
 #include <algorithm>
 #include <cstdlib>
 #include <iterator>
@@ -56,6 +58,7 @@ LogicalResult mlir::atlas::verifyAtlasOutputInitialization(Operation *operation,
   atlasProofInvocation(AtlasProofKind::SourceInitialization);
   auto function = dyn_cast<func::FuncOp>(operation);
   if (!function || function.isDeclaration()) return failure();
+  Liveness liveness(function);
   llvm::DenseMap<Value, uint32_t> values;
   InitializedBytes initialized;
   auto get = [&](Value v) -> std::optional<uint32_t> {
@@ -74,6 +77,99 @@ LogicalResult mlir::atlas::verifyAtlasOutputInitialization(Operation *operation,
   // This is a work bound, not an inferred loop bound or a hardware limit.
   // Unknown runtime branches and exhausted proofs remain compile failures.
   unsigned remaining = kAtlasScalarProofWorkLimit;
+  // Identify scalar values this interpreter can ever resolve. Runtime tensor
+  // contents stay unknown; replaying their arithmetic cannot establish a DMA
+  // address or choose a control edge. This is a may-be-known fixed point, so
+  // loop arguments remain eligible if any incoming edge supplies a known value.
+  llvm::DenseSet<Value> mayBeKnown;
+  SmallVector<Value> knownWork;
+  llvm::DenseMap<Value, SmallVector<Value>> forwarded;
+  llvm::DenseMap<Operation *, unsigned> unknownOperands;
+  auto discover = [&](Value value) {
+    if (mayBeKnown.insert(value).second) knownWork.push_back(value);
+  };
+  auto forward = [&](Block *destination, ValueRange operands) {
+    for (auto [argument, value] : llvm::zip_equal(destination->getArguments(), operands))
+      forwarded[value].push_back(argument);
+  };
+  for (Block &body : function.getBody()) {
+    for (Operation &op : body) {
+      if (!remaining--) return op.emitOpError("output initialization proof exceeded its scalar work limit");
+      atlasProofRecord(AtlasProofKind::SourceInitialization);
+      if (auto constant = dyn_cast<arith::ConstantOp>(op)) {
+        if (isa<IntegerAttr>(constant.getValue()) &&
+            (constant.getType().isInteger(1) || constant.getType().isInteger(32)))
+          discover(constant.getResult());
+      } else if (isa<arith::AddIOp, arith::SubIOp, arith::MulIOp,
+                     arith::AndIOp, arith::OrIOp, arith::XOrIOp,
+                     arith::ShLIOp, arith::ShRUIOp,
+                     arith::ExtUIOp, arith::CmpIOp>(op)) {
+        unknownOperands[&op] = op.getNumOperands();
+      } else if (auto branch = dyn_cast<cf::BranchOp>(op)) {
+        forward(branch.getDest(), branch.getDestOperands());
+      } else if (auto branch = dyn_cast<cf::CondBranchOp>(op)) {
+        forward(branch.getTrueDest(), branch.getTrueDestOperands());
+        forward(branch.getFalseDest(), branch.getFalseDestOperands());
+      }
+    }
+  }
+  while (!knownWork.empty()) {
+    Value value = knownWork.pop_back_val();
+    for (Value argument : forwarded.lookup(value)) {
+      if (!remaining--) return operation->emitOpError("output initialization proof exceeded its scalar work limit");
+      atlasProofRecord(AtlasProofKind::SourceInitialization);
+      discover(argument);
+    }
+    for (OpOperand &use : value.getUses()) {
+      if (!remaining--) return operation->emitOpError("output initialization proof exceeded its scalar work limit");
+      atlasProofRecord(AtlasProofKind::SourceInitialization);
+      auto found = unknownOperands.find(use.getOwner());
+      if (found != unknownOperands.end() && --found->second == 0)
+        for (Value result : use.getOwner()->getResults()) discover(result);
+    }
+  }
+  // Slice once, before replaying loops. Tensor arithmetic and scalar values
+  // used only to form tensor data cannot change initialization. Keep every
+  // control-flow operand (including loop-carried values) so state-cycle and
+  // termination checks retain the same scalar semantics.
+  llvm::DenseSet<Value> needed;
+  SmallVector<Value> worklist;
+  auto require = [&](Value value) {
+    if ((value.getType().isInteger(1) || value.getType().isInteger(32)) &&
+        mayBeKnown.contains(value) && needed.insert(value).second)
+      worklist.push_back(value);
+  };
+  for (Block &body : function.getBody()) {
+    for (Operation &op : body) {
+      if (!remaining--) return op.emitOpError("output initialization proof exceeded its scalar work limit");
+      atlasProofRecord(AtlasProofKind::SourceInitialization);
+      bool load = isa<VirtualDMALoadFP8Op, VirtualDMALoadBF16Op>(op);
+      bool store = isa<VirtualDMAStoreFP8Op, VirtualDMAStoreBF16Op>(op);
+      if (load || store) {
+        require(op.getOperand(load ? 1 : 2));
+        require(op.getOperand(load ? 2 : 3));
+      }
+      if (op.hasTrait<OpTrait::IsTerminator>())
+        for (Value operand : op.getOperands()) require(operand);
+    }
+  }
+  while (!worklist.empty()) {
+    Value value = worklist.pop_back_val();
+    if (!remaining--) return operation->emitOpError("output initialization proof exceeded its scalar work limit");
+    atlasProofRecord(AtlasProofKind::SourceInitialization);
+    if (Operation *definition = value.getDefiningOp())
+      for (Value operand : definition->getOperands()) require(operand);
+  }
+  llvm::DenseMap<Block *, SmallVector<Operation *>> proofOperations;
+  for (Block &body : function.getBody()) {
+    auto &selected = proofOperations[&body];
+    for (Operation &op : body)
+      if (op.hasTrait<OpTrait::IsTerminator>() ||
+          isa<VirtualDMALoadFP8Op, VirtualDMALoadBF16Op,
+              VirtualDMAStoreFP8Op, VirtualDMAStoreBF16Op>(op) ||
+          llvm::any_of(op.getResults(), [&](Value value) { return needed.contains(value); }))
+        selected.push_back(&op);
+  }
   Block *block = &function.getBody().front();
   struct Pending {
     Block *block;
@@ -89,6 +185,16 @@ LogicalResult mlir::atlas::verifyAtlasOutputInitialization(Operation *operation,
   while (!pending.empty()) {
     auto current = std::move(pending.front()); pending.pop_front();
     block = current.block; values = std::move(current.values); initialized = std::move(current.initialized);
+    // Only facts that can be used after this block entry distinguish scalar
+    // states. Dead branch-local facts otherwise duplicate every later proof
+    // path, even after its initialized-byte sets have reached the same join.
+    const auto &liveIn = liveness.getLiveIn(block);
+    SmallVector<Value> dead;
+    for (auto [value, bits] : values) {
+      bool argument = isa<BlockArgument>(value) && cast<BlockArgument>(value).getOwner() == block;
+      if (!argument && !liveIn.contains(value)) dead.push_back(value);
+    }
+    for (Value value : dead) values.erase(value);
     std::vector<std::pair<uint64_t, uint32_t>> scalar;
     for (auto [value, bits] : values)
       scalar.emplace_back(reinterpret_cast<uintptr_t>(value.getAsOpaquePointer()), bits);
@@ -111,7 +217,8 @@ LogicalResult mlir::atlas::verifyAtlasOutputInitialization(Operation *operation,
       initialized = entry->second;
     }
     Block *next = nullptr;
-    for (Operation &op : *block) {
+    for (Operation *selected : proofOperations[block]) {
+      Operation &op = *selected;
       atlasProofTransfer(AtlasProofKind::SourceInitialization);
       if (!remaining--)
         return op.emitOpError("output initialization proof exceeded its scalar work limit");

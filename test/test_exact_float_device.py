@@ -11,7 +11,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 from hashlib import sha256
-from atlas_mlir_native.exact_float_device import prepare_plan,machine_program,OPS,MAX_LEAF_ELEMENTS,compile_source,prepare_c_package
+from atlas_mlir_native.exact_float_device import prepare_plan,prepare_source_plan,chunk_elements,machine_program,OPS,MAX_LEAF_ELEMENTS,compile_source,prepare_c_package
 from atlas_mlir_native.binding import TARGET_IDENTITY
 from atlas_mlir_native.limits import DEFAULT_FUNCTIONAL_INSTRUCTION_LIMIT
 from merlin.semantic_compiler.model import TensorType,pointwise_identity_maps
@@ -40,7 +40,7 @@ def host_reference(source,raw):
         lib=ctypes.CDLL(str(path/"reference.so"));fn=lib.reference
         fn.argtypes=[ctypes.c_void_p,ctypes.POINTER(ctypes.c_void_p),ctypes.POINTER(ctypes.c_void_p)]
         inputs=[ctypes.create_string_buffer(data) for data in raw]
-        p=prepare_plan(source);out=ctypes.create_string_buffer(bytes([0xa5])*(p.count*p.output_width))
+        p=prepare_source_plan(source);out=ctypes.create_string_buffer(bytes([0xa5])*(p.count*p.output_width))
         status=fn(None,(ctypes.c_void_p*len(inputs))(*(ctypes.addressof(a) for a in inputs)),(ctypes.c_void_p*1)(ctypes.addressof(out)))
         return out.raw[:-1],status
 
@@ -108,7 +108,8 @@ class ExactFloatTypedTest(unittest.TestCase):
         return b''.join(row['word_u32'].to_bytes(4,'little') for row in json.loads(r.stdout)['instructions'])
     def test_all_operations_use_complete_standard_contracts(self):
         for op in OPS:
-            for count in (1,35,MAX_LEAF_ELEMENTS[op]):
+            maximum=chunk_elements(prepare_source_plan(request(op,MAX_LEAF_ELEMENTS[op])))
+            for count in (1,35,maximum):
                 source=request(op,count);machine=self.lower(source)
                 r=subprocess.run([str(BIN/'atlas-opt'),'--verify-atlas-generated-schedule','--verify-atlas-machine-stream','--verify-atlas-timing','-'],input=machine,text=True,capture_output=True,timeout=30)
                 self.assertEqual(r.returncode,0,r.stderr)

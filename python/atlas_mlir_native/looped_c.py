@@ -16,7 +16,7 @@ from merlin.semantic_compiler.model import KernelRequest
 from merlin.semantic_compiler.target_binding import verify_native_publication
 
 from .binding import (
-    DRAM_BASE,
+    io_memory_base,
     RTL_REVISION,
     TILE_BYTES,
     check_io_memory_manifest,
@@ -103,6 +103,7 @@ def prepare_c_package(
         or len(output) != 1
     ):
         raise ValueError("looped C export has the wrong input or output ranges")
+    io_base = io_memory_base()
     sizes = (
         *device_tiling.buffer_bytes[:2],
         *((device_tiling.buffer_bytes[2],) if seed else ()),
@@ -112,9 +113,9 @@ def prepare_c_package(
     for address, size in zip(addresses + output, sizes, strict=True):
         if (
             type(address) is not int
-            or address < DRAM_BASE
-            or (address - DRAM_BASE) % TILE_BYTES
-            or address + size > DRAM_BASE + dram_slots() * TILE_BYTES
+            or address < io_base
+            or (address - io_base) % TILE_BYTES
+            or address + size > io_base + dram_slots() * TILE_BYTES
         ):
             raise ValueError("looped C export range exceeds the selected diagnostic window")
         ranges.append((address, address + size))

@@ -7,6 +7,8 @@ No floating-point interpretation, conversion, or arithmetic is performed.
 
 from __future__ import annotations
 
+from .binding import io_memory_base as selected_io_base
+
 from dataclasses import dataclass
 from hashlib import sha256
 import json
@@ -17,7 +19,7 @@ from pathlib import Path
 from merlin.semantic_compiler.model import IndexMap, KernelRequest, pointwise_identity_maps
 from merlin.semantic_compiler.target_binding import NativeCompilationError, verify_native_publication
 
-from .binding import DRAM_BASE, NATIVE_CHECKS, RTL_REVISION, TARGET_IDENTITY, TILE_BYTES, _native_pipeline, _scheduled_virtual_pipeline, _run, dram_slots
+from .binding import NATIVE_CHECKS, RTL_REVISION, TARGET_IDENTITY, TILE_BYTES, _native_pipeline, _scheduled_virtual_pipeline, _run, dram_slots
 
 BYTE_TILE = 1024
 
@@ -44,8 +46,8 @@ class BroadcastPlan:
         return dict(schema="atlas.scalar_broadcast.v1", source_request_digest=self.source.digest(),
                     scalar_node=self.source.nodes[0].id, scalar_hex=self.scalar.hex(),
                     output_node=self.source.outputs[0], output_bytes=self.physical_bytes,
-                    logical_output_bytes=self.output_bytes, output_addresses=[DRAM_BASE + TILE_BYTES],
-                    input_addresses=[DRAM_BASE], input_payload_bytes=[BYTE_TILE],
+                    logical_output_bytes=self.output_bytes, output_addresses=[selected_io_base() + TILE_BYTES],
+                    input_addresses=[selected_io_base()], input_payload_bytes=[BYTE_TILE],
                     physical_output_bytes=self.physical_bytes, tile_bytes=BYTE_TILE,
                     tiles=self.tiles, tile_sha256=sha256(self.tile).hexdigest(),
                     constant_materialization="one immutable raw-byte tile at target compilation",
@@ -81,16 +83,16 @@ def prepare_source(source):
 
 def virtual_program(plan, *, size_limit=None):
     """Existing typed byte transport retains full CFG, DMA, and buffer proofs."""
-    output = DRAM_BASE + TILE_BYTES
-    if output + plan.physical_bytes > DRAM_BASE + dram_slots() * TILE_BYTES:
+    output = selected_io_base() + TILE_BYTES
+    if output + plan.physical_bytes > selected_io_base() + dram_slots() * TILE_BYTES:
         raise NativeCompilationError("resource_limit", "scalar broadcast exceeds selected I/O window")
     signed = lambda n: n if n < 2**31 else n - 2**32
     budget = f"atlas.program_size_limit_bytes = {size_limit} : i64, " if size_limit is not None else ""
     state, tile = "!atlas.virtual_state", "!atlas.virtual_fp8"
     return f'''module {{
-  func.func @scalar_broadcast() -> {state} attributes {{{budget}atlas.input_dram_base = {DRAM_BASE} : i64, atlas.output_dram_base = {output} : i64, atlas.output_dram_bytes = {plan.physical_bytes} : i64}} {{
+  func.func @scalar_broadcast() -> {state} attributes {{{budget}atlas.input_dram_base = {selected_io_base()} : i64, atlas.output_dram_base = {output} : i64, atlas.output_dram_bytes = {plan.physical_bytes} : i64}} {{
     %s = "atlas.virtual_start"() : () -> {state}
-    %base = arith.constant {signed(DRAM_BASE)} : i32
+    %base = arith.constant {signed(selected_io_base())} : i32
     %bytes = arith.constant {BYTE_TILE} : i32
     %loaded, %tile = "atlas.virtual_dma_load_fp8"(%s,%base,%bytes) : ({state},i32,i32) -> ({state},{tile})
     %zero = arith.constant 0 : i32
@@ -194,8 +196,8 @@ static int {name}_overlap(const void *a,size_t an,const void *b,size_t bn) {{
   (void)scratch;(void)bytes;
   if (!ctx || !host || !host->mmio.read32 || !host->mmio.write32 || host->active || !io.write || !io.read || !polls ||
       {name}_overlap(ctx,sizeof(*ctx),host,sizeof(*host))) return {upper}_INVALID;
-  *ctx=({name}_context){{host,io,polls,{{{{{DRAM_BASE}ULL,{BYTE_TILE}u,ATLAS_HOST_DEVICE_READ}},
-    {{{DRAM_BASE + TILE_BYTES}ULL,{plan.physical_bytes}u,ATLAS_HOST_DEVICE_WRITE}}}}}};
+  *ctx=({name}_context){{host,io,polls,{{{{{selected_io_base()}ULL,{BYTE_TILE}u,ATLAS_HOST_DEVICE_READ}},
+    {{{selected_io_base() + TILE_BYTES}ULL,{plan.physical_bytes}u,ATLAS_HOST_DEVICE_WRITE}}}}}};
   return {upper}_OK;
 }}
 {name}_status {name}_source_bind({name}_source_context *ctx,{name}_context *region,void *scratch,size_t bytes) {{
@@ -214,12 +216,12 @@ int {name}_source_dispatch(void *opaque,const void *const *inputs,void *const *o
       {name}_overlap(outputs[0],{plan.output_bytes}u,ctx,sizeof(*ctx)) ||
       {name}_overlap(outputs[0],{plan.output_bytes}u,region,sizeof(*region)) ||
       {name}_overlap(outputs[0],{plan.output_bytes}u,region->host,sizeof(*region->host))) return {upper}_INVALID;
-  if (region->io.write(region->io.context,{DRAM_BASE}ULL,{name}_tile,{BYTE_TILE}u)) return {upper}_MEMORY_ERROR;
+  if (region->io.write(region->io.context,{selected_io_base()}ULL,{name}_tile,{BYTE_TILE}u)) return {upper}_MEMORY_ERROR;
   atlas_host_result status=atlas_host_ensure_loaded(region->host,{name}_words,{len(binary)//4}u);
   if (status==ATLAS_HOST_OK) status=atlas_host_start(region->host,region->buffers,2u);
   if (status==ATLAS_HOST_OK) status=atlas_host_wait(region->host,region->max_polls);
   if (status!=ATLAS_HOST_OK) return {upper}_DEVICE_ERROR;
-  if (region->io.read(region->io.context,{DRAM_BASE + TILE_BYTES}ULL,outputs[0],{plan.output_bytes}u)) return {upper}_MEMORY_ERROR;
+  if (region->io.read(region->io.context,{selected_io_base() + TILE_BYTES}ULL,outputs[0],{plan.output_bytes}u)) return {upper}_MEMORY_ERROR;
   return {upper}_OK;
 }}
 '''

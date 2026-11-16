@@ -20,6 +20,7 @@ from .binding import (
     _run,
     check_io_memory_manifest,
     dram_slots,
+    io_memory_base,
 )
 from .memory_windows import dma_span_in_window
 from .pointwise import (
@@ -49,7 +50,8 @@ def prepare_c_package(
                                        runtime_linkage=runtime_linkage)
 
 
-def prepare_precision_c_package(precision, compiled, name, *, target_source, runtime_linkage="separate"):
+def prepare_precision_c_package(precision, compiled, name, *, target_source, runtime_linkage="separate",
+                                output_dtype=None, input_dtype=None):
     """Replay a precision-owned target and render its explicit source operands."""
     source = precision.source
     request = precision.request
@@ -96,9 +98,11 @@ def prepare_precision_c_package(precision, compiled, name, *, target_source, run
         if (
             type(address) is not int
             or address % TILE_BYTES
+            or address < io_memory_base()
+            or address + size > io_memory_base() + dram_slots() * TILE_BYTES
             or not dma_span_in_window(address, size)
         ):
-            raise ValueError("pointwise byte address is unaligned or outside the selected window")
+            raise ValueError("pointwise byte address is unaligned or outside the selected memory window")
         ranges.append((address, address + size))
     if max(b for a, b in ranges) - min(a for a, b in ranges) > dram_slots() * TILE_BYTES:
         raise ValueError("pointwise buffers exceed the selected memory window")
@@ -142,16 +146,21 @@ def prepare_precision_c_package(precision, compiled, name, *, target_source, run
     replayed = json.loads(_run([str(tools / "atlas-emit"), "--program-json", "-"], input_text=machine))
     if binary != b"".join(row["word_u32"].to_bytes(4, "little") for row in replayed["instructions"]):
         raise ValueError("pointwise encoded program differs from source lowering")
-    from .restoration_budget import instruction_bound
-    from .limits import functional_instruction_limit
     from types import SimpleNamespace
+
+    from .limits import functional_instruction_limit
+    from .restoration_budget import instruction_bound
     saved_bound = json.loads((compiled / "pointwise-instruction-bound.json").read_text())
     cap = functional_instruction_limit(SimpleNamespace(functional_instruction_limit=saved_bound["max_instructions"]))
     bound = instruction_bound(virtual_program(plan, addresses, output, descriptor), machine, replayed, max_instructions=cap)
     if not bound["admitted"] or saved_bound != bound:
         raise ValueError("pointwise instruction bound differs or exceeds default")
     elements = [prod(node.type.shape) for node in request.nodes]
-    source_dtype = source.nodes[-1].type.dtype
+    if input_dtype is not None and input_dtype != 'bf16':
+        raise ValueError('private input transport requires original BF16 codes')
+    source_dtype = source.nodes[-1].type.dtype if input_dtype is None else input_dtype
+    if input_dtype is not None and output_dtype is None:
+        output_dtype = source.nodes[-1].type.dtype
     encode = render_bf16_codes_c if source_dtype == "bf16" else render_f32_array_c
     source_inputs = tuple(node.id for node in source.nodes if node.effect in {"input", "constant"})
     helpers = (
@@ -174,6 +183,7 @@ def prepare_precision_c_package(precision, compiled, name, *, target_source, run
         tile_bytes=plan.tile_bytes,
         helpers=helpers,
         source_dtype=source_dtype,
+        output_dtype=output_dtype,
         source_input_indices=tuple(source_inputs.index(key) for key in precision.record()["inputs"]),
     )
     return {

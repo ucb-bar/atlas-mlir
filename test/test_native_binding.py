@@ -1,6 +1,6 @@
 """Optional Merlin-native raw movement integration; no ACT compiler is used."""
-
 from __future__ import annotations
+
 
 import copy
 import ctypes
@@ -13,8 +13,10 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
+from merlin.semantic_compiler.codegen import codegen_options, current_codegen_options
 
 ROOT = Path(__file__).resolve().parents[1]
 MERLIN = os.environ.get("MERLIN_NATIVE_ROOT")
@@ -171,7 +173,7 @@ class NativeBindingTest(unittest.TestCase):
     def test_native_optimized_pipeline_compiles_and_tracks_qualification(self) -> None:
         from merlin.semantic_compiler.search import SearchLimits
 
-        with patch.dict(os.environ, ATLAS_NATIVE_PIPELINE="optimized"):
+        with codegen_options(replace(current_codegen_options(), native_pipeline="optimized")):
             manifest = self.compile_verified(
                 self.request(), fixed_inputs={"x": 3}, fixed_outputs=(35,),
                 destination=self.work / "optimized", limits=SearchLimits(),

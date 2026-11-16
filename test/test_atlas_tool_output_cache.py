@@ -1,11 +1,12 @@
 """The pure tool cache preserves output and checks every execution input."""
 
+from dataclasses import replace
 import subprocess
 
 import pytest
 
+from merlin.semantic_compiler.codegen import CodegenOptions, codegen_options, current_codegen_options
 from atlas_mlir_native import binding
-from merlin.semantic_compiler.codegen import CodegenOptions, codegen_options
 from merlin.semantic_compiler.materialization import materialization_session
 from merlin.semantic_compiler.target_binding import NativeCompilationError
 
@@ -92,3 +93,22 @@ def test_output_files_and_unknown_tools_are_never_reused(compiler):
             binding._run([str(unknown), "-"], input_text="input")
     assert len(calls) == 4
     assert stats["calls"] == 0
+
+
+def test_recipe_options_partition_pure_tool_cache(compiler):
+    executable, calls = compiler
+    baseline = current_codegen_options()
+    recipes = [
+        {}, {"native_pipeline": "optimized"}, {"adjacent_patterns": "expanded_silu"},
+        {"exponent_page_cache": True}, {"staging_storage": "vmem"},
+        {"looped_operand_reuse": "resident-a"}, {"quantized_operand_reuse": "row-cache"},
+        {"exact_binary_lane_groups": True}, {"exact_binary_vector_preflight": True},
+        {"exact_cast_vector_preflight": True}, {"static_quantizer_sizing": True},
+        {"exact_binary_routes": True}, {"capture_postspill": True}, {"kernel_library": True},
+    ]
+    with materialization_session(enabled=True) as stats:
+        for recipe in recipes:
+            with codegen_options(replace(baseline, **recipe)):
+                for _ in range(2):
+                    assert binding._run([str(executable), "-"], input_text="module {}") == "compiled output\n"
+    assert stats["hits"] == stats["misses"] == len(calls) == len(recipes)

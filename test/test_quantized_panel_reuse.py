@@ -1,8 +1,9 @@
 """Paired rows share operands without changing per-output K order."""
+from merlin.semantic_compiler.codegen import codegen_options, current_codegen_options
+
 from dataclasses import replace
 import os
 import unittest
-from unittest.mock import patch
 
 from atlas_mlir_native.already_quantized import prepare_source
 from atlas_mlir_native.binding import DRAM_BASE
@@ -24,8 +25,8 @@ def panel_virtual(plan,layout):
 
 class PanelReuseTest(unittest.TestCase):
     def setUp(self):
-        from merlin.semantic_compiler.codegen import CodegenOptions,codegen_options
-        options=codegen_options(CodegenOptions(io_memory_bytes=64*1024*1024))
+
+        options=codegen_options(replace(current_codegen_options(), io_memory_bytes=64*1024*1024))
         options.__enter__()
         self.addCleanup(options.__exit__,None,None,None)
 
@@ -64,10 +65,13 @@ class PanelReuseTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root=Path(directory)
             capture=SelectionCapture(build_snapshot(root/'native'))
-            with patch.dict(os.environ,ATLAS_QUANTIZED_OPERAND_REUSE='paired-cache'):
+            with codegen_options(replace(current_codegen_options(), quantized_operand_reuse='paired-cache')):
                 quantized_loop.compile_source(capture,canonical,target_source=ROOT,
                     destination=root/'compiled',limits=SearchLimits())
-            with patch.dict(os.environ,ATLAS_QUANTIZED_OPERAND_REUSE='invalid'):
+            with codegen_options(replace(current_codegen_options(), quantized_operand_reuse='ordered')):
+                with self.assertRaisesRegex(ValueError, 'sizing context changed'):
+                    bind_counted(source,canonical,root/'compiled',root/'different-options',capture,target_source=ROOT)
+            with codegen_options(replace(current_codegen_options(), quantized_operand_reuse='paired-cache')):
                 bind_counted(source,canonical,root/'compiled',root/'bound',capture,target_source=ROOT)
                 record,files=quantized_loop_c.prepare_c_package(source,root/'bound','paired',target_source=ROOT)
                 self.assertEqual(record['output_node_ids'],list(source.outputs))
@@ -115,7 +119,7 @@ class PanelReuseTest(unittest.TestCase):
                 mc,nc,kc=((v+31)//32 for v in (m,n,k))
                 phases=(kc+PANEL_K_TILES-1)//PANEL_K_TILES
                 saved_weights=(mc//2)*nc*kc*1024
-                partial_reads=phases*mc*nc*2048
+                partial_reads=(phases-1)*mc*nc*2048
                 self.assertEqual(32*(old.load_beats-new.load_beats),saved_weights-partial_reads)
                 self.assertEqual(32*(new.store_beats-old.store_beats),partial_reads)
                 self.assertLess(new.load_beats+new.store_beats,old.load_beats+old.store_beats)

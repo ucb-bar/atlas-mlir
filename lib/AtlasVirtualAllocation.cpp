@@ -549,6 +549,13 @@ LogicalResult VirtualAllocationPlan::colorValues(RegisterKind kind) {
       for (Value second : set)
         interfere(first, second);
   };
+  // Live values already form a clique. Removing values preserves it; only
+  // newly inserted values need edges to the remaining live values.
+  auto insertLive = [&](Set &live, Value value) {
+    if (live.insert(value).second)
+      for (Value other : live)
+        interfere(value, other);
+  };
   // All runtime controls are loaded from the mailbox before the entry
   // block executes. Their physical registers therefore overlap at staging,
   // even if their SSA uses are disjoint later in the CFG.
@@ -579,8 +586,7 @@ LogicalResult VirtualAllocationPlan::colorValues(RegisterKind kind) {
       if (auto branch = dyn_cast<cf::CondBranchOp>(op)) {
         Value condition = branch.getCondition();
         if (selected(condition)) {
-          live.insert(condition);
-          clique(live);
+          insertLive(live, condition);
           note(live, &op);
         }
         stage(live, op);
@@ -612,8 +618,7 @@ LogicalResult VirtualAllocationPlan::colorValues(RegisterKind kind) {
         live.erase(result);
       }
       for (Value operand : operands)
-        live.insert(operand);
-      clique(live);
+        insertLive(live, operand);
       stage(live, op);
     }
     SmallVector<Value> args;

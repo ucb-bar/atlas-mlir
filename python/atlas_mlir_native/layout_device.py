@@ -4,6 +4,8 @@ Only raw bytes cross the host boundary. The common compiler allocates and times
 these operations and verifies its six ordinary source contracts.
 """
 from __future__ import annotations
+
+from .binding import io_memory_base as selected_io_base
 from dataclasses import dataclass
 from hashlib import sha256
 from math import prod, gcd
@@ -109,11 +111,14 @@ def _segment(index, shape, source_strides, output_strides, source_offset, output
                 source_row_bytes=0, output_row_bytes=0)
 
 
-def prepare_source(source, *, io_memory_base=DRAM_BASE):
+def prepare_source(source, *, io_memory_base=None):
     """Plan byte transport in an explicitly selected device I/O window."""
+    io_memory_base = selected_io_base() if io_memory_base is None else io_memory_base
     if (type(io_memory_base) is not int or io_memory_base < 0 or io_memory_base % 32
             or io_memory_base + dram_slots() * TILE_BYTES > 1 << 32):
         raise ValueError("device I/O window must be 32-byte aligned within the 32-bit buffer ABI")
+    from .binding import validate_explicit_io_base
+    validate_explicit_io_base(io_memory_base)
     if (source.target_identity != TARGET_IDENTITY or source.lowering_policy != "diagnostic"
             or source.physical_extents or source.boundary_layouts or source.output_layouts
             or source.output_storages != ("external",)):
@@ -410,13 +415,12 @@ def virtual_program(plan, *, size_limit=None):
     lines.extend((f"  return {current} : {state}", " }", "}", ""))
     return "\n".join(lines)
 
-def compile_source(snapshot, source, *, target_source, destination, limits, io_memory_base=DRAM_BASE):
+def compile_source(snapshot, source, *, target_source, destination, limits, io_memory_base=None):
+    io_memory_base = selected_io_base() if io_memory_base is None else io_memory_base
     plan = prepare_source(source, io_memory_base=io_memory_base)
     from . import layout_prefix_application
     schedule = layout_prefix_application.prepare_plan(plan)
     if schedule is not None:
-        if io_memory_base != DRAM_BASE:
-            raise ValueError("custom I/O base is unsupported for layout prefix schedules")
         return layout_prefix_application.compile_source(snapshot, source, schedule,
             target_source=target_source, destination=destination, limits=limits)
     from merlin.semantic_compiler.codegen import current_codegen_options
@@ -460,16 +464,16 @@ def compile_source(snapshot, source, *, target_source, destination, limits, io_m
     return manifest
 
 
-def prepare_c_package(source, compiled, name, *, target_source, runtime_linkage="separate", io_memory_base=DRAM_BASE):
+def prepare_c_package(source, compiled, name, *, target_source, runtime_linkage="separate", io_memory_base=None):
+    io_memory_base = selected_io_base() if io_memory_base is None else io_memory_base
     from merlin.compile.c_sources import c_source_pair
     from .c_runtime import program_array, runtime_headers, runtime_members
     plan = prepare_source(source, io_memory_base=io_memory_base)
     compiled, target_source = Path(compiled), Path(target_source)
     if (compiled / "layout-prefix-manifest.json").exists():
-        if io_memory_base != DRAM_BASE:
-            raise ValueError("custom I/O base is unsupported for layout prefix schedules")
         from .layout_prefix_application import prepare_c_package as prepare_prefix
-        return prepare_prefix(source, compiled, name, target_source=target_source, runtime_linkage=runtime_linkage)
+        return prepare_prefix(source, compiled, name, target_source=target_source, runtime_linkage=runtime_linkage,
+                              io_memory_base=io_memory_base)
     manifest = json.loads((compiled / "manifest.json").read_text())
     verify_native_publication(compiled, manifest, engine="merlin_native", request_digest=source.digest(), target_identity=source.target_identity)
     from merlin.semantic_compiler.codegen import current_codegen_options

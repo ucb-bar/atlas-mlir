@@ -1,6 +1,8 @@
 """Publish one checked exp-pack/PV body through a bounded source C interface."""
 from __future__ import annotations
 
+from .binding import io_memory_base as selected_io_base
+
 import hashlib
 import json
 from math import prod
@@ -13,7 +15,7 @@ from merlin.semantic_compiler.precision_values import FloatBoundarySpec
 from merlin.semantic_compiler.softmax_source import recognize_masked_row_softmax
 from merlin.semantic_compiler.target_binding import verify_native_publication
 
-from .binding import DRAM_BASE, TILE_BYTES, check_io_memory_manifest, dram_slots
+from .binding import TILE_BYTES, check_io_memory_manifest, dram_slots
 from .c_runtime import program_array, runtime_headers, runtime_members
 from .layout import pack_bf16_pair_halves
 from .quantized_softmax_value import prepare_source, score_spec
@@ -62,7 +64,7 @@ def _checked_execution(plan, compiled, target_source):
     execution = json.loads(_member(compiled, 'execution_plan.json'))
     _, slots, sizes, liveness = mixed_memory_plan(plan.body)
     def row(key):
-        return dict(node=key, address=DRAM_BASE+slots[key]*TILE_BYTES, bytes=sizes[key])
+        return dict(node=key, address=selected_io_base()+slots[key]*TILE_BYTES, bytes=sizes[key])
     inputs = [dict(**row(n.id), type=n.type.record()) for n in plan.body.nodes if n.effect in {'input', 'constant'}]
     outputs = [dict(**row(key), type=plan.body.node(key).type.record()) for key in plan.body.outputs]
     buffers = [row(key) for key in slots]
@@ -114,8 +116,8 @@ def _render_package(plan, execution, binary, slots, name, target_source, runtime
     addresses = {entry['node']: entry['address'] for entry in execution['inputs']+execution['outputs']}
     readonly = sum(n.effect in {'input', 'constant'} for n in body.nodes)
     end = max(slots.values())+1
-    ranges = [(DRAM_BASE, readonly*TILE_BYTES, 'READ'),
-              (DRAM_BASE+readonly*TILE_BYTES, (end-readonly)*TILE_BYTES, 'READ_WRITE')]
+    ranges = [(selected_io_base(), readonly*TILE_BYTES, 'READ'),
+              (selected_io_base()+readonly*TILE_BYTES, (end-readonly)*TILE_BYTES, 'READ_WRITE')]
     if any(size <= 0 for _, size, _ in ranges):
         raise ValueError('quantized softmax value body needs readonly and mutable slot ranges')
     buffers = ','.join(f'{{{address}u,{size}u,ATLAS_HOST_DEVICE_{mode}}}' for address,size,mode in ranges)

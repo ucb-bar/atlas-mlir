@@ -17,27 +17,34 @@ from merlin.semantic_compiler.model import KernelRequest
 from merlin.semantic_compiler.target_binding import verify_native_publication
 
 from . import vector_quantize as device
-from .binding import TARGET_IDENTITY, TILE_BYTES, dram_slots
-from .limits import DEFAULT_FUNCTIONAL_INSTRUCTION_LIMIT
+from .binding import TARGET_IDENTITY, TILE_BYTES, dram_slots, _native_pipeline
+from .limits import functional_instruction_limit
 
 STATIC_CHUNK_ELEMENTS = 2048
-# A static body has no amax or per-row exponent packing. Even the worst
-# 32-lane prefix path costs at most 50 instructions/tile plus 128 fixed:
-# 50 * (2**19 / 32) + 128 = 819,328, below the default 1M bound. Unchanged
-# npu_model measured 819,249 at count 524,256 (the largest gcd32 extent).
-# Larger inputs or smaller I/O windows retain bounded chunk dispatch.
 STATIC_WHOLE_BODY_MAX_ELEMENTS = 1 << 19
+# A static body has no amax or exceptional-lane scan. Use a conservative
+# envelope for the smallest supported (32-lane) tile, then independently prove
+# the actual generated machine bound during compilation and C export.
+STATIC_TILE_INSTRUCTIONS = 50
+STATIC_FIXED_INSTRUCTIONS = 128
+
+
+def _static_body_capacity(instruction_limit):
+    instruction_elements = max(0, (instruction_limit - STATIC_FIXED_INSTRUCTIONS)
+                               // STATIC_TILE_INSTRUCTIONS) * 32
+    memory_elements = max(0, (dram_slots() * TILE_BYTES - 32) // 3)
+    return min(instruction_elements, memory_elements) // 32 * 32
+
+
 # Legacy measured scheduling estimate retained to preserve chunking and images.
 # The current exceptional-lane loop has 25 words, so the older 119,525/group
 # measurement is not a worst-case proof. Admission uses the replayed machine
 # instruction bound; do not use this scheduling constant as that proof.
 DYNAMIC_GROUP_WORST_INSTRUCTIONS = 119_525
-DYNAMIC_GROUPS_PER_LAUNCH = DEFAULT_FUNCTIONAL_INSTRUCTION_LIMIT // DYNAMIC_GROUP_WORST_INSTRUCTIONS
 # Counted full-tile groups scale with their number of 4,096-element blocks.
 # Charge each block the complete measured single-group cost, including fixed
-# exponent and launch work. This conservative envelope admits a single
-# 32,768-element window512 head and preserves eight 4,096-element heads.
-MAX_DYNAMIC_GROUP_ELEMENTS = 4096 * DYNAMIC_GROUPS_PER_LAUNCH
+# exponent and launch work. The selected execution budget sizes this envelope;
+# compilation must still prove the actual machine bound and image capacity.
 
 
 def _dynamic_group_instruction_bound(length):
@@ -57,6 +64,18 @@ class QuantizerSchedule:
     attrs: dict
     bodies: tuple[KernelRequest, ...]
     launches: tuple[dict, ...]
+    instruction_limit: int
+    pipeline: str
+    static_body_capacity: int
+    static_quantizer_sizing: bool
+
+    @property
+    def dynamic_groups_per_launch(self):
+        return self.instruction_limit // DYNAMIC_GROUP_WORST_INSTRUCTIONS
+
+    @property
+    def max_dynamic_group_elements(self):
+        return 4096 * self.dynamic_groups_per_launch
 
     @property
     def count(self):
@@ -73,13 +92,16 @@ class QuantizerSchedule:
                     input_bytes=self.count * self.width, code_bytes=self.count,
                     exponent_bytes=prod(self.exponents.type.shape) * 4,
                     static_chunk_elements=STATIC_CHUNK_ELEMENTS,
-                    static_whole_body_max_elements=STATIC_WHOLE_BODY_MAX_ELEMENTS,
-                    max_dynamic_group_elements=MAX_DYNAMIC_GROUP_ELEMENTS,
-                    dynamic_groups_per_launch=DYNAMIC_GROUPS_PER_LAUNCH,
+                    static_whole_body_max_elements=self.static_body_capacity,
+                    **(dict(lowering_pipeline=self.pipeline,
+                            static_instruction_envelope="50 * ceil(elements / 32) + 128")
+                       if self.static_quantizer_sizing else {}),
+                    max_dynamic_group_elements=self.max_dynamic_group_elements,
+                    dynamic_groups_per_launch=self.dynamic_groups_per_launch,
                     dynamic_group_worst_instructions=DYNAMIC_GROUP_WORST_INSTRUCTIONS,
                     dynamic_group_bound_block_elements=4096,
                     dynamic_group_bound_rule="119525 * ceil(group_elements / 4096)",
-                    functional_instruction_limit=DEFAULT_FUNCTIONAL_INSTRUCTION_LIMIT,
+                    functional_instruction_limit=self.instruction_limit,
                     bodies=[dict(index=index, path=f"segments/body_{index:03d}", request_digest=body.digest(),
                                  shape=list(body.node(self.x.id).type.shape)) for index, body in enumerate(self.bodies)],
                     launches=list(self.launches), launches_per_invocation=len(self.launches),
@@ -100,9 +122,24 @@ def _body(source, x, codes, exponents, attrs, shape):
     return body
 
 
-def prepare_plan(source):
+def prepare_plan(source, *, limits=None, _pipeline=None, _static_capacity=None, _static_sizing=None):
+    from merlin.semantic_compiler.codegen import current_codegen_options
     from . import dynamic_quantize, static_quantize
 
+    instruction_limit = functional_instruction_limit(limits)
+    pipeline = _native_pipeline() if _pipeline is None else _pipeline
+    if pipeline not in ("mandatory", "optimized"):
+        raise ValueError("unknown quantizer scheduling pipeline")
+    static_sizing = current_codegen_options().static_quantizer_sizing if _static_sizing is None else _static_sizing
+    static_capacity = (_static_body_capacity(instruction_limit) if static_sizing
+                       else STATIC_WHOLE_BODY_MAX_ELEMENTS)
+    if _static_capacity is not None:
+        if (type(_static_capacity) is not int or _static_capacity < 0
+                or _static_capacity % 32 or _static_capacity > static_capacity
+                or not static_sizing and _static_capacity != static_capacity):
+            raise ValueError("saved quantizer static capacity exceeds selected admission")
+        static_capacity = _static_capacity
+    max_group_elements = 4096 * (instruction_limit // DYNAMIC_GROUP_WORST_INSTRUCTIONS)
     code = next((node for node in source.nodes if node.op == "atlas.quantize_act.codes"), None)
     if code is None:
         raise ValueError("activation quantizer needs its code projection")
@@ -124,9 +161,18 @@ def prepare_plan(source):
         raise ValueError("scheduled quantizer extent exceeds bounded addressing")
     spans = []
     if mode == "static":
-        chunk = (count if x.type.dtype == 'bf16' and count % 32 == 0
-                 and count <= STATIC_WHOLE_BODY_MAX_ELEMENTS
-                 and count * 3 + 32 <= dram_slots() * TILE_BYTES else STATIC_CHUNK_ELEMENTS)
+        chunk = STATIC_CHUNK_ELEMENTS
+        if not static_sizing:
+            chunk = (count if x.type.dtype == 'bf16' and count % 32 == 0
+                     and count <= STATIC_WHOLE_BODY_MAX_ELEMENTS
+                     and count * 3 + 32 <= dram_slots() * TILE_BYTES else STATIC_CHUNK_ELEMENTS)
+        elif x.type.dtype == 'bf16' and count % 32 == 0:
+            if static_capacity < 32:
+                raise ValueError("selected execution budget or I/O window cannot fit a static quantizer tile")
+            # A large tensor uses bounded counted bodies, not thousands of
+            # tiny fallback launches. Full-tile chunks also avoid making every
+            # iteration use a prefix tile merely because the final tail is short.
+            chunk = count if count <= static_capacity else (static_capacity // 1024 * 1024 or static_capacity)
         for first in range(0, count, chunk):
             length = min(chunk, count - first)
             spans.append((first, length, 0, 1, (length,)))
@@ -150,14 +196,14 @@ def prepare_plan(source):
         while group < len(groups):
             first, end = groups[group]
             length = (end - first) * k
-            if length > MAX_DYNAMIC_GROUP_ELEMENTS:
-                raise ValueError(f"indivisible dynamic reduction group has {length} elements; selected device body supports at most {MAX_DYNAMIC_GROUP_ELEMENTS}")
+            if length > max_group_elements:
+                raise ValueError(f"indivisible dynamic reduction group has {length} elements; selected device body supports at most {max_group_elements}")
             if length > 4096 and length % 1024:
                 raise ValueError("indivisible dynamic reduction group above 4096 elements requires complete 1024-element tiles")
             packed = 1
             bounded_tiles = length % 1024 == 0 or length <= 1024
             if reduction == "head" and x.type.dtype == "bf16" and length % 32 == 0 and bounded_tiles:
-                capacity = min(DEFAULT_FUNCTIONAL_INSTRUCTION_LIMIT // _dynamic_group_instruction_bound(length), 256,
+                capacity = min(instruction_limit // _dynamic_group_instruction_bound(length), 256,
                                max(1, (dram_slots() * TILE_BYTES - 1024) // (length * 3)))
                 while (packed < capacity and group + packed < len(groups)
                        and groups[group + packed][1] - groups[group + packed][0] == end - first):
@@ -176,11 +222,12 @@ def prepare_plan(source):
                              input_bytes=length * (2 if x.type.dtype == "bf16" else 4),
                              code_offset_bytes=first, code_bytes=length,
                              exponent_offset_bytes=exp_first * 4, exponent_bytes=exp_count * 4))
-    return QuantizerSchedule(source, x, codes, exponents, attrs, tuple(bodies), tuple(launches))
+    return QuantizerSchedule(source, x, codes, exponents, attrs, tuple(bodies), tuple(launches),
+                             instruction_limit, pipeline, static_capacity, static_sizing)
 
 
 def compile_source(snapshot, region, *, target_source, destination, limits):
-    plan = prepare_plan(region)
+    plan = prepare_plan(region, limits=limits)
     destination = Path(destination)
     destination.mkdir(parents=True, exist_ok=False)
     (destination / "segments").mkdir()
@@ -262,14 +309,24 @@ def _verify_publication(root, manifest, plan):
         verify_native_publication(leaf, detail, engine="merlin_native", request_digest=body.digest(), target_identity=plan.source.target_identity)
 
 
-def prepare_c_package(region, compiled, name, *, target_source, runtime_linkage="separate"):
+def prepare_c_package(region, compiled, name, *, target_source, runtime_linkage="separate", input_permutation=None):
     from merlin.compile.c_sources import c_source_pair
     from merlin.compile.semantic_application import CompiledCRegion
     from .c_runtime import RUNTIME_SHARED_FILES
 
     if runtime_linkage != "separate":
         raise ValueError("scheduled quantizer requires shared runtime linkage")
-    plan, compiled = prepare_plan(region), Path(compiled)
+    from types import SimpleNamespace
+
+    compiled = Path(compiled)
+    # Replay the captured partition policy and capacity, independently of the
+    # current pipeline selection. The resolver still enforces the invocation cap.
+    saved = json.loads((compiled / "quantizer-schedule.json").read_text())
+    plan = prepare_plan(region, limits=SimpleNamespace(
+        functional_instruction_limit=saved["functional_instruction_limit"]),
+        _pipeline=saved.get("lowering_pipeline", "mandatory"),
+        _static_sizing="static_instruction_envelope" in saved,
+        _static_capacity=saved["static_whole_body_max_elements"])
     manifest = json.loads((compiled / "quantizer-manifest.json").read_text())
     _verify_publication(compiled, manifest, plan)
     if (json.loads((compiled / "source-request.json").read_text()) != region.record()
@@ -279,7 +336,8 @@ def prepare_c_package(region, compiled, name, *, target_source, runtime_linkage=
     if [row["path"] for row in manifest["segments"]] != expected_paths:
         raise ValueError("scheduled quantizer body set differs from source schedule")
     lowered = [device.prepare_c_package(body, compiled / path, name + f"_body_{index:03d}",
-                                       target_source=target_source, runtime_linkage=runtime_linkage)
+                                       target_source=target_source, runtime_linkage=runtime_linkage,
+                                       input_permutation=input_permutation)
                for index, (body, path) in enumerate(zip(plan.bodies, expected_paths, strict=True))]
     maximum = max(row.description["workspace_bytes"] for row in lowered)
     code_at, exp_at = maximum, maximum + plan.count
@@ -298,7 +356,11 @@ def prepare_c_package(region, compiled, name, *, target_source, runtime_linkage=
         inner = name + f"_body_{index:03d}"
         output_values = {plan.codes.id: f"region->workspace+{code_at + call['code_offset_bytes']}u",
                          plan.exponents.id: f"region->workspace+{exp_at + call['exponent_offset_bytes']}u"}
-        launch_code.append("  { const void *body_inputs[1]={(const uint8_t *)inputs[0]+" + str(call["input_offset_bytes"]) + "u}; void *body_outputs[2]={" + ",".join(output_values[key] for key in region.outputs) + f"}}; int result={inner}_source_dispatch(&region->source_{index},body_inputs,body_outputs); if (result) return result; }}")
+        source_pointer=f'(const uint8_t *)inputs[0]+{call["input_offset_bytes"]}u'
+        if input_permutation is not None:
+            launch_code.append(f'  region->source_{index}.input_first={call["input_offset_bytes"] // plan.width}u;')
+            source_pointer='inputs[0]'
+        launch_code.append("  { const void *body_inputs[1]={" + source_pointer + "}; void *body_outputs[2]={" + ",".join(output_values[key] for key in region.outputs) + f"}}; int result={inner}_source_dispatch(&region->source_{index},body_inputs,body_outputs); if (result) return result; }}")
     offsets = {plan.codes.id: code_at, plan.exponents.id: exp_at}
     from .slice_dispatch import render_slice_dispatch
     declarations, implementation = render_slice_dispatch(

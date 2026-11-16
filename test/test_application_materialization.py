@@ -9,11 +9,12 @@ import json
 
 import pytest
 
+from merlin.semantic_compiler.codegen import codegen_options, current_codegen_options
 from atlas_mlir_native.application import AtlasApplicationAdapter
 from atlas_mlir_native import exact_float_application as application
 from atlas_mlir_native import exact_float_device as device
 from atlas_mlir_native.application_materialization import bind_exact_float
-from merlin.semantic_compiler.codegen import CodegenOptions, codegen_options
+
 from merlin.semantic_compiler.materialization import canonical_request, materialization_session
 from test_exact_float_device import request
 
@@ -42,7 +43,7 @@ def test_rebind_every_float_kind_matches_all_fresh_publication_bytes(tmp_path, o
     canonical = canonical_request(original, source_identity_policy="provenance")
     adapter = AtlasApplicationAdapter.__new__(AtlasApplicationAdapter)
     alternative = SimpleNamespace(metadata=(("kind", "exact_float_device"),))
-    with codegen_options(CodegenOptions(io_memory_bytes=67108864)):
+    with codegen_options(replace(current_codegen_options(), io_memory_bytes=67108864)):
         with materialization_session(enabled=False):
             fresh = adapter.compile_region(None, original, alternative, "region", tmp_path / "fresh", ROOT, None)
         with materialization_session(enabled=True):
@@ -72,7 +73,7 @@ def test_provider_advertises_capability_without_enabling_reuse():
     assert not hasattr(AtlasApplicationAdapter, "materialization_cache_supported")
 
 
-def test_materialization_identity_uses_effective_inputs_and_receipt_mode(tmp_path, monkeypatch):
+def test_materialization_identity_uses_effective_inputs_and_receipt_mode(tmp_path, monkeypatch, select_codegen_options):
     class Choice:
         def to_dict(self):
             return dict(id="choice", nodes=[], inputs=[], outputs=[], resident_inputs=[], resident_outputs=[])
@@ -83,30 +84,56 @@ def test_materialization_identity_uses_effective_inputs_and_receipt_mode(tmp_pat
     for name in ("atlas-opt", "atlas-emit"):
         (tools / name).write_bytes(name.encode())
     monkeypatch.setenv("ATLAS_OOT_BIN_DIR", str(tools))
-    monkeypatch.setenv("ATLAS_NATIVE_PIPELINE", "mandatory")
-    monkeypatch.delenv("ATLAS_CAPTURE_POSTSPILL", raising=False)
+    select_codegen_options(native_pipeline="mandatory")
+    select_codegen_options(capture_postspill=False)
     source, choice = request("bf16_neg", 3), Choice()
     original = adapter.materialization_identity(source, choice)
+    assert set(original["compilation_identity"]) == {
+        "schema", "policy", "application_sha256", "binding_sha256", "materialization_sources",
+        "tools", "pipeline", "capture_postspill", "deterministic_receipts",
+    }
     monkeypatch.setenv("UNRELATED_COMPILER_TEST", "changed")
     working = tmp_path / "working"
     working.mkdir()
     monkeypatch.chdir(working)
     assert adapter.materialization_identity(source, choice) == original
-    monkeypatch.setenv("ATLAS_QUANTIZED_OPERAND_REUSE", "row-cache")
+    select_codegen_options(quantized_operand_reuse="row-cache")
     changed = adapter.materialization_identity(source, choice)
     assert changed != original
     assert changed["compilation_identity"]["quantized_operand_reuse"] == "row-cache"
-    monkeypatch.setenv("ATLAS_QUANTIZED_OPERAND_REUSE", "ordered")
+    select_codegen_options(quantized_operand_reuse="ordered")
+    assert adapter.materialization_identity(source, choice) == original
+    select_codegen_options(exact_binary_vector_preflight=True)
+    changed = adapter.materialization_identity(source, choice)
+    assert changed != original
+    assert changed["compilation_identity"]["exact_binary_vector_preflight"] is True
+    select_codegen_options(exact_binary_vector_preflight=False)
+    assert adapter.materialization_identity(source, choice) == original
+    select_codegen_options(exact_cast_vector_preflight=True)
+    changed = adapter.materialization_identity(source, choice)
+    assert changed != original
+    assert changed["compilation_identity"]["exact_cast_vector_preflight"] is True
+    select_codegen_options(exact_cast_vector_preflight=False)
+    assert adapter.materialization_identity(source, choice) == original
+    select_codegen_options(staging_storage="vmem")
+    changed = adapter.materialization_identity(source, choice)
+    assert changed != original
+    assert changed["compilation_identity"]["staging_storage"] == "vmem"
+    select_codegen_options(staging_storage="vmem-inputs")
+    inputs_cached = adapter.materialization_identity(source, choice)
+    assert inputs_cached != changed and inputs_cached != original
+    assert inputs_cached["compilation_identity"]["staging_storage"] == "vmem-inputs"
+    select_codegen_options(staging_storage="dram")
     assert adapter.materialization_identity(source, choice) == original
     with adapter.publication_options(deterministic_receipts=True):
         changed = adapter.materialization_identity(source, choice)
         assert changed != original
         assert changed["compilation_identity"]["deterministic_receipts"] is True
     assert adapter.materialization_identity(source, choice) == original
-    monkeypatch.setenv("ATLAS_NATIVE_PIPELINE", "optimized")
+    select_codegen_options(native_pipeline="optimized")
     assert adapter.materialization_identity(source, choice) != original
-    monkeypatch.setenv("ATLAS_NATIVE_PIPELINE", "mandatory")
-    monkeypatch.setenv("ATLAS_CAPTURE_POSTSPILL", "1")
+    select_codegen_options(native_pipeline="mandatory")
+    select_codegen_options(capture_postspill=True)
     assert adapter.materialization_identity(source, choice) != original
 
 

@@ -410,6 +410,7 @@ int restore(uint32_t word,int32_t lhs,int32_t rhs,uint32_t *out) {
         from hashlib import sha256
         from unittest.mock import patch
         from atlas_mlir_native import already_quantized as native
+        from atlas_mlir_native.binding import io_memory_base
         from merlin.semantic_compiler.model import pointwise_identity_maps
         if not shutil.which('cc'):self.skipTest('C compiler unavailable')
         atlas=Path(__file__).resolve().parents[1]
@@ -433,11 +434,11 @@ int restore(uint32_t word,int32_t lhs,int32_t rhs,uint32_t *out) {
                 for role,body in (('reset',plan.reset),('continue',plan.continuation)):
                     directory=compiled/role;directory.mkdir()
                     abi=native.AtlasNativeBinding.plan_boundary_abi(body)
-                    addresses=[native.DRAM_BASE+abi['fixed_inputs'][node.id]*native.TILE_BYTES for node in body.nodes if node.effect=='input']
+                    addresses=[io_memory_base()+abi['fixed_inputs'][node.id]*native.TILE_BYTES for node in body.nodes if node.effect=='input']
                     (directory/'manifest.json').write_text(json.dumps({'target_inventory_sha256':sha256((atlas/'docs/selected-variant-inventory.json').read_bytes()).hexdigest()}))
                     (directory/'source-request.json').write_text(json.dumps(body.record()))
                     (directory/'execution_plan.json').write_text(json.dumps(dict(input_addresses=addresses,
-                        output_addresses=[native.DRAM_BASE+abi['fixed_outputs'][0]*native.TILE_BYTES],operation='mxu1_cap448_seeded_ordered')))
+                        output_addresses=[io_memory_base()+abi['fixed_outputs'][0]*native.TILE_BYTES],operation='mxu1_cap448_seeded_ordered')))
                     (directory/'program.bin').write_bytes((0x00100073).to_bytes(4,'little'))
                     (directory/'physical-program.json').write_text(json.dumps({'instructions':[{'word_u32':0x00100073}]}))
                 with patch.object(native,'verify_native_publication'):

@@ -120,6 +120,8 @@ def compile_members(snapshot, request, plan, *, fixed_inputs, fixed_outputs, roo
 
 def compile_chunked(snapshot, request, plan, *, fixed_inputs, fixed_outputs, target_source, destination, limits):
     """Publish a full-source request with a checked, flat set of native bodies."""
+    from .binding import DRAM_BASE, DRAM_SLOTS, io_memory_base, dram_slots, TILE_BYTES
+
     destination.mkdir(parents=True, exist_ok=False)
     segments = destination / "segments"
     segments.mkdir()
@@ -164,6 +166,8 @@ def compile_chunked(snapshot, request, plan, *, fixed_inputs, fixed_outputs, tar
         "execution_requires": "ordered_chunked_host_dispatch",
         "segments": rows,
         "native_snapshot_sha256": hashlib.sha256((snapshot.root / "manifest.json").read_bytes()).hexdigest(),
+        **({"io_memory_base": io_memory_base()} if io_memory_base() != DRAM_BASE else {}),
+        **({"io_memory_bytes": dram_slots() * TILE_BYTES} if dram_slots() != DRAM_SLOTS else {}),
         "chunk_lowering_source_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
         "stage_artifacts": {
             path.relative_to(destination).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest()

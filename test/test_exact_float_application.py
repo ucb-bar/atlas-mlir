@@ -11,10 +11,12 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 from atlas_mlir_native import exact_float_application as app
 from atlas_mlir_native import exact_float_device as device
 from merlin.semantic_compiler.codegen import CodegenOptions,codegen_options
 from test_exact_float_device import request,host_reference,scalar_execute,OPS
+from atlas_mlir_native.limits import functional_instruction_limit
 ROOT=Path(__file__).resolve().parents[1]
 BIN=Path(os.environ.get('ATLAS_OOT_BIN_DIR',ROOT/'build/bin'))
 
@@ -67,6 +69,11 @@ class ExactFloatCompilationTest(unittest.TestCase):
 
 @unittest.skipUnless(os.environ.get('ATLAS_RUN_NPU_MODEL')=='1','select pinned npu_model')
 class ExactFloatModelTest(unittest.TestCase):
+    def test_larger_budget_binary_dispatch_and_atomic_publication(self):
+        with codegen_options(CodegenOptions(execution_instruction_limit=16_000_000)), \
+             patch(__name__ + '.OPS', ('bf16_add', 'bf16_sub')):
+            self.test_all_operations_actual_c_dispatch_and_late_invalid_second_chunk()
+
     def test_all_operations_actual_c_dispatch_and_late_invalid_second_chunk(self):
         import torch
         model_root=Path(os.environ['ATLAS_NPU_MODEL_ROOT'])
@@ -105,7 +112,7 @@ int run(atlas_host_read32 read,atlas_host_write32 write,atlas_tile_write put,atl
                 for segment in manifest['segments']:
                     leaf=compiled/segment['path'];binary=(leaf/'program.bin').read_bytes();images.append(binary)
                     plans[sha256(binary).hexdigest()]=json.loads((leaf/'execution_plan.json').read_text())
-                runtime=FunctionalModelRuntime(ROOT,model_root,images,directory/(op+'-run'),memory_bytes=max(pl['workspace_bytes'] for pl in plans.values())+64,image_plans=plans,trace_payloads=False)
+                runtime=FunctionalModelRuntime(ROOT,model_root,images,directory/(op+'-run'),memory_bytes=max(pl['workspace_bytes'] for pl in plans.values())+64,image_plans=plans,trace_payloads=False,max_instructions=functional_instruction_limit())
                 # Directed ties, subnormals, signed zero, infinities, and NaN payload sign flips.
                 width=p.plan.width
                 codes=[0,1,127,128,0x8000,0x3f80,0x3bc0,0x7f7f,0x7f80,0xff80]

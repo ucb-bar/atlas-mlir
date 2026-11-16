@@ -1,8 +1,10 @@
 """Bounded prefix residency preserves the complete ordered K reduction."""
+from merlin.semantic_compiler.codegen import codegen_options, current_codegen_options
+
 import os
 import unittest
+from dataclasses import replace
 from math import prod
-from unittest.mock import patch
 
 import numpy as np
 
@@ -42,9 +44,9 @@ def memory_fixture(plan, layout):
 
 class PrefixReuseTest(unittest.TestCase):
     def setUp(self):
-        from merlin.semantic_compiler.codegen import CodegenOptions, codegen_options
+
         # The model workflow explicitly selects its 64 MiB I/O arena.
-        options = codegen_options(CodegenOptions(io_memory_bytes=64*1024*1024))
+        options = codegen_options(replace(current_codegen_options(), io_memory_bytes=64*1024*1024))
         options.__enter__()
         self.addCleanup(options.__exit__, None, None, None)
 
@@ -54,7 +56,7 @@ class PrefixReuseTest(unittest.TestCase):
             residency = activation_residency(plan, 'prefix-cache')
             self.assertEqual(residency.tile_count, min(64, (k+31)//32))
             layout = execution_layout(plan, operand_reuse='prefix-cache')
-            with patch.dict(os.environ, ATLAS_QUANTIZED_OPERAND_REUSE='invalid'):
+            with codegen_options(replace(current_codegen_options(), quantized_operand_reuse='ordered')):
                 virtual_source(plan, layout)  # Replay uses the recorded policy.
             if k > 2048:
                 layout['operand_reuse_cached_tiles'] -= 1
@@ -80,13 +82,18 @@ class PrefixReuseTest(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix='atlas-prefix-policy-') as directory:
             directory = Path(directory)
             capture = SelectionCapture(build_snapshot(directory/'native'))
-            with patch.dict(os.environ, ATLAS_QUANTIZED_OPERAND_REUSE='prefix-cache'):
+            with codegen_options(replace(current_codegen_options(), quantized_operand_reuse='prefix-cache')):
                 sized = size_counted(plan, target_source=ROOT)
                 quantized_loop.compile_source(capture, canonical, target_source=ROOT,
                     destination=directory/'materialized', limits=SearchLimits())
-            with patch.dict(os.environ, ATLAS_QUANTIZED_OPERAND_REUSE='invalid'):
-                self.assertIs(size_counted(plan, target_source=ROOT,
+            with codegen_options(replace(current_codegen_options(), quantized_operand_reuse='ordered')):
+                self.assertIsNot(size_counted(plan, target_source=ROOT,
                     operand_reuse='prefix-cache'), sized)
+                with self.assertRaisesRegex(ValueError, 'sizing context changed'):
+                    bind_counted(source, canonical, directory/'materialized', directory/'different-options',
+                        capture, target_source=ROOT)
+            with codegen_options(replace(current_codegen_options(), quantized_operand_reuse='prefix-cache')):
+                self.assertIs(size_counted(plan, target_source=ROOT), sized)
                 bind_counted(source, canonical, directory/'materialized', directory/'bound',
                     capture, target_source=ROOT)
                 record, files = quantized_loop_c.prepare_c_package(source,

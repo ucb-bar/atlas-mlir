@@ -1,5 +1,4 @@
 """Exact float routes using counted tile and lane loops in common virtual IR."""
-import os
 from .scalar_ssa import ScalarBuilder
 from .binding import DRAM_BASE
 
@@ -76,6 +75,24 @@ class Builder(ScalarBuilder):
 
         return self.loop(label, count // factor, accumulators, group)
 
+    def unary_word_pairs(self, operation, count):
+        """Read adjacent BF16 encodings once without interpreting their bits."""
+        assert operation in ('bf16_to_f32', 'bf16_neg') and count % 2 == 0
+
+        def pair(index, unused):
+            word = self.load('left', index, 4)
+            if operation == 'bf16_neg':
+                self.store('result', index,
+                    self.binary('xor', word, self.constant(0x80008000)), 4)
+            else:
+                self.store('result', 2 * index,
+                    self.binary('shl', word, self.constant(16)), 4)
+                self.store('result', 2 * index + 1,
+                    self.binary('and', word, self.constant(0xffff0000)), 4)
+            return []
+
+        self.unary_lanes(count // 2, [], pair)
+
     def splat(self,bits): return self.value(f'"atlas.virtual_vpu_splat"() {{bits = {bits} : i32}} : () -> {T}')
     def vector_binary(self,kind,a,b): return self.value(f'"atlas.virtual_vpu_binary"({a},{b}) {{kind = "{kind}"}} : ({T},{T}) -> {T}')
     def dma_load(self,address,bytes_):
@@ -140,12 +157,94 @@ def qualified_vector(b,p):
 
 
 def binary_lane_groups():
-    """Validate the opt-in before generating or caching target code."""
-    from merlin.semantic_compiler.target_binding import NativeCompilationError
-    value = os.environ.get('ATLAS_EXACT_BINARY_LANE_GROUPS', '0')
-    if value not in ('0', '1'):
-        raise NativeCompilationError('unsupported_semantics', 'ATLAS_EXACT_BINARY_LANE_GROUPS must be 0 or 1')
-    return value == '1'
+    from merlin.semantic_compiler.codegen import current_codegen_options
+    return current_codegen_options().exact_binary_lane_groups
+
+def binary_vector_preflight():
+    from merlin.semantic_compiler.codegen import current_codegen_options
+    return current_codegen_options().exact_binary_vector_preflight
+
+def cast_vector_preflight():
+    from merlin.semantic_compiler.codegen import current_codegen_options
+    return current_codegen_options().exact_cast_vector_preflight
+
+def cast_vector_refusal(b):
+    """Ordered-bit absolute maximum exceeds infinity exactly for a NaN.
+
+    Only the admission test uses VPU arithmetic. Widening still shifts the
+    original bits, preserving subnormals, signed zeros and infinities exactly.
+    """
+    value = b.restore('left')
+    maximum = b.vector_binary('max', value, b.vector_binary('mul', value, b.splat(0xbf80)))
+    for axis in ('col', 'row'):
+        maximum = b.value(f'"atlas.virtual_vpu_reduce"({maximum}) {{kind = "{axis}_max"}} : ({T}) -> {T}')
+    b.save('pairs', maximum)
+    return b.compare('ult', b.constant(0x7f80), b.load('pairs', 0, 2))
+
+
+def binary_vector_refusal(b):
+    """Min/max of both absolute operands proves a stronger nonzero domain.
+
+    Selected RTL min/max compares ordered BF16 bits, including NaNs. For every
+    encoding x, max(x, x * -1) is in [0x2f80, 0x4f80] exactly when abs(x) is.
+    The two reductions preserve extrema across all lanes. Zeros and everything
+    outside this interval decline to the existing scalar classification.
+    """
+    negative_one = b.splat(0xbf80)
+    absolute = []
+    for slot in ('left', 'right'):
+        value = b.restore(slot)
+        absolute.append(b.vector_binary('max', value, b.vector_binary('mul', value, negative_one)))
+    extrema = []
+    for kind in ('min', 'max'):
+        value = b.vector_binary(kind, *absolute)
+        for axis in ('col', 'row'):
+            value = b.value(f'"atlas.virtual_vpu_reduce"({value}) {{kind = "{axis}_{kind}"}} : ({T}) -> {T}')
+        b.save('pairs', value)
+        extrema.append(b.load('pairs', 0, 2))
+    minimum, maximum = extrema
+    return b.binary('or', b.compare('ult', minimum, b.constant(0x2f80)),
+                    b.compare('ult', b.constant(0x4f80), maximum))
+
+
+def binary_qualified_refusal(b, left, right):
+    """The qualified vector domain implies valid input arithmetic."""
+    c, op, cmp = b.constant, b.binary, b.compare
+    bad = c(0)
+    for value in (left, right):
+        magnitude = op('and', value, c(32767))
+        outside = op('or', op('and', cmp('ult', magnitude, c(0x2f80)),
+                             cmp('ne', magnitude, c(0))),
+                     cmp('ult', c(0x4f80), magnitude))
+        bad = op('or', bad, outside)
+    return bad
+
+
+def binary_slow_flags(b, left, right):
+    """After qualified refusal, classify pair admission and invalid inputs.
+
+    The right operand already has its sign flipped for subtraction. Keep
+    input validity separate from route admission: rejecting a fast route must
+    still permit the exact scalar implementation.
+    """
+    c, op, cmp = b.constant, b.binary, b.compare
+    magnitudes = [op('and', value, c(32767)) for value in (left, right)]
+    pair, invalid = c(0), c(0)
+    for magnitude in magnitudes:
+        nonzero = cmp('ne', magnitude, c(0))
+        exceptional = op('or', op('and', cmp('ult', magnitude, c(128)), nonzero),
+                         cmp('ule', c(32640), magnitude))
+        pair = op('or', pair, exceptional)
+        invalid = op('or', invalid, cmp('ult', c(32640), magnitude))
+    both_negative_zero = cmp('eq', op('or', op('xor', left, c(32768)),
+                                     op('xor', right, c(32768))), c(0))
+    pair = op('or', pair, both_negative_zero)
+    both_inf = op('and', cmp('eq', magnitudes[0], c(32640)),
+                  cmp('eq', magnitudes[1], c(32640)))
+    opposite = op('shr', op('xor', left, right), c(15))
+    invalid = op('or', invalid, op('and', both_inf, opposite))
+    return op('or', c(1), op('or', op('shl', pair, c(1)),
+                                 op('shl', invalid, c(2))))
 
 
 def virtual_program(p):
@@ -154,45 +253,85 @@ def virtual_program(p):
     # Preserve qualified compact images unless expansion is explicitly selected.
     expand_unary=current_codegen_options().exact_float_unroll
     group_binary=binary_lane_groups()
+    vector_preflight=binary_vector_preflight()
+    vector_cast=cast_vector_preflight() and p.op == 'bf16_to_f32'
     lines=['module {',f'  func.func @exact_float() -> {S} attributes {{atlas.input_dram_base = {p.io_memory_base} : i64, atlas.input_dram_bytes = {len(p.operands)*p.input_bytes} : i64, atlas.output_dram_base = {p.output_address} : i64, atlas.output_dram_bytes = {p.output_bytes+32} : i64}} {{',f'    %start = "atlas.virtual_start"() : () -> {S}']
     b=Builder(lines);c=b.constant;op=b.binary;cmp=b.compare
-    for slot in ('left','right','result','pairs','status'):b.slot(slot)
-    zero=b.splat(0)
-    for slot in ('left','right','result','pairs','status'):b.save(slot,zero)
     lanes=p.tile_lanes;tiles=p.input_bytes//(lanes*p.width)
-    binary=p.op in ('bf16_add','bf16_sub');flag=c(0)
+    binary=p.op in ('bf16_add','bf16_sub')
+    # Binary route caching is selected independently of the lowering pipeline.
+    binary_routes=binary and (group_binary or vector_preflight or current_codegen_options().exact_binary_routes)
+    # One word per tile retains route admission across the complete input
+    # preflight. Arithmetic starts only after every tile passed validation.
+    if binary_routes and tiles > 512:
+        raise ValueError('exact binary route table exceeds one 2048-byte slot')
+    slots=(('left','result','pairs','status') if expand_unary and not binary
+           else ('left','right','result','pairs','status')) + (('routes',) if binary_routes else ())
+    for slot in slots:b.slot(slot)
+    zero=b.splat(0)
+    for slot in slots:b.save(slot,zero)
+    flag=c(0)
     phases=('check','compute') if not p.op.endswith('_neg') else ('compute',)
     for phase in phases:
         pointers=[c(p.io_memory_base),c(p.io_memory_base+[n.id for n in p.operands].index(p.node.inputs[-1])*p.input_bytes),c(p.output_address)]
         def tile_body(tile,values):
             bad,ap,bp,out=values
             # A one-tile binary preflight leaves both immutable inputs in VMEM.
-            if not (group_binary and binary and tiles == 1 and phase == 'compute'):
+            if not (binary_routes and tiles == 1 and phase == 'compute'):
                 a=b.dma_load(ap,lanes*p.width);b.save('left',a)
-                b.save('right',b.dma_load(bp,lanes*p.width) if len(p.operands)>1 else a)
+                if binary or not expand_unary:
+                    b.save('right',b.dma_load(bp,lanes*p.width) if len(p.operands)>1 else a)
             if phase=='check':
+                if binary_routes:
+                    if vector_preflight:
+                        outside = binary_vector_refusal(b)
+                        admitted = b.value(f'arith.cmpi eq, {outside}, {c(0)} : i32')
+                        lines.append(f'    cf.cond_br {admitted}, ^binary_checked({b.state},{c(0)} : {S},i32), ^scalar_qualified_check({b.state} : {S})')
+                        lines.append(f'  ^scalar_qualified_check(%scalar_check_state: {S}):')
+                        b.state = '%scalar_check_state'
+                    lane_loop=b.checked_lane_groups if group_binary else b.loop
+                    def qualified_lane(index,acc):
+                        a,d=b.inputs(p,index)
+                        return [op('or',acc[0],binary_qualified_refusal(b,a,d))]
+                    qbad,=lane_loop('qualified_lane',lanes,[c(0)],qualified_lane)
+                    admitted=b.value(f'arith.cmpi eq, {qbad}, {c(0)} : i32')
+                    lines.append(f'    cf.cond_br {admitted}, ^binary_checked({b.state},{c(0)} : {S},i32), ^binary_check_slow({b.state} : {S})')
+                    lines.append(f'  ^binary_check_slow(%binary_slow_state: {S}):');b.state='%binary_slow_state'
+                    def slow_lane(index,acc):
+                        a,d=b.inputs(p,index)
+                        return [op('or',acc[0],binary_slow_flags(b,a,d))]
+                    flags,=lane_loop('preflight_lane',lanes,[c(0)],slow_lane)
+                    lines.append(f'    cf.br ^binary_checked({b.state},{flags} : {S},i32)')
+                    lines.append(f'  ^binary_checked(%binary_checked_state: {S},%binary_flags: i32):')
+                    b.state='%binary_checked_state';flags='%binary_flags'
+                    b.store('routes',tile,flags,4)
+                    bad=op('or',bad,op('shr',flags,c(2)))
                 def validate(index,acc):
                     a,d=b.inputs(p,index)
                     return [op('or',acc[0],_valid(b,p,a,d))]
-                if binary and group_binary:
-                    bad,=b.checked_lane_groups('preflight_lane',lanes,[bad],validate)
-                else:
+                if vector_cast:
+                    bad=op('or',bad,cast_vector_refusal(b))
+                elif not binary_routes:
                     bad,=(b.loop('preflight_lane',lanes,[bad],validate) if binary or not expand_unary
                           else b.unary_lanes(lanes,[bad],validate))
             else:
                 if binary:
-                    def classify(index,acc):
-                        a,d=b.inputs(p,index);qbad,rbad=acc
-                        for value in (a,d):
-                            magnitude=op('and',value,c(32767))
-                            nonzero=cmp('ne',magnitude,c(0))
-                            outside=op('or',op('and',cmp('ult',magnitude,c(0x2f80)),nonzero),cmp('ult',c(0x4f80),magnitude))
-                            qbad=op('or',qbad,outside)
-                            exceptional=op('or',op('and',cmp('ult',magnitude,c(128)),nonzero),cmp('ule',c(32640),magnitude))
-                            rbad=op('or',rbad,exceptional)
-                        both_negative_zero=cmp('eq',op('or',op('xor',a,c(32768)),op('xor',d,c(32768))),c(0))
-                        return [qbad,op('or',rbad,both_negative_zero)]
-                    qbad,rbad=(b.checked_lane_groups if group_binary else b.loop)('classify_lane',lanes,[c(0),c(0)],classify)
+                    if binary_routes:
+                        flags=b.load('routes',tile,4)
+                        qbad,rbad=op('and',flags,c(1)),op('and',flags,c(2))
+                    else:
+                        def classify(index,acc):
+                            a,d=b.inputs(p,index);qbad,rbad=acc
+                            for value in (a,d):
+                                magnitude=op('and',value,c(32767))
+                                nonzero=cmp('ne',magnitude,c(0))
+                                outside=op('or',op('and',cmp('ult',magnitude,c(0x2f80)),nonzero),cmp('ult',c(0x4f80),magnitude))
+                                qbad=op('or',qbad,outside)
+                                exceptional=op('or',op('and',cmp('ult',magnitude,c(128)),nonzero),cmp('ule',c(32640),magnitude))
+                                rbad=op('or',rbad,exceptional)
+                            both_negative_zero=cmp('eq',op('or',op('xor',a,c(32768)),op('xor',d,c(32768))),c(0))
+                            return [qbad,op('or',rbad,both_negative_zero)]
+                        qbad,rbad=(b.checked_lane_groups if group_binary else b.loop)('classify_lane',lanes,[c(0),c(0)],classify)
                     qualified=b.value(f'arith.cmpi eq, {qbad}, {c(0)} : i32')
                     lines.append(f'    cf.cond_br {qualified}, ^qualified({b.state} : {S}), ^pair_test({b.state} : {S})')
                     lines.append(f'  ^qualified(%qualified_state: {S}):');b.state='%qualified_state'
@@ -226,7 +365,9 @@ def virtual_program(p):
                 def calculate(index,unused):
                     a,d=b.inputs(p,index);b.store('result',index,_compute(b,p,a,d),p.output_width)
                     return []
-                if binary or not expand_unary:
+                if expand_unary and p.op in ('bf16_to_f32', 'bf16_neg'):
+                    b.unary_word_pairs(p.op, lanes)
+                elif binary or not expand_unary:
                     b.loop('scalar_lane',lanes,[],calculate)
                 else:
                     b.unary_lanes(lanes,[],calculate)

@@ -13,7 +13,7 @@ from merlin.compile.c_tiling import (
 from merlin.semantic_compiler.model import KernelRequest
 from merlin.semantic_compiler.target_binding import verify_native_publication
 
-from .binding import DRAM_BASE, TILE_BYTES
+from .binding import io_memory_base, TILE_BYTES, check_io_memory_manifest
 from .c_runtime import runtime_headers, runtime_members
 from .chunked_tiling import check_frames, chunk_bodies
 
@@ -30,6 +30,8 @@ def prepare_c_package(request_path, compiled, name, *, target_source, runtime_li
         raise ValueError("chunked C export needs an ordered K partition")
     manifest_bytes = (compiled / "manifest.json").read_bytes()
     manifest = json.loads(manifest_bytes)
+    check_io_memory_manifest(manifest)
+    io_base = io_memory_base()
     verify_native_publication(
         compiled,
         manifest,
@@ -62,8 +64,8 @@ def prepare_c_package(request_path, compiled, name, *, target_source, runtime_li
             raise ValueError("chunk body differs from the source decomposition")
         execution = json.loads((member / "execution_plan.json").read_text())
         roles = ("a", "w") if role == "first" else ("a", "w", "seed")
-        if execution["input_addresses"] != [DRAM_BASE + bindings["frames"][key] * TILE_BYTES for key in roles] or (
-            execution["output_addresses"] != [DRAM_BASE + bindings["frames"]["out"] * TILE_BYTES]
+        if execution["input_addresses"] != [io_base + bindings["frames"][key] * TILE_BYTES for key in roles] or (
+            execution["output_addresses"] != [io_base + bindings["frames"]["out"] * TILE_BYTES]
         ):
             raise ValueError("chunk physical bindings differ from the checked frame")
         roots[role] = member

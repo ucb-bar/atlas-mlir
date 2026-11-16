@@ -19,11 +19,21 @@ class LeafMemoryBaseTest(unittest.TestCase):
 
     def test_invalid_bases_and_full_span_refusal(self):
         for prepare, request in self.cases:
-            for base in (True, None, 0, -32, 0x40000, 0x08008001,
+            for base in (True, 0, -32, 0x40000, 0x08008001,
                          0x0800ffe0, 0xffffffe0, 1 << 32):
                 with self.subTest(prepare=prepare.__module__, base=base):
                     with self.assertRaises((ValueError, NativeCompilationError)):
                         prepare(request, io_memory_base=base)
+
+    def test_none_base_uses_invocation_default(self):
+        for base in (DRAM_BASE, 0x80000000):
+            with codegen_options(CodegenOptions(io_memory_base=base, io_memory_bytes=67108864)):
+                for prepare, request in self.cases:
+                    with self.subTest(prepare=prepare.__module__, base=base):
+                        selected = prepare(request, io_memory_base=None)
+                        self.assertEqual(selected.io_memory_base, base)
+                        self.assertEqual(selected, prepare(request))
+                        self.assertEqual(selected, prepare(request, io_memory_base=base))
 
     def test_default_and_relocated_geometry(self):
         for prepare, request in self.cases:

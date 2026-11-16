@@ -101,6 +101,26 @@ class RegionCompositionContractTest(unittest.TestCase):
             with self.subTest(message=message), self.assertRaisesRegex(ValueError, message):
                 _contract(stage_rows, storage, initial, outputs, window)
 
+    def test_adjacent_arena_and_contract_follow_the_selected_io_base(self):
+        from atlas_mlir_native.binding import DRAM_BASE
+        from atlas_mlir_native.memory_windows import VMEM_BUS_WINDOW
+        from atlas_mlir_native.region_composition import (
+            DeviceBuffer, VirtualStage, _contract, allocate_adjacent_arena)
+
+        names, sizes = ("input", "result"), {"input": 4096, "result": 2048}
+        self.assertEqual(allocate_adjacent_arena(sizes, names),
+                         ({"input": DRAM_BASE, "result": DRAM_BASE + 4096}, 6144))
+        base = VMEM_BUS_WINDOW[0]
+        addresses, arena_bytes = allocate_adjacent_arena(sizes, names, base)
+        self.assertEqual((addresses, arena_bytes), ({"input": base, "result": base + 4096}, 6144))
+        buffers = tuple(DeviceBuffer(name, addresses[name], sizes[name], "bf16_tiles") for name in names)
+        stages = (VirtualStage("only", "", ("input",), ("result",)),)
+        _contract(stages, buffers, ("input",), ("result",), 768 * 1024, base)
+        with self.assertRaisesRegex(ValueError, "selected I/O"):
+            _contract(stages, buffers, ("input",), ("result",), 1 << 20)
+        with self.assertRaisesRegex(ValueError, "selected I/O window"):
+            allocate_adjacent_arena({"input": VMEM_BUS_WINDOW[1] - base}, ("input",), base + 2048)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -15,7 +15,7 @@ VMEM for computation, removing their second DMA load. Multi-tile programs keep
 loading each computation tile separately. Validation still completes before any
 result is written; a rejected input preserves the original output.
 
-Select `ATLAS_EXACT_BINARY_LANE_GROUPS=1` to enable both changes; default binary
+Select `--exact-binary-lane-groups` to enable both changes; default binary
 emission is unchanged. Unary emission and its explicit
 `exact_float_unroll` option are unchanged. Physical image and instruction bounds
 remain mandatory; no limits have been raised.
@@ -52,7 +52,7 @@ actual layer input gave the same 145,490 to 113,555-cycle improvement above.
 
 ## Bounded activation prefix reuse
 
-Select `ATLAS_QUANTIZED_OPERAND_REUSE=prefix-cache` to reuse the first 64 K32 tiles
+Select `--quantized-operand-reuse prefix-cache` to reuse the first 64 K32 tiles
 of a wide row across output columns, streaming the remaining tiles through the
 existing ordered loop. The cache remains capped at 64 KiB. Existing ordered and
 full-row-cache virtual programs were byte-identical in 52 compared configurations.
@@ -186,10 +186,10 @@ the raw bandwidth savings alone would suggest. Its larger image is another
 explicit tradeoff. The schedule declines small K, odd M-tile counts, multiple
 batches and quantized multiply epilogues, using the wide-cache policy instead.
 
-Enable both opportunities for supported shapes before compilation:
+Pass this argument to `native-compile` for supported shapes:
 
-```bash
-export ATLAS_QUANTIZED_OPERAND_REUSE=paired-cache
+```text
+--quantized-operand-reuse paired-cache
 ```
 
 For comparison, select `wide-cache`, `prefix-cache` or `ordered`. The default

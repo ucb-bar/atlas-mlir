@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 from atlas_mlir_native import quantized_loop as loop
 from atlas_mlir_native.already_quantized import prepare_source
-from atlas_mlir_native.binding import DRAM_BASE, _tile_io_base, _with_tile_io_base
+from atlas_mlir_native.binding import DRAM_BASE, _tile_io_base, _with_tile_io_base, io_memory_base
 from atlas_mlir_native.memory_windows import dma_span_in_window
 from merlin.semantic_compiler.codegen import CodegenOptions, codegen_options
 from merlin.semantic_compiler.target_binding import NativeCompilationError
@@ -35,17 +35,15 @@ class VmemWindowTest(unittest.TestCase):
         for base in (0x20000000, 0x200BF800, 0x2017F000):
             with self.subTest(base=hex(base)), self.assertRaises(NativeCompilationError):
                 emit(None, request, io_memory_base=base, **args)
-        self.assertEqual(_tile_io_base.get(), DRAM_BASE)
+        self.assertIsNone(_tile_io_base.get())
+        self.assertEqual(io_memory_base(), DRAM_BASE)
 
     def test_quantized_frame_moves_with_identical_offsets(self):
         plan = prepare_source(source_request(1, 256, 2048, batch=()))
-        with codegen_options(CodegenOptions(io_memory_bytes=67108864)):
+        with codegen_options(CodegenOptions(io_memory_bytes=786432)):
             default = loop.execution_layout(plan)
-            token = _tile_io_base.set(VMEM_WINDOW)
-            try:
-                moved = loop.execution_layout(plan)
-            finally:
-                _tile_io_base.reset(token)
+        with codegen_options(CodegenOptions(io_memory_base=VMEM_WINDOW, io_memory_bytes=786432)):
+            moved = loop.execution_layout(plan)
         self.assertEqual(default['input_addresses'][0], DRAM_BASE)
         self.assertEqual(moved['input_addresses'][0], VMEM_WINDOW)
         shift = VMEM_WINDOW - DRAM_BASE
@@ -58,27 +56,37 @@ class VmemWindowTest(unittest.TestCase):
 
     def test_quantized_loop_refuses_bases_before_tools(self):
         source = source_request(1, 256, 2048, batch=())
-        with codegen_options(CodegenOptions(io_memory_bytes=67108864)), \
+        with codegen_options(CodegenOptions(io_memory_bytes=786432)), \
              patch('atlas_mlir_native.quantized_loop_sizing.size_counted', side_effect=AssertionError('sized')), \
              tempfile.TemporaryDirectory(prefix='atlas-vmem-window-') as directory:
-            # 0x20170000 starts in the window but its 626,688-byte frame leaves it.
+            # 0x20170000 starts in the aperture but its selected window leaves it.
             for base in (True, 1.0, '0x200c0000', -2048, VMEM_WINDOW + 32, 0x20000000, 0x200B0000, 0x20170000, 0x0800b000):
                 with self.subTest(base=base), self.assertRaises(NativeCompilationError):
                     loop.compile_source('snapshot', source, target_source=ROOT, destination=Path(directory)/'x',
                                         limits='limits', io_memory_base=base)
-                self.assertEqual(_tile_io_base.get(), DRAM_BASE)
+                self.assertIsNone(_tile_io_base.get())
+                self.assertEqual(io_memory_base(), DRAM_BASE)
             self.assertFalse((Path(directory)/'x').exists())
 
-    def test_custom_base_refuses_tiled_fallback(self):
+    def test_custom_base_reaches_tiled_fallback(self):
+        from atlas_mlir_native.quantized_row_blocks import NoFittingRowBlock
+
         source = source_request(1, 256, 2048, batch=())
         tiled = SimpleNamespace(record=lambda: dict(route='k32_tiles', reason='physical_instruction_bound'))
-        with codegen_options(CodegenOptions(io_memory_bytes=67108864)), \
+        row_refusal = NoFittingRowBlock(source, tiled.record(), ())
+        def compile_tiles(*args, **kwargs):
+            self.assertEqual(io_memory_base(), VMEM_WINDOW)
+            raise RuntimeError('tiles compiled')
+        with codegen_options(CodegenOptions(io_memory_bytes=786432)), \
              patch('atlas_mlir_native.quantized_loop_sizing.size_counted', return_value=tiled), \
-             patch('atlas_mlir_native.already_quantized.compile_source', side_effect=AssertionError('tiles compiled')):
-            with self.assertRaisesRegex(NativeCompilationError, 'requires the counted'):
+             patch('atlas_mlir_native.quantized_row_blocks.prepare_schedule', side_effect=row_refusal), \
+             patch('atlas_mlir_native.already_quantized.compile_source', side_effect=compile_tiles) as fallback:
+            with self.assertRaisesRegex(RuntimeError, '^tiles compiled$'):
                 loop.compile_source('snapshot', source, target_source=ROOT, destination='unused',
                                     limits='limits', io_memory_base=VMEM_WINDOW)
-        self.assertEqual(_tile_io_base.get(), DRAM_BASE)
+            fallback.assert_called_once_with('snapshot', source, target_source=ROOT, destination='unused', limits='limits')
+        self.assertIsNone(_tile_io_base.get())
+        self.assertEqual(io_memory_base(), DRAM_BASE)
 
     def test_reduction_refuses_bases_before_tools(self):
         from atlas_mlir_native import reduction

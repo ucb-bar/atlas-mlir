@@ -1,4 +1,5 @@
 """Exact source grouping, slicing, publication, and C export for quantizers."""
+
 from dataclasses import replace
 import json
 import os
@@ -10,6 +11,7 @@ import unittest
 
 import numpy as np
 
+from merlin.semantic_compiler.codegen import codegen_options, current_codegen_options
 from atlas_mlir_native.activation_quantize_application import compile_source, prepare_c_package, prepare_plan
 from test_already_quantized import quantizer_source
 from test_activation_quantize_device import dynamic_source, host_reference
@@ -32,6 +34,28 @@ def scheduled_reference(source, raw):
 
 
 class QuantizerApplicationScheduleTest(unittest.TestCase):
+    def test_captured_schedule_record_and_replay_ignore_later_recipe_selection(self):
+        sources = (quantizer_source(count=524320),
+                   dynamic_source(shape=(1, 64, 64), reduce="head"))
+        for pipeline in ("mandatory", "optimized"):
+            for static_sizing in (False, True):
+                with self.subTest(pipeline=pipeline, static_sizing=static_sizing), \
+                        codegen_options(replace(current_codegen_options(), io_memory_bytes=67108864)):
+                    for source in sources:
+                        with codegen_options(replace(current_codegen_options(), native_pipeline=pipeline,
+                                                     static_quantizer_sizing=static_sizing)):
+                            plan = prepare_plan(source)
+                            captured = plan.record()
+                        other = "optimized" if pipeline == "mandatory" else "mandatory"
+                        with codegen_options(replace(current_codegen_options(), native_pipeline=other,
+                                                     static_quantizer_sizing=not static_sizing)):
+                            self.assertEqual(plan.record(), captured)
+                            replay = prepare_plan(source,
+                                _pipeline=captured.get("lowering_pipeline", "mandatory"),
+                                _static_sizing="static_instruction_envelope" in captured,
+                                _static_capacity=captured["static_whole_body_max_elements"])
+                            self.assertEqual(replay.record(), captured)
+
     def test_static_full_and_tail_chunks_keep_every_byte(self):
         source = quantizer_source(count=4103, fixed=-9)
         plan = prepare_plan(source)
@@ -59,8 +83,8 @@ class QuantizerApplicationScheduleTest(unittest.TestCase):
         self.assertEqual(prepare_plan(source).source.outputs, source.outputs)
 
     def test_large_application_geometry_reuses_bodies(self):
-        from merlin.semantic_compiler.codegen import CodegenOptions, codegen_options
-        with codegen_options(CodegenOptions(io_memory_bytes=4325376)):
+
+        with codegen_options(replace(current_codegen_options(), io_memory_bytes=4325376)):
             static = prepare_plan(quantizer_source(count=64 * 5632))
         self.assertEqual(len(static.launches), 1)
         self.assertEqual(len(static.bodies), 1)
@@ -79,8 +103,8 @@ class QuantizerApplicationScheduleTest(unittest.TestCase):
             self.assertEqual(len(plan.launches), 2)
 
     def test_largest_static_prefix_extent_keeps_measured_whole_body(self):
-        from merlin.semantic_compiler.codegen import CodegenOptions, codegen_options
-        with codegen_options(CodegenOptions(io_memory_bytes=4325376)):
+
+        with codegen_options(replace(current_codegen_options(), io_memory_bytes=4325376)):
             plan = prepare_plan(quantizer_source(count=524256))
         self.assertEqual(len(plan.launches), 1)
         self.assertEqual(plan.launches[0]["code_bytes"], 524256)
@@ -93,8 +117,8 @@ class QuantizerApplicationScheduleTest(unittest.TestCase):
         self.assertEqual(scheduled_reference(source, values.tobytes()), host_reference(source, values.tobytes()))
 
     def test_small_selected_io_retains_static_chunk_fallback(self):
-        from merlin.semantic_compiler.codegen import CodegenOptions, codegen_options
-        with codegen_options(CodegenOptions(io_memory_bytes=8192)):
+
+        with codegen_options(replace(current_codegen_options(), io_memory_bytes=8192)):
             plan = prepare_plan(quantizer_source(count=65536))
         self.assertEqual(len(plan.launches), 32)
         self.assertTrue(all(item['code_bytes'] == 2048 for item in plan.launches))
@@ -132,59 +156,64 @@ class QuantizerApplicationScheduleTest(unittest.TestCase):
 @unittest.skipUnless((BIN / "atlas-opt").is_file(), "select built Atlas tools")
 class QuantizerApplicationCompilationTest(unittest.TestCase):
     def test_multiple_bodies_default_proof_c_export_and_source_seal(self):
-        from atlas_mlir_native.activation_quantize_application import STATIC_WHOLE_BODY_MAX_ELEMENTS
-        source = quantizer_source(count=STATIC_WHOLE_BODY_MAX_ELEMENTS + 32)
-        with tempfile.TemporaryDirectory(prefix="atlas-quantizer-schedule-") as directory:
-            root = Path(directory)
-            compiled = root / "compiled"
-            manifest = compile_source(None, source, target_source=ROOT, destination=compiled, limits=None)
-            self.assertEqual(manifest["artifact_kind"], "program_set")
-            self.assertEqual(len(manifest["segments"]), 2)
-            region = prepare_c_package(source, compiled, "quant", target_source=ROOT)
-            self.assertEqual(region.outputs, source.outputs)
-            self.assertEqual(region.description["launches_per_invocation"], 257)
-            self.assertEqual(region.description["device_launch_schedule"]["total_launches"], 257)
-            self.assertNotIn("launches_per_call", region.description)
-            self.assertEqual(region.programs, ("segments/quant/segments/body_000", "segments/quant/segments/body_001"))
-            # An application flattens these image leaves. Its existing branch
-            # verifier must accept all authenticated scheduling metadata.
-            from hashlib import sha256
-            from merlin.semantic_compiler.target_binding import verify_native_publication
-            parent = root / "application"
-            branch = parent / "segments/quant"
-            branch.parent.mkdir(parents=True)
-            shutil.copytree(compiled, branch)
-            parent_rows = [{**row, "path": "segments/quant/" + row["path"]} for row in manifest["segments"]]
-            artifacts = {"segments/quant/" + filename: sha256((compiled / filename).read_bytes()).hexdigest()
-                         for filename in ("source-request.json", "quantizer-schedule.json", "quantizer-manifest.json")}
-            parent_manifest = dict(engine="merlin_native", artifact_kind="program_set", request_digest=source.digest(),
-                                   target_identity=source.target_identity, segments=parent_rows, stage_artifacts=artifacts)
-            (parent / "manifest.json").write_text(json.dumps(parent_manifest))
-            verify_native_publication(parent, parent_manifest, engine="merlin_native", request_digest=source.digest(), target_identity=source.target_identity)
-            package = root / "c"
-            for filename, data in region.files.items():
-                path = package / filename
-                path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_bytes(data)
-            if shutil.which("cc"):
-                subprocess.run(["cc", "-std=c11", "-Wall", "-Wextra", "-Werror", "-fsyntax-only", "quant.c"], cwd=package, check=True, capture_output=True)
-            # Rehashing both the source and mutable manifest must not let a
-            # different source/body slice mapping through export replay.
-            schedule = compiled / "quantizer-schedule.json"
-            record = json.loads(schedule.read_text())
-            record["launches"][0]["code_offset_bytes"] = 1
-            schedule.write_text(json.dumps(record))
-            manifest["stage_artifacts"]["quantizer-schedule.json"] = sha256(schedule.read_bytes()).hexdigest()
-            (compiled / "quantizer-manifest.json").write_text(json.dumps(manifest))
-            with self.assertRaisesRegex(ValueError, "slice mapping"):
-                prepare_c_package(source, compiled, "changed", target_source=ROOT)
+        with codegen_options(replace(current_codegen_options(), native_pipeline="optimized", static_quantizer_sizing=True)):
+            from atlas_mlir_native.activation_quantize_application import _static_body_capacity
+            from atlas_mlir_native.limits import functional_instruction_limit
+            source = quantizer_source(count=_static_body_capacity(functional_instruction_limit()) + 32)
+            with tempfile.TemporaryDirectory(prefix="atlas-quantizer-schedule-") as directory:
+                root = Path(directory)
+                compiled = root / "compiled"
+                manifest = compile_source(None, source, target_source=ROOT, destination=compiled, limits=None)
+                self.assertEqual(manifest["artifact_kind"], "program_set")
+                self.assertEqual(len(manifest["segments"]), 2)
+                with codegen_options(replace(current_codegen_options(), native_pipeline="mandatory")):
+                    region = prepare_c_package(source, compiled, "quant", target_source=ROOT)
+                self.assertEqual(region.outputs, source.outputs)
+                self.assertEqual(region.description["launches_per_invocation"], 2)
+                self.assertEqual(region.description["device_launch_schedule"]["total_launches"], 2)
+                self.assertNotIn("launches_per_call", region.description)
+                self.assertEqual(region.programs, ("segments/quant/segments/body_000", "segments/quant/segments/body_001"))
+                # An application flattens these image leaves. Its existing branch
+                # verifier must accept all authenticated scheduling metadata.
+                from hashlib import sha256
+                from merlin.semantic_compiler.target_binding import verify_native_publication
+                parent = root / "application"
+                branch = parent / "segments/quant"
+                branch.parent.mkdir(parents=True)
+                shutil.copytree(compiled, branch)
+                parent_rows = [{**row, "path": "segments/quant/" + row["path"]} for row in manifest["segments"]]
+                artifacts = {"segments/quant/" + filename: sha256((compiled / filename).read_bytes()).hexdigest()
+                             for filename in ("source-request.json", "quantizer-schedule.json", "quantizer-manifest.json")}
+                parent_manifest = dict(engine="merlin_native", artifact_kind="program_set", request_digest=source.digest(),
+                                       target_identity=source.target_identity, segments=parent_rows, stage_artifacts=artifacts)
+                (parent / "manifest.json").write_text(json.dumps(parent_manifest))
+                verify_native_publication(parent, parent_manifest, engine="merlin_native", request_digest=source.digest(), target_identity=source.target_identity)
+                package = root / "c"
+                for filename, data in region.files.items():
+                    path = package / filename
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_bytes(data)
+                if shutil.which("cc"):
+                    subprocess.run(["cc", "-std=c11", "-Wall", "-Wextra", "-Werror", "-fsyntax-only", "quant.c"], cwd=package, check=True, capture_output=True)
+                # Rehashing both the source and mutable manifest must not let a
+                # different source/body slice mapping through export replay.
+                schedule = compiled / "quantizer-schedule.json"
+                record = json.loads(schedule.read_text())
+                record["launches"][0]["code_offset_bytes"] = 1
+                schedule.write_text(json.dumps(record))
+                manifest["stage_artifacts"]["quantizer-schedule.json"] = sha256(schedule.read_bytes()).hexdigest()
+                (compiled / "quantizer-manifest.json").write_text(json.dumps(manifest))
+                with self.assertRaisesRegex(ValueError, "slice mapping"):
+                    prepare_c_package(source, compiled, "changed", target_source=ROOT)
 
     def test_dynamic_head4096_under_default_proof_and_c_export(self):
         source = dynamic_source(shape=(1, 64, 64), reduce="head", dtype="bf16")
         with tempfile.TemporaryDirectory(prefix="atlas-quantizer-head4096-") as directory:
             compiled = Path(directory) / "compiled"
-            compile_source(None, source, target_source=ROOT, destination=compiled, limits=None)
-            region = prepare_c_package(source, compiled, "head4096", target_source=ROOT)
+            with codegen_options(replace(current_codegen_options(), native_pipeline="mandatory")):
+                compile_source(None, source, target_source=ROOT, destination=compiled, limits=None)
+            with codegen_options(replace(current_codegen_options(), native_pipeline="optimized")):
+                region = prepare_c_package(source, compiled, "head4096", target_source=ROOT)
             self.assertEqual(region.description["launches_per_invocation"], 1)
 
 

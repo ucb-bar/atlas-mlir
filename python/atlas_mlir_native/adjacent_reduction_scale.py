@@ -4,6 +4,8 @@ The transition reproduces the removed division encoder on logical reduction
 values. Rejected values become admitted padding before device arithmetic, and
 the accumulated status is checked before any source result is published.
 """
+from .binding import io_memory_base as selected_io_base
+
 from dataclasses import replace
 from math import prod
 import os
@@ -21,10 +23,9 @@ from .region_composition import (
     verify_adjacent_group,
     export_adjacent_package,
 )
-from .binding import DRAM_BASE
 
 
-def prepare(region, adapter=None):
+def prepare(region, adapter=None, io_memory_base=None):
     from .pointwise import prepare_source, prepare_execution_plan
 
     pure = [node for node in region.nodes if node.effect == 'pure']
@@ -34,7 +35,7 @@ def prepare(region, adapter=None):
     if (divided.op != 'f32_div' or len(divided.inputs) != 2 or divided.inputs.count(reduced.id) != 1
             or region.outputs != (divided.id,)):
         raise ValueError('reduction/scale enlargement needs one closed division consumer')
-    prefix = square_reduce.prepare(extract_semantic_region(region, (square.id, reduced.id)), adapter)
+    prefix = square_reduce.prepare(extract_semantic_region(region, (square.id, reduced.id)), adapter, io_memory_base)
     precision = prepare_source(extract_semantic_region(region, (divided.id,)), allow_math=True)
     _, plan, streaming = prepare_execution_plan(precision.request)
     rows = prefix['plans'][1].matrix_shape[0]
@@ -60,10 +61,11 @@ def prepare(region, adapter=None):
              other: plan.input_packed_bytes[1 - operand], square.id: prefix['sizes'][square.id],
              reduced.id: prefix['sizes'][reduced.id], transition: plan.input_packed_bytes[operand],
              divided.id: plan.packed_bytes, status: 2048}
-    addresses, arena_bytes = allocate_adjacent_arena(sizes, (*inputs, *mutable))
+    addresses, arena_bytes = allocate_adjacent_arena(sizes, (*inputs, *mutable), io_memory_base)
     prefix = {**prefix,
               'addresses': {key: addresses[key] for key in (*prefix['inputs'], *prefix['outputs'])},
-              'arena_bytes': addresses[reduced.id] + sizes[reduced.id] - DRAM_BASE}
+              'arena_bytes': addresses[reduced.id] + sizes[reduced.id]
+                            - (selected_io_base() if io_memory_base is None else io_memory_base)}
     spec = precision.operand_specs[operand]
     proof = dict(square_preimage=prefix['proof'], consumer_operand=operand,
                  consumer_conversion=spec.record(), transition='column_to_row',
@@ -78,7 +80,7 @@ def prepare(region, adapter=None):
     return dict(region=region, prefix=prefix, precision=precision, plan=plan, rows=rows,
                 inputs=inputs, mutable=mutable, transition=transition, status=status,
                 data=prefix['data'], seed=prefix['seed'], other=other, operand=operand,
-                sizes=sizes, addresses=addresses, arena_bytes=arena_bytes, proof=proof)
+                sizes=sizes, addresses=addresses, arena_bytes=arena_bytes, io_memory_base=io_memory_base, proof=proof)
 
 
 def alternatives(adapter, source, choices):
@@ -121,7 +123,8 @@ def transition_source(group):
         rows=group['rows'], columns=1, kind='column_to_row', admitted_code_ranges=spec.admitted_code_ranges,
         pad=int.from_bytes(group['plan'].input_pad(group['operand']), 'little'),
         canonicalize_negative_zero=spec.canonicalize_negative_zero,
-        output_base=group['addresses'][first], output_bytes=sum(group['sizes'][key] for key in group['mutable']))
+        output_base=group['addresses'][first], output_bytes=sum(group['sizes'][key] for key in group['mutable']),
+        io_memory_base=group['io_memory_base'])
 
 
 def compile_group(group, snapshot, *, target_source, destination, limits):
@@ -138,7 +141,8 @@ def compile_group(group, snapshot, *, target_source, destination, limits):
     addresses = tuple(group['addresses'][group['transition'] if key == group['mutable'][1] else key] for key in keys)
     output = group['addresses'][group['mutable'][3]]
     descriptor, _ = compile_pointwise_member(precision, plan, snapshot, addresses=addresses, output=output,
-        target_source=target_source, destination=destination / 'division', limits=limits)
+        target_source=target_source, destination=destination / 'division', limits=limits,
+        io_memory_base=group['io_memory_base'])
     final = virtual_program(plan, addresses, output, descriptor)
     tools = Path(os.environ.get('ATLAS_OOT_BIN_DIR', target_source / 'build/bin'))
     virtual = compose_fragments([(destination / 'square-reduction/atlas-virtual.mlir').read_text(),

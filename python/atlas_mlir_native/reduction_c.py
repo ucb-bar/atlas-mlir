@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from .binding import io_memory_base as selected_io_base
+
 import hashlib
 import json
 import os
@@ -37,7 +39,8 @@ from .tile_io_c import render_tile_io_package
 
 
 def prepare_c_package(source, compiled, name, *, target_source, runtime_linkage="separate",
-                      reduction_policy=REDUCTION_POLICY, io_memory_base=DRAM_BASE):
+                      reduction_policy=REDUCTION_POLICY, io_memory_base=None):
+    io_memory_base = selected_io_base() if io_memory_base is None else io_memory_base
     if type(io_memory_base) is not int or io_memory_base % TILE_BYTES or not dma_span_in_window(io_memory_base, 1):
         raise ValueError("reduction I/O base must be tile-aligned within a DMA window")
     precision = prepare_source(source, reduction_policy=reduction_policy)

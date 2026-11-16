@@ -6,6 +6,9 @@ host conversions, rewrite addresses, change arithmetic, or join program sets.
 
 from __future__ import annotations
 
+from .binding import DRAM_BASE, io_memory_base as selected_io_base
+from merlin.semantic_compiler.codegen import current_codegen_options
+
 import hashlib
 import io
 import json
@@ -30,15 +33,20 @@ class VirtualStage:
     writes: tuple[str, ...]
 
 
-def _contract(stages, buffers, initialized, outputs, io_memory_bytes):
-    from .binding import DRAM_BASE, TILE_BYTES
+def _contract(stages, buffers, initialized, outputs, io_memory_bytes, io_memory_base=None):
+    from .binding import TILE_BYTES
+
+    if io_memory_base is None:
+        io_memory_base = selected_io_base()
 
     if not stages or len({stage.name for stage in stages}) != len(stages):
         raise ValueError("composition requires nonempty stages with unique names")
     if type(io_memory_bytes) is not int or io_memory_bytes <= 0 or io_memory_bytes % TILE_BYTES:
         raise ValueError("composition I/O window must contain whole positive slots")
-    if DRAM_BASE + io_memory_bytes > 1 << 32:
+    if type(io_memory_base) is not int or io_memory_base % TILE_BYTES or io_memory_base + io_memory_bytes > 1 << 32:
         raise ValueError("composition I/O window exceeds the 32-bit buffer ABI")
+    from .binding import validate_io_window
+    validate_io_window(io_memory_base, io_memory_bytes)
     by_name = {buffer.name: buffer for buffer in buffers}
     if len(by_name) != len(buffers) or any(not key for key in by_name):
         raise ValueError("composition buffers require unique nonempty names")
@@ -46,8 +54,8 @@ def _contract(stages, buffers, initialized, outputs, io_memory_bytes):
     for index, buffer in enumerate(ordered):
         if (type(buffer.address) is not int or type(buffer.bytes) is not int
                 or buffer.bytes <= 0 or buffer.address % TILE_BYTES or buffer.bytes % TILE_BYTES
-                or not buffer.layout or buffer.address < DRAM_BASE
-                or buffer.address + buffer.bytes > DRAM_BASE + io_memory_bytes):
+                or not buffer.layout or buffer.address < io_memory_base
+                or buffer.address + buffer.bytes > io_memory_base + io_memory_bytes):
             raise ValueError("composition buffer must fit whole slots in the selected I/O window")
         if index and ordered[index - 1].address + ordered[index - 1].bytes > buffer.address:
             raise ValueError("distinct composition buffers must not overlap")
@@ -138,7 +146,7 @@ def rematerialize_scalar_constants(source):
 def compose_regions(
     stages, *, buffers, initialized, outputs, destination, tools=None,
     pipeline="mandatory", io_memory_bytes=262144, program_size_limit_bytes=None,
-    rematerialize_constants=False,
+    rematerialize_constants=False, io_memory_base=None,
 ):
     """Compile ordered explicit-DMA stages, with no host work between stages.
 
@@ -150,9 +158,10 @@ def compose_regions(
     from .binding import NATIVE_CHECKS, NATIVE_PIPELINES, RTL_REVISION, _run
     from .resident_graph import compose_fragments
 
+    io_memory_base = selected_io_base() if io_memory_base is None else io_memory_base
     stages, buffers = tuple(stages), tuple(buffers)
     initialized, outputs = tuple(initialized), tuple(outputs)
-    by_name = _contract(stages, buffers, initialized, outputs, io_memory_bytes)
+    by_name = _contract(stages, buffers, initialized, outputs, io_memory_bytes, io_memory_base)
     if pipeline not in NATIVE_PIPELINES:
         raise ValueError("composition pipeline must be mandatory or optimized")
     if program_size_limit_bytes is not None and (type(program_size_limit_bytes) is not int or program_size_limit_bytes <= 0):
@@ -191,6 +200,8 @@ def compose_regions(
                     "source_sha256": hashlib.sha256(stage.source.encode()).hexdigest()} for stage in stages],
         "physical_contract": "caller_declared; no inferred boundary conversions or source equivalence",
     }
+    if io_memory_base is not None:
+        execution["io_memory_base"] = io_memory_base
     (destination / "atlas-machine.mlir").write_text(machine)
     (destination / "program.bin").write_bytes(binary)
     for name, record in (("execution_plan.json", execution), ("physical-program.json", program)):
@@ -210,36 +221,41 @@ def compose_regions(
     return manifest
 
 
-def allocate_adjacent_arena(sizes, names):
-    """Place whole tile buffers in one checked off-chip application arena."""
-    from .binding import DRAM_BASE, TILE_BYTES, dram_slots
+def allocate_adjacent_arena(sizes, names, io_memory_base=None):
+    """Place whole tile buffers in one checked arena at the selected I/O base."""
+    from .binding import TILE_BYTES, dram_slots
+    from .memory_windows import dma_span_in_window
 
-    addresses, cursor = {}, DRAM_BASE
+    base = selected_io_base() if io_memory_base is None else io_memory_base
+    if type(base) is not int or base % TILE_BYTES:
+        raise ValueError("adjacent arena base must be a tile-aligned integer")
+    addresses, cursor = {}, base
     for name in names:
         if name in addresses or sizes[name] <= 0 or sizes[name] % TILE_BYTES:
             raise ValueError("adjacent arena needs distinct complete tile buffers")
         addresses[name] = cursor
         cursor += sizes[name]
-    if cursor - DRAM_BASE > dram_slots() * TILE_BYTES:
-        raise ValueError("adjacent arena exceeds the selected off-chip window")
-    return addresses, cursor - DRAM_BASE
+    if cursor - base > dram_slots() * TILE_BYTES or not dma_span_in_window(base, cursor - base):
+        raise ValueError("adjacent arena exceeds the selected I/O window")
+    return addresses, cursor - base
 
 
 def compile_pointwise_member(precision, plan, snapshot, *, addresses, output,
-                             target_source, destination, limits, ordinary_abi=False):
+                             target_source, destination, limits, ordinary_abi=False, io_memory_base=None):
     """Qualify an unchanged child and return its selected body plus receipt."""
-    from .binding import DRAM_BASE, TILE_BYTES
+    from .binding import TILE_BYTES
     from .pointwise import compile_pointwise, plan_abi, selected_body_descriptor
 
+    base = selected_io_base() if io_memory_base is None else io_memory_base
     abi = plan_abi(precision.request) if ordinary_abi else dict(
-        fixed_inputs={node.id: (address - DRAM_BASE) // TILE_BYTES
+        fixed_inputs={node.id: (address - base) // TILE_BYTES
                       for node, address in zip(precision.request.nodes[:-1], addresses, strict=True)},
-        fixed_outputs=((output - DRAM_BASE) // TILE_BYTES,))
+        fixed_outputs=((output - base) // TILE_BYTES,))
     destination = Path(destination)
     destination.parent.mkdir(parents=True, exist_ok=True)
     compile_pointwise(snapshot, precision.request, fixed_inputs=abi['fixed_inputs'],
         fixed_outputs=tuple(abi['fixed_outputs']), target_source=target_source,
-        destination=destination, limits=limits)
+        destination=destination, limits=limits, io_memory_base=io_memory_base)
     return selected_body_descriptor(plan, destination / 'body'), dict(
         request_digest=precision.request.digest(), body_digest=plan.body_request().digest(),
         manifest_sha256=hashlib.sha256((destination / 'manifest.json').read_bytes()).hexdigest())
@@ -265,16 +281,19 @@ def compile_adjacent_virtual(virtual, *, destination, target_source):
         row['word_u32'].to_bytes(4, 'little') for row in program['instructions']))
 
 
-def link_adjacent_stages(stages, *, buffers, initialized, outputs, destination, target_source):
+def link_adjacent_stages(stages, *, buffers, initialized, outputs, destination, target_source, io_memory_base=None):
     """Compose checked explicit-buffer members and retain their final image."""
     import shutil
     from .binding import TILE_BYTES, _native_pipeline, dram_slots
 
     destination = Path(destination)
     linked = destination / 'linked'
+    from merlin.semantic_compiler.codegen import current_codegen_options
     compose_regions(stages, buffers=buffers, initialized=initialized, outputs=outputs,
         destination=linked, tools=os.environ.get('ATLAS_OOT_BIN_DIR', str(Path(target_source) / 'build/bin')),
-        pipeline=_native_pipeline(), io_memory_bytes=dram_slots() * TILE_BYTES, rematerialize_constants=True)
+        pipeline=_native_pipeline(), io_memory_bytes=dram_slots() * TILE_BYTES, rematerialize_constants=True,
+        program_size_limit_bytes=current_codegen_options().program_size_limit_bytes,
+        io_memory_base=io_memory_base)
     for path in linked.iterdir():
         shutil.copyfile(path, destination / path.name)
     shutil.rmtree(linked)
@@ -296,6 +315,8 @@ def publish_adjacent_group(group, destination, *, kind, execution, enlargement):
         request_digest=region.digest(), target_identity=region.target_identity,
         binary_sha256=artifacts['program.bin'], execution_plan_sha256=artifacts['execution_plan.json'],
         stage_artifacts=artifacts, io_memory_bytes=dram_slots() * TILE_BYTES)
+    if selected_io_base() != DRAM_BASE:
+        manifest["io_memory_base"] = selected_io_base()
     (destination / 'manifest.json').write_text(json.dumps(manifest, sort_keys=True, indent=2) + '\n')
     return manifest
 
@@ -321,7 +342,7 @@ def verify_adjacent_group(group, compiled, *, precision_plan=None, plans=None):
 def export_adjacent_package(group, compiled, name, *, kind, target_source, execution,
                             input_sources, packed_sizes, helpers, metadata=None,
                             completion_check='', source_input_indices=None, input_guard=None):
-    """Export shared checked f32 boundary dispatch around a single device image."""
+    """Export checked f32 inputs and the source result type around one image."""
     from merlin.compile.semantic_application import CompiledCRegion
     from merlin.semantic_compiler.model import KernelRequest, SemanticNode, TensorType
     from .c_runtime import RUNTIME_SHARED_FILES
@@ -339,7 +360,7 @@ def export_adjacent_package(group, compiled, name, *, kind, target_source, execu
     record, files = render_tile_io_package(boundary, (compiled / 'program.bin').read_bytes(), execution, name,
         target_source=Path(target_source), runtime_linkage='separate', packed_sizes=packed_sizes,
         tile_bytes=2048, helpers='\n'.join(helpers), source_dtype='f32', completion_check=completion_check,
-        input_guard=input_guard, **options)
+        output_dtype=region.node(region.outputs[0]).type.dtype, input_guard=input_guard, **options)
     record.update(kind=kind, context_type=name + '_context', source_context_type=name + '_source_context',
         binding_function=name + '_bind', source_binding_function=name + '_source_bind',
         input_node_ids=list(group['inputs']), output_node_ids=list(region.outputs),
@@ -356,7 +377,7 @@ def compile_virtual_with_receipt(virtual, *, tools, pipeline, destination):
     from .publication_options import deterministic_receipts_enabled
 
     destination, tools = Path(destination), Path(tools)
-    capture = os.environ.get('ATLAS_CAPTURE_POSTSPILL') == '1'
+    capture = current_codegen_options().capture_postspill
     capture_options = ['--mlir-disable-threading',
         '--mlir-print-ir-before=lower-atlas-virtual-to-machine',
         '--mlir-print-ir-module-scope'] if capture else []

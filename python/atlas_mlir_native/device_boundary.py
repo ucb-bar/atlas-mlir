@@ -8,6 +8,7 @@ invocation-local status slot records rejection without data-dependent control.
 from __future__ import annotations
 
 from .exponent_restoration import BF16, SLOT, STATE, Emitter
+from .memory_windows import dma_span_in_window
 from .region_composition import rematerialize_scalar_constants
 
 
@@ -36,9 +37,9 @@ def _configuration(source, destination, status, rows, columns, kind, ranges, pad
     if ranges and not any(low <= pad <= high for low, high in ranges):
         raise ValueError('device boundary pad must be admitted by its consumer')
     spans = ((source,pages*2048),(destination,pages*2048),(status,2048))
-    if any(type(address) is not int or not 0x80000000 <= address <= 0xffffffff or address % 2048
-           or address+size > 1 << 32 for address,size in spans):
-        raise ValueError('device boundary pages must be aligned fixed DRAM ranges')
+    if any(type(address) is not int or address % 2048 or not dma_span_in_window(address, size)
+           for address,size in spans):
+        raise ValueError('device boundary pages must be aligned fixed DMA ranges')
     if any(a < b+bn and b < a+an for i,(a,an) in enumerate(spans) for b,bn in spans[i+1:]):
         raise ValueError('device boundary source, destination, and status must be disjoint')
     if output_base is None and output_bytes is None:
@@ -47,7 +48,7 @@ def _configuration(source, destination, status, rows, columns, kind, ranges, pad
         if source < output_base+output_bytes and output_base < source+pages*2048:
             raise ValueError('implicit boundary output window overlaps its source')
     if (type(output_base) is not int or type(output_bytes) is not int or output_base % 32 or output_bytes % 32
-            or output_base < 0x80000000 or output_bytes <= 0 or output_base+output_bytes > 1 << 32
+            or not dma_span_in_window(output_base, output_bytes)
             or any(address < output_base or address+size > output_base+output_bytes for address,size in spans[1:])):
         raise ValueError('device boundary output window does not cover its publications')
     return pages,ranges,pad,output_base,output_bytes
@@ -79,7 +80,7 @@ def _admitted(e, code, ranges):
 def virtual_transition(*, source_address, destination_address, status_address,
                        rows, columns, kind='identity', admitted_code_ranges=(), pad=0,
                        canonicalize_negative_zero=False, output_base=None, output_bytes=None,
-                       initialize_status=True):
+                       initialize_status=True, io_memory_base=None):
     """Return one composable packed-tensor boundary program.
 
     ``rows`` and ``columns`` describe the producer's logical matrix. The two
@@ -92,6 +93,17 @@ def virtual_transition(*, source_address, destination_address, status_address,
     pages,ranges,pad,output_base,output_bytes = _configuration(
         source_address,destination_address,status_address,rows,columns,kind,
         admitted_code_ranges,pad,canonicalize_negative_zero,output_base,output_bytes)
+    from merlin.semantic_compiler.codegen import IO_MEMORY_OPTIONS, current_codegen_options
+    options = current_codegen_options()
+    if io_memory_base is not None or any(getattr(options, name) is not None for name in IO_MEMORY_OPTIONS):
+        from .binding import io_memory_base as selected_io_base, validate_explicit_io_base, dram_slots, TILE_BYTES
+        base = selected_io_base() if io_memory_base is None else io_memory_base
+        validate_explicit_io_base(base)
+        size = dram_slots() * TILE_BYTES
+        if any(address < base or address + length > base + size for address, length in
+               ((source_address, pages * 2048), (destination_address, pages * 2048),
+                (status_address, 2048), (output_base, output_bytes))):
+            raise ValueError("device boundary exceeds selected I/O window")
     mc = (rows+31)//32
     nc = (columns+31)//32 if kind == 'identity' else 1
     e = Emitter('boundary')
@@ -123,22 +135,41 @@ def virtual_transition(*, source_address, destination_address, status_address,
     e.effect('save',['boundary_source',tile],[SLOT,BF16])
     e.effect('save',['boundary_destination','boundary_pad_tile'],[SLOT,BF16])
     invalid = e.load('boundary_status',zero)
+    # The destination is already padded. Visit only potentially logical rows
+    # for identity views, only row zero for column-to-row, and one source value
+    # per row for broadcasts. A power-of-two row span keeps indexing affine in
+    # bit operations while retaining the original logical-lane guard.
+    scan_rows = min(32, 1 << (rows - 1).bit_length())
+    scan_words = (16 * scan_rows if kind == 'identity' else
+                  (min(rows, 32) + 1) // 2 if kind == 'column_to_row' else min(rows, 32))
     e.emit(f'cf.br ^boundary_words(%{e.state}, %{zero}, %{invalid} : {STATE}, i32, i32)')
     e.lines.append(f'  ^boundary_words(%boundary_ws: {STATE}, %boundary_i: i32, %boundary_invalid: i32):')
-    more = e.cmp('ult','boundary_i',e.const(512))
+    more = e.cmp('ult','boundary_i',e.const(scan_words))
     e.emit(f'cf.cond_br %{more}, ^boundary_word_body(%boundary_ws : {STATE}), ^boundary_word_done(%boundary_ws, %boundary_invalid : {STATE}, i32)')
     e.lines.append(f'  ^boundary_word_body(%boundary_wb: {STATE}):')
     e.state = 'boundary_wb'
     invalid = 'boundary_invalid'
+    word_index = 'boundary_i'
+    if kind == 'identity' and scan_rows < 32:
+        # Each BF16 register holds 16 columns; keep both register halves.
+        half_words = scan_rows * 8
+        word_index = e.binary('ori', e.binary('andi', 'boundary_i', e.const(half_words - 1)),
+            e.binary('shli', e.binary('shrui', 'boundary_i', e.const(half_words.bit_length() - 1)), e.const(8)))
+    elif kind == 'column_to_row':
+        word_index = e.binary('ori', e.binary('andi', 'boundary_i', e.const(7)),
+            e.binary('shli', e.binary('shrui', 'boundary_i', e.const(3)), e.const(8)))
+    source_word = e.load('boundary_source', word_index) if kind == 'identity' else None
     result = []
-    for lane in range(2):
-        row = e.binary('shrui',e.binary('andi','boundary_i',e.const(255)),e.const(3))
-        column = e.binary('addi',e.binary('shli',e.binary('andi','boundary_i',e.const(7)),e.const(1)),
-                          e.binary('shli',e.binary('shrui','boundary_i',e.const(8)),e.const(4)))
-        if lane:
-            column = e.binary('addi',column,e.const(1))
+    for lane in range(1 if kind == 'broadcast_column' else 2):
+        row = 'boundary_i'
+        if kind != 'broadcast_column':
+            row = e.binary('shrui',e.binary('andi',word_index,e.const(255)),e.const(3))
+            column = e.binary('addi',e.binary('shli',e.binary('andi',word_index,e.const(7)),e.const(1)),
+                              e.binary('shli',e.binary('shrui',word_index,e.const(8)),e.const(4)))
+            if lane:
+                column = e.binary('addi',column,e.const(1))
         if kind == 'identity':
-            word = e.load('boundary_source','boundary_i')
+            word = source_word
             if lane:
                 word = e.binary('shrui',word,e.const(16))
             global_row = e.binary('addi',e.binary('shli','boundary_rt',e.const(5)),row)
@@ -162,8 +193,19 @@ def virtual_transition(*, source_address, destination_address, status_address,
         take = e.binary('subi',zero,e.flag(e.combine('andi',logical,admitted)))
         difference = e.binary('xori',code,e.const(pad))
         result.append(e.binary('xori',e.const(pad),e.binary('andi',difference,take)))
+    if kind == 'broadcast_column':
+        result *= 2
     packed = e.binary('ori',result[0],e.binary('shli',result[1],e.const(16)))
-    e.store('boundary_destination','boundary_i',packed)
+    if kind == 'broadcast_column':
+        # Replicate the checked raw bits, preserving signed zero and payloads.
+        # The row index is below 32, so all 16 immediate stores stay in the slot.
+        word_base = e.binary('shli', 'boundary_i', e.const(3))
+        for half in (0, 256):
+            for word in range(8):
+                e.effect('slot_store', ['boundary_destination', packed, word_base], [SLOT, 'i32', 'i32'],
+                    attrs=f' {{kind = "sw", byte_offset = {4 * (half + word)} : i32}}')
+    else:
+        e.store('boundary_destination',word_index,packed)
     index = e.binary('addi','boundary_i',e.const(1))
     e.emit(f'cf.br ^boundary_words(%{e.state}, %{index}, %{invalid} : {STATE}, i32, i32)')
     e.lines.append(f'  ^boundary_word_done(%boundary_wd: {STATE}, %boundary_bad: i32):')

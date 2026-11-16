@@ -1,0 +1,122 @@
+"""Publish a selected BF16 pointwise result through a private exact cast.
+
+The selected pointwise operation and all input encoders stay unchanged. Only
+the host publication omits its exact widening and the following device cast.
+This is a target-representation proof, not reassociation of source FP32 math.
+"""
+from dataclasses import dataclass, replace
+from hashlib import sha256
+from pathlib import Path
+
+from merlin.compile.semantic_regions import extract_semantic_region
+from merlin.compile.result_narrowing import split_private_bf16_cast
+
+
+@dataclass(frozen=True)
+class Narrowing:
+    source: object
+    precision: object
+
+
+def prepare(source, adapter):
+    from .pointwise import PointwisePrecision, prepare_source
+    from .pointwise_math import MathPointwisePrecision
+    from .gelu import GeluPrecision
+    from .sigmoid import SigmoidPrecision, SiluPrecision
+
+    producer = split_private_bf16_cast(source)
+    result = producer.node(producer.outputs[0])
+    precision = prepare_source(producer,
+        allow_math=True, bf16_policy=adapter.bf16_pointwise,
+        rne_add_policy=adapter.qualified_rne_add if result.op == 'f32_add' else None,
+        exp_policy=adapter.source_exp_policy)
+    # These bounded operators cannot produce NaN: sums/products have finite
+    # normal-or-zero inputs of magnitude at most 2**63; LUT division/rsqrt also
+    # require a positive denominator of magnitude at least 2**-63. Their selected
+    # arithmetic produces BF16, and exact widening followed by RNE is identity
+    # for every non-NaN BF16 encoding (including infinities and signed zero).
+    bounded_pointwise = (type(precision) in (PointwisePrecision, MathPointwisePrecision)
+            and precision.request.nodes[-1].op in {
+                'mul_bf16_zero', 'add_bf16_rne', 'sub_bf16_rne',
+                'divide_bf16_lut', 'rsqrt_bf16_lut'})
+    # The separately selected GELU policy admits |x| <= 2**32. Its cube and
+    # scaled inner sum remain finite; tanh lies in [-1, 1], so the final
+    # half*x*(1+tanh) is finite as well. All steps retain the existing BF16
+    # rounding and coefficient encodings, including both signed zeros.
+    bounded_gelu = (type(precision) is GeluPrecision and adapter.gelu
+                    and precision.request.nodes[-1].op == 'tanh_gelu_bf16_lut')
+    # The selected sigmoid has a finite positive denominator >= 1, and
+    # returns finite BF16 in (0, 1]. Its optional product keeps |x| <= 32.
+    bounded_sigmoid = (adapter.sigmoid
+        and (type(precision) is SigmoidPrecision and precision.request.nodes[-1].op == 'sigmoid_bf16_lut'
+             or type(precision) is SiluPrecision and adapter.pointwise
+             and precision.request.nodes[-1].op == 'silu_bf16_lut'))
+    if not (bounded_pointwise or bounded_gelu or bounded_sigmoid):
+        raise ValueError('pointwise narrowing has no non-NaN result proof for this policy')
+    return Narrowing(source, precision)
+
+
+def alternatives(adapter, source, choices):
+    from merlin.xdsl_dialects.lowering.global_plan import CycleInterval
+
+    from .pointwise import plan_abi
+
+    choices = list(choices)
+    casts = {row.nodes[0]: row for row in choices if len(row.nodes) == 1
+             and row.placement == 'accelerator' and dict(row.metadata).get('kind') == 'exact_float_device'}
+    pure = [node for node in source.nodes if node.effect == 'pure']
+    adapter._pointwise_narrowing_groups = {}
+    for first in tuple(choices):
+        if (first.placement != 'accelerator'
+                or dict(first.metadata).get('kind') not in ('pointwise', 'pointwise_math')
+                or first.nodes != tuple(range(min(first.nodes), max(first.nodes)+1))):
+            continue
+        last = casts.get(max(first.nodes)+1)
+        if last is None:
+            continue
+        try:
+            region = extract_semantic_region(source, tuple(pure[index].id for index in (*first.nodes, *last.nodes)))
+            group = prepare(region, adapter)
+            plan_abi(group.precision.request)
+        except ValueError:
+            continue
+        ports = {port.buffer: port for row in (first, last) for port in (*row.inputs, *row.outputs)}
+        inputs = tuple(node.id for node in region.nodes if node.effect in ('input', 'constant'))
+        adapter._pointwise_narrowing_groups[region.digest()] = group
+        choices.append(replace(first, id='pointwise_narrowing_' + first.id,
+            nodes=(*first.nodes, *last.nodes), implementation='source_pointwise_narrowing',
+            inputs=tuple(ports[key] for key in inputs), outputs=tuple(ports[key] for key in region.outputs),
+            cycles=CycleInterval.unknown('unchanged pointwise program; exact cast omitted'),
+            metadata=(('kind', 'pointwise_narrowing'),)))
+    return tuple(choices)
+
+
+def compile_group(group, snapshot, *, target_source, destination, limits):
+    from .pointwise import compile_pointwise, plan_abi
+
+    request = group.precision.request
+    abi = plan_abi(request)
+    compile_pointwise(snapshot, request, fixed_inputs=abi['fixed_inputs'],
+        fixed_outputs=tuple(abi['fixed_outputs']), target_source=target_source,
+        destination=destination, limits=limits)
+
+
+def export_group(group, compiled, name, *, target_source):
+    from merlin.compile.semantic_application import CompiledCRegion
+
+    from .c_runtime import RUNTIME_SHARED_FILES
+    from .pointwise_c import prepare_precision_c_package
+
+    compiled = Path(compiled)
+    record, files = prepare_precision_c_package(group.precision, compiled, name,
+        target_source=Path(target_source), output_dtype='bf16')
+    record.update(kind='pointwise_narrowing', output_node_ids=list(group.source.outputs),
+        source_request_digest=group.source.digest(),
+        narrowing_proof='non-NaN BF16 result; exact widening followed by RNE is identity',
+        context_type=name + '_context', source_context_type=name + '_source_context',
+        binding_function=name + '_bind', source_binding_function=name + '_source_bind',
+        launches_per_invocation=record.get('streaming', {}).get('launch_count', 1),
+        native_manifest_sha256=sha256((compiled / 'manifest.json').read_bytes()).hexdigest())
+    return CompiledCRegion(name + '_source_dispatch', name + '.h',
+        tuple(record['input_node_ids']), group.source.outputs, files, RUNTIME_SHARED_FILES,
+        ('segments/' + name,), record)

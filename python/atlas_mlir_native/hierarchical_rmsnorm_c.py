@@ -3,6 +3,8 @@
 The host converts declared inputs, compares their words, and moves completed
 tiles. All normalization arithmetic and the FP8 boundary execute natively.
 """
+from .binding import io_memory_base as selected_io_base
+
 from hashlib import sha256
 import json
 from pathlib import Path
@@ -13,7 +15,7 @@ from merlin.compile.c_sources import c_source_pair
 from merlin.compile.launch_schedule import make_launch_schedule
 from merlin.semantic_compiler.target_binding import verify_native_publication
 
-from .binding import AtlasNativeBinding, DRAM_BASE, TILE_BYTES, check_io_memory_manifest, dram_slots
+from .binding import AtlasNativeBinding, TILE_BYTES, check_io_memory_manifest, dram_slots
 from .c_runtime import program_array, runtime_headers, runtime_members
 from .hierarchical_rmsnorm import prepare_source, operand_spec, runtime_admission
 from .layout import pack_bf16_pair_halves
@@ -36,22 +38,22 @@ def _stage_layout(body, kind):
     """Derive addresses and complete device spans from the semantic request."""
     abi = AtlasNativeBinding.plan_boundary_abi(body)
     sources = [n for n in body.nodes if n.effect in {'input', 'constant'}]
-    addresses = {k:DRAM_BASE+v*TILE_BYTES for k,v in abi['fixed_inputs'].items()}
-    output = DRAM_BASE+abi['fixed_outputs'][0]*TILE_BYTES
+    addresses = {k:selected_io_base()+v*TILE_BYTES for k,v in abi['fixed_inputs'].items()}
+    output = selected_io_base()+abi['fixed_outputs'][0]*TILE_BYTES
     if kind == 'publish':
         _, slots, sizes, liveness = mixed_memory_plan(body)
         def row(key):
-            return dict(node=key, address=DRAM_BASE+slots[key]*TILE_BYTES, bytes=sizes[key])
+            return dict(node=key, address=selected_io_base()+slots[key]*TILE_BYTES, bytes=sizes[key])
         typed_inputs = [dict(**row(n.id), type=n.type.record()) for n in sources]
         typed_outputs = [dict(**row(k), type=body.node(k).type.record()) for k in body.outputs]
         if addresses != {n.id:row(n.id)['address'] for n in sources} or output != row(body.outputs[0])['address']:
             raise ValueError('hierarchical RMSNorm ABI and mixed memory allocation differ')
         readonly, end = len(sources), max(slots.values())+1
-        ranges = [(DRAM_BASE, readonly*TILE_BYTES, 'READ'),
-                  (DRAM_BASE+readonly*TILE_BYTES, (end-readonly)*TILE_BYTES, 'READ_WRITE')]
+        ranges = [(selected_io_base(), readonly*TILE_BYTES, 'READ'),
+                  (selected_io_base()+readonly*TILE_BYTES, (end-readonly)*TILE_BYTES, 'READ_WRITE')]
         expected = dict(inputs=typed_inputs, outputs=typed_outputs,
             buffers=[row(k) for k in slots], source_liveness_buffers=liveness,
-            staging_workspace=dict(address=DRAM_BASE+readonly*TILE_BYTES, bytes=(end-readonly)*TILE_BYTES),
+            staging_workspace=dict(address=selected_io_base()+readonly*TILE_BYTES, bytes=(end-readonly)*TILE_BYTES),
             operation='mixed_tile_staged', backend_verification_tier='verified', launches_per_invocation=1,
             input_payload_bytes=[2048]*len(sources), output_payload_bytes=[1024])
         write_spans = [row(n.id) for n in body.nodes if n.effect=='pure']
@@ -60,7 +62,7 @@ def _stage_layout(body, kind):
         expected = dict(operation='bf16_row_sum' if kind == 'reduce' else 'bf16_mixed',
                         input_bytes=2048, output_address=output)
         write_spans = [dict(node=body.outputs[0],address=output,bytes=2048)]
-    if any(a < DRAM_BASE or s <= 0 or a+s > DRAM_BASE+dram_slots()*TILE_BYTES for a,s,_ in ranges):
+    if any(a < selected_io_base() or s <= 0 or a+s > selected_io_base()+dram_slots()*TILE_BYTES for a,s,_ in ranges):
         raise ValueError('hierarchical RMSNorm stage exceeds diagnostic memory')
     return dict(addresses=addresses, output=output, output_bytes=1024 if kind=='publish' else 2048,
                 ranges=ranges, write_spans=write_spans, expected=expected)

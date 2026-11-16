@@ -107,3 +107,42 @@ def test_cli_requires_matching_window_for_compilation_and_verification(tmp_path)
     assert rejected.returncode == 2 and "snapshot differs" in status.read_text()
     verified = subprocess.run([*verify_cmd, "--io-memory-bytes", "1048576"], capture_output=True, text=True)
     assert verified.returncode == 0, verified.stdout + verified.stderr
+
+
+@pytest.mark.parametrize("base,size,capacity_base,capacity", [
+    (0x90000001, 262144, None, None),
+    (0x20000, 262144, None, None),
+    (0x40000, 262144, None, None),
+    (0xBFFFF800, 4096, 0x80000000, 1 << 30),
+    (0x80000000, 64 << 20, 0x80000000, (64 << 20) - 2048),
+    (0x200C0000, 1 << 20, None, None),
+])
+def test_complete_window_refuses_invalid_placement(base, size, capacity_base, capacity):
+    from atlas_mlir_native.binding import validate_io_window
+    with codegen_options(CodegenOptions(io_memory_base=base, io_memory_bytes=size,
+            io_memory_capacity_base=capacity_base, io_memory_capacity_bytes=capacity)):
+        with pytest.raises(NativeCompilationError):
+            validate_io_window()
+
+
+@pytest.mark.parametrize("base,size", [(0x200C0000, 768 << 10), (0x80000000, 64 << 20)])
+def test_window_context_controls_adjacent_and_leaf_plans(base, size):
+    from atlas_mlir_native.binding import validate_io_window
+    from atlas_mlir_native.region_composition import allocate_adjacent_arena
+    from atlas_mlir_native.scalar_broadcast import prepare_source as broadcast
+    with codegen_options(CodegenOptions(io_memory_base=base, io_memory_bytes=size)):
+        assert validate_io_window() == (base, size)
+        addresses, used = allocate_adjacent_arena({'x': 2048, 'y': 2048}, ('x', 'y'))
+        assert addresses == {'x': base, 'y': base + 2048}
+        assert used == 4096
+        check_io_memory_manifest({'io_memory_bytes': size, 'io_memory_base': base})
+        with pytest.raises(ValueError):
+            check_io_memory_manifest({'io_memory_bytes': size})
+
+
+def test_row_explicit_base_cannot_escape_declared_capacity():
+    from atlas_mlir_native.row_loop import prepare_plan as row_plan
+    with codegen_options(CodegenOptions(io_memory_base=0xA0000000, io_memory_bytes=64 << 20,
+            io_memory_capacity_base=0xA0000000, io_memory_capacity_bytes=64 << 20)):
+        with pytest.raises(NativeCompilationError, match='capacity'):
+            row_plan(None, io_memory_base=DRAM_BASE)

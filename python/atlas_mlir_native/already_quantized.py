@@ -5,6 +5,8 @@ MXU contraction restores their sum at readout. No weight encoder is involved.
 """
 from __future__ import annotations
 
+from .binding import io_memory_base as selected_io_base
+
 from dataclasses import dataclass
 from hashlib import sha256
 import json
@@ -15,7 +17,7 @@ import numpy as np
 from merlin.semantic_compiler.model import KernelRequest, SemanticNode, TensorType
 from merlin.semantic_compiler.target_binding import NativeCompilationError, verify_native_publication
 
-from .binding import (AtlasNativeBinding, DRAM_BASE, MXU1_CAP448_INPUT_DOMAIN,
+from .binding import (AtlasNativeBinding, MXU1_CAP448_INPUT_DOMAIN,
     MXU1_CAP448_POLICY, MXU1_CAP448_SEED_DOMAIN, TARGET_IDENTITY, TILE_BYTES,
     _mxu0_maps, _mxu0_accumulate_maps)
 
@@ -108,6 +110,14 @@ class QuantizedPlan:
     epilogue_other_id: str | None = None
     epilogue_other_dtype: str | None = None
     narrowing_input_id: str | None = None
+    operand_permutation: tuple[str, str, tuple[int, ...]] | None = None
+
+    @property
+    def physical_operand_ids(self):
+        if self.operand_permutation is None:
+            return self.operand_ids
+        logical, physical, _ = self.operand_permutation
+        return tuple(physical if key == logical else key for key in self.operand_ids)
 
     @property
     def output_id(self):
@@ -133,8 +143,16 @@ class QuantizedPlan:
         if self.narrowing_input_id is not None:
             record.update(schema="atlas.already_quantized_narrowing.v1", narrowing=dict(
                 input_id=self.narrowing_input_id, source_dtype="f32", output_dtype="bf16",
-                admission="restored finite normal BF16 or signed zero; exact FP32 widening",
-                arithmetic="unchanged ordered K and exponent restoration; omit widening then narrowing"))
+                admission=("bounded non-NaN BF16 epilogue product; exact FP32 widening"
+                           if self.epilogue_precision is not None else
+                           "restored finite normal BF16 or signed zero; exact FP32 widening"),
+                arithmetic=("unchanged ordered K, exponent restoration and original BF16 RNE multiply; "
+                            "omit widening then narrowing" if self.epilogue_precision is not None else
+                            "unchanged ordered K and exponent restoration; omit widening then narrowing")))
+        if self.operand_permutation is not None:
+            logical, physical, axes = self.operand_permutation
+            record['operand_permutation'] = dict(logical_operand=logical, physical_operand=physical,
+                axes=list(axes), placement='existing raw-byte input tile packing; no intermediate copy')
         return record
 
 
@@ -152,6 +170,13 @@ def _body(source, continued):
 
 def prepare_source(source):
     pure = [node for node in source.nodes if node.effect == "pure"]
+    if (len(pure) == 3 and pure[0].op in OPS and pure[1].op == "f32_mul"
+            and pure[2].op == "f32_to_bf16"):
+        from .quantized_epilogue_narrowing import prepare_source as prepare_product_narrowing
+        return prepare_product_narrowing(source)
+    if any(node.op in {'gather', 'transpose'} for node in pure):
+        from .quantized_operand_permutation import prepare_source as prepare_permutation
+        return prepare_permutation(source)
     if (len(pure) == 2 and pure[0].op in OPS
             and pure[1].op in ("f32_mul", "bf16_mul")):
         from .quantized_epilogue import prepare_source as prepare_epilogue
@@ -225,8 +250,8 @@ def prepare_c_package(source, compiled, name, *, target_source):
             raise ValueError("already-quantized native body differs from its publication")
         abi = AtlasNativeBinding.plan_boundary_abi(body)
         execution = json.loads((root/"execution_plan.json").read_text())
-        addresses = [DRAM_BASE+abi["fixed_inputs"][node.id]*TILE_BYTES for node in body.nodes if node.effect == "input"]
-        out = DRAM_BASE+abi["fixed_outputs"][0]*TILE_BYTES
+        addresses = [selected_io_base()+abi["fixed_inputs"][node.id]*TILE_BYTES for node in body.nodes if node.effect == "input"]
+        out = selected_io_base()+abi["fixed_outputs"][0]*TILE_BYTES
         if execution["input_addresses"] != addresses or execution["output_addresses"] != [out] or execution.get("operation") != "mxu1_cap448_seeded_ordered":
             raise ValueError("already-quantized native operand ABI differs")
         if sha256((target_source/"docs/selected-variant-inventory.json").read_bytes()).hexdigest() != manifest["target_inventory_sha256"]:
