@@ -62,6 +62,28 @@ class VectorPreflightTest(unittest.TestCase):
         with self.assertRaises(ValueError), codegen_options(replace(current_codegen_options(), exact_cast_vector_preflight='true')):
             cast_vector_preflight()
 
+    def test_zero_probe_distinguishes_every_bf16_encoding(self):
+        import torch
+        from npu_model.configs.numerics import RtlNumerics as rtl
+
+        raw = torch.arange(65536, dtype=torch.int32)
+        values = raw.to(torch.int16).view(torch.bfloat16)
+        magnitude = rtl.maximum(values, rtl.mul(values, torch.full_like(values, -1)))
+        scaled = rtl.mul(rtl.minimum(magnitude, torch.full_like(values, 2.0 ** -32)),
+                         torch.full_like(values, 2.0 ** 32))
+        probe = rtl.mul(scaled, rtl.sub(torch.ones_like(values), scaled))
+        probe_bits = probe.view(torch.int16).to(torch.int32) & 65535
+        magnitude_bits = magnitude.view(torch.int16).to(torch.int32) & 65535
+        admitted = (probe_bits == 0) & (magnitude_bits <= 0x4f80)
+        original = raw & 32767
+        expected = (original == 0) | ((original >= 0x2f80) & (original <= 0x4f80))
+        self.assertTrue(torch.equal(admitted, expected))
+        self.assertEqual(int(admitted.sum()), 16388)
+        # Includes the smallest subnormal: scaling makes every small nonzero
+        # input's probe normal, preventing silent acceptance after underflow.
+        small = (original > 0) & (original < 0x2f80)
+        self.assertGreaterEqual(int(probe_bits[small].min()), 128)
+
     @unittest.skipUnless(os.environ.get('ATLAS_RUST_NPU_MODEL') and os.environ.get('ATLAS_OOT_BIN_DIR'),
                          'select Rust simulator and Atlas tools')
     def test_rust_widening_every_non_nan_code_and_atomic_nan_rejection(self):
@@ -116,7 +138,17 @@ class VectorPreflightTest(unittest.TestCase):
                             if count == 2048:
                                 raw = [bytes.fromhex('803f') * 1024 + data[2048:] for data in raw]
                             self.compare_runs(root, runner, source, plan, programs, raw,
-                                              cycle_ratio=0.5 if index == 0 and count == 1024 else None)
+                                              cycle_ratio=0.5 if index in (0, 1) and count == 1024 else None)
+                        # A zero must not hide a disallowed small or large lane
+                        # in either operand. Partial tiles also exercise padding.
+                        for code in (0, 0x8000, 1, 127, 0x2f7f, 0x2f80, 0x4f80, 0x4f81,
+                                     0x7f80, 0xff80, 0x7f81, 0x7fff, 0xff81, 0xffff):
+                            for operand in (0, 1):
+                                raw = [bytes.fromhex('803f') * count, bytes.fromhex('003f') * count]
+                                raw[operand] = bytes(2) + raw[operand][2:-2] + code.to_bytes(2, 'little')
+                                raw[1 - operand] = raw[1 - operand][:-2] + bytes(2)
+                                self.compare_runs(root, runner, source, plan, programs, raw,
+                                    cycle_ratio=0.5 if code in (0, 0x8000) and count == 1024 else None)
                         for operand in (0, 1):
                             raw = [bytes.fromhex('803f') * count, bytes.fromhex('003f') * count]
                             raw[operand] = raw[operand][:-2] + bytes.fromhex('c1ff')

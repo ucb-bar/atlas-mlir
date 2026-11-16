@@ -183,12 +183,12 @@ def cast_vector_refusal(b):
 
 
 def binary_vector_refusal(b):
-    """Min/max of both absolute operands proves a stronger nonzero domain.
+    """Prove signed zero or magnitude in [2^-32, 2^32] using vector extrema.
 
-    Selected RTL min/max compares ordered BF16 bits, including NaNs. For every
-    encoding x, max(x, x * -1) is in [0x2f80, 0x4f80] exactly when abs(x) is.
-    The two reductions preserve extrema across all lanes. Zeros and everything
-    outside this interval decline to the existing scalar classification.
+    Ordered-bit extrema reject NaNs and out-of-range magnitudes. The ordinary
+    nonzero case needs only min/max. If the minimum is zero, a bounded probe
+    distinguishes other zeros from small nonzero lanes without a scalar scan.
+    This only selects a route; arithmetic still reads the original operands.
     """
     negative_one = b.splat(0xbf80)
     absolute = []
@@ -203,8 +203,35 @@ def binary_vector_refusal(b):
         b.save('pairs', value)
         extrema.append(b.load('pairs', 0, 2))
     minimum, maximum = extrema
-    return b.binary('or', b.compare('ult', minimum, b.constant(0x2f80)),
-                    b.compare('ult', b.constant(0x4f80), maximum))
+    upper_bad = b.compare('ult', b.constant(0x4f80), maximum)
+    outside = b.binary('or', b.compare('ult', minimum, b.constant(0x2f80)), upper_bad)
+    has_zero = b.value(f'arith.cmpi eq, {minimum}, {b.constant(0)} : i32')
+    b.lines.append(f'    cf.cond_br {has_zero}, ^zero_domain({b.state} : {S}), '
+                   f'^vector_domain_done({b.state},{outside} : {S},i32)')
+    b.lines.append(f'  ^zero_domain(%zero_domain_state: {S}):')
+    b.state = '%zero_domain_state'
+
+    # For finite a >= 0, t = min(a, 2^-32) * 2^32 lies in [0, 1].
+    # t*(1-t) is zero exactly at t=0 or t=1. Any nonzero BF16 a below
+    # 2^-32 produces t >= 2^-101, so the probe cannot underflow to zero.
+    # The nearest t below one is 255/256: subtraction cannot round to zero
+    # either. NaNs and infinities are rejected by the original upper bound.
+    probes = []
+    lower, inverse, one = b.splat(0x2f80), b.splat(0x4f80), b.splat(0x3f80)
+    for slot in ('left', 'right'):
+        value = b.restore(slot)
+        magnitude = b.vector_binary('max', value, b.vector_binary('mul', value, negative_one))
+        scaled = b.vector_binary('mul', b.vector_binary('min', magnitude, lower), inverse)
+        probes.append(b.vector_binary('mul', scaled, b.vector_binary('sub', one, scaled)))
+    probe = b.vector_binary('max', *probes)
+    for axis in ('col', 'row'):
+        probe = b.value(f'"atlas.virtual_vpu_reduce"({probe}) {{kind = "{axis}_max"}} : ({T}) -> {T}')
+    b.save('pairs', probe)
+    outside = b.binary('or', upper_bad, b.compare('ne', b.load('pairs', 0, 2), b.constant(0)))
+    b.lines.append(f'    cf.br ^vector_domain_done({b.state},{outside} : {S},i32)')
+    b.lines.append(f'  ^vector_domain_done(%vector_domain_state: {S},%vector_domain_bad: i32):')
+    b.state = '%vector_domain_state'
+    return '%vector_domain_bad'
 
 
 def binary_qualified_refusal(b, left, right):
