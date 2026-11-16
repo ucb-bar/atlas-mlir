@@ -41,6 +41,37 @@ from tools.check_program_decode import audit_program
 from tools.check_variant_inventory import load_inventory
 
 
+def model_arrays(manifest, capture):
+    """Validate the complete static ABI before exposing buffers to native code."""
+    arrays = np.load(capture / "inputs.npz")
+    inputs = [
+        np.array(arrays[f"arg{i}"], copy=True, order="C")
+        for i in range(len(manifest["signature"]["inputs"]))
+    ]
+    numpy_types = {
+        "f32": np.float32,
+        "f64": np.float64,
+        "i1": np.bool_,
+        "i8": np.int8,
+        "i16": np.int16,
+        "i32": np.int32,
+        "i64": np.int64,
+    }
+    signature = manifest["signature"]
+    input_dtypes = signature.get("inputs_dtypes", ["f32"] * len(inputs))
+    for value, shape, dtype in zip(
+        inputs, signature["inputs"], input_dtypes, strict=True
+    ):
+        if value.shape != tuple(shape) or value.dtype != np.dtype(numpy_types[dtype]):
+            raise ValueError("runtime input shape/dtype differs from declared ABI")
+    output_dtypes = signature.get("outputs_dtypes", ["f32"] * len(signature["outputs"]))
+    outputs = [
+        np.full(shape, np.nan if dtype in ("f32", "f64") else 0, numpy_types[dtype])
+        for shape, dtype in zip(signature["outputs"], output_dtypes, strict=True)
+    ]
+    return inputs, outputs
+
+
 def reference(a, b):
     """Independent conversion implementation and left-to-right scalar K order."""
 
@@ -184,7 +215,7 @@ def execute_tile(task):
         sim.close()
 
 
-def run(directory, capture, destination, workers=1):
+def execute(directory, capture, destination, workers=1):
     if type(workers) is not int or not 1 <= workers <= 32:
         raise ValueError("workers must be between one and 32")
     destination.mkdir(parents=True, exist_ok=False)
@@ -276,19 +307,12 @@ def run(directory, capture, destination, workers=1):
             records.append(record)
             print(json.dumps(record), flush=True)
             return 0
-        except BaseException:
+        except BaseException:  # noqa: BLE001 - exceptions cannot cross a ctypes callback
             errors.append(traceback.format_exc())
             print(errors[-1], flush=True)
             return 1
 
-    arrays = np.load(capture / "inputs.npz")
-    inputs = [
-        np.ascontiguousarray(arrays[f"arg{i}"])
-        for i in range(len(manifest["signature"]["inputs"]))
-    ]
-    outputs = [
-        np.full(shape, np.nan, np.float32) for shape in manifest["signature"]["outputs"]
-    ]
+    inputs, outputs = model_arrays(manifest, capture)
     host = HostModel.load(str(directory / "model.so"), name=manifest["entry"])
     callback_type = ctypes.CFUNCTYPE(
         ctypes.c_int, ctypes.c_int64, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p
@@ -303,6 +327,27 @@ def run(directory, capture, destination, workers=1):
             pool.shutdown()
     assert not errors and [r["call"] for r in records] == list(
         range(len(manifest["calls"]))
+    )
+    np.savez(
+        destination / "outputs.npz", **{f"output{i}": v for i, v in enumerate(outputs)}
+    )
+    evidence = {
+        "device_tiles_bit_exact": True,
+        "calls": records,
+        "cycles": sum(r["cycles"] for r in records),
+        "pipeline": manifest["pipeline"],
+        "model_revision": revision,
+        "torch_version": torch.__version__,
+        "workers": workers,
+        "scope": "model simulator device cycles only; host and transfer costs excluded",
+    }
+    (destination / "execution.json").write_text(json.dumps(evidence, indent=2) + "\n")
+    return manifest, inputs, outputs, boundaries, records, revision
+
+
+def run(directory, capture, destination, workers=1):
+    manifest, inputs, outputs, boundaries, records, revision = execute(
+        directory, capture, destination, workers
     )
     heads = manifest["calls"][3]["input_shapes"][0][0]
     dim = inputs[0].shape[-1] // heads

@@ -169,5 +169,7 @@ Local artifacts are retained under `out/build/generalized-layer`, including
 `review.json`, compilation manifests, per-call operand/output snapshots and the
 six final run reports. This is an initial integration baseline. Production
 transport, stronger end-to-end numerical qualification, pretrained weights,
-stacked layers/embedding/logits, integer-token ABI and KV-cache decoding remain
-separate work.
+full-size stacked layers, pretrained embedding/logits and KV-cache decoding remain
+separate work. The [additional model validation](generalized-model-validation.md)
+now exercises integer-token ABI and embedding/logits on the scaled Llama PoC,
+plus reduced SmolVLA and complete ResNet-50 at 32×32.

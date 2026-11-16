@@ -12,13 +12,12 @@ from dataclasses import asdict
 from hashlib import sha256
 from pathlib import Path
 
-from merlin.frontends.linalg_text import parse_mlir_text
 from merlin.llvmlower.floating_matmul_outline import (
     compile_callback_host,
     outline_floating_matmuls,
+    static_tensor_signature,
 )
 from merlin.transforms.ordered_float_dense import OrderedFloatDense
-from xdsl.dialects.builtin import TensorType, f32
 
 from .shared_counted_dense import counted_dense_program
 from .shared_dense import (
@@ -52,21 +51,7 @@ def compile_model(
     )
     if not calls:
         raise ValueError("model has no supported contractions")
-    module = parse_mlir_text(source)
-    fn = module.body.block.first_op
-    if any(
-        type(t) is not TensorType
-        or t.element_type != f32
-        or any(d <= 0 for d in t.get_shape())
-        for t in (*fn.function_type.inputs, *fn.function_type.outputs)
-    ):
-        raise ValueError(
-            "model transport requires positive static f32 tensor inputs and outputs"
-        )
-    signature = {
-        "inputs": [list(t.get_shape()) for t in fn.function_type.inputs],
-        "outputs": [list(t.get_shape()) for t in fn.function_type.outputs],
-    }
+    signature = static_tensor_signature(source, entry=entry)
     destination.mkdir(parents=True, exist_ok=False)
     (destination / "source.mlir").write_text(source)
     (destination / "host.mlir").write_text(host)
