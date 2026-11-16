@@ -312,10 +312,67 @@ Artifacts: `out/traffic-audit/snapshot-balanced-64m`, `compile_balanced_layer.py
 `balanced-sizing-replay.log`. The naive larger-slice experiment is retained
 separately under `*-private-sizing` for its compile-time comparison.
 
-Next traffic investigations: repeated dense bias inputs still account for
-14,155,776 read bytes in SmolVLA; cache them within each device invocation where
-the source read map proves repetition and the scratch frame admits it. Merlin
-should own that indexing proof, Atlas its transport and VMEM schedule. Also
-investigate retaining QK scores through softmax and improving the remaining
-TinyLlama affine layout copies; do not assume those rewrites preserve layouts,
-rounding or operand reuse without native and full-layer verification.
+## Fifth implementation: invocation-local repeated operand cache
+
+Merlin proves when an affine dense read repeats its complete physical input.
+The proof uses strides, bounds and unit-extent axes, independently of dtype or
+target. It refuses partial source slices, permutations and reversed/strided
+reads. Atlas uses that proof for private exact BF16 add/subtract inputs: load
+one complete cycle of tiles into VMEM, then reuse those immutable tiles.
+The cache initializes on every invocation; it is not persistent across calls.
+
+A period of 768 elements needs three 1,024-element tiles, including rotated
+phases. Generated host packing preserves the phase at each slice boundary.
+Partial or unprofitable leaves retain dense transport. The candidate shares the
+existing 96-tile staging ceiling, and every selected image still passes native
+allocation, instruction, memory and timing proofs. Arithmetic, RNE, exceptional
+value handling and atomic public output remain unchanged. Saved dense packages
+replay as dense; changing only a parent's cache marker cannot relabel its child.
+The example simulator harness delegates the new transport geometry check to
+Atlas rather than putting cache/VMEM policy in shared Merlin code.
+The companion Merlin commit is `719dbbd04` on `perf/model-traffic-reduction`.
+
+| Layer | Before cycles | After cycles | Dispatches | DRAM reads removed |
+| --- | ---: | ---: | ---: | ---: |
+| TinyLlama, B1/T64 | 69,857,257 | **69,857,257** | 55 → 55 | 0 |
+| SmolVLA vision, B1/T1024 | 375,876,512 | **367,647,056** | 90 → 90 | 13,934,592 |
+
+SmolVLA saves 8,229,456 cycles (2.189%) at the cost of 263,268 more scalar/control
+instructions for cache selection. Writes do not change. All 62 SmolVLA and 63
+TinyLlama retained intermediate outputs and every final BF16 word match their
+controls. All 54 unchanged SmolVLA launches retain exact counters. TinyLlama
+has no eligible repeated add operand: all generated C, headers, program binaries
+and its compiled host library are byte-identical to the preceding control.
+
+An initial TinyLlama run nevertheless produced 1,091 differing final words,
+first appearing in one row of the unchanged gate projection. Three reruns,
+including full traffic tracing, plus an address/undefined-behavior-sanitized
+host run pass exactly. The initial failure is retained and its cause is still
+unresolved; it is not counted as a passing run or attributed to this cache.
+The accepted comparison uses `rust-tinyllama-cache-census` and
+`rust-smolvla-cache-runtime`; the failed run remains `rust-tinyllama-input-cache`.
+
+Directed coverage includes rotated phases, both operand positions, multiple
+widths, full and partial tails, cache-disabled controls, signed zeros, tiny
+values, invalid-domain rejection, aliases, guards, legacy replay and the largest
+admitted cache. The shared indexing proof passes 22 tests. Atlas tests also
+check actual Rust DMA instruction reductions against dense execution and reject
+mutated transport geometry. The final Atlas/layout/runtime suite passes 47 tests
+and 169 subtests; 23 additional exact-float/application regressions pass, with
+two Python instruction-model cases skipped. Receipts are in `out/traffic-audit/`, particularly
+`input-cache-comparison.json`, `cache-final-tests.log` and
+`cache-asan-comparison.log`.
+
+## Current focus: one device dispatch per layer
+
+The user has narrowed the next work to dispatch reduction. Broad traffic,
+arithmetic and batching optimizations are deferred. First remove software-budget
+slicing where the complete counted body fits the physical frame and IMEM;
+then connect device-resident regions and share kernel bodies across stages.
+
+The accepted applications contain 35/25 distinct images totaling 187,424/154,924
+bytes (TinyLlama/SmolVLA), against 131,072 bytes of physical IMEM. These totals
+count identical images only once. Simple concatenation is insufficient even
+before handling host-side packing, layout changes, status publication and
+shared-buffer lifetimes. The execution watchdog is a separate software setting;
+raising it does not enlarge IMEM or establish that a composed image fits.

@@ -19,6 +19,7 @@ class FloatSchedule:
     def source(self):return self.plan.source
     def record(self):
         return dict(schema="atlas.exact_float_schedule.v1",
+                    **({"repeated_input": self.plan.repeated_input.record()} if self.plan.repeated_input else {}),
                     **({"private_output": True} if self.plan.private_output else {}),source_request_digest=self.source.digest(),
                     operation=self.plan.op,chunk_elements=self.chunk_elements,input_node_ids=[n.id for n in self.plan.operands],
                     output_node_ids=list(self.source.outputs),logical_count=self.plan.count,
@@ -26,7 +27,7 @@ class FloatSchedule:
                     launches=list(self.launches),launches_per_invocation=len(self.launches),runtime_arithmetic="none",
                     publication="copy logical output only after every device status succeeds",weight_conversion="none")
 
-def prepare_plan(source, *, private_output=False, _chunk_elements=None):
+def prepare_plan(source, *, private_output=False, _chunk_elements=None, input_layout=None):
     if type(private_output) is not bool:
         raise ValueError('private result selection must be Boolean')
     p=device.prepare_source_plan(source);bodies=[];sizes={};launches=[]
@@ -34,6 +35,8 @@ def prepare_plan(source, *, private_output=False, _chunk_elements=None):
         if p.op not in ('bf16_add', 'bf16_sub'):
             raise ValueError('private float publication currently requires an exact binary operation')
         p=replace(p,private_output=True)
+    from .float_operand_cache import with_repeated_input
+    p=with_repeated_input(p,input_layout)
     chunk=device.chunk_elements(p)
     if _chunk_elements is not None:
         # Replaying an older, smaller slice schedule must not silently repack
@@ -51,24 +54,29 @@ def prepare_plan(source, *, private_output=False, _chunk_elements=None):
             body=replace(source,nodes=tuple(replace(n,type=replace(n.type,shape=(size,)),
                 index_maps=() if n.effect=="input" else pointwise_identity_maps(1,len(n.inputs))) for n in source.nodes),
                 source_identity=sha256(_json(dict(source_request_digest=source.digest(),count=size))).hexdigest())
-            device.prepare_plan(body,private_output=private_output);bodies.append(body)
+            device.prepare_plan(body,private_output=private_output,input_layout=input_layout,
+                                cache_input=p.repeated_input is not None);bodies.append(body)
         launches.append(dict(body_index=sizes[size],input_offset_bytes=start*p.width,input_bytes=size*p.width,
                              output_offset_bytes=start*p.output_width,output_bytes=size*p.output_width))
     return FloatSchedule(p,tuple(bodies),tuple(launches),chunk)
 
-def compile_source(snapshot,region,*,target_source,destination,limits,private_output=None):
+def compile_source(snapshot,region,*,target_source,destination,limits,private_output=None,input_layout=None,cache_input=True):
     # These generated wrappers retain all leaf results in disjoint scratch and
     # publish only after every status succeeds. Raw native compilation remains
     # two-pass unless its caller explicitly selects private output ownership.
     if private_output is None:
         private_output=device.prepare_source_plan(region).op in ('bf16_add','bf16_sub')
-    p=prepare_plan(region,private_output=private_output);destination=Path(destination);destination.mkdir(parents=True,exist_ok=False);(destination/"segments").mkdir()
+    if type(cache_input) is not bool:
+        raise ValueError('input cache selection must be Boolean')
+    p=prepare_plan(region,private_output=private_output,input_layout=input_layout if cache_input else None)
+    destination=Path(destination);destination.mkdir(parents=True,exist_ok=False);(destination/"segments").mkdir()
     records={"source-request.json":region.record(),"float-schedule.json":p.record()}
     for filename,r in records.items():(destination/filename).write_bytes(_json(r))
     segments=[]
     for i,body in enumerate(p.bodies):
         relative=f"segments/body_{i:03d}"
-        detail=device.compile_source(snapshot,body,target_source=target_source,destination=destination/relative,limits=limits,private_output=p.plan.private_output)
+        detail=device.compile_source(snapshot,body,target_source=target_source,destination=destination/relative,limits=limits,
+            private_output=p.plan.private_output,input_layout=input_layout,cache_input=p.plan.repeated_input is not None)
         segments.append(dict(index=i,path=relative,request_digest=body.digest(),binary_sha256=detail["binary_sha256"],
                              manifest_sha256=sha256((destination/relative/"manifest.json").read_bytes()).hexdigest()))
     manifest=dict(schema="atlas.exact_float_application.v1",artifact_kind="program_set",engine="merlin_native",compile_mode="diagnostic",
@@ -118,11 +126,12 @@ def prepare_c_package(region,compiled,name,*,target_source,runtime_linkage="sepa
     if runtime_linkage!="separate":raise ValueError("scheduled exact float requires shared runtime linkage")
     compiled=Path(compiled)
     schedule=json.loads((compiled/"float-schedule.json").read_text())
+    cache_input="repeated_input" in schedule
     p=prepare_plan(region,private_output=schedule.get("private_output",False),
-                   _chunk_elements=schedule.get("chunk_elements"))
+                   _chunk_elements=schedule.get("chunk_elements"),input_layout=input_layout if cache_input else None)
     manifest=json.loads((compiled/"float-manifest.json").read_text());_verify_publication(compiled,manifest,p)
     paths=[f"segments/body_{i:03d}" for i in range(len(p.bodies))]
-    leaves=[device.prepare_c_package(body,compiled/path,name+f"_body_{i:03d}",target_source=target_source,runtime_linkage=runtime_linkage,input_layout=input_layout,private_output=p.plan.private_output)
+    leaves=[device.prepare_c_package(body,compiled/path,name+f"_body_{i:03d}",target_source=target_source,runtime_linkage=runtime_linkage,input_layout=input_layout,private_output=p.plan.private_output,cache_input=cache_input)
             for i,(body,path) in enumerate(zip(p.bodies,paths,strict=True))]
     maximum=max(leaf.description["workspace_bytes"] for leaf in leaves)
     result_bytes=p.plan.count*p.plan.output_width;workspace_bytes=maximum+result_bytes;n=len(p.plan.operands);upper=name.upper()

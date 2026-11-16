@@ -282,7 +282,7 @@ def virtual_program(p):
     group_binary=binary_lane_groups()
     vector_preflight=binary_vector_preflight()
     vector_cast=cast_vector_preflight() and p.op == 'bf16_to_f32'
-    lines=['module {',f'  func.func @exact_float() -> {S} attributes {{atlas.input_dram_base = {p.io_memory_base} : i64, atlas.input_dram_bytes = {len(p.operands)*p.input_bytes} : i64, atlas.output_dram_base = {p.output_address} : i64, atlas.output_dram_bytes = {p.output_bytes+32} : i64}} {{',f'    %start = "atlas.virtual_start"() : () -> {S}']
+    lines=['module {',f'  func.func @exact_float() -> {S} attributes {{atlas.input_dram_base = {p.io_memory_base} : i64, atlas.input_dram_bytes = {p.output_address-p.io_memory_base} : i64, atlas.output_dram_base = {p.output_address} : i64, atlas.output_dram_bytes = {p.output_bytes+32} : i64}} {{',f'    %start = "atlas.virtual_start"() : () -> {S}']
     b=Builder(lines);c=b.constant;op=b.binary;cmp=b.compare
     lanes=p.tile_lanes;tiles=p.input_bytes//(lanes*p.width)
     binary=p.op in ('bf16_add','bf16_sub')
@@ -298,14 +298,24 @@ def virtual_program(p):
     for slot in slots:b.slot(slot)
     zero=b.splat(0)
     for slot in slots:b.save(slot,zero)
+    if p.cached_tiles:
+        from .float_operand_cache import initialize_cache, restore_cached_input
+        initialize_cache(b,p)
     flag=c(0)
     phases = ('private',) if private else ('check','compute') if not p.op.endswith('_neg') else ('compute',)
     for phase in phases:
-        pointers=[c(p.io_memory_base),c(p.io_memory_base+[n.id for n in p.operands].index(p.node.inputs[-1])*p.input_bytes),c(p.output_address)]
+        right_index=[n.id for n in p.operands].index(p.node.inputs[-1])
+        pointers=[c(p.input_addresses[0]),c(p.input_addresses[right_index]),c(p.output_address)]
         def tile_body(tile,values):
-            bad,ap,bp,out=values
+            bad,ap,bp,out=values[:4]
             # A one-tile binary preflight leaves both immutable inputs in VMEM.
-            if not (binary_routes and tiles == 1 and phase == 'compute'):
+            if p.cached_tiles:
+                for slot,index,address in (('left',0,ap),('right',right_index,bp)):
+                    if index == p.repeated_input.port:
+                        restore_cached_input(b,p,slot,values[4])
+                    else:
+                        b.save(slot,b.dma_load(address,lanes*p.width))
+            elif not (binary_routes and tiles == 1 and phase == 'compute'):
                 a=b.dma_load(ap,lanes*p.width);b.save('left',a)
                 if binary or not expand_unary:
                     b.save('right',b.dma_load(bp,lanes*p.width) if len(p.operands)>1 else a)
@@ -417,8 +427,12 @@ def virtual_program(p):
                     lines.append(f'    cf.br ^private_complete({b.state} : {S})')
                     lines.append(f'  ^private_complete(%private_complete_state: {S}):')
                     b.state = '%private_complete_state'
-            return [bad,op('add',ap,c(lanes*p.width)),op('add',bp,c(lanes*p.width)),op('add',out,c(lanes*p.output_width))]
-        flag,*_=b.loop(phase+'_tile',tiles,[flag,*pointers],tile_body)
+            advanced=[bad,op('add',ap,c(lanes*p.width)),op('add',bp,c(lanes*p.width)),op('add',out,c(lanes*p.output_width))]
+            if p.cached_tiles:
+                next_cache=op('add',values[4],c(1))
+                advanced.append(b.select(next_cache,c(0),cmp('ult',next_cache,c(p.cached_tiles))))
+            return advanced
+        flag,*_=b.loop(phase+'_tile',tiles,[flag,*pointers,*([c(0)] if p.cached_tiles else [])],tile_body)
         if phase=='check':
             accepted=b.value(f'arith.cmpi eq, {flag}, {c(0)} : i32')
             lines.append(f'    cf.cond_br {accepted}, ^accepted({b.state} : {S}), ^done({b.state},{flag} : {S},i32)')
