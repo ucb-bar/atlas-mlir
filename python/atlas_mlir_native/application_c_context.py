@@ -7,6 +7,22 @@ def application_binding(name, regions, interface):
     external = interface.get("model_parameters")
     raw = max(1, *(row["description"].get("workspace_bytes", 0) for row in regions))
     converted = max(1, *(row["description"].get("source_workspace_bytes", 0) for row in regions))
+    sizes = dict(device_scratch=raw, conversion_scratch=converted,
+                 workspace=max(1, interface["workspace_bytes"]))
+    deployment = interface.get("deployment")
+    fixed = {}
+    if deployment is not None:
+        for key, size in sizes.items():
+            matches = [row for row in deployment["allocations"] if row["name"] == key]
+            if (len(matches) != 1 or type(matches[0].get("address")) is not int
+                    or matches[0]["address"] <= 0 or matches[0]["address"] % 64
+                    or type(matches[0].get("bytes")) is not int or matches[0]["bytes"] < size
+                    or matches[0]["address"] + matches[0]["bytes"] > 1 << 32):
+                raise ValueError("deployment allocation differs for " + key)
+            fixed[key] = matches[0]["address"]
+    def capacity(key):
+        return f"{sizes[key]}u" if deployment is not None else f"sizeof(ctx->{key})"
+
     declarations, initialization, pointers = [], [], []
     for i, row in enumerate(regions):
         if row["placement"] == "host":
@@ -15,11 +31,15 @@ def application_binding(name, regions, interface):
         data = row["description"]
         declarations += [f"  {data['context_type']} region_{i};", f"  {data['source_context_type']} source_{i};"]
         initialization += [
-            f"  if ({data['binding_function']}(&ctx->region_{i},host,io,ctx->device_scratch,sizeof(ctx->device_scratch),max_polls)) return -1;",
-            f"  if ({data['source_binding_function']}(&ctx->source_{i},&ctx->region_{i},ctx->conversion_scratch,sizeof(ctx->conversion_scratch))) return -1;",
+            f"  if ({data['binding_function']}(&ctx->region_{i},host,io,ctx->device_scratch,{capacity('device_scratch')},max_polls)) return -1;",
+            f"  if ({data['source_binding_function']}(&ctx->source_{i},&ctx->region_{i},ctx->conversion_scratch,{capacity('conversion_scratch')})) return -1;",
         ]
         pointers.append(f"&ctx->source_{i}")
     fields = "\n".join(declarations)
+    scratch_fields = ("\n".join(f"  unsigned char *{key};" for key in sizes) if deployment is not None else
+                      "\n".join(f"  _Alignas(64) unsigned char {key}[{size}];" for key, size in sizes.items()))
+    context_assert = (f'_Static_assert(sizeof({name}_context)<=4096u,"deployment host context exceeds reservation");\n'
+                      if deployment is not None else "")
     public = f"""
 /* Zero-initialize and keep this context alive through completion or recovery.
  * It contains all private region scratch; prefer static storage on bare metal.
@@ -31,11 +51,9 @@ typedef struct {{
   {name}_driver_contexts dispatch;
   void *items[{len(regions)}];
 {fields}
-  _Alignas(64) unsigned char device_scratch[{raw}];
-  _Alignas(64) unsigned char conversion_scratch[{converted}];
-  _Alignas(64) unsigned char workspace[{max(1, interface["workspace_bytes"])}];
+{scratch_fields}
 }} {name}_context;
-int {name}_bind({name}_context *,atlas_host *,atlas_tile_memory_io,size_t max_polls);
+{context_assert}int {name}_bind({name}_context *,atlas_host *,atlas_tile_memory_io,size_t max_polls);
 {f"int {name}_bind_parameters({name}_context *,const void *,size_t);" if external else ""}
 int {name}_run({name}_context *,const void *const *inputs,void *const *outputs);
 /* After the platform has completed/reset the device, discard a failed call. */
@@ -60,7 +78,7 @@ int {name}_bind_parameters({name}_context *ctx,const void *data,size_t bytes) {{
 int {name}_bind({name}_context *ctx,atlas_host *host,atlas_tile_memory_io io,size_t max_polls) {{
   if (!ctx || !host || !max_polls) return -1;
   if (ctx->state.active || host->active) return -2;
-{chr(10).join(initialization)}
+{''.join(f"  ctx->{key}=(unsigned char *)(uintptr_t){address}u;" + chr(10) for key, address in fixed.items())}{chr(10).join(initialization)}
   ctx->host=host;
   ctx->state=({name}_driver_state){{0}};
 {chr(10).join(f"  ctx->items[{i}]={value};" for i, value in enumerate(pointers))}
@@ -69,7 +87,7 @@ int {name}_bind({name}_context *ctx,atlas_host *host,atlas_tile_memory_io io,siz
 }}
 int {name}_run({name}_context *ctx,const void *const *inputs,void *const *outputs) {{
   if (!ctx || !ctx->host || !outputs{" || !inputs" if interface["inputs"] else ""}) return -1;
-{typed}  return {name}_invoke(&ctx->state,ctx->workspace,sizeof(ctx->workspace),
+{typed}  return {name}_invoke(&ctx->state,ctx->workspace,{capacity('workspace')},
       {"&ctx->parameters," if external else ""}
       {"inputs,outputs" if mixed else "typed_inputs,typed_outputs"},&ctx->dispatch);
 }}
@@ -94,6 +112,7 @@ int {name}_recover({name}_context *ctx) {{
             "completion": "synchronous",
             "host_float_abi": "lp64d",
             "device_context_ownership": "caller",
+            **({"host_context_reservation_bytes": 4096} if deployment is not None else {}),
             **({"bind_parameters": name + "_bind_parameters"} if external else {}),
         },
     )

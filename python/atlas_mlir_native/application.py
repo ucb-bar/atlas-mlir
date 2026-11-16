@@ -304,6 +304,12 @@ class AtlasApplicationAdapter:
         }
 
     @staticmethod
+    def deployment_requirements(regions, native_root):
+        from .provider_deployment import deployment_requirements
+
+        return deployment_requirements(regions, native_root)
+
+    @staticmethod
     def application_binding(name, regions, interface):
         if regions and all(row["placement"] == "host" for row in regions):
             return None
