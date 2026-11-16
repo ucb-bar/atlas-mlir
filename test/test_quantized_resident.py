@@ -38,6 +38,35 @@ def options(source, ids):
 
 
 class QuantizedResidentTest(unittest.TestCase):
+    def test_fused_counted_routes_keep_the_resident_input_contract(self):
+        from types import SimpleNamespace
+        from atlas_mlir_native.application import AtlasApplicationAdapter
+        from test_quantized_epilogue import case as epilogue
+        from test_quantized_epilogue_narrowing import case as epilogue_narrowing
+        from test_quantized_narrowing import case as narrowing
+        from test_quantized_operand_permutation import fixture
+
+        cases = (("quantized_epilogue", epilogue("bf16")[0]),
+                 ("quantized_narrowing", narrowing()[0]),
+                 ("quantized_epilogue_narrowing", epilogue_narrowing()[0]),
+                 ("quantized_operand_permutation", fixture()[1]))
+        for kind, source in cases:
+            alternative = SimpleNamespace(metadata=(("kind", kind),))
+            inventory = inventory_resident_inputs(source)
+            self.assertEqual(AtlasApplicationAdapter.inventory_resident_inputs(source, alternative), inventory)
+            ids = tuple(item["node_id"] for item in inventory if item["node_id"].startswith("w")
+                        or item["node_id"] == "sw")
+            with codegen_options(options(source, ids)):
+                execution = execution_layout(prepare_source(source))
+                self.assertEqual({row["node_id"] for row in execution["resident_bindings"]}, set(ids))
+            for item in inventory:
+                dtype = np.uint8 if item["kind"] == "fp8" else "<i4"
+                value = 0x38 if item["kind"] == "fp8" else 0
+                dense = np.full(source.node(item["node_id"]).type.shape, value, dtype=dtype).tobytes()
+                self.assertEqual(AtlasApplicationAdapter.pack_resident_input(
+                    source, item["node_id"], dense, alternative),
+                    pack_resident_input(source, item["node_id"], dense))
+
     def test_packing_preserves_folded_transposes_and_scalar_batch_exponents(self):
         from test_quantized_operand_permutation import fixture
 

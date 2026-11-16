@@ -153,7 +153,8 @@ class AtlasApplicationAdapter:
     @staticmethod
     def _resident_input_module(region, alternative):
         kind = dict(alternative.metadata)["kind"]
-        if kind == "already_quantized":
+        if kind in {"already_quantized", "quantized_epilogue", "quantized_narrowing",
+                    "quantized_epilogue_narrowing", "quantized_operand_permutation"}:
             from . import quantized_resident
             return quantized_resident
         if kind == "layout_device":
