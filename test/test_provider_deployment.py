@@ -362,7 +362,7 @@ def test_tiled_rhs_refill_groups_follow_native_n_outer_bounds(tmp_path):
         precision_plan=dict(schema="atlas.already_quantized_contraction.v1",
             operand_ids=["a", "w"], batch_shape=[], shape=[1, 65, 33]))
     groups = requirements(tmp_path, rows)["refill_groups"]
-    assert groups == [dict(context_index=0, operand="source_w", groups=[
+    assert groups == [dict(context_index=0, operand="source_w", region_operand="w", groups=[
         dict(first_launch=0, launch_count=2, source_offset=0, bytes=1056),
         dict(first_launch=2, launch_count=2, source_offset=1056, bytes=1056),
         dict(first_launch=4, launch_count=2, source_offset=2112, bytes=33)])]
