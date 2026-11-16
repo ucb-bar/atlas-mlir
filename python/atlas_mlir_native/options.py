@@ -116,7 +116,8 @@ class BoardDescription:
         start = self.ddr_base + self.host_reserved_bytes
         return dict(io_memory_base=start, io_memory_capacity_base=start,
                     io_memory_capacity_bytes=self.ddr_capacity_bytes - self.host_reserved_bytes,
-                    io_memory_bytes=self.staging_bytes, application_residency=self.residency)
+                    io_memory_bytes=self.staging_bytes, application_residency=self.residency,
+                    quantized_operand_reuse="wide-cache")
 
 
 SOPHIALAKE = BoardDescription()
@@ -168,6 +169,12 @@ def expand_codegen_arguments(args):
         value = getattr(args, field.name, None)
         if value is None:
             setattr(args, field.name, selected.get(field.name, getattr(defaults, field.name)))
+    if recipe and board and args.io_memory_bytes == SOPHIALAKE.staging_bytes:
+        raise ValueError(
+            "--recipe dispatch-reduction --board sophialake is unsupported at the preset "
+            "16 MiB staging window: known spill rewrite work limit reached; use --board "
+            "sophialake without the recipe, or select the recipe's 786432-byte staging window"
+        )
     if board:
         # Overrides remain subject to the physical board and host exclusion range.
         start = description.ddr_base + description.host_reserved_bytes

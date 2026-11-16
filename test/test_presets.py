@@ -20,23 +20,56 @@ def test_recipe_matches_explicit_fields_and_has_no_alias_identity():
 
 def test_board_matches_explicit_fields_and_excludes_host_reservation():
     preset = options_from_args(Namespace(board="sophialake"))
-    explicit = CodegenOptions(**SOPHIALAKE.options())
+    explicit = CodegenOptions(io_memory_base=0x84000000, io_memory_capacity_base=0x84000000,
+        io_memory_capacity_bytes=1006632960, io_memory_bytes=16777216,
+        application_residency=True, quantized_operand_reuse="wide-cache")
     assert preset.identity_record() == explicit.identity_record()
     assert preset.io_memory_base == SOPHIALAKE.ddr_base + SOPHIALAKE.host_reserved_bytes
     assert preset.io_memory_capacity_base + preset.io_memory_capacity_bytes == SOPHIALAKE.ddr_base + SOPHIALAKE.ddr_capacity_bytes
+    assert preset.quantized_operand_reuse == "wide-cache"
+    assert preset.native_pipeline == "mandatory"
+    assert preset.application_residency
+    assert preset.io_memory_bytes == 16 << 20
 
 
-def test_board_staging_wins_recipe_default_and_flags_win_both():
-    options = options_from_args(Namespace(recipe="dispatch-reduction", board="sophialake"))
-    assert options.io_memory_bytes == 16 << 20
+@pytest.mark.parametrize("window", [None, 16 << 20])
+def test_recipe_board_refuses_known_spill_work_limit_at_preset_window(window):
+    with pytest.raises(ValueError, match="16 MiB staging window: known spill rewrite work limit reached"):
+        options_from_args(Namespace(recipe="dispatch-reduction", board="sophialake",
+                                    io_memory_bytes=window))
+
+
+def test_explicit_flags_override_board_and_recipe():
     override = options_from_args(Namespace(recipe="dispatch-reduction", board="sophialake",
         native_pipeline="mandatory", device_kv_quantizer=False, application_residency=False,
-        exponent_page_cache=False, io_memory_bytes=786432))
+        exponent_page_cache=False, io_memory_bytes=786432, quantized_operand_reuse="ordered"))
     assert override.native_pipeline == "mandatory"
     assert not override.device_kv_quantizer
     assert not override.application_residency
     assert not override.exponent_page_cache
     assert override.io_memory_bytes == 786432
+    assert override.quantized_operand_reuse == "ordered"
+
+
+@pytest.mark.parametrize("presets", [
+    ["--recipe", "dispatch-reduction", "--board", "sophialake"],
+    ["--board", "sophialake", "--recipe", "dispatch-reduction"],
+])
+def test_cli_refuses_recipe_board_before_loading_compile_inputs(tmp_path, presets):
+    from atlas_mlir_native.binding import AtlasNativeBinding
+    from merlin.targetgen.cli import build_parser
+    from merlin.targetgen.native_codegen_cli import prepare_native_arguments
+
+    binding = AtlasNativeBinding()
+    args = build_parser(binding=binding).parse_args([
+        "native-compile", "--engine", "merlin_native", "--support", "atlas",
+        "--snapshot", str(tmp_path / "missing-snapshot"), "--compile-inputs", "missing-inputs",
+        "--target-source", "missing-target", "--application", "--out", str(tmp_path / "output"),
+        *presets,
+    ])
+    with pytest.raises(ValueError, match="spill rewrite work limit reached"):
+        prepare_native_arguments(args, binding)
+    assert not (tmp_path / "output").exists()
 
 
 def test_explicit_host_reservation_changes_usable_geometry():
