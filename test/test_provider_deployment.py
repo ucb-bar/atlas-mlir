@@ -104,6 +104,25 @@ def test_pointwise_bias_frame_records_its_sequential_call(tmp_path):
     assert all(row["lifetime"] == dict(scope="region_call", context_index=2) for row in second)
 
 
+@pytest.mark.parametrize("schema,output_bytes", [
+    ("atlas.layout_device.v1", 1920), ("atlas.exact_float.v1", 1952),
+])
+def test_layout_and_exact_float_preserve_padded_published_payloads(tmp_path, schema, output_bytes):
+    # Exact-float's combined output already contains its 32-byte status tail.
+    # The provider must preserve that publication without counting it twice.
+    plan = dict(schema=schema, input_addresses=[BASE], input_payload_bytes=[1920],
+                input_logical_bytes=[1918], output_addresses=[BASE + 1920],
+                output_bytes=output_bytes, logical_output_bytes=1918,
+                status_address=BASE + 3840)
+    publish(tmp_path, plan)
+    result = requirements(tmp_path)
+    assert [(row["address"], row["bytes"], row["role"]) for row in result["reservations"]] == [
+        (BASE, 1920, "input"), (BASE + 1920, output_bytes, "output")]
+    assert all(row["lifetime"] == dict(scope="region_call", context_index=0)
+               for row in result["reservations"])
+    assert result["images"][0]["bytes"] == 4
+
+
 @pytest.mark.parametrize("change,reason", [
     ({"schema": "atlas.future_execution.v2"}, "unsupported provider execution schema"),
     ({"status_address": BASE + 786432}, "outside selected window"),

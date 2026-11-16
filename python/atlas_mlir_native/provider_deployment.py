@@ -55,14 +55,17 @@ def deployment_requirements(regions, native_root):
             seen.add(relative)
             plan = json.loads((folder / "execution_plan.json").read_bytes())
             schema = plan.get("schema")
-            if schema in {"atlas.quantized_loop_execution.v1", "atlas.pointwise_execution_plan.v1"}:
+            if schema in {"atlas.quantized_loop_execution.v1", "atlas.pointwise_execution_plan.v1",
+                          "atlas.layout_device.v1", "atlas.exact_float.v1"}:
                 counted = schema == "atlas.quantized_loop_execution.v1"
                 if counted and region["description"].get("execution_route") != "checked_counted_image":
                     refuse("quantized deployment requires checked_counted_image route")
                 if plan.get("resident_bindings"):
                     refuse("on-chip deployment does not support resident bindings")
+                input_sizes = plan["input_payload_bytes"] if schema in {
+                    "atlas.layout_device.v1", "atlas.exact_float.v1"} else plan["input_buffer_bytes"]
                 buffers = [
-                    ("input", plan["input_addresses"], plan["input_buffer_bytes"]),
+                    ("input", plan["input_addresses"], input_sizes),
                     ("output", plan["output_addresses"], [plan["output_bytes"]]),
                 ]
                 if counted:
