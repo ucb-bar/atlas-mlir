@@ -36,6 +36,7 @@ def deployment_requirements(regions, native_root):
             continue
         if region["placement"] != "accelerator":
             refuse("unsupported provider region placement: " + str(region["placement"]))
+        call_lifetime = dict(scope="region_call", context_index=region["context_index"])
         programs = region.get("native_programs", [])
         if not programs:
             refuse("device region has no published native program")
@@ -54,21 +55,25 @@ def deployment_requirements(regions, native_root):
             seen.add(relative)
             plan = json.loads((folder / "execution_plan.json").read_bytes())
             schema = plan.get("schema")
-            if schema == "atlas.quantized_loop_execution.v1":
-                if region["description"].get("execution_route") != "checked_counted_image":
+            if schema in {"atlas.quantized_loop_execution.v1", "atlas.pointwise_execution_plan.v1"}:
+                counted = schema == "atlas.quantized_loop_execution.v1"
+                if counted and region["description"].get("execution_route") != "checked_counted_image":
                     refuse("quantized deployment requires checked_counted_image route")
                 if plan.get("resident_bindings"):
                     refuse("on-chip deployment does not support resident bindings")
-                for role, addresses, counts in (
+                buffers = [
                     ("input", plan["input_addresses"], plan["input_buffer_bytes"]),
-                    ("exponent", plan["exponent_addresses"], plan["exponent_buffer_bytes"]),
                     ("output", plan["output_addresses"], [plan["output_bytes"]]),
-                ):
+                ]
+                if counted:
+                    buffers.insert(1, ("exponent", plan["exponent_addresses"], plan["exponent_buffer_bytes"]))
+                for role, addresses, counts in buffers:
                     if len(addresses) != len(counts):
                         refuse("provider execution buffer lengths differ")
                     for i, (address, count) in enumerate(zip(addresses, counts, strict=True)):
-                        reserve(f"{relative}/{role}_{i}", address, count, role)
-                reserve(relative + "/status", plan["status_address"], plan["status_bytes"], "status")
+                        reserve(f"{relative}/{role}_{i}", address, count, role, call_lifetime)
+                if counted:
+                    reserve(relative + "/status", plan["status_address"], plan["status_bytes"], "status", call_lifetime)
             elif schema in {"atlas.resident_graph_execution_plan.v1", "atlas.native_tile_execution_plan.v8"}:
                 # Keep reservations even when a receipt promotes individual
                 # accesses. An address can later hold an unpromoted public value.

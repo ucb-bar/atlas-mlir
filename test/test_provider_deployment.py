@@ -15,7 +15,7 @@ BASE = 0x200C0000
 
 
 def regions():
-    return [dict(placement="accelerator", native_programs=["segments/r"], description=dict(
+    return [dict(placement="accelerator", context_index=0, native_programs=["segments/r"], description=dict(
         context_type="r_context", source_context_type="r_source_context", binding_function="r_bind",
         source_binding_function="r_source_bind", workspace_bytes=4096, source_workspace_bytes=1024,
         execution_route="checked_counted_image")), dict(placement="host", description={}, native_programs=[])]
@@ -52,7 +52,8 @@ def test_counted_reservations_and_relative_exact_image(tmp_path):
     assert result["schema"] == "atlas.provider_deployment.v1"
     assert result["window"] == dict(address=BASE, bytes=786432)
     assert [row["bytes"] for row in result["reservations"]] == [1024, 1024, 2048, 2048, 2048, 2048]
-    assert all(row["lifetime"] is None and row["promotion_receipts"] == [] for row in result["reservations"])
+    assert all(row["lifetime"] == dict(scope="region_call", context_index=0)
+               and row["promotion_receipts"] == [] for row in result["reservations"])
     assert result["images"] == [dict(path="segments/r/program.bin", bytes=4,
         sha256=hashlib.sha256(b"\x73\0\0\0").hexdigest(), imem_offset_bytes=0,
         capacity_bytes=131072, upload_convention="counted_ensure_loaded")]
@@ -82,6 +83,25 @@ def test_readonly_promotion_join_and_host_only_regions(tmp_path):
     host = requirements(tmp_path, [regions()[1]])
     assert host["images"] == host["reservations"] == []
     assert host["raw_scratch_bytes"] == host["conversion_scratch_bytes"] == 1
+
+
+def test_pointwise_bias_frame_records_its_sequential_call(tmp_path):
+    publish(tmp_path, counted())
+    folder = tmp_path / "segments/bias"
+    folder.mkdir()
+    for member in ("program.bin", "physical-program.json"):
+        (folder / member).write_bytes((tmp_path / "segments/r" / member).read_bytes())
+    (folder / "execution_plan.json").write_text(json.dumps(dict(
+        schema="atlas.pointwise_execution_plan.v1", input_addresses=[BASE, BASE + 2048],
+        input_buffer_bytes=[2048, 2048], output_addresses=[BASE + 4096], output_bytes=2048)))
+    rows = regions()
+    rows.append(dict(placement="accelerator", context_index=2, native_programs=["segments/bias"], description={}))
+    result = requirements(tmp_path, rows)
+    assert len(result["images"]) == 2
+    first, second = result["reservations"][:6], result["reservations"][6:]
+    assert [row["address"] for row in second] == [BASE, BASE + 2048, BASE + 4096]
+    assert all(row["lifetime"] == dict(scope="region_call", context_index=0) for row in first)
+    assert all(row["lifetime"] == dict(scope="region_call", context_index=2) for row in second)
 
 
 @pytest.mark.parametrize("change,reason", [
