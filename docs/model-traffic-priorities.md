@@ -376,3 +376,45 @@ count identical images only once. Simple concatenation is insufficient even
 before handling host-side packing, layout changes, status publication and
 shared-buffer lifetimes. The execution watchdog is a separate software setting;
 raising it does not enlarge IMEM or establish that a composed image fits.
+
+### Verified software-budget experiment: 90 to 54 SmolVLA launches
+
+With Atlas `874f6ac` and Merlin `719dbbd04`, select
+`--execution-instruction-limit 2100000000` in the otherwise unchanged application
+recipe. This exercises the existing counted kernels with a larger software
+watchdog; it is not a new optimization pass or a larger hardware instruction
+memory. The backend still enforces 131,072 encoded bytes per image.
+
+| Layer | Before launches | After launches | Before cycles | After cycles |
+| --- | ---: | ---: | ---: | ---: |
+| TinyLlama B1/T64 | 55 | **55** | 69,857,257 | **69,857,257** |
+| SmolVLA vision B1/T1024 | 90 | **54** | 367,647,056 | **367,502,579** |
+
+The six bias operations and two residual operations each fit one dispatch,
+instead of 36 and eight dispatches respectively. SmolVLA saves 144,477 device
+cycles (0.0393%), 184,320 read bytes and 1,152 write bytes. Its instruction count
+increases by 3,297 to 24,385,775. This is chiefly a reduction in host launches;
+the model does not include host launch latency in these device-cycle totals.
+All final words and all 63/62 intermediate outputs match exactly. Unchanged
+55/46 program launches retain identical cycles, instructions and traffic.
+
+The largest private-add body covers 3,145,728 elements. Its independent bound is
+1,819,874,486 executed instructions for the worst admitted numeric route, but
+its image occupies only 6,892 bytes. A larger watchdog does not require larger
+IMEM. Different complete tensor sizes do create one extra distinct image:
+SmolVLA now has 26 unique images totaling 161,816 bytes. Reusable bodies and a
+common device ABI are still necessary for a one-image layer.
+
+The initial larger-budget build hit a buffer-verifier error on an unchanged QK
+machine file. That file has the same SHA-256 as the preceding passing control;
+16 fresh file-based checks, 12 fresh stdin checks and a complete fresh application
+build subsequently passed without changing code or disabling any check. The
+first failure remains retained and unresolved, like the isolated runtime outlier
+above. These observations do not establish a hardware result.
+
+Artifacts: `compile_dispatch_budget_layer.py`, `tinyllama-dispatch-budget`,
+`smolvla-dispatch-budget-v2`, their `rust-*` runs, and
+`dispatch-budget-comparison.json` in `out/traffic-audit/`. The failed first build
+is retained as `smolvla-dispatch-budget`. All simulator, source and reference
+hashes match the preceding cache experiment. The shared-body compiler prototype
+uses a separate `build-shared-dispatch/` and was not used for these measurements.
