@@ -166,6 +166,10 @@ def main():
     parser.add_argument("--atlas-bin-dir", required=True, type=Path)
     parser.add_argument("--model-root", required=True, type=Path)
     parser.add_argument("--model-python", required=True, type=Path)
+    parser.add_argument(
+        "--dense-witnesses", action="store_true",
+        help="use dense signed weights to exercise cancellation and accumulated rounding",
+    )
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
     assert (
@@ -198,10 +202,15 @@ def main():
                     arguments = {}
                     for i in range(5):
                         w = np.zeros((32, width if i < 3 else 32), np.float32)
-                        for c in range(0, w.shape[1], 32):
-                            w[np.arange(32), c + rng.permutation(32)] = rng.choice(
-                                [0.5, 1.0, -0.5], size=32
+                        if args.dense_witnesses:
+                            w[:] = rng.choice(
+                                [-0.375, -0.25, -0.125, 0.125, 0.25, 0.375], size=w.shape
                             )
+                        else:
+                            for c in range(0, w.shape[1], 32):
+                                w[np.arange(32), c + rng.permutation(32)] = rng.choice(
+                                    [0.5, 1.0, -0.5], size=32
+                                )
                         arguments["input" + str(i)] = w
                     arguments["input5"] = rng.choice(
                         [-0.5, 0, 0.5, 1.0], size=(32, width)
@@ -233,6 +242,7 @@ def main():
                             retained=retained,
                             mode=mode,
                             seed=seed,
+                            witness="dense" if args.dense_witnesses else "sparse",
                             quality=quality,
                             **result,
                         )

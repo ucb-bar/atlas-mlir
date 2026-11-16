@@ -19,7 +19,7 @@ from atlas_mlir_native.shared_dense import INPUT_BASE, OUTPUT_BASE, MODEL_REVISI
 
 
 def source_for(root, m, k, n):
-    from merlin.frontends.linalg_mlir import parse_mlir_text
+    from merlin.frontends.linalg_text import parse_mlir_text
     from merlin.xdsl_dialects._common import text
     from xdsl.dialects.builtin import TensorType
 
