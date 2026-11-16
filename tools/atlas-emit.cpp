@@ -11,6 +11,7 @@
 #include "llvm/Support/FormatVariadic.h"
 #include "llvm/Support/JSON.h"
 #include "llvm/Support/raw_ostream.h"
+#include <algorithm>
 
 using namespace mlir;
 using namespace mlir::atlas;
@@ -71,20 +72,74 @@ static LogicalResult emitIssueTiming(ModuleOp module,
   return success();
 }
 
+// A conservative fixed-only scheduling input, usable BEFORE scheduling.
+// Serialize complete physical occupancy; this is not an overlap cost model.
+static LogicalResult emitFixedEffects(ModuleOp module,
+                                      llvm::ArrayRef<uint32_t> words) {
+  auto stream = readAtlasStream(module, AtlasStreamReadMode::Verification);
+  auto provider = selectAtlasTimingProvider(module);
+  if (failed(stream) || failed(provider)) return failure();
+  std::string scope = provider->validateScope(*stream);
+  if (!scope.empty()) return module.emitError(scope);
+  if (stream->starts.size() != 1)
+    return module.emitError("fixed scheduling input requires one straight-line block");
+  auto regs = stream->entry[0];
+  llvm::json::Array rows;
+  for (size_t i = 0; i < stream->instrs.size(); ++i) {
+    const auto &in = stream->instrs[i];
+    using timing::OpClass;
+    auto cls = in.op->opClass;
+    if (cls == OpClass::DmaLoad || cls == OpClass::DmaStore ||
+        cls == OpClass::DmaWait || cls == OpClass::DmaConfig ||
+        cls == OpClass::Branch || cls == OpClass::Jump)
+      return module.emitError("event/CFG instruction requires a separate completion boundary");
+    auto f = provider->footprint(in, regs);
+    auto gap = provider->issueGap(in);
+    auto reservations = provider->createReservations();
+    if (!f.error.empty() || !gap.error.empty() || !reservations.error.empty() ||
+        !reservations.value || gap.value <= 0 || f.doneAge < 0)
+      return module.emitError("incomplete fixed timing evidence");
+    auto conflict = reservations.value->conflict(in, f, 0);
+    if (!conflict.error.empty() || !conflict.value.empty())
+      return module.emitError("fixed instruction cannot issue alone");
+    int end = std::max({gap.value, f.doneAge + 1, f.vpuLive,
+                        f.readRelease + 1, f.writeRelease + 1});
+    for (const auto &a : f.accesses) {
+      if (a.atCompletion)
+        return module.emitError("event-relative access has no fixed completion");
+      end = std::max(end, a.lastAge() + 1);
+    }
+    for (const auto &h : f.holds) end = std::max(end, h.to + 1);
+    rows.push_back(llvm::json::Object{
+        {"word_u32", static_cast<int64_t>(words[i])},
+        {"complete", end}, {"issue_gap", gap.value},
+        {"delay", cls == OpClass::Delay}});
+    timing::applyScalar(in, regs);
+  }
+  llvm::json::Object result{
+      {"schema", "atlas.fixed_effects.v1"}, {"provider", provider->id},
+      {"selected_rtl_revision", kSelectedRTLRevision},
+      {"scope", "fixed-only whole-machine serialization; final timing verification required"},
+      {"instructions", std::move(rows)}};
+  llvm::outs() << llvm::formatv("{0:2}\n", llvm::json::Value(std::move(result)));
+  return success();
+}
+
 int main(int argc, char **argv) {
-  bool mapJson = false, programJson = false, timingJson = false, allowUntimed = false, invalid = false;
+  bool mapJson = false, programJson = false, timingJson = false, fixedJson = false, allowUntimed = false, invalid = false;
   const char *input = nullptr;
   for (int i = 1; i < argc; ++i) {
     StringRef arg(argv[i]);
     if (arg == "--map-json") mapJson = true;
     else if (arg == "--program-json") programJson = true;
     else if (arg == "--issue-timing-json") timingJson = true;
+    else if (arg == "--fixed-effects-json") fixedJson = true;
     else if (arg == "--allow-untimed") allowUntimed = true;
     else if (arg.starts_with("--") || input) invalid = true;
     else input = argv[i];
   }
-  if (invalid || !input || (mapJson + programJson + timingJson > 1) || (timingJson && allowUntimed)) {
-    llvm::errs() << "usage: atlas-emit [--allow-untimed] [--map-json|--program-json|--issue-timing-json] <flat-mlir-module>\n";
+  if (invalid || !input || (mapJson + programJson + timingJson + fixedJson > 1) || (timingJson && allowUntimed)) {
+    llvm::errs() << "usage: atlas-emit [--allow-untimed] [--map-json|--program-json|--issue-timing-json|--fixed-effects-json] <flat-mlir-module>\n";
     return 2;
   }
   DialectRegistry registry;
@@ -95,7 +150,8 @@ int main(int argc, char **argv) {
 
   llvm::SmallVector<uint32_t> words;
   if (failed(verifyAtlasTimingState(*module, !allowUntimed))) return 1;
-  if (failed(verifyAtlasArtifact(*module, mapJson || programJson || timingJson, words))) return 1;
+  if (failed(verifyAtlasArtifact(*module, mapJson || programJson || timingJson || fixedJson, words))) return 1;
+  if (fixedJson) return failed(emitFixedEffects(*module, words));
   if (timingJson) return failed(emitIssueTiming(*module, words));
   // An untimed stream may still lack its delay slots.
   bool slots = atlasHasDelaySlots(*module);

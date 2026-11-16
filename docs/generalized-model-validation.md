@@ -125,3 +125,7 @@ reproduced 17 baseline failures; no ledger was relaxed.
 
 Production transport, pretrained quality, dynamic shapes, cached decoding and
 compiler-authoring admission of the whole-host helper remain unqualified.
+
+The [shared static scheduler integration](shared-static-scheduling.md) separately
+validates construction and actual delay emission for fixed matmul and VPU
+programs. The full-model results above still use the existing Atlas scheduler.
