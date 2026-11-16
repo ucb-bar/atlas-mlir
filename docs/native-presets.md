@@ -10,6 +10,8 @@ The default usable capacity is consequently `[0x84000000, 0xc0000000)`, and stag
 
 Activate an install that sets `MERLIN_NATIVE_SNAPSHOT` to its checked native snapshot, or pass `--snapshot` explicitly. Snapshot/profile validation still runs. Native compile defaults to `--abi auto`, application compilation defaults to diagnostic mode, invocation-local exact materialization reuse is enabled, and region reuse stays disabled because residency embeds addresses. `--no-materialization-cache` disables reuse. Region compilation defaults to strict-native mode; specify another mode for diagnostic requests.
 
+The decode fixture with both presets at the 16 MiB staging default currently refuses with `spill rewrite work limit reached`. Resident recipe qualification is blocked pending compiler cache sizing or output/reduction partitioning. The command documents the intended interface.
+
 For the qualified layer capture, a resident DDR recipe compile is:
 
 ```sh
