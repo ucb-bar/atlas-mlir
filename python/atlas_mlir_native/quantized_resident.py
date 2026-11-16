@@ -1,7 +1,7 @@
 """Compiler-owned immutable input bindings for counted quantized programs.
 
-The compiler packs and validates immutable bytes once. A binding changes only
-the DMA base; the counted program still declares the complete readonly range.
+The compiler packs and validates immutable bytes once. Bound inputs use no
+staging reservation; the counted program declares their complete readonly range.
 """
 from __future__ import annotations
 

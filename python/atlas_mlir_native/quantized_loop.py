@@ -34,18 +34,32 @@ def uses_tiled_fallback(plan):
 
 def _execution_geometry(plan):
     """Derive the single counted frame used by selection and publication."""
+    from .quantized_resident import requested_bindings
+
     batch = prod(plan.batch_shape)
     mc, nc, kc = ((value + 31)//32 for value in (plan.m, plan.n, plan.k))
     rhs = plan.source.node(plan.operand_ids[1])
     sizes = [batch*mc*kc*1024, (batch if rhs.type.shape[:-2] else 1)*nc*kc*1024]
     output_bytes = batch*mc*nc*2048
     base = selected_io_memory_base()
-    addresses = [base, base + ((sizes[0]+2047)//2048)*2048]
-    cursor = addresses[1] + ((sizes[1]+2047)//2048)*2048
+    resident = requested_bindings(plan)
+    cursor = base
+
+    def reserve(node_id, size):
+        nonlocal cursor
+        # Resident placeholders equal the next staged slot; bind_geometry supplies their addresses.
+        address = cursor
+        if node_id not in resident:
+            cursor += ((size+2047)//2048)*2048
+        return address
+
+    addresses = [reserve(node_id, size) for node_id, size in
+                 zip(plan.physical_operand_ids, sizes, strict=True)]
     exponents = exponent_geometry(plan)
     exponent_bytes = [geometry['bytes'] for geometry in exponents]
-    exponent_addresses = [cursor, cursor+exponent_bytes[0]]
-    output = exponent_addresses[1]+exponent_bytes[1]
+    exponent_addresses = [reserve(node_id, size) for node_id, size in
+                          zip(plan.exponent_ids, exponent_bytes, strict=True)]
+    output = cursor
     status = output+output_bytes
     end = status+2048
     epilogue = getattr(plan, 'epilogue_precision', None)

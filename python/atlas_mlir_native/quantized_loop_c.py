@@ -78,9 +78,20 @@ def prepare_c_package(source, compiled, name, *, target_source):
     lhs_bytes,rhs_bytes = execution["input_buffer_bytes"][:2]
     device_output_bytes = execution["output_bytes"]
     exponent_bytes = execution['exponent_buffer_bytes']
+    operand_offsets = [0, lhs_bytes]
     exponent_offsets = [lhs_bytes+rhs_bytes, lhs_bytes+rhs_bytes+exponent_bytes[0]]
     output_offset = exponent_offsets[1]+exponent_bytes[1]
     status_offset = output_offset+device_output_bytes
+    if resident_ids:
+        from .binding import io_memory_base
+        base = io_memory_base()
+        # Resident host offsets are zero and are never written.
+        operand_offsets = [0 if node_id in resident_ids else address-base for node_id, address in
+                           zip(plan.physical_operand_ids, execution['input_addresses'][:2], strict=True)]
+        exponent_offsets = [0 if node_id in resident_ids else address-base for node_id, address in
+                            zip(plan.exponent_ids, execution['exponent_addresses'], strict=True)]
+        output_offset = execution['output_addresses'][0]-base
+        status_offset = execution['status_address']-base
     extra_offset = status_offset+execution['status_bytes']
     extra_bytes = 0
     extra_encoder, extra_packing = '', ''
@@ -127,7 +138,7 @@ int {name}_source_dispatch(void *,const void *const *,void *const *);
     arrays=program_array(name+"_words",binary)
     addresses=execution["input_addresses"]
     out=execution["output_addresses"][0]
-    read_inputs = [(addresses[0], 0, lhs_bytes), (addresses[1], lhs_bytes, rhs_bytes),
+    read_inputs = [(addresses[0], operand_offsets[0], lhs_bytes), (addresses[1], operand_offsets[1], rhs_bytes),
                    *zip(execution['exponent_addresses'], exponent_offsets, exponent_bytes, strict=True)]
     read_ids = [*plan.physical_operand_ids, *plan.exponent_ids]
     if extra_bytes:
@@ -180,7 +191,7 @@ int {name}_source_dispatch(void *,const void *const *,void *const *);
         operand_packing += f"""  for (size_t batch=0;batch<{rhs_batches}u;++batch) for (size_t nt=0;nt<{nc}u;++nt)
     for (size_t kt=0;kt<{kc}u;++kt) for (size_t row=0;row<32u && nt*32u+row<{n}u;++row)
       for (size_t c=0;c<32u && kt*32u+c<{k}u;++c)
-        region->workspace[{lhs_bytes}u+((batch*{nc}u+nt)*{kc}u+kt)*1024u+row*32u+c]=b[{rhs_index}];
+        region->workspace[{operand_offsets[1]}u+((batch*{nc}u+nt)*{kc}u+kt)*1024u+row*32u+c]=b[{rhs_index}];
 """
     input_check = ' && '.join(f'i!={index}u' for index in sorted(resident_indices))
     input_check = f'if ({input_check}) ' if input_check else ''

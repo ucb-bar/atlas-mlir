@@ -17,7 +17,7 @@ from merlin.semantic_compiler.target_binding import NativeCompilationError
 from atlas_mlir_native import quantized_loop_c as native
 from atlas_mlir_native.already_quantized import prepare_source
 from atlas_mlir_native.binding import DRAM_BASE
-from atlas_mlir_native.quantized_loop import execution_layout, virtual_source
+from atlas_mlir_native.quantized_loop import _execution_geometry, execution_layout, virtual_source
 from atlas_mlir_native.quantized_resident import inventory_resident_inputs, pack_resident_input
 from test_already_quantized import source_request
 
@@ -116,7 +116,7 @@ class QuantizedResidentTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'byte length'):
             pack_resident_input(source, 'sw', b'')
 
-    def test_layout_binds_exact_spans_and_preserves_transient_geometry(self):
+    def test_layout_binds_exact_spans_and_compacts_transient_geometry(self):
         source = source_request(3, 5, 7, batch=())
         plan = prepare_source(source)
         baseline = execution_layout(plan)
@@ -125,7 +125,9 @@ class QuantizedResidentTest(unittest.TestCase):
             layout = execution_layout(plan)
             self.assertEqual(layout['input_addresses'][1], DRAM_BASE+262144)
             self.assertEqual(layout['exponent_addresses'][1], DRAM_BASE+264192)
-            self.assertEqual(layout['output_addresses'], baseline['output_addresses'])
+            self.assertEqual(layout['output_addresses'], [baseline['output_addresses'][0]-4096])
+            self.assertEqual(layout['input_buffer_bytes'], baseline['input_buffer_bytes'])
+            self.assertEqual(layout['exponent_buffer_bytes'], baseline['exponent_buffer_bytes'])
             signed_address = layout['input_addresses'][1]-(1 << 32)
             self.assertIn(f'arith.constant {signed_address} : i32', virtual_source(plan, layout))
             self.assertEqual([item['node_id'] for item in layout['resident_bindings']], ['sw', 'w'])
@@ -142,6 +144,24 @@ class QuantizedResidentTest(unittest.TestCase):
             with self.assertRaises(NativeCompilationError):
                 execution_layout(plan)
 
+    def test_resident_reservations_make_an_oversized_frame_fit(self):
+        source = source_request(32, 128, 512, batch=())
+        plan = prepare_source(source)
+        selected = replace(options(source, ('w', 'sw')), io_memory_bytes=32768)
+        with codegen_options(replace(selected, resident_bindings=None)):
+            with self.assertRaisesRegex(NativeCompilationError, 'exceed selected DRAM window'):
+                execution_layout(plan)
+            baseline, original_end = _execution_geometry(plan)
+        with codegen_options(selected):
+            compact, end = _execution_geometry(plan)
+            layout = execution_layout(plan)
+            self.assertEqual(original_end-end, 65536+8192)
+            self.assertEqual(end-DRAM_BASE, 28672)
+            self.assertEqual(compact['input_buffer_bytes'], baseline['input_buffer_bytes'])
+            self.assertEqual(compact['exponent_buffer_bytes'], baseline['exponent_buffer_bytes'])
+            self.assertEqual(layout['output_addresses'], [DRAM_BASE+18432])
+            self.assertEqual(layout['status_address'], DRAM_BASE+26624)
+
     def test_resident_fallback_is_an_explicit_refusal(self):
         from atlas_mlir_native import quantized_loop_sizing as sizing
         source = source_request(1, 1, 1, batch=())
@@ -152,9 +172,14 @@ class QuantizedResidentTest(unittest.TestCase):
 
     @unittest.skipUnless(shutil.which('cc'), 'C compiler unavailable')
     def test_generated_c_keeps_read_spans_and_omits_only_resident_writes(self):
+        from test_quantized_epilogue import case as epilogue
+
         source = source_request(1, 1, 1, batch=())
-        for resident in (('w',), ('sw',), ('w', 'sw'), ('a', 'sx', 'w', 'sw')):
-            with self.subTest(resident=resident), codegen_options(options(source, resident)), tempfile.TemporaryDirectory() as temp:
+        cases = [(source, resident) for resident in
+                 (('a',), ('sx',), ('w',), ('sw',), ('a', 'sx'), ('w', 'sw'), ('a', 'sx', 'w', 'sw'))]
+        cases.append((epilogue(m=1, n=1, k=1, batch=())[0], ('w', 'sw')))
+        for source, resident in cases:
+            with self.subTest(output=source.outputs, resident=resident), codegen_options(options(source, resident)), tempfile.TemporaryDirectory() as temp:
                 dest = Path(temp)
                 compiled = dest/'compiled'
                 compiled.mkdir()
@@ -169,38 +194,60 @@ class QuantizedResidentTest(unittest.TestCase):
                 with patch.object(native, 'verify_native_publication'), patch.object(native, 'selected_route', return_value='counted'):
                     record, files = native.prepare_c_package(source, compiled, 'probe', target_source=ATLAS)
                 self.assertEqual(record['resident_bindings'], layout['resident_bindings'])
+                end = layout['status_address']+layout['status_bytes']
+                if plan.epilogue_precision is not None:
+                    self.assertEqual(layout['input_addresses'][2], end)
+                    end += layout['input_buffer_bytes'][2]
+                self.assertEqual(record['workspace_bytes'], end-DRAM_BASE)
                 for key, value in files.items():
                     path = dest/key
                     path.parent.mkdir(parents=True, exist_ok=True)
                     path.write_bytes(value)
-                pointers = ','.join('0' if node_id in resident else '&code' if node_id in ('a','w') else '&exponent'
+                pointers = ','.join('0' if node_id in resident else '&'+node_id
                                     for node_id in plan.input_ids)
+                spans = {item['node_id']: item for item in inventory_resident_inputs(source)}
+                expected = []
+                for node_id in plan.input_ids:
+                    if node_id in resident:
+                        continue
+                    if node_id == plan.epilogue_other_id:
+                        expected.append(f' if(a=={layout["input_addresses"][2]}u && n=={layout["input_buffer_bytes"][2]}u) {{'
+                                        'for(size_t i=0;i<n;++i)if(v[i]!=(i==0?0x80u:i==1?0x3fu:0u))return 1;return 0;}')
+                        continue
+                    operand = node_id in ('a', 'w')
+                    at = plan.physical_operand_ids.index(node_id) if operand else plan.exponent_ids.index(node_id)
+                    address = layout['input_addresses' if operand else 'exponent_addresses'][at]
+                    value = {'a': 0x38, 'w': 0x40, 'sx': 17, 'sw': 19}[node_id]
+                    expected.append(f' if(a=={address}u && n=={spans[node_id]["bytes"]}u) {{'
+                                    f'for(size_t i=0;i<n;++i)if(v[i]!=(i?0u:{value}u))return 1;return 0;}}')
                 shim = '''#include "probe.h"
 #include <string.h>
 static unsigned starts,puts;static atlas_host host;
 static uint32_t read32(void *c,uintptr_t a){(void)c;return a==0x40004u?starts:5u;}
 static void write32(void *c,uintptr_t a,uint32_t v){(void)c;if(a==0x40018u&&v==1u)++starts;}
-static int put(void *c,uintptr_t a,const uint8_t *v,size_t n){(void)c;(void)a;(void)v;(void)n;++puts;return 0;}
-static int get(void *c,uintptr_t a,uint8_t *v,size_t n){(void)c;(void)a;memset(v,0,n);return 0;}
+static int put(void *c,uintptr_t a,const uint8_t *v,size_t n){(void)c;(void)a;(void)v;(void)n;++puts;
+@EXPECTED@
+ return 1;}
+static int get(void *c,uintptr_t a,uint8_t *v,size_t n){(void)c;memset(v,0,n);if(a==@OUTPUT@u){v[0]=0x80;v[1]=0x3f;}return 0;}
 int invoke(void){
  probe_context region;probe_source_context source;
  uint8_t raw[PROBE_WORKSPACE_BYTES],converted[PROBE_SOURCE_WORKSPACE_BYTES];
- uint8_t code=0x38;int32_t exponent=0;uint16_t out=0xffff;
- (void)code;(void)exponent;
+ uint8_t a=0x38,w=0x40;int32_t sx=17,sw=19;uint16_t other=0x3f80,out=0xffff;
+ (void)a;(void)w;(void)sx;(void)sw;(void)other;
  if(atlas_host_init(&host,(atlas_host_map){0x20000u,0x40000u,131072u},(atlas_host_mmio){read32,write32,0},(atlas_host_memory){1,0,0}))return -1;
  if(probe_bind(&region,&host,(atlas_tile_memory_io){put,get,0},raw,sizeof(raw),20u))return -2;
  if(probe_source_bind(&source,&region,converted,sizeof(converted)))return -3;
  const void *inputs[]={@POINTERS@};void *outputs[]={&out};
  int result=probe_source_dispatch(&source,inputs,outputs);
- return result?100+result:out?200:(int)puts;
+ return result?100+result:out!=0x3f80?200:(int)puts;
 }
-'''.replace('@POINTERS@', pointers)
+'''.replace('@POINTERS@', pointers).replace('@EXPECTED@', '\n'.join(expected)).replace('@OUTPUT@', str(layout['output_addresses'][0]))
                 (dest/'shim.c').write_text(shim)
                 proc = subprocess.run(['cc','-std=c11','-O2','-Wall','-Wextra','-Werror','-shared','-fPIC',
                                        'probe.c','runtime/atlas_host.c','shim.c','-o','probe.so'], cwd=dest, capture_output=True, text=True)
                 self.assertEqual(proc.returncode, 0, proc.stderr)
                 lib = ctypes.CDLL(str(dest/'probe.so'))
-                self.assertEqual(lib.invoke(), 4-len(resident))
+                self.assertEqual(lib.invoke(), len(plan.input_ids)-len(resident))
 
 
 if __name__ == '__main__':
