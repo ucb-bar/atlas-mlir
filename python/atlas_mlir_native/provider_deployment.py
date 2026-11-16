@@ -167,7 +167,7 @@ def deployment_requirements(regions, native_root):
                 if len(local_inputs) != len(region["inputs"]) or rhs not in local_inputs:
                     refuse("refill operand differs from region inputs")
                 refill_groups.append(dict(context_index=region["context_index"],
-                    operand=region["inputs"][local_inputs.index(rhs)], groups=[
+                    operand=region["inputs"][local_inputs.index(rhs)], region_operand=rhs, groups=[
                         dict(first_launch=group*((k+31)//32), launch_count=(k+31)//32,
                              source_offset=first_n*k, bytes=min(32, n-first_n)*k)
                         for group, first_n in enumerate(range(0, n, 32))]))
