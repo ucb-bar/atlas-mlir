@@ -3,7 +3,6 @@
 import ctypes
 import dataclasses
 import hashlib
-import importlib.metadata
 import json
 import os
 import shutil
@@ -247,14 +246,12 @@ class PointwiseLoopTest(unittest.TestCase):
         from npu_model.logging import LoggerConfig
         from npu_model.simulation import Simulation
         from npu_model.software.program import InstantiableProgram
-        from test_spill_model_execution import MODEL_REVISION, model_instruction
+        from test_spill_model_execution import model_instruction
+        from test_mxu1_cap448 import authenticate_model
 
         from tools.check_program_decode import decode_binary
 
-        origin = json.loads(importlib.metadata.distribution("npu-model").read_text("direct_url.json") or "{}")
-        self.assertTrue(
-            MODEL_REVISION in origin.get("url", "") or origin.get("vcs_info", {}).get("commit_id") == MODEL_REVISION
-        )
+        self.assertTrue(authenticate_model(Path(os.environ["NPU_MODEL_ROOT"])))
         torch.set_num_threads(1)
         spec = input_spec()
         spec.encode(np.array([0.0, -0.0, 2.0**-63, -(2.0**63)], dtype=np.float32))
