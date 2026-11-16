@@ -105,7 +105,7 @@ class BoardDescription:
     dma_capacity_bytes: int = 1 << 31
     # Assumption until the board team confirms the host ELF, stack, and heap footprint.
     host_reserved_bytes: int = 64 << 20
-    staging_bytes: int = 16 << 20
+    staging_bytes: int = 8 << 20
     residency: bool = True
 
     def options(self):
@@ -160,7 +160,7 @@ def expand_codegen_arguments(args):
     if recipe and board:
         raise ValueError(
             "--recipe dispatch-reduction --board sophialake is unsupported: "
-            "known spill rewrite work limit reached at the 16 MiB staging window; "
+            "known spill rewrite work limit reached with a 16 MiB staging window; "
             "use --board sophialake without the recipe, or --recipe dispatch-reduction "
             "without the board at its 768 KiB staging window"
         )

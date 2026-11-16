@@ -21,7 +21,7 @@ def test_recipe_matches_explicit_fields_and_has_no_alias_identity():
 def test_board_matches_explicit_fields_and_excludes_host_reservation():
     preset = options_from_args(Namespace(board="sophialake"))
     explicit = CodegenOptions(io_memory_base=0x84000000, io_memory_capacity_base=0x84000000,
-        io_memory_capacity_bytes=1006632960, io_memory_bytes=16777216,
+        io_memory_capacity_bytes=1006632960, io_memory_bytes=8388608,
         application_residency=True, quantized_operand_reuse="wide-cache")
     assert preset.identity_record() == explicit.identity_record()
     assert preset.io_memory_base == SOPHIALAKE.ddr_base + SOPHIALAKE.host_reserved_bytes
@@ -29,15 +29,15 @@ def test_board_matches_explicit_fields_and_excludes_host_reservation():
     assert preset.quantized_operand_reuse == "wide-cache"
     assert preset.native_pipeline == "mandatory"
     assert preset.application_residency
-    assert preset.io_memory_bytes == 16 << 20
+    assert preset.io_memory_bytes == 8 << 20
 
 
-@pytest.mark.parametrize("window", [None, 16 << 20, 786432])
+@pytest.mark.parametrize("window", [None, 8 << 20, 16 << 20, 786432])
 def test_recipe_board_refuses_known_spill_work_limit_before_memory_selection(monkeypatch, window):
     def unexpected_memory_selection(self):
         pytest.fail("unsupported preset combination reached board memory selection")
     monkeypatch.setattr(type(SOPHIALAKE), "options", unexpected_memory_selection)
-    with pytest.raises(ValueError, match="known spill rewrite work limit reached at the 16 MiB staging window"):
+    with pytest.raises(ValueError, match="known spill rewrite work limit reached with a 16 MiB staging window"):
         options_from_args(Namespace(recipe="dispatch-reduction", board="sophialake",
                                     io_memory_bytes=window))
 
