@@ -10,17 +10,16 @@ The default usable capacity is consequently `[0x84000000, 0xc0000000)`, and stag
 
 Activate an install that sets `MERLIN_NATIVE_SNAPSHOT` to its checked native snapshot, or pass `--snapshot` explicitly. Snapshot/profile validation still runs. Native compile defaults to `--abi auto`, application compilation defaults to diagnostic mode, invocation-local exact materialization reuse is enabled, and region reuse stays disabled because residency embeds addresses. `--no-materialization-cache` disables reuse. Region compilation defaults to strict-native mode; specify another mode for diagnostic requests.
 
-For an existing staged capture and its source-bound state interface, a resident DDR recipe compile is:
+For the qualified layer capture, a resident DDR recipe compile is:
 
 ```sh
 merlin-targetgen native-compile --engine merlin_native \
   --support atlas \
   --target-source "$ATLAS_ROOT" --compile-inputs "$CAPTURE" \
-  --application --application-memory-bytes 134217728 \
-  --application-state "$STATE" --already-quantized \
-  --application-parameters external --application-buffer-views \
-  --application-common-values --application-compose-reshapes \
+  --application --application-memory-bytes 536870912 \
+  --already-quantized --application-parameters external \
+  --application-name capsule \
   --recipe dispatch-reduction --board sophialake --out "$OUTPUT"
 ```
 
-The command has 15 flags. Its equivalent with the fourteen recipe fields and five board fields (with the shared I/O size counted once), explicit snapshot, ABI, mode, and materialization-cache selection has 35 flags. This count treats each option name as one flag and excludes the executable, subcommand, and values. Source-bound state and application memory budgets stay explicit because the install does not determine them. This command requires the board reservation assumption to match the actual host allocation before deployment.
+The command has 12 flags. Its equivalent with the fourteen recipe fields and five board fields (with the shared I/O size counted once), explicit snapshot, ABI, mode, and materialization-cache selection has 32 flags. This count treats each option name as one flag and excludes the executable, subcommand, and values. The application memory budget stays explicit because the install does not determine it. Captures with lifted mutable buffers additionally require a source-bound state declaration. This command requires the board reservation assumption to match the actual host allocation before deployment.
