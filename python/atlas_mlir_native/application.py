@@ -310,6 +310,12 @@ class AtlasApplicationAdapter:
         return deployment_requirements(regions, native_root)
 
     @staticmethod
+    def deployment_region_package(region, compiled, name, target_source, paging):
+        from .already_quantized import prepare_c_package
+
+        return prepare_c_package(region, compiled, name, target_source=target_source, paging=paging)
+
+    @staticmethod
     def application_binding(name, regions, interface):
         if regions and all(row["placement"] == "host" for row in regions):
             return None

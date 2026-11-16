@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from hashlib import sha256
 import json
+from math import prod
 from pathlib import Path
 
 from merlin.semantic_compiler.target_binding import NativeCompilationError
@@ -30,7 +31,7 @@ def deployment_requirements(regions, native_root):
         return None
     base, size = validate_io_window()
     root = Path(native_root).resolve()
-    reservations, images, seen, calls = [], [], set(), []
+    reservations, images, seen, calls, refill_groups = [], [], set(), [], []
 
     def refuse(message):
         raise NativeCompilationError("unsupported_semantics", "deployment: " + message)
@@ -58,7 +59,7 @@ def deployment_requirements(regions, native_root):
             refuse("device region has no published native program")
         first_reservation = len(reservations)
         first_image = len(images)
-        tile_buffers = []
+        tile_buffers, standalone_tiles = [], True
         for relative in programs:
             if not isinstance(relative, str):
                 refuse("provider native program path is not relative")
@@ -74,6 +75,8 @@ def deployment_requirements(regions, native_root):
             seen.add(relative)
             plan = json.loads((folder / "execution_plan.json").read_bytes())
             schema = plan.get("schema")
+            standalone_tiles &= (schema == "atlas.native_tile_execution_plan.v8"
+                                 and plan.get("scope") == "diagnostic_selected_standalone_core")
             if schema in {"atlas.quantized_loop_execution.v1", "atlas.pointwise_execution_plan.v1",
                           "atlas.layout_device.v1", "atlas.exact_float.v1"}:
                 counted = schema == "atlas.quantized_loop_execution.v1"
@@ -151,6 +154,23 @@ def deployment_requirements(regions, native_root):
             merged.append((address, end, name, role))
         for address, end, name, role in merged:
             reserve(name, address, end - address, role, call_lifetime)
+        description = region["description"]
+        precision = description.get("precision_plan", {})
+        if (standalone_tiles and description.get("kind") == "already_quantized"
+                and precision.get("schema") == "atlas.already_quantized_contraction.v1"
+                and "operand_permutation" not in precision
+                and prod(precision.get("batch_shape", [])) == 1):
+            m, n, k = precision["shape"]
+            if all(type(value) is int and value > 0 for value in (m, n, k)) and m <= 32:
+                rhs = precision["operand_ids"][1]
+                local_inputs = description["input_node_ids"]
+                if len(local_inputs) != len(region["inputs"]) or rhs not in local_inputs:
+                    refuse("refill operand differs from region inputs")
+                refill_groups.append(dict(context_index=region["context_index"],
+                    operand=region["inputs"][local_inputs.index(rhs)], groups=[
+                        dict(first_launch=group*((k+31)//32), launch_count=(k+31)//32,
+                             source_offset=first_n*k, bytes=min(32, n-first_n)*k)
+                        for group, first_n in enumerate(range(0, n, 32))]))
         if len(programs) > 1 and region["description"].get("kind") == "exact_float_device":
             # Reconstruct the source-bound schedule, rather than treating an
             # arbitrary image list or a claimed lifetime as sequential proof.
@@ -222,6 +242,7 @@ def deployment_requirements(regions, native_root):
         call["launches_per_invocation"] = count
     return dict(schema="merlin.provider_deployment.v1", window=dict(address=base, bytes=size),
 
+
                 reservations=reservations, images=images,
                 regions=calls,
                 allocation_alignment=ALLOCATION_ALIGNMENT,
@@ -241,4 +262,5 @@ def deployment_requirements(regions, native_root):
                     reserved_bytes=65536),
                 raw_scratch_bytes=max(1, *(row["description"].get("workspace_bytes", 0) for row in regions)),
                 conversion_scratch_bytes=max(1, *(row["description"].get("source_workspace_bytes", 0)
-                                                  for row in regions)))
+                                                  for row in regions)),
+                **({"refill_groups": refill_groups} if refill_groups else {}))

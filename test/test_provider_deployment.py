@@ -350,3 +350,27 @@ def test_standalone_v8_flat_buffers_and_length_checks(tmp_path):
     rows[0]["native_programs"].append("segments/s")
     assert [(r["address"], r["bytes"]) for r in requirements(tmp_path, rows)["reservations"]] == [
         (BASE, 1024), (BASE + 2048, 1024), (BASE + 4096, 2048), (BASE + 6144, 2048)]
+
+
+def test_tiled_rhs_refill_groups_follow_native_n_outer_bounds(tmp_path):
+    publish(tmp_path, dict(schema="atlas.native_tile_execution_plan.v8",
+        scope="diagnostic_selected_standalone_core", input_addresses=[BASE, BASE + 2048],
+        input_payload_bytes=[1024, 1024], output_addresses=[BASE + 4096], output_bytes=2048))
+    rows = regions()
+    rows[0]["inputs"] = ["source_a", "source_sx", "source_w", "source_sw"]
+    rows[0]["description"].update(kind="already_quantized", input_node_ids=["a", "sx", "w", "sw"],
+        precision_plan=dict(schema="atlas.already_quantized_contraction.v1",
+            operand_ids=["a", "w"], batch_shape=[], shape=[1, 65, 33]))
+    groups = requirements(tmp_path, rows)["refill_groups"]
+    assert groups == [dict(context_index=0, operand="source_w", groups=[
+        dict(first_launch=0, launch_count=2, source_offset=0, bytes=1056),
+        dict(first_launch=2, launch_count=2, source_offset=1056, bytes=1056),
+        dict(first_launch=4, launch_count=2, source_offset=2112, bytes=33)])]
+    precision = rows[0]["description"]["precision_plan"]
+    for changes in (dict(shape=[33, 65, 33]), dict(batch_shape=[2]),
+                    dict(operand_permutation={}), dict(schema="atlas.already_quantized_epilogue.v1")):
+        original = dict(precision)
+        precision.update(changes)
+        assert "refill_groups" not in requirements(tmp_path, rows)
+        precision.clear()
+        precision.update(original)

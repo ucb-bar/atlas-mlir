@@ -233,7 +233,7 @@ def compile_source(snapshot, source, *, target_source, destination, limits):
     return plan
 
 
-def prepare_c_package(source, compiled, name, *, target_source):
+def prepare_c_package(source, compiled, name, *, target_source, paging=None):
     """Export the used checked K32 images with unchanged code/exponent inputs."""
     from merlin.compile.c_sources import c_source_pair
     from .c_runtime import program_array, runtime_headers, runtime_members
@@ -267,6 +267,39 @@ def prepare_c_package(source, compiled, name, *, target_source):
     a,b = (source.node(key) for key in plan.operand_ids)
     ia,ib = (plan.input_ids.index(key) for key in plan.operand_ids)
     iea,ieb = (plan.input_ids.index(key) for key in plan.exponent_ids)
+    page_declaration = page_state = page_boundary = relative_rhs = ""
+    operand_scans = 2
+    if paging is not None:
+        if (batches != 1 or m > 32 or plan.operand_permutation is not None
+                or plan.record()["schema"] != "atlas.already_quantized_contraction.v1"
+                or paging["region_operand"] != plan.operand_ids[1]):
+            raise ValueError("paging requires one dense RHS in the N-outer tiled route")
+        segments, slot = paging["segments"], paging["slot"]["bytes"]
+        offset = group = launch = 0
+        if not segments or type(slot) is not int or slot <= 0:
+            raise ValueError("paging requires nonempty bounded segments")
+        for step, segment in enumerate(segments):
+            count = segment["group_count"]
+            end = min(n, (group+count)*32)*k
+            if (type(count) is not int or count <= 0 or group+count > (n+31)//32
+                    or any(segment[key] != value for key, value in dict(id=step,
+                        operand_offset=offset, first_group=group, first_launch=launch,
+                        launch_count=count*((k+31)//32), bytes=end-offset).items())
+                    or not 0 < segment["bytes"] <= slot):
+                raise ValueError("paging segments must partition ordered RHS row groups")
+            page_boundary += f"\n      if (first_n=={group*32}u) {{\n"
+            if step:
+                page_boundary += f"        if (region->host->active || refill({step}u)) return 4;\n"
+            page_boundary += f"""        rhs_offset={offset}u;
+        for (size_t i=0;i<{segment['bytes']}u;++i)
+          if (!(b[i]==0u || (b[i]>=8u && b[i]<=126u) || (b[i]>=136u && b[i]<=254u))) return 2;
+      }}"""
+            offset, group, launch = end, group+count, launch+segment["launch_count"]
+        if offset != n*k or group != (n+31)//32:
+            raise ValueError("paging segments must cover the whole RHS")
+        sizes[ib], operand_scans = slot, 1
+        page_declaration = "\nextern int refill(unsigned);\n"
+        page_state, relative_rhs = "\n  size_t rhs_offset=0;", "-rhs_offset"
     def exp_index(key,operand,row):
         shape = source.node(key).type.shape
         if not shape: return "0u"
@@ -315,7 +348,7 @@ int {name}_source_dispatch(void *,const void *const *,void *const *);
     storing = ("uint16_t value=(uint16_t)word; __builtin_memcpy(ctx->workspace+index*2u,&value,2u);" if plan.output_dtype=="bf16"
         else "uint32_t value=word<<16; __builtin_memcpy(ctx->workspace+index*4u,&value,4u);")
     dispatch = cases[0] if len(cases) == 1 else f"if (!first_k) {cases[0]} else {cases[1]}"
-    implementation=arrays+_restore_bf16_c(name)+f"""
+    implementation=arrays+page_declaration+_restore_bf16_c(name)+f"""
 static int {name}_range(const void *p,size_t n) {{ return p && n && (uintptr_t)p<=UINTPTR_MAX-n; }}
 static int {name}_overlap(const void *a,size_t an,const void *b,size_t bn) {{ return (uintptr_t)a<(uintptr_t)b+bn && (uintptr_t)b<(uintptr_t)a+an; }}
 static int32_t {name}_exponent(const void *p,size_t i) {{ int32_t v; __builtin_memcpy(&v,(const uint8_t *)p+4u*i,4u); return v; }}
@@ -362,7 +395,7 @@ int {name}_source_dispatch(void *context,const void *const *inputs,void *const *
     int32_t exponent={name}_exponent(inputs[exponent_inputs[which]],i);
     if (exponent< -127 || exponent>127) return 2;
   }}
-  for (size_t which=0;which<2u;++which) {{
+  for (size_t which=0;which<{operand_scans}u;++which) {{
     const uint8_t *v=which?b:a; size_t size=which?{prod(b.type.shape)}u:{prod(a.type.shape)}u;
     for (size_t i=0;i<size;++i) if (!(v[i]==0u || (v[i]>=8u && v[i]<=126u) || (v[i]>=136u && v[i]<=254u))) return 2;
   }}
@@ -382,13 +415,13 @@ int {name}_source_dispatch(void *context,const void *const *inputs,void *const *
     if ((int64_t)lhs_min+(int64_t)rhs_min< -133 ||
         (int64_t)lhs_max+(int64_t)rhs_max>127) return 2;
   }}
-  for (size_t batch=0;batch<{batches}u;++batch) for (size_t first_m=0;first_m<{m}u;first_m+=32u)
-    for (size_t first_n=0;first_n<{n}u;first_n+=32u) {{
+  {page_state}for (size_t batch=0;batch<{batches}u;++batch) for (size_t first_m=0;first_m<{m}u;first_m+=32u)
+    for (size_t first_n=0;first_n<{n}u;first_n+=32u) {{{page_boundary}
       for (size_t first_k=0;first_k<{k}u;first_k+=32u) {{
         __builtin_memset(region->workspace,0,2048u);
         for (size_t row=0;row<32u;++row) for (size_t c=0;c<32u;++c) if (first_k+c<{k}u) {{
           if (first_m+row<{m}u) region->workspace[row*32u+c]=a[(batch*{m}u+first_m+row)*{k}u+first_k+c];
-          if (first_n+row<{n}u) region->workspace[1024u+row*32u+c]=b[({wb}*{n}u+first_n+row)*{k}u+first_k+c];
+          if (first_n+row<{n}u) region->workspace[1024u+row*32u+c]=b[({wb}*{n}u+first_n+row)*{k}u+first_k+c{relative_rhs}];
         }}
         {dispatch}
         for (size_t i=0;i<2048u;i+=2u) {{
@@ -425,4 +458,8 @@ int {name}_source_dispatch(void *context,const void *const *inputs,void *const *
         precision_plan=plan.record(),input_node_ids=list(plan.input_ids),output_node_ids=[plan.output_id],
         source_interface=dict(workspace_bytes=converted,failure_output="unchanged",completion="synchronous"),
         native_program_paths=[role for role,_,_,_ in images], device_launch_schedule=schedule, **runtime_record)
+    if paging is not None:
+        record["paging_validation"] = ("RHS codes validated per segment after refill and before first use; "
+            "invalid segment 0 returns 2 before starts; later invalid segments return 2 after earlier starts; "
+            "caller output unchanged")
     return record,files
