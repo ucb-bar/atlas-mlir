@@ -58,6 +58,7 @@ def deployment_requirements(regions, native_root):
             refuse("device region has no published native program")
         first_reservation = len(reservations)
         first_image = len(images)
+        tile_buffers = []
         for relative in programs:
             if not isinstance(relative, str):
                 refuse("provider native program path is not relative")
@@ -95,6 +96,18 @@ def deployment_requirements(regions, native_root):
                         reserve(f"{relative}/{role}_{i}", address, count, role, call_lifetime)
                 if counted:
                     reserve(relative + "/status", plan["status_address"], plan["status_bytes"], "status", call_lifetime)
+            elif (schema == "atlas.native_tile_execution_plan.v8"
+                  and plan.get("scope") == "diagnostic_selected_standalone_core"):
+                for role, addresses, counts in (
+                    ("input", plan["input_addresses"], plan["input_payload_bytes"]),
+                    ("output", plan["output_addresses"], [plan["output_bytes"]]),
+                ):
+                    if len(addresses) != len(counts):
+                        refuse("provider execution buffer lengths differ")
+                    for i, (address, count) in enumerate(zip(addresses, counts, strict=True)):
+                        if type(address) is not int or type(count) is not int or count <= 0:
+                            refuse("invalid standalone provider buffer")
+                        tile_buffers.append((address, address + count, f"{relative}/{role}_{i}", role))
             elif schema in {"atlas.resident_graph_execution_plan.v1", "atlas.native_tile_execution_plan.v8"}:
                 # Keep reservations even when a receipt promotes individual
                 # accesses. An address can later hold an unpromoted public value.
@@ -130,6 +143,14 @@ def deployment_requirements(regions, native_root):
             images.append(dict(path=relative + "/program.bin", sha256=sha256(binary).hexdigest(),
                                bytes=len(binary), imem_offset_bytes=0, capacity_bytes=IMEM_BYTES,
                                upload_convention="counted_ensure_loaded"))
+        merged = []
+        for address, end, name, role in sorted(tile_buffers):
+            if merged and address < merged[-1][1]:
+                start, prior_end, prior_name, prior_role = merged.pop()
+                address, end, name, role = start, max(end, prior_end), prior_name, role if role == prior_role else "private"
+            merged.append((address, end, name, role))
+        for address, end, name, role in merged:
+            reserve(name, address, end - address, role, call_lifetime)
         if len(programs) > 1 and region["description"].get("kind") == "exact_float_device":
             # Reconstruct the source-bound schedule, rather than treating an
             # arbitrary image list or a claimed lifetime as sequential proof.
@@ -200,6 +221,7 @@ def deployment_requirements(regions, native_root):
             refuse("provider region requires an explicit positive launch count")
         call["launches_per_invocation"] = count
     return dict(schema="merlin.provider_deployment.v1", window=dict(address=base, bytes=size),
+
                 reservations=reservations, images=images,
                 regions=calls,
                 allocation_alignment=ALLOCATION_ALIGNMENT,

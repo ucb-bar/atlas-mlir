@@ -324,3 +324,29 @@ def test_real_exact_float_full_and_tail_placement(tmp_path):
         rows[0]['description'] = {**package.description, 'device_launch_schedule': {}}
         with pytest.raises(NativeCompilationError, match='sequential schedule differs'):
             AtlasApplicationAdapter.deployment_requirements(rows, tmp_path)
+
+def test_standalone_v8_flat_buffers_and_length_checks(tmp_path):
+    plan = dict(schema="atlas.native_tile_execution_plan.v8",
+                scope="diagnostic_selected_standalone_core",
+                input_addresses=[BASE, BASE + 2048], input_payload_bytes=[1024, 1024],
+                output_addresses=[BASE + 4096], output_bytes=2048)
+    publish(tmp_path, plan)
+    assert [(r["address"], r["bytes"], r["role"]) for r in requirements(tmp_path)["reservations"]] == [
+        (BASE, 1024, "input"), (BASE + 2048, 1024, "input"), (BASE + 4096, 2048, "output")]
+    for field in ("input_addresses", "input_payload_bytes", "output_addresses"):
+        publish(tmp_path, {**plan, field: []})
+        with pytest.raises(NativeCompilationError, match="buffer lengths differ"):
+            requirements(tmp_path)
+    publish(tmp_path, plan)
+    second = tmp_path / "segments/s"
+    second.mkdir()
+    for member in ("program.bin", "physical-program.json"):
+        (second / member).write_bytes((tmp_path / "segments/r" / member).read_bytes())
+    (second / "execution_plan.json").write_text(json.dumps({**plan,
+        "input_addresses": [BASE, BASE + 2048, BASE + 4096],
+        "input_payload_bytes": [1024, 1024, 2048],
+        "output_addresses": [BASE + 6144]}))
+    rows = regions()
+    rows[0]["native_programs"].append("segments/s")
+    assert [(r["address"], r["bytes"]) for r in requirements(tmp_path, rows)["reservations"]] == [
+        (BASE, 1024), (BASE + 2048, 1024), (BASE + 4096, 2048), (BASE + 6144, 2048)]
