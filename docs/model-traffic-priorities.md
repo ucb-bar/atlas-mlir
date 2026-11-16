@@ -37,7 +37,7 @@ required to isolate each new optimization from upstream changes.
 | Priority | Work | Evidence / expected benefit | Ownership |
 | --- | --- | --- | --- |
 | 1 — implemented | Admit valid zeros through the vector check for exact BF16 addition/subtraction | Saves 2.60M TinyLlama and 50.85M SmolVLA cycles in matched full-layer runs; details below. | Atlas: proof against the selected VPU primitives and native route selection. |
-| 2 | Fuse private softmax output with static activation quantization | SmolVLA writes a 25,165,824-byte BF16 probability tensor that its quantizer reads back. Removing that pair of transfers removes about 34.1M cycles of bandwidth demand at 1.477 B/cycle; actual saved cycles require simulation. | Merlin: reusable private producer/consumer ownership proofs. Atlas: row schedule, original BF16 rounding, exact FP8 conversion and exponent publication. |
+| 2 — implemented | Fuse private softmax output with static activation quantization | SmolVLA writes a 25,165,824-byte BF16 probability tensor that its quantizer reads back. Removing that pair of transfers removes about 34.1M cycles of bandwidth demand at 1.477 B/cycle; actual saved cycles require simulation. | Merlin: reusable private producer/consumer ownership proofs. Atlas: row schedule, original BF16 rounding, exact FP8 conversion and exponent publication. |
 | 3 | Fold exact bias/residual additions into producer epilogues | SmolVLA's six projection bias additions still require 54 launches. Their producer results total 14,155,776 BF16 bytes; eliminating one write/read pair would remove 28.31 MB of traffic. This requires the original post-projection rounding and safe fallback/publication, not substitution of the VPU's truncated add for exact RNE. | Merlin: private result and broadcast-layout proofs. Atlas: exact arithmetic and producer-store fusion. |
 | 4 | Pipeline tile DMA with vector compute and validation | Before priority 1, exact-float and folded-layout kernels accounted for about 7.26M TinyLlama and 106.75M SmolVLA cycles in which DMA was inactive. Remeasure after scalar work removal before selecting schedules. Prefetch the next independent tile while processing the current one. | Atlas: VMEM lifetimes, register pressure, DMA slots and instruction timing. |
 | 5 | Compose compatible regions while keeping private intermediates on device | The current 56/113 launches include real data dependencies as well as image/resource limits. Composition must remove repeated publication/packing or enable overlap to reduce device cycles; merely concatenating launches chiefly changes host overhead. | Merlin: generic composition, ownership and lifetime contracts. Atlas: admitted schedules, memory placement and image bounds. |
@@ -134,3 +134,74 @@ and protected memory using Rust. Compile and execute both complete retained
 layers with matched options and source/model hashes. Report cycles, dispatches,
 instructions and DRAM bytes, including regressions. Commit and push only after
 the feature's independent checks and full-layer comparisons pass.
+
+## Second implementation: softmax output quantization
+
+Opt into `softmax_quantize` after `softmax_narrowing` and
+`softmax_input_widening` in the adjacent-pattern list. A private BF16 probability
+result feeding both projections of a static activation quantizer is packed in
+its original row program. Dynamic scales, escaping probability tensors and an
+explicit host quantizer route retain the separate regions.
+
+The selected softmax computation, BF16 rounding and masks are unchanged. The
+native rewrite identifies the final full-tile store on an unconditional chain
+of staged blocks; earlier stores to reused output slots remain BF16. It applies
+the same raw PACK scale clamp as the standalone quantizer. The Atlas host ABI
+reassembles the two physical column halves and publishes the FP8 codes and the
+original int32 exponent only after all launches/readbacks succeed. The original
+row frame remains allocated, including unused upper output halves. This change
+reduces transfers, not the reserved device arena.
+
+This feature requires Merlin commit `dadab98d7` on the companion
+`perf/model-traffic-reduction` branch. Merlin's `render_row_softmax_c` now accepts an independently selected output
+byte width. It only copies dense rows and trims tails; it makes no numerical or
+hardware decisions. Atlas owns matching its quantizer semantics, final-store
+proof, physical PACK/layout handling, source binding, and replay verification.
+
+Matched full-layer Rust runs, compared with the zero-admission implementation:
+
+| Layer | Before cycles | After cycles | Saved | Dispatches | DRAM bytes removed |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| TinyLlama, B1/T64 | 71,519,269 | **71,126,873** | 392,396 (0.549%) | 56 → 55 | 524,320 |
+| SmolVLA vision, B1/T1024 | 440,156,657 | **402,703,972** | 37,452,685 (8.509%) | 113 → 112 | 50,331,680 |
+
+The removed traffic is one BF16 write/read pair plus the standalone quantizer's
+32-byte exponent publication. Every remaining region output, including the
+new fused FP8 codes and exponent, matches its prior byte string. All 54
+unchanged TinyLlama launches and 111 unchanged SmolVLA launches retain identical
+cycles, instruction histograms, busy counters and transfer counts. Both final
+layer outputs match their independently retained arithmetic references exactly:
+131,072 and 786,432 BF16 words respectively.
+
+After fusion, TinyLlama reads 66,138,112 bytes and writes 12,819,232; SmolVLA reads
+296,982,528 and writes 112,495,168. Their serial same-work bounds are 53,456,785
+and 277,233,916 cycles. DMA busy fractions are 82.30% and 74.23%; SmolVLA's busy
+fraction decreases while execution gets faster because substantially less DMA
+work remains. These are simulator device cycles, excluding host packing and
+launch latency, and are not hardware or full-model measurements.
+
+Validation includes 21 fusion tests with eight native/C/Rust execution cases:
+FP32 and BF16 score transport, plain/additive-mask/guarded softmax, fully masked
+rows, partial rows/columns, both int32 scale extremes, shared-result and dynamic
+scale rejection, final-store selection, output alias rejection, late read failure
+with unchanged public outputs, and refusal to replay a different output encoding
+or exponent. Existing softmax/row-loop regressions add 37 passing tests and two
+native subcases; one Python-instruction-model test remains skipped. Merlin's
+nine packing tests also exercise 1-, 3-, and 8-byte output elements, tails,
+guards and invalid widths. Structure and target-name gates pass. The repository
+regex gate reports three pre-existing calls in unchanged
+`src/merlin/compile/baremetal_harness.py`; this feature adds no regex calls.
+
+Reproduction artifacts are in `out/traffic-audit/`:
+`compile_quantized_softmax_layer.py`, `snapshot-quantize-64m`,
+`tinyllama-quantized-softmax`, `smolvla-quantized-softmax`, the corresponding
+`rust-*` directories, and `softmax-quantize-comparison.json`. The fixture hashes,
+Rust commit/binary and numerical settings are unchanged from the first feature.
+
+The next investigation is the repeated input reads in exact bias/residual
+kernels. They currently validate a whole chunk, then reload it for computation.
+Their application wrapper already stages outputs privately until every status
+succeeds. Proving that ownership for a fused validation/computation loop may
+remove the same traffic as a projection epilogue without first changing MXU
+partitioning or its weight reuse. Raw native calls must retain their existing
+failure-publication contract unless explicitly compiled for private results.

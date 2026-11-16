@@ -57,7 +57,12 @@ def _prepare_c_package(
     score_domain=SOFTMAX_DOMAIN,
     input_dtype="f32",
     output_dtype="f32",
+    static_output_exponent=None,
 ):
+    from .row_output_quantize import validate_exponent
+
+    validate_exponent(static_output_exponent)
+    packed = static_output_exponent is not None
     staged_precision = precision
     if semantic_source is not None:
         if precision is not None:
@@ -72,7 +77,8 @@ def _prepare_c_package(
         raise ValueError("finite additive sentinel requires a bound semantic source interface")
     if input_dtype not in {"f32", "bf16"} or input_dtype == "bf16" and precision is None:
         raise ValueError("softmax score transport requires a supported bound source interface")
-    if output_dtype not in {"f32", "bf16"} or output_dtype == "bf16" and precision is None:
+    if (output_dtype not in {"f32", "bf16", "i8"} or output_dtype != "f32" and precision is None
+            or (output_dtype == "i8") != packed):
         raise ValueError("softmax result publication requires a supported bound source interface")
     if compiled.is_symlink() or not compiled.is_dir():
         raise ValueError("softmax compilation must be a real directory")
@@ -107,7 +113,10 @@ def _prepare_c_package(
 
         if row_compilations is not None or not row_loop_compilation.resolve().is_relative_to(compiled.resolve()):
             raise ValueError("select one contained row-loop compilation or separate row programs")
-        row_loop, loop_manifest = verify_row_loop(source, row_loop_compilation, target_source=target_source)
+        row_loop, loop_manifest = verify_row_loop(source, row_loop_compilation, target_source=target_source,
+            static_output_exponent=static_output_exponent)
+    if packed and row_loop is None:
+        raise ValueError("packed softmax publication requires a checked row loop")
     if row_compilations is not None and (
         len(row_compilations) != len(plan.regions)
         or len(set(row_compilations)) != len(row_compilations)
@@ -125,7 +134,8 @@ def _prepare_c_package(
     columns, groups = plan.column_tiles, len(plan.regions)
     input_tiles = columns * (2 if plan.masked else 1)
     mask_parameter = ", const uint8_t *keep" if plan.masked else ""
-    output_bytes = m * n * 2
+    input_bytes = m * n * 2
+    output_bytes = m * n * (1 if packed else 2)
     workspace = output_bytes + 2 * TILE_BYTES
     embedded, initializers, images, files = [], [], [], {}
     publications = []
@@ -315,12 +325,12 @@ def _prepare_c_package(
     mask_check, mask_write, keep_helper = "", "", ""
     if plan.masked:
         mask_check = f"""
-  if (!{name}_valid(keep,{output_bytes}u) ||
-      {name}_overlap(keep,{output_bytes}u,in,{output_bytes}u) ||
-      {name}_overlap(keep,{output_bytes}u,out,{output_bytes}u) ||
-      {name}_overlap(keep,{output_bytes}u,ctx,sizeof(*ctx)) ||
-      {name}_overlap(keep,{output_bytes}u,ctx->host,sizeof(*ctx->host)) ||
-      {name}_overlap(keep,{output_bytes}u,ctx->workspace,{workspace}u)) return {name.upper()}_INVALID;
+  if (!{name}_valid(keep,{input_bytes}u) ||
+      {name}_overlap(keep,{input_bytes}u,in,{input_bytes}u) ||
+      {name}_overlap(keep,{input_bytes}u,out,{output_bytes}u) ||
+      {name}_overlap(keep,{input_bytes}u,ctx,sizeof(*ctx)) ||
+      {name}_overlap(keep,{input_bytes}u,ctx->host,sizeof(*ctx->host)) ||
+      {name}_overlap(keep,{input_bytes}u,ctx->workspace,{workspace}u)) return {name.upper()}_INVALID;
   for (size_t row=0;row<{m}u;++row) {{
     unsigned any=0;
     for (size_t col=0;col<{n}u;++col) {{
@@ -384,6 +394,17 @@ static void {name}_pack_keep_tile(uint8_t *out,const uint8_t *in,size_t start,si
       {name}_scatter_row_tile(ctx->workspace,logical,{row_start},col);
     }}
 """
+    if packed:
+        read_code = f"""
+    for (size_t col=0; col < {columns}u; ++col) {{
+      if (ctx->io.read(ctx->io.context,image->outputs[col]+{output_offset},physical,1024u))
+        return {upper}_MEMORY_ERROR;
+      /* Raw PACK preserves the two column halves of the BF16 tile. */
+      for (size_t row=0; row<32u; ++row) for (size_t c=0; c<32u; ++c)
+        logical[row*32u+c]=physical[(c/16u)*512u+row*16u+c%16u];
+      {name}_scatter_row_tile(ctx->workspace,logical,{row_start},col);
+    }}
+"""
     before_rows, after_rows = "", ""
     row_groups = groups
     if row_loop is not None:
@@ -419,10 +440,10 @@ typedef struct {{
  * The platform serializes calls sharing one Atlas host. No heap allocation. */
 {name}_status {name}_bind({name}_context *, atlas_host *, atlas_tile_memory_io,
                          void *workspace, size_t bytes, size_t max_polls);
-/* Dense row-major BF16 little-endian input/output. All rows share the selected
+/* Dense row-major BF16 little-endian input and {"FP8 codes" if packed else "BF16 output"}. All rows share the selected
  * per-row normalization across columns. Output is unchanged on any error. */
 {name}_status {name}_run({name}_context *, const uint8_t *scores_bf16_le{mask_parameter},
-                        uint8_t *probabilities_bf16_le, atlas_host_result *);
+                        uint8_t *probabilities, atlas_host_result *);
 int {name}_dispatch(void *, const void *const *inputs, void *const *outputs);
 const uint32_t *{name}_program(size_t index, size_t *word_count);
 """
@@ -471,15 +492,15 @@ static int {name}_overlap(const void *a, size_t an, const void *b, size_t bn) {{
   if (!ctx || !ctx->host || !ctx->workspace || !ctx->io.write || !ctx->io.read || !ctx->max_polls)
     return {upper}_INVALID;
   if (ctx->host->active) {{ if (device) *device=ATLAS_HOST_BUSY; return {upper}_DEVICE_ERROR; }}
-  if (!{name}_valid(in,{output_bytes}u) || !{name}_valid(out,{output_bytes}u) ||
-      {name}_overlap(in,{output_bytes}u,out,{output_bytes}u) ||
-      {name}_overlap(in,{output_bytes}u,ctx,sizeof(*ctx)) ||
+  if (!{name}_valid(in,{input_bytes}u) || !{name}_valid(out,{output_bytes}u) ||
+      {name}_overlap(in,{input_bytes}u,out,{output_bytes}u) ||
+      {name}_overlap(in,{input_bytes}u,ctx,sizeof(*ctx)) ||
       {name}_overlap(out,{output_bytes}u,ctx,sizeof(*ctx)) ||
-      {name}_overlap(in,{output_bytes}u,ctx->host,sizeof(*ctx->host)) ||
+      {name}_overlap(in,{input_bytes}u,ctx->host,sizeof(*ctx->host)) ||
       {name}_overlap(out,{output_bytes}u,ctx->host,sizeof(*ctx->host)) ||
-      {name}_overlap(in,{output_bytes}u,ctx->workspace,{workspace}u) ||
+      {name}_overlap(in,{input_bytes}u,ctx->workspace,{workspace}u) ||
       {name}_overlap(out,{output_bytes}u,ctx->workspace,{workspace}u)) return {upper}_INVALID;
-  for (size_t at=0; at < {output_bytes}u; at+=2) {{
+  for (size_t at=0; at < {input_bytes}u; at+=2) {{
     unsigned code=(unsigned)in[at] | ((unsigned)in[at+1]<<8), mag=code&32767u;
     unsigned exponent=(code>>7)&255u;
     if (mag>{'0x4300u' if relative else '0x4200u'} || (mag && (exponent<8u || exponent>{'134u' if relative else '132u'}))) return {upper}_INPUT_DOMAIN;
@@ -519,7 +540,7 @@ int {name}_dispatch(void *ctx, const void *const *inputs, void *const *outputs) 
 
         more_declarations, more_source, source_interface, extra_readme = render_source_interface(
             precision, name, workspace, finite_sentinel_bits=finite_sentinel_bits, score_domain=score_domain,
-            input_dtype=input_dtype, output_dtype=output_dtype,
+            input_dtype=input_dtype, output_dtype=output_dtype, static_output_exponent=static_output_exponent,
         )
         declarations += more_declarations
         implementation += more_source
@@ -532,7 +553,7 @@ int {name}_dispatch(void *ctx, const void *const *inputs, void *const *outputs) 
                 private_headers={},
                 sources={
                     **host_members,
-                    "row_packing.c": render_row_softmax_c(plan, name) + keep_helper,
+                    "row_packing.c": render_row_softmax_c(plan, name, output_element_bytes=1 if packed else None) + keep_helper,
                 },
                 declarations=declarations,
                 implementation=implementation,
@@ -585,7 +606,8 @@ Standalone-core evidence does not qualify an integrated SoC or FPGA bitstream.
         if member(root, "manifest.json") != original:
             raise ValueError("softmax compilation changed during C export")
     if row_loop_compilation is not None:
-        _, final_loop_manifest = verify_row_loop(source, row_loop_compilation, target_source=target_source)
+        _, final_loop_manifest = verify_row_loop(source, row_loop_compilation, target_source=target_source,
+            static_output_exponent=static_output_exponent)
         if final_loop_manifest != loop_manifest:
             raise ValueError("row-loop compilation changed during C export")
     return {

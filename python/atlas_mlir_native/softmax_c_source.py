@@ -60,7 +60,12 @@ def prepare_source_c_package(
 
 
 def render_source_interface(precision, name: str, raw_workspace: int, *, finite_sentinel_bits=None,
-                            score_domain=SOFTMAX_DOMAIN, input_dtype="f32", output_dtype="f32"):
+                            score_domain=SOFTMAX_DOMAIN, input_dtype="f32", output_dtype="f32",
+                            static_output_exponent=None):
+    from .row_output_quantize import validate_exponent
+
+    validate_exponent(static_output_exponent)
+    packed = static_output_exponent is not None
     if dict(precision.request.nodes[0].attrs).get("input_domain") != score_domain:
         raise ValueError("source interface score domain differs from the checked precision plan")
     shape = precision.request.nodes[0].type.shape
@@ -68,11 +73,11 @@ def render_source_interface(precision, name: str, raw_workspace: int, *, finite_
         raise ValueError("row-relative span80 domain supports at most 1024 columns")
     if input_dtype not in {"f32", "bf16"}:
         raise ValueError("unsupported softmax score dtype")
-    if output_dtype not in {"f32", "bf16"}:
+    if output_dtype not in {"f32", "bf16", "i8"} or (output_dtype == "i8") != packed:
         raise ValueError("unsupported softmax publication dtype")
     output_type = "float" if output_dtype == "f32" else "uint8_t"
     count = shape[0] * shape[1]
-    output_bytes = count * (4 if output_dtype == "f32" else 2)
+    output_bytes = count * (1 if packed else 4 if output_dtype == "f32" else 2)
     masked = hasattr(precision.source_region, "mask")
     guarded = isinstance(precision.source_region, GuardedMaskedRowSoftmaxSource)
     input_type = "void" if guarded or input_dtype == "bf16" else "float"
@@ -112,6 +117,18 @@ def render_source_interface(precision, name: str, raw_workspace: int, *, finite_
         input_spec(score_domain).policy,
         input_spec(score_domain),
     )
+    exponent_parameter = ", int32_t *exponent" if packed else ""
+    exponent_checks = ""
+    if packed:
+        protected = [('out', str(output_bytes) + 'u'), ('inputs[0]', str(input_bytes) + 'u'),
+            ('ctx->workspace', str(scratch) + 'u'), ('region->workspace', str(raw_workspace) + 'u'),
+            ('ctx', 'sizeof(*ctx)'), ('region', 'sizeof(*region)'),
+            ('region->host', 'sizeof(*region->host)')]
+        if masked:
+            protected.append(('inputs[1]', str(mask_bytes) + 'u'))
+        checks = [f'!{name}_valid(exponent,4u)'] + [
+            f'{name}_overlap(exponent,4u,{pointer},{size})' for pointer, size in protected]
+        exponent_checks = '  if (' + ' ||\n      '.join(checks) + f') return {name.upper()}_INVALID;\n'
     upper = name.upper()
     declarations = f"""
 #define {upper}_SOURCE_INPUT_COUNT {arity}u
@@ -121,17 +138,19 @@ typedef struct {{ {name}_context *region; uint8_t *workspace; }} {name}_source_c
 {name}_status {name}_source_bind({name}_source_context *, {name}_context *, void *, size_t);
 /* Dense source {input_dtype} scores and {output_dtype} result; recorded BF16 precision change inside. */
 {name}_status {name}_source_run({name}_source_context *, const {input_type} *const *inputs,
-                               {output_type} *output, atlas_host_result *device_result);
+                               {output_type} *output{exponent_parameter}, atlas_host_result *device_result);
 int {name}_source_dispatch(void *, const void *const *inputs, void *const *outputs);
 """
     publication = (f"  __builtin_memcpy(out,ctx->workspace+{output_offset}u,{output_bytes}u);"
-                   if output_dtype == "bf16" else f"""
+                   if output_dtype != "f32" else f"""
   for (size_t i=0; i<{count}u; ++i) {{
     uint32_t bits=((uint32_t)ctx->workspace[{output_offset}u+i*2u] |
                    ((uint32_t)ctx->workspace[{output_offset}u+i*2u+1u]<<8))<<16;
     __builtin_memcpy(out+i,&bits,4u);
   }}
 """)
+    if packed:
+        publication += f"\n  {{ const uint32_t bits={static_output_exponent & 0xffffffff}u; __builtin_memcpy(exponent,&bits,4u); }}"
     source = (
         (helpers if masked else render_bf16_codes_c(input_spec(score_domain), count, name + "_encode_source")
          if input_dtype == "bf16" else render_f32_operand_c(conversion, name + "_encode_source"))
@@ -151,7 +170,7 @@ int {name}_source_dispatch(void *, const void *const *inputs, void *const *outpu
   return {upper}_OK;
 }}
 {name}_status {name}_source_run({name}_source_context *ctx, const {input_type} *const *inputs,
-                               {output_type} *out, atlas_host_result *device) {{
+                               {output_type} *out{exponent_parameter}, atlas_host_result *device) {{
   if (device) *device=ATLAS_HOST_INVALID;
   if (!ctx || !ctx->region || !ctx->region->host || !ctx->workspace || !inputs)
     return {upper}_INVALID;
@@ -169,7 +188,7 @@ int {name}_source_dispatch(void *, const void *const *inputs, void *const *outpu
       {name}_overlap(out,{output_bytes}u,region,sizeof(*region)) ||
       {name}_overlap(inputs[0],{input_bytes}u,region->host,sizeof(*region->host)) ||
       {name}_overlap(out,{output_bytes}u,region->host,sizeof(*region->host))) return {upper}_INVALID;
-{mask_checks}  if ({conversion_call}) return {upper}_INPUT_DOMAIN;
+{mask_checks}{exponent_checks}  if ({conversion_call}) return {upper}_INPUT_DOMAIN;
   {name}_status status={name}_run(region,ctx->workspace{",ctx->workspace+" + str(encoded) + "u" if masked else ""},
                                 ctx->workspace+{output_offset}u,device);
   if (status!={upper}_OK) return status;
@@ -180,7 +199,7 @@ int {name}_source_dispatch(void *ctx, const void *const *inputs, void *const *ou
   if (!inputs || !outputs) return {upper}_INVALID;
   const {input_type} *source[{arity}]={{0}}; source[0]=inputs[0];
   {"source[1]=inputs[1];" if masked else ""}
-  return (int){name}_source_run(ctx,source,outputs[0],0);
+  return (int){name}_source_run(ctx,source,outputs[0]{",outputs[1]" if packed else ""},0);
 }}
 """
     )
@@ -200,6 +219,8 @@ int {name}_source_dispatch(void *ctx, const void *const *inputs, void *const *ou
            if guarded or masked and input_dtype == "bf16" else {}),
         **({"mask_semantics": "true-excludes-score"} if guarded else {}),
         "output_dtype": output_dtype,
+        **({"output_count": 2, "static_exponent": static_output_exponent,
+            "publication": "FP8 codes and authored int32 exponent, atomic after completion"} if packed else {}),
         "precision_plan": precision.record(),
         **({"additive_mask": {"zero_keeps": True, "finite_exclusion_bits": finite_sentinel_bits,
                               "scores": "finite absolute value at most 128" if score_domain == ROWSPAN80_DOMAIN else "finite absolute value at most 32",
@@ -222,7 +243,7 @@ score tensor through its input-pointer array and returns dense {output_dtype} pr
 `{name}_source_dispatch` exposes the same call to Merlin's dispatch program.
 The input is {"rounded to BF16 RNE" if input_dtype == "f32" else "copied as unchanged BF16 codes"}, then checked against the recorded score-code
 domain. Values outside that domain are rejected rather than clipped to scores.
-The device uses the selected row-softmax policy; output BF16 is {"widened exactly" if output_dtype == "f32" else "published unchanged"}.
+The device uses the selected row-softmax policy; output BF16 is {"packed with the source static exponent" if packed else "widened exactly" if output_dtype == "f32" else "published unchanged"}.
 {mask_note}
 Keep both contexts and workspaces alive through completion, including timeouts.
 The output stays unchanged on failure. This precision change has no model-quality

@@ -50,6 +50,7 @@ class RowLoopPlan:
     scratch_bytes: int
     io_memory_base: int = DRAM_BASE
     dispatch_instruction_budget: int = DEFAULT_FUNCTIONAL_INSTRUCTION_LIMIT
+    static_output_exponent: int | None = None
 
     @property
     def groups(self):
@@ -109,10 +110,13 @@ class RowLoopPlan:
         return self.writable_base + group * self.writable_bytes + offset - self.readonly_bytes
 
     def record(self):
+        from .row_output_quantize import record
+
         explicit = self.dispatch_instruction_budget != DEFAULT_FUNCTIONAL_INSTRUCTION_LIMIT
         return {
             "schema": "atlas.row_loop_plan.v2" if explicit else "atlas.row_loop_plan.v1",
             **({"dispatch_instruction_budget": self.dispatch_instruction_budget} if explicit else {}),
+            **record(self.static_output_exponent),
             "source_request_digest": self.tiling.source.digest(),
             "body_request_digest": self.tiling.regions[0].request.digest(),
             "groups": self.groups,
@@ -128,7 +132,12 @@ class RowLoopPlan:
         }
 
 
-def prepare_plan(source, *, io_memory_base=None, instruction_budget=None):
+def prepare_plan(source, *, io_memory_base=None, instruction_budget=None, static_output_exponent=None):
+    from .row_output_quantize import validate_exponent
+
+    validate_exponent(static_output_exponent)
+    if static_output_exponent is not None and source.nodes[-1].op == "rmsnorm":
+        raise ValueError("quantized row publication requires a softmax source")
     io_memory_base = selected_io_base() if io_memory_base is None else io_memory_base
     if type(io_memory_base) is not int or io_memory_base % 32:
         raise ValueError("I/O memory base requires an aligned integer address")
@@ -159,7 +168,7 @@ def prepare_plan(source, *, io_memory_base=None, instruction_budget=None):
         _, slots, _, _ = staged_memory_plan(body)
         total = max(slots.values()) + 1
     plan = RowLoopPlan(tiling, readonly * TILE_BYTES, outputs * TILE_BYTES,
-                      (total - readonly - outputs) * TILE_BYTES, io_memory_base, instruction_budget)
+                      (total - readonly - outputs) * TILE_BYTES, io_memory_base, instruction_budget, static_output_exponent)
     from .memory_windows import dma_span_in_window
     if (type(io_memory_base) is not int or io_memory_base % 32 or
         plan.end - io_memory_base > dram_slots() * TILE_BYTES or
@@ -180,6 +189,11 @@ def virtual_program(plan, body_text):
     if len(operations) != 1 or not isinstance(operations[0], FuncOp) or module.attributes:
         raise ValueError("row body must contain one function")
     function = operations[0]
+    packed_stores = frozenset()
+    if plan.static_output_exponent is not None:
+        from .row_output_quantize import final_stores
+
+        packed_stores = final_stores(function, selected_io_base() + plan.readonly_bytes, plan.output_bytes)
     initial_state = None
     if len(function.body.blocks) == 1:
         first = function.body.block.first_op
@@ -219,6 +233,12 @@ def virtual_program(plan, body_text):
         operands = list(op.operands)
         operands[index] = value
         op.operands = operands
+        if op in packed_stores:
+            from .row_output_quantize import pack_store
+
+            if offset % TILE_BYTES:
+                raise ValueError("row output store is not tile aligned")
+            pack_store(op, plan.static_output_exponent)
         accesses += 1
     if not accesses:
         raise ValueError("row body contains no explicit DMA accesses")
@@ -232,12 +252,13 @@ def virtual_program(plan, body_text):
     return stream.getvalue()
 
 
-def compile_row_loop(snapshot, source, *, target_source, destination, limits, io_memory_base=None):
+def compile_row_loop(snapshot, source, *, target_source, destination, limits, io_memory_base=None, static_output_exponent=None):
     io_memory_base = selected_io_base() if io_memory_base is None else io_memory_base
     from .region_composition import compile_virtual_with_receipt
 
     plan = prepare_plan(source, io_memory_base=io_memory_base,
-                        instruction_budget=functional_instruction_limit(limits))
+                        instruction_budget=functional_instruction_limit(limits),
+                        static_output_exponent=static_output_exponent)
     body = plan.tiling.regions[0].request
     abi = AtlasNativeBinding.plan_boundary_abi(body)
     destination.mkdir(parents=True, exist_ok=False)
@@ -323,11 +344,12 @@ def compile_row_loop(snapshot, source, *, target_source, destination, limits, io
         },
     }
     (destination / "manifest.json").write_bytes(_json(result))
-    verify_row_loop(source, destination, target_source=target_source, io_memory_base=io_memory_base)
+    verify_row_loop(source, destination, target_source=target_source, io_memory_base=io_memory_base,
+                    static_output_exponent=static_output_exponent)
     return result
 
 
-def verify_row_loop(source, compiled, *, target_source, io_memory_base=None):
+def verify_row_loop(source, compiled, *, target_source, io_memory_base=None, static_output_exponent=None):
     """Reconstruct the frame and check its original captured physical lowering."""
     io_memory_base = selected_io_base() if io_memory_base is None else io_memory_base
     manifest = json.loads((compiled / "manifest.json").read_text())
@@ -347,7 +369,8 @@ def verify_row_loop(source, compiled, *, target_source, io_memory_base=None):
     # Historical artifacts used the fixed legacy envelope even if their
     # execution proof selected a larger budget. Preserve that source replay.
     plan = prepare_plan(source, io_memory_base=io_memory_base,
-        instruction_budget=execution.get("dispatch_instruction_budget", DEFAULT_FUNCTIONAL_INSTRUCTION_LIMIT))
+        instruction_budget=execution.get("dispatch_instruction_budget", DEFAULT_FUNCTIONAL_INSTRUCTION_LIMIT),
+        static_output_exponent=static_output_exponent)
     body = plan.tiling.regions[0].request
     body_manifest = json.loads((compiled / "body/manifest.json").read_text())
     verify_native_publication(
