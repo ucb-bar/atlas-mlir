@@ -14,7 +14,7 @@ For an existing staged capture and its source-bound state interface, a resident 
 
 ```sh
 merlin-targetgen native-compile --engine merlin_native \
-  --support atlas_mlir_native.binding:binding \
+  --support atlas \
   --target-source "$ATLAS_ROOT" --compile-inputs "$CAPTURE" \
   --application --application-memory-bytes 134217728 \
   --application-state "$STATE" --already-quantized \
