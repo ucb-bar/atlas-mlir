@@ -82,7 +82,7 @@ jobs:
         run: |
           cd "$RUNNER_TEMP"
           python "$GITHUB_WORKSPACE/ci/smoke_wheel.py" --capture --require-host-elf
-          python -m pytest "$GITHUB_WORKSPACE/test/test_atlasc.py" -q
+          python -m pytest "$GITHUB_WORKSPACE/test/test_atlasc.py" "$GITHUB_WORKSPACE/test/test_qwen_capture.py" -q
 
   numerical-evaluator:
     needs: build

@@ -12,8 +12,21 @@ cycles, numerical error, and the exact boundaries of each workload.
 The follow-up [roofline analysis](../../docs/qwen-roofline.md) includes per-resource
 lower bounds, default/faster-memory comparisons, raw reports and reproduction.
 
-With `atlas-mlir` installed (or `build/bin` built), plus `uv`, Git and Cargo on
-PATH, run from the repository:
+For a wheel installation, use Python 3.12 and download the Linux x86-64 wheel
+from the **Package** workflow for `feat/qwen-kernels`. Keep a checkout of the
+same branch for the experiment scripts; those scripts are not included in the
+wheel. From that checkout:
+
+```sh
+python3.12 -m venv .venv
+source .venv/bin/activate
+python -m pip install /path/to/atlas_mlir-0.1.0-py3-none-linux_x86_64.whl
+atlasc doctor
+atlasc demo
+```
+
+The wheel includes the native compiler tools, so this route needs no local
+LLVM build. With `uv`, Git and Cargo on PATH, run the campaign:
 
 ```sh
 python3 examples/qwen/run.py --setup
@@ -24,6 +37,8 @@ Setup downloads pinned Merlin and NPU-model sources and creates three isolated
 Python environments under `out/qwen-deps`: capture, Merlin selection, and
 numerical simulation. It does not modify sibling checkouts. Cargo's locked
 bridge dependencies are fetched during setup; snapshot construction is offline.
+The setup step installs PyTorch and torch-mlir in the capture environment, so
+the wheel's optional capture extra is not needed in the launching environment.
 The second command creates a fresh `atlas-out/qwen` campaign. Use `-o DIR` for
 subsequent runs. Existing results are never overwritten.
 Use `--panel signed -o atlas-out/qwen-signed` to repeat with bounded signed
@@ -34,6 +49,11 @@ For already prepared environments, override `--capture-python`,
 `--merlin-python`, `--model-python`, `--merlin-root`, and `--model-root`.
 Dependency checkouts must be clean at the recorded pins. `ATLAS_OOT_BIN_DIR`
 selects another compiler build.
+
+Use this campaign for the Qwen attention and SwiGLU experiments: it supplies
+their Merlin graph policies and numerical checks. `atlasc build model.py` is
+the simpler standalone importer for its supported tile graphs; it does not
+replace the Qwen campaign or compile the complete pretrained model.
 
 The campaign captures all workloads, then compiles supported graphs through
 Merlin and Atlas and executes their emitted instructions on the NPU model.

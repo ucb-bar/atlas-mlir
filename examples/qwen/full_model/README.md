@@ -78,4 +78,5 @@ cover two projection panels. It does not establish a complete quantized model,
 generated host dispatch, model ELF, hardware execution, perplexity, or throughput.
 All datasets, checkpoints, tensor captures, programs and images remain under
 ignored local output directories. Only source code, mapping policy and Markdown
-reports are tracked; this branch contains no CI changes.
+reports are tracked. The Package workflow checks wheel installation, PyTorch
+capture and Qwen capture regressions; it does not run this full-model campaign.
