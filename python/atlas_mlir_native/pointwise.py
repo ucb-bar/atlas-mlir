@@ -388,7 +388,33 @@ def selected_body_descriptor(plan, directory):
     return names[0]
 
 
-def virtual_program(plan, addresses, output, descriptor):
+def virtual_program(plan, addresses, output, descriptor, *, static_output_exponent=None):
+    """Keep BF16 arithmetic, optionally packing its sole final output store."""
+    from .row_output_quantize import validate_exponent, pack_store
+
+    validate_exponent(static_output_exponent)
+    text = _virtual_program(plan, addresses, output, descriptor)
+    if static_output_exponent is None:
+        return text
+    from io import StringIO
+    from merlin.frontends.linalg_mlir import parse_mlir_text
+    from xdsl.printer import Printer
+
+    module = parse_mlir_text(text)
+    stores = [op for op in module.walk() if op.name == 'builtin.unregistered'
+              and op.op_name.data.startswith('atlas.virtual_dma_store_')]
+    # Both pointwise generators have one final output store in their counted
+    # tile body. They never store or reload intermediate results. Pointer bounds
+    # and disjoint input/output frames are checked by native compilation.
+    if len(stores) != 1 or stores[0].op_name.data != 'atlas.virtual_dma_store_bf16':
+        raise ValueError('packed pointwise output requires one final BF16 tile store')
+    pack_store(stores[0], static_output_exponent)
+    stream = StringIO()
+    Printer(stream=stream).print_op(module)
+    return stream.getvalue() + '\n'
+
+
+def _virtual_program(plan, addresses, output, descriptor):
     composite = isinstance(descriptor, list)
     unary = len(addresses) == 1 if composite else descriptor in _UNARY_RULES
     second_load = len(addresses) == 2
@@ -542,6 +568,7 @@ def compile_pointwise(
     destination,
     limits,
     io_memory_base=None,
+    static_output_exponent=None,
 ):
     from .binding import (
         DRAM_BASE,
@@ -556,7 +583,12 @@ def compile_pointwise(
 
     from .region_composition import compile_virtual_with_receipt
 
+    from .row_output_quantize import record as quantization_record
+
+    quantization = quantization_record(static_output_exponent)
     full_plan, plan, streaming = prepare_execution_plan(request)
+    if quantization and streaming:
+        raise ValueError('packed pointwise output requires a single resident frame')
     if set(fixed_inputs) != {node.id for node in request.nodes[:-1]} or len(fixed_outputs) != 1:
         raise NativeCompilationError("compile_error", "pointwise loop needs every input and one output binding")
     slots = tuple(fixed_inputs[node.id] for node in request.nodes[:-1]) + tuple(fixed_outputs)
@@ -592,7 +624,7 @@ def compile_pointwise(
         allow_staging=False,
     )
     descriptor = selected_body_descriptor(plan, destination / "body")
-    virtual = virtual_program(plan, addresses, output, descriptor)
+    virtual = virtual_program(plan, addresses, output, descriptor, static_output_exponent=static_output_exponent)
     tools = Path(os.environ.get("ATLAS_OOT_BIN_DIR", target_source / "build/bin"))
     pipeline = _native_pipeline()
     mandatory = compile_virtual_with_receipt(virtual, tools=tools, pipeline="mandatory", destination=destination)
@@ -628,7 +660,8 @@ def compile_pointwise(
         "input_buffer_bytes": list(plan.input_packed_bytes),
         "output_addresses": [output],
         "output_bytes": plan.packed_bytes,
-        "output_physical_layouts": ["mn_tiles_bf16_pair_halves"],
+        "output_physical_layouts": ["mn_tiles_fp8_in_bf16_slots" if quantization else "mn_tiles_bf16_pair_halves"],
+        **quantization,
         "tiling": plan.record(),
         **({"streaming": streaming, "source_tiling": full_plan.record()} if streaming else {}),
     }

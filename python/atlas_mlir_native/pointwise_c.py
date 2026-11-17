@@ -51,12 +51,18 @@ def prepare_c_package(
 
 
 def prepare_precision_c_package(precision, compiled, name, *, target_source, runtime_linkage="separate",
-                                output_dtype=None, input_dtype=None):
+                                output_dtype=None, input_dtype=None, static_output_exponent=None):
     """Replay a precision-owned target and render its explicit source operands."""
+    from .row_output_quantize import record as quantization_record
+    quantization = quantization_record(static_output_exponent)
+    if quantization and output_dtype != 'i8':
+        raise ValueError('packed pointwise output requires an i8 public result')
     source = precision.source
     request = precision.request
     arity = len(request.nodes) - 1
     full_plan, plan, streaming = prepare_execution_plan(request)
+    if quantization and streaming:
+        raise ValueError('packed pointwise output requires a single resident frame')
     manifest = json.loads((compiled / "manifest.json").read_text())
     check_io_memory_manifest(manifest)
     verify_native_publication(
@@ -115,12 +121,13 @@ def prepare_precision_c_package(precision, compiled, name, *, target_source, run
         "input_buffer_bytes": list(plan.input_packed_bytes),
         "output_addresses": [output],
         "output_bytes": plan.packed_bytes,
-        "output_physical_layouts": ["mn_tiles_bf16_pair_halves"],
+        "output_physical_layouts": ["mn_tiles_fp8_in_bf16_slots" if quantization else "mn_tiles_bf16_pair_halves"],
+        **quantization,
         "tiling": plan.record(),
         **({"streaming": streaming, "source_tiling": full_plan.record()} if streaming else {}),
     }
     if execution != expected or (compiled / "atlas-virtual.mlir").read_text() != virtual_program(
-        plan, addresses, output, descriptor
+        plan, addresses, output, descriptor, static_output_exponent=static_output_exponent
     ):
         raise ValueError("pointwise program or ABI differs from source replay")
     binary = (compiled / "program.bin").read_bytes()
@@ -137,7 +144,7 @@ def prepare_precision_c_package(precision, compiled, name, *, target_source, run
     tools = Path(os.environ.get("ATLAS_OOT_BIN_DIR", target_source / "build/bin"))
     machine = _run(
         [str(tools / "atlas-opt"), *NATIVE_PIPELINES[pipeline], "-"],
-        input_text=virtual_program(plan, addresses, output, descriptor),
+        input_text=virtual_program(plan, addresses, output, descriptor, static_output_exponent=static_output_exponent),
     )
     _run(
         [str(tools / "atlas-opt"), *NATIVE_CHECKS, "--verify-atlas-timing", "-"],
@@ -152,7 +159,7 @@ def prepare_precision_c_package(precision, compiled, name, *, target_source, run
     from .restoration_budget import instruction_bound
     saved_bound = json.loads((compiled / "pointwise-instruction-bound.json").read_text())
     cap = functional_instruction_limit(SimpleNamespace(functional_instruction_limit=saved_bound["max_instructions"]))
-    bound = instruction_bound(virtual_program(plan, addresses, output, descriptor), machine, replayed, max_instructions=cap)
+    bound = instruction_bound(virtual_program(plan, addresses, output, descriptor, static_output_exponent=static_output_exponent), machine, replayed, max_instructions=cap)
     if not bound["admitted"] or saved_bound != bound:
         raise ValueError("pointwise instruction bound differs or exceeds default")
     elements = [prod(node.type.shape) for node in request.nodes]
@@ -164,7 +171,7 @@ def prepare_precision_c_package(precision, compiled, name, *, target_source, run
     encode = render_bf16_codes_c if source_dtype == "bf16" else render_f32_array_c
     source_inputs = tuple(node.id for node in source.nodes if node.effect in {"input", "constant"})
     helpers = (
-        render_pointwise_c(full_plan, name)
+        render_pointwise_c(full_plan, name, output_element_bytes=1 if quantization else None)
         + "\n"
         + "\n".join(
             encode(spec, count, name + f"_encode_{i}")
@@ -184,6 +191,7 @@ def prepare_precision_c_package(precision, compiled, name, *, target_source, run
         helpers=helpers,
         source_dtype=source_dtype,
         output_dtype=output_dtype,
+        static_output_exponent=static_output_exponent,
         source_input_indices=tuple(source_inputs.index(key) for key in precision.record()["inputs"]),
     )
     return {

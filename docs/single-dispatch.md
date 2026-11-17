@@ -1,8 +1,8 @@
 # Toward one dispatch per decoder/vision layer
 
-The current verified full-layer recipes run TinyLlama B1/T64 in **55 launches,
-69,857,257 device cycles**, and SmolVLA vision B1/T1024 in **54 launches,
-367,502,579 cycles**. These are Rust/RTL-numerics measurements, excluding host
+The current verified full-layer recipes run TinyLlama B1/T64 in **53 launches,
+69,063,633 device cycles**, and SmolVLA vision B1/T1024 in **51 launches,
+353,224,269 cycles**. These are Rust/RTL-numerics measurements, excluding host
 launch latency. Every final and retained intermediate word matches. See
 [the measurement history](model-traffic-priorities.md) for settings, artifacts
 and the two retained, unresolved outliers on unchanged artifacts.
@@ -122,6 +122,53 @@ will fit the layer. The largest current panel-cached matrix bodies occupy
 49,800/50,516 bytes. Compact counted cache traversal is therefore a concrete
 next target if shared bodies plus glue exceed IMEM; the cache's traffic reuse
 and ordered arithmetic must survive that change.
+
+### Pointwise output quantization
+
+Opt into `pointwise_quantize` after `pointwise_narrowing` and
+`pointwise_input_widening`. A private BF16 pointwise result feeding the two
+projections of a static activation quantizer is packed in its producer's tile
+loop. This includes selected BF16 multiplication, a proved private f32-to-BF16
+narrowing, and the existing qualified BF16-input GELU boundary. The selected
+arithmetic, BF16 rounding, input guards and authored exponent stay unchanged.
+Dynamic quantizers, shared BF16 results, explicit host quantization and streamed
+frames retain their separate regions. No model name selects this transformation.
+
+Merlin's byte-only pointwise assembler accepts an independent result element
+width; its input packing and affine indexing remain unchanged. Atlas owns the
+final-store raw PACK, layout, static-scale clamp and two-output C ABI. FP8 tiles
+occupy 1,024 bytes of the existing 2,048-byte slots; untouched upper halves stay
+private. The host reads only initialized FP8 bytes and publishes codes and the
+original int32 exponent after all device transfers succeed. Export replays the
+scale, virtual program, exact binary and dynamic instruction bound.
+
+| Single-layer Rust measurement | Before | After | Saved |
+|---|---:|---:|---:|
+| TinyLlama B1/T64 dispatches | 55 | 53 | 2 |
+| TinyLlama cycles | 69,857,257 | 69,063,633 | 793,624 (1.14%) |
+| SmolVLA vision B1/T1024 dispatches | 54 | 51 | 3 |
+| SmolVLA cycles | 367,502,579 | 353,224,269 | 14,278,310 (3.89%) |
+
+Every final word matches the independent reference (131,072/786,432 words).
+All 61/59 remaining audited intermediate boundaries match the control; only the
+2/3 now-private BF16 outputs disappear. The 51/48 unchanged launches retain
+identical binaries, cycles, instruction counts and device traffic. This is an
+incremental dispatch reduction, not whole-layer composition or a hardware claim.
+The Rust revision, runner hash, source and checkpoint hashes, CPU backend and
+`register_rows` layout are identical to the control.
+
+Validation: 18 focused tests (seven Rust/C execution cases), 63 regression tests
+and 10 subtests, plus 38 Merlin packing tests. Seven older Python-simulator tests
+remain skipped. Cases include multiple ranks, tile tails, broadcasts, both zero
+signs, nontrivial RNE products, extreme int32 exponents, alias/read failures,
+shared-result rejection, dynamic-scale rejection and frame-size refusal. Merlin
+structure, target-name and docs gates pass; its regex gate still reports the
+three pre-existing, unchanged `baremetal_harness.py` sites (21/54/56).
+
+Local receipts under `out/traffic-audit/`: `compile_pointwise_quantize_layer.py`,
+`snapshot-pointwise-quantize-64m`, `{tinyllama,smolvla}-pointwise-quantize`, their
+`rust-*` runs, `pointwise-quantize-comparison.json`,
+`pointwise-quantize-tests.log` and `pointwise-quantize-regression.log`.
 
 ### Next steps
 
