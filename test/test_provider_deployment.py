@@ -348,6 +348,7 @@ def test_standalone_v8_flat_buffers_and_length_checks(tmp_path):
         "output_addresses": [BASE + 6144]}))
     rows = regions()
     rows[0]["native_programs"].append("segments/s")
+    rows[0]["description"]["launches_per_invocation"] = 2
     assert [(r["address"], r["bytes"]) for r in requirements(tmp_path, rows)["reservations"]] == [
         (BASE, 1024), (BASE + 2048, 1024), (BASE + 4096, 2048), (BASE + 6144, 2048)]
 

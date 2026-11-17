@@ -88,6 +88,7 @@ int refill(unsigned id) {
  if(host.active||id!=refills+1u)return 1;
  ++refills;__builtin_memcpy(slot,weights+id*2112u,id==2u?1056u:2112u);
  if(id==poison)slot[0]=1u;
+ if(poison==3u && id==1u)slot[2111]=1u;
  return 0;
 }
 unsigned start_count(void) {return starts;}
@@ -115,7 +116,7 @@ int invoke(const void *a,const void *sx,void *w,const void *sw,void *out,const v
     a, sx, sw = np.zeros(33, np.uint8), np.zeros(1, np.int32), np.zeros(160, np.int32)
     full = np.repeat(np.arange(8, 48, 8, dtype=np.uint8), 1056)
     slot = np.zeros(full.size, np.uint8)
-    for invalid, expected, starts, refills in ((99, 0, 10, 2), (0, 2, 0, 0), (1, 2, 4, 1)):
+    for invalid, expected, starts, refills in ((99, 0, 10, 2), (0, 2, 0, 0), (1, 2, 4, 1), (3, 2, 4, 1)):
         slot[:] = 0
         slot[:2112] = full[:2112]
         if invalid == 0:

@@ -241,8 +241,6 @@ def deployment_requirements(regions, native_root):
             refuse("provider region requires an explicit positive launch count")
         call["launches_per_invocation"] = count
     return dict(schema="merlin.provider_deployment.v1", window=dict(address=base, bytes=size),
-
-
                 reservations=reservations, images=images,
                 regions=calls,
                 allocation_alignment=ALLOCATION_ALIGNMENT,
