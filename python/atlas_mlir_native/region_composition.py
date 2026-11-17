@@ -147,6 +147,7 @@ def compose_regions(
     stages, *, buffers, initialized, outputs, destination, tools=None,
     pipeline="mandatory", io_memory_bytes=262144, program_size_limit_bytes=None,
     rematerialize_constants=False, io_memory_base=None,
+    share_bodies=False,
 ):
     """Compile ordered explicit-DMA stages, with no host work between stages.
 
@@ -170,7 +171,8 @@ def compose_regions(
     fragments = [_prepare_source(stage, by_name, program_size_limit_bytes) for stage in stages]
     destination = Path(destination)
     destination.mkdir(parents=True, exist_ok=False)
-    virtual = compose_fragments(fragments, tools=tools, boundaries_lowered=True)
+    virtual = compose_fragments(fragments, tools=tools, boundaries_lowered=True,
+                                share_bodies=share_bodies)
     if rematerialize_constants:
         virtual = rematerialize_scalar_constants(virtual)
     (destination / "atlas-virtual.mlir").write_text(virtual)
@@ -200,6 +202,8 @@ def compose_regions(
                     "source_sha256": hashlib.sha256(stage.source.encode()).hexdigest()} for stage in stages],
         "physical_contract": "caller_declared; no inferred boundary conversions or source equivalence",
     }
+    if share_bodies:
+        execution["share_bodies"] = True
     if io_memory_base is not None:
         execution["io_memory_base"] = io_memory_base
     (destination / "atlas-machine.mlir").write_text(machine)
