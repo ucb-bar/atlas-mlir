@@ -258,8 +258,16 @@ def test_composition_api_keeps_dependent_intermediates_on_device(tmp_path):
     assert manifest['launches_per_invocation'] == 1 and manifest['stage_count'] == 3
     record = json.loads((compiled/'execution_plan.json').read_text())
     assert record['share_bodies'] is True
+    assert 'instruction-bound.json' in manifest['files']
+    assert json.loads((compiled/'instruction-bound.json').read_text())['admitted']
     program = json.loads((compiled/'physical-program.json').read_text())
     initial = bytes((i*71+i//128)%256 for i in range(32768))
     expected = bytearray(initial)
     expected[16384:16384+6144] = initial[:2048]*3
     assert execute(tmp_path,program,initial,0) == expected
+    from merlin.semantic_compiler.codegen import CodegenOptions, codegen_options
+    with codegen_options(CodegenOptions(execution_instruction_limit=1)):
+        with pytest.raises(ValueError, match='execution instruction budget'):
+            compose_regions(stages,buffers=buffers,initialized=('input',),outputs=('out2',),
+                destination=tmp_path/'refused',tools=TOOLS,io_memory_bytes=32768,share_bodies=True)
+    assert not (tmp_path/'refused/manifest.json').exists()
