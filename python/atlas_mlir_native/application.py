@@ -35,6 +35,7 @@ from .gelu import is_source_gelu
 from .row_softmax import SOFTMAX_POLICY, SOFTMAX_DOMAIN
 from .softmax_precision import lower_semantic_softmax
 from .publication_options import publication_options
+from .work_budget import CountedWorkExhausted
 
 _LEGACY_LAYOUTS = ("transpose", "reshape", "copy")
 _INDEXED_LAYOUTS = ("gather", "insert_slice", "concat")
@@ -1455,7 +1456,7 @@ class AtlasApplicationAdapter:
             try:
                 layout_device.prove_plan(plan)
             except NativeCompilationError as error:
-                if error.status != "resource_limit":
+                if error.status != "resource_limit" or isinstance(error, CountedWorkExhausted):
                     raise
                 return False
         return True
