@@ -1,7 +1,7 @@
 # Toward one dispatch per decoder/vision layer
 
-The current verified full-layer recipes run TinyLlama B1/T64 in **53 launches,
-69,063,633 device cycles**, and SmolVLA vision B1/T1024 in **51 launches,
+The current verified full-layer recipes run TinyLlama B1/T64 in **47 launches,
+67,349,877 device cycles**, and SmolVLA vision B1/T1024 in **51 launches,
 353,224,269 cycles**. These are Rust/RTL-numerics measurements, excluding host
 launch latency. Every final and retained intermediate word matches. See
 [the measurement history](model-traffic-priorities.md) for settings, artifacts
@@ -12,7 +12,7 @@ that submits many programs does not meet that goal.
 
 ## Why the existing kernels cannot simply be concatenated
 
-The latest recipes contain 35/26 distinct images totaling 187,424/161,816 bytes
+The latest recipes contain 32/24 distinct images totaling 185,888/160,688 bytes
 for TinyLlama/SmolVLA, even after identical binaries are counted once. Physical
 IMEM is 131,072 bytes. Every kernel also has a local device frame and a host ABI
 that may pack tiles, transform row order, replicate exponent pages or publish
@@ -169,6 +169,51 @@ Local receipts under `out/traffic-audit/`: `compile_pointwise_quantize_layer.py`
 `snapshot-pointwise-quantize-64m`, `{tinyllama,smolvla}-pointwise-quantize`, their
 `rust-*` runs, `pointwise-quantize-comparison.json`,
 `pointwise-quantize-tests.log` and `pointwise-quantize-regression.log`.
+
+### Pointwise input layout folding
+
+Opt into `pointwise_input_layout` after `pointwise_quantize` to absorb a private
+full-coverage gather/transpose into pointwise input packing. The same option can
+combine a read, BF16 multiply and static quantizer into one launch. Existing
+qualified arithmetic stays selected; a rounding policy that cannot admit the
+composed maps refuses the candidate instead of using a different implementation.
+
+Merlin's `fold_private_full_read` composes affine operand maps and proves that
+complete source axes remain covered. It admits broadcasts, reversals and
+permutations, while refusing slices, escaping views and multiple readers.
+Full coverage preserves the input validation domain: inspecting an entire backing
+buffer after folding a slice would wrongly reject invalid values the old code
+never read. Atlas rechecks its precision plan, input guards, physical tiling and
+resources. Compilation/export replay the source-indexing proof. Input packing is
+still byte transport; no arithmetic is moved to the host.
+
+TinyLlama loses **six more layout launches: 53 → 47**, and saves **1,713,756 cycles
+(2.48%): 69,063,633 → 67,349,877**. Every final word and all 55 remaining audited
+intermediate boundaries are exact. Only the six now-private expanded operands
+disappear. The 41 unaffected launches retain identical binaries and counters.
+SmolVLA vision has no eligible private layout feeding this pointwise pattern:
+all 51 launches, 59 retained boundaries, binaries and counters remain identical
+at 353,224,269 cycles. It benefits from the preceding output-quantization fusion.
+
+Together, the two boundary changes reduce the matched control from **55 → 47
+TinyLlama dispatches** and **54 → 51 SmolVLA dispatches**, saving **2,507,380** and
+**14,278,310 device cycles**, respectively. These still are multiple launches;
+the whole-layer one-dispatch goal is not achieved.
+
+Validation includes 14 focused tests (five Rust/C cases, including a rank-three
+broadcast), 89 regression tests and two subtests, and 46 Merlin tests. Rejection
+cases cover partial reads, shared views, numerical policy changes and forged
+source-indexing plans. All six full-layer folded regions were re-exported from
+the final source with native verification; their C/H bytes match the measured
+package. Structure, target-name and documentation checks pass. The unrelated
+Merlin regex-gate debt described above remains unchanged.
+
+Local receipts: `compile_pointwise_layout_layer.py`,
+`snapshot-pointwise-layout-64m`, `{tinyllama,smolvla}-pointwise-layout`, their
+`rust-*` directories, `pointwise-layout-comparison.json`,
+`pointwise-layout-current-source-replay.json`,
+`pointwise-input-layout-final-tests.log` and `pointwise-layout-regression.log`.
+The Merlin test/gate logs are under its `out/artifacts/perf-studies/` directory.
 
 ### Next steps
 

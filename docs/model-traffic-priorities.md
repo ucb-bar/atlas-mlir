@@ -5,6 +5,10 @@ at `cadc2080b`. The next implementation branch in each repository is
 `perf/model-traffic-reduction`. The old `perf/model-dispatch-reduction` branches
 and their measurement artifacts remain unchanged.
 
+For the current dispatch-focused work and latest verified layer counts, see
+[single-dispatch.md](single-dispatch.md). The tables below retain their original
+measurement checkpoints.
+
 ## What is already covered
 
 The current PR heads include the prior dispatch-reduction stack: exact cast

@@ -20,6 +20,7 @@ _ADJACENT_PATTERNS = (
     ("softmax_quantize", "_softmax_quantize_groups"),
     ("pointwise_input_widening", "_pointwise_input_widening_groups"),
     ("pointwise_quantize", "_pointwise_quantize_groups"),
+    ("pointwise_input_layout", "_pointwise_input_layout_groups"),
     ("expanded_silu", "_expanded_silu_groups"),
     ("quantized_operand_permutation", "_quantized_operand_permutation_groups"),
     ("quantizer_input_permutation", "_quantizer_input_permutation_groups"),
