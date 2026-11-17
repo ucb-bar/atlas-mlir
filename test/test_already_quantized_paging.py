@@ -52,12 +52,12 @@ def test_segment_partition_and_deployment_only_emission(exported):
     export, paging = exported
     ordinary, files = export(None)
     text = files["probe.c"].decode()
-    assert "refill(" not in text and "rhs_offset" not in text and "paging_validation" not in ordinary
+    assert "merlin_deployment_refill(" not in text and "rhs_offset" not in text and "paging_validation" not in ordinary
     record, files = export()
     text = files["probe.c"].decode()
     assert "after earlier starts" in record["paging_validation"]
     assert "which<1u" in text and "rhs_offset" in text
-    assert text.count("extern int refill(unsigned);") == 1
+    assert text.count("extern int merlin_deployment_refill(unsigned);") == 1
     for key, change in (("operand_offset", 1), ("first_group", 1), ("first_launch", 1),
                         ("launch_count", 1), ("bytes", 1)):
         original = paging["segments"][1][key]
@@ -84,7 +84,7 @@ static int put(void *c,uintptr_t a,const uint8_t *v,size_t n) {
  (void)c;(void)n;if(a==0x80000800u && v[0]!=(uint8_t)(8u+(starts/2u)*8u))++bad;return 0;
 }
 static int get(void *c,uintptr_t a,uint8_t *v,size_t n) {(void)c;(void)a;__builtin_memset(v,0,n);return 0;}
-int refill(unsigned id) {
+int merlin_deployment_refill(unsigned id) {
  if(host.active||id!=refills+1u)return 1;
  ++refills;__builtin_memcpy(slot,weights+id*2112u,id==2u?1056u:2112u);
  if(id==poison)slot[0]=1u;

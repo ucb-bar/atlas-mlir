@@ -289,7 +289,7 @@ def prepare_c_package(source, compiled, name, *, target_source, paging=None):
                 raise ValueError("paging segments must partition ordered RHS row groups")
             page_boundary += f"\n      if (first_n=={group*32}u) {{\n"
             if step:
-                page_boundary += f"        if (region->host->active || refill({step}u)) return 4;\n"
+                page_boundary += f"        if (region->host->active || merlin_deployment_refill({step}u)) return 4;\n"
             page_boundary += f"""        rhs_offset={offset}u;
         for (size_t i=0;i<{segment['bytes']}u;++i)
           if (!(b[i]==0u || (b[i]>=8u && b[i]<=126u) || (b[i]>=136u && b[i]<=254u))) return 2;
@@ -298,7 +298,7 @@ def prepare_c_package(source, compiled, name, *, target_source, paging=None):
         if offset != n*k or group != (n+31)//32:
             raise ValueError("paging segments must cover the whole RHS")
         sizes[ib], operand_scans = slot, 1
-        page_declaration = "\nextern int refill(unsigned);\n"
+        page_declaration = "\nextern int merlin_deployment_refill(unsigned);\n"
         page_state, relative_rhs = "\n  size_t rhs_offset=0;", "-rhs_offset"
     def exp_index(key,operand,row):
         shape = source.node(key).type.shape
