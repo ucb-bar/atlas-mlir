@@ -3,7 +3,7 @@ import unittest
 from types import SimpleNamespace
 from atlas_mlir_native.binding import _with_tile_io_base, _tile_io_base, DRAM_BASE, io_memory_base
 from merlin.semantic_compiler.target_binding import NativeCompilationError
-from merlin.semantic_compiler.codegen import CodegenOptions, codegen_options
+from atlas_mlir_native.options import CodegenOptions, codegen_options
 
 class TileIOBaseTest(unittest.TestCase):
     def setUp(self):

@@ -125,35 +125,53 @@ def virtual_program(plan):
     return program(plan)
 
 
-def compile_source(snapshot, region, *, target_source, destination, limits, io_memory_base=None, _plan=None):
-    io_memory_base = selected_io_base() if io_memory_base is None else io_memory_base
-    import hashlib
+def prove_plan(plan, *, target_source=None, limits=None, _pipeline=None):
+    """Lower and prove a body without publishing files or creating directories."""
     import json
     import os
     from pathlib import Path
-    from merlin.semantic_compiler.codegen import current_codegen_options
-    from merlin.semantic_compiler.target_binding import verify_native_publication
+    from merlin.semantic_compiler.target_binding import NativeCompilationError
     from .binding import NATIVE_CHECKS, RTL_REVISION, _run, _native_pipeline, _scheduled_virtual_pipeline
-    plan=_plan or prepare_plan(region, io_memory_base=io_memory_base)
-    destination=Path(destination)
-    destination.mkdir(parents=True, exist_ok=False)
+    if target_source is None:
+        target_source = Path(__file__).resolve().parents[2]
     tools=Path(os.environ.get('ATLAS_OOT_BIN_DIR', Path(target_source)/'build/bin'))
     virtual=virtual_program(plan)
-    pipeline = _native_pipeline()
+    pipeline = _native_pipeline() if _pipeline is None else _pipeline
+    if pipeline not in ("mandatory", "optimized"):
+        raise ValueError("unknown quantizer proof pipeline")
     machine=_run([str(tools/'atlas-opt'),*_scheduled_virtual_pipeline(pipeline),'-'], input_text=virtual)
     _run([str(tools/'atlas-opt'),*NATIVE_CHECKS,'--verify-atlas-timing','-'], input_text=machine)
-    program=json.loads(_run([str(tools/'atlas-emit'),'--program-json','-'], input_text=machine))
+    emitted=_run([str(tools/'atlas-emit'),'--program-json','-'], input_text=machine)
+    try:
+        program=json.loads(emitted)
+    except json.JSONDecodeError as error:
+        raise NativeCompilationError('compile_error','activation quantizer emitter returned invalid program JSON: '+str(error)) from error
+    if not isinstance(program, dict):
+        raise NativeCompilationError('compile_error','activation quantizer emitter returned a non-object program')
     if program.get('selected_rtl_revision') != RTL_REVISION:
-        raise ValueError('activation quantizer emitter uses a different RTL revision')
+        raise NativeCompilationError('unqualified_target','activation quantizer emitter uses a different RTL revision')
     from .restoration_budget import instruction_bound
-    from merlin.semantic_compiler.target_binding import NativeCompilationError
     try:
         from .limits import functional_instruction_limit
         bound=instruction_bound(virtual,machine,program,max_instructions=functional_instruction_limit(limits))
     except (ValueError,KeyError,IndexError) as error:
-        raise NativeCompilationError('resource_limit','activation quantizer instruction bound is unproved: '+str(error)) from error
+        raise NativeCompilationError('compile_error','activation quantizer instruction bound is unproved: '+str(error)) from error
     if not bound['admitted']:
         raise NativeCompilationError('resource_limit','activation quantizer worst-case instruction bound exceeds '+str(bound['max_instructions'])+': '+str(bound['instruction_bound']))
+    return virtual, machine, program, bound, pipeline
+
+
+def compile_source(snapshot, region, *, target_source, destination, limits, io_memory_base=None, _plan=None):
+    io_memory_base = selected_io_base() if io_memory_base is None else io_memory_base
+    import hashlib
+    import json
+    from pathlib import Path
+    from merlin.semantic_compiler.codegen import current_codegen_options
+    from merlin.semantic_compiler.target_binding import verify_native_publication
+    plan=_plan or prepare_plan(region, io_memory_base=io_memory_base)
+    virtual,machine,program,bound,pipeline=prove_plan(plan,target_source=target_source,limits=limits)
+    destination=Path(destination)
+    destination.mkdir(parents=True, exist_ok=False)
     binary=b''.join(row['word_u32'].to_bytes(4,'little') for row in program['instructions'])
     budget=current_codegen_options().program_size_limit_bytes
     if budget is not None and len(binary)>budget:

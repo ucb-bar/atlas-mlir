@@ -237,7 +237,7 @@ DRAM_SLOTS = 128
 
 def io_memory_base():
     """Selected invocation base, with an optional nested tile override."""
-    from merlin.semantic_compiler.codegen import current_codegen_options
+    from atlas_mlir_native.options import current_codegen_options
 
     scoped = _tile_io_base.get()
     selected = current_codegen_options().io_memory_base
@@ -246,7 +246,7 @@ def io_memory_base():
 
 def validate_io_window(base=None, size=None):
     """Check the complete allocation window against DMA and installed capacity."""
-    from merlin.semantic_compiler.codegen import current_codegen_options
+    from atlas_mlir_native.options import current_codegen_options
     from .memory_windows import dma_span_in_window
 
     options = current_codegen_options()
@@ -275,7 +275,7 @@ def validate_explicit_io_base(base, *, alignment=32):
     Invocation geometry remains unchanged. A declared capacity contains the
     complete override window; legacy callers retain their actual-span checks.
     """
-    from merlin.semantic_compiler.codegen import current_codegen_options
+    from atlas_mlir_native.options import current_codegen_options
 
     options = current_codegen_options()
     _, size = validate_io_window()
@@ -317,7 +317,7 @@ NATIVE_CHECKS = ("--verify-atlas-generated-schedule", "--verify-atlas-machine-st
 
 
 def _native_pipeline() -> str:
-    from merlin.semantic_compiler.codegen import current_codegen_options
+    from atlas_mlir_native.options import current_codegen_options
     return current_codegen_options().native_pipeline
 
 def _scheduled_virtual_pipeline(pipeline=None):
@@ -1032,21 +1032,26 @@ def _with_program_size_limit(arguments, budget):
 
 
 def _run(command: list[str], *, input_text: str, diagnostics: list[str] | None = None) -> str:
-    from merlin.semantic_compiler.codegen import current_codegen_options
+    from atlas_mlir_native.options import current_codegen_options
+
+    from .work_budget import CountedWorkExhausted, TOOL_HANG_GUARD_SECONDS
 
     command = _with_program_size_limit(
         command, current_codegen_options().program_size_limit_bytes)
     def invoke():
         try:
-            result = subprocess.run(command, input=input_text, text=True, capture_output=True, timeout=30, check=False)
+            result = subprocess.run(command, input=input_text, text=True, capture_output=True, timeout=TOOL_HANG_GUARD_SECONDS, check=False)
         except subprocess.TimeoutExpired as exc:
-            raise NativeCompilationError("search_timeout", f"Atlas tool timed out: {exc}") from exc
+            raise NativeCompilationError("compile_error", f"internal error: Atlas tool hang detector exceeded {TOOL_HANG_GUARD_SECONDS} seconds: {exc}") from exc
         except OSError as exc:
             raise NativeCompilationError("tool_unavailable", f"Atlas tool failed: {exc}") from exc
         if result.returncode:
             if diagnostics is not None:
                 diagnostics.append(result.stderr)
-            raise NativeCompilationError("compile_error", f"Atlas tool rejected selected program: {result.stderr.strip()}")
+            reason = f"Atlas tool rejected selected program: {result.stderr.strip()}"
+            if "work budget exhausted" in result.stderr.lower() or "budget=" in result.stderr:
+                raise CountedWorkExhausted(reason)
+            raise NativeCompilationError("compile_error", reason)
         return json.dumps([result.stdout, result.stderr]).encode()
 
     # Cache only pure stdin/stdout tools. Original request publications and
@@ -1059,7 +1064,7 @@ def _run(command: list[str], *, input_text: str, diagnostics: list[str] | None =
         stat = tool.stat()
         identity = dict(command=command, executable_sha256=_tool_digest(
             str(tool.resolve()), stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns),
-            timeout_seconds=30, codegen=current_codegen_options().identity_record())
+            codegen=current_codegen_options().identity_record())
         payload = cached_tool_output(namespace="atlas.pure_tool.v1", input_bytes=input_text.encode(),
                                      compilation_identity=identity, invoke=invoke)
     else:
@@ -2899,6 +2904,9 @@ def _with_tile_io_base(function):
 
 
 class AtlasNativeBinding:
+    from .options import configure_codegen_parser, expand_codegen_arguments
+    configure_codegen_parser = staticmethod(configure_codegen_parser)
+    expand_codegen_arguments = staticmethod(expand_codegen_arguments)
     codegen_capabilities = ("reduction_unroll", "tuning_profile", "program_size_limit_bytes", "io_memory_bytes",
                            "execution_instruction_limit", "io_memory_base", "io_memory_alignment",
                            "io_memory_capacity_base", "io_memory_capacity_bytes")
@@ -2916,7 +2924,7 @@ class AtlasNativeBinding:
         from .application import AtlasApplicationAdapter
 
         base = AtlasApplicationAdapter(policy, original_source_sha256=original_source_sha256)
-        from merlin.semantic_compiler.codegen import current_codegen_options
+        from atlas_mlir_native.options import current_codegen_options
         selected = current_codegen_options().adjacent_patterns.strip()
         if not selected:
             return base
@@ -2927,7 +2935,8 @@ class AtlasNativeBinding:
     @staticmethod
     def plan_boundary_abi(request: KernelRequest) -> dict:
         """Place current tile inputs/constants and outputs without source-ID tables."""
-        from merlin.semantic_compiler.buffer_allocation import Buffer, allocate_buffers
+        from merlin.semantic_compiler.buffer_allocation import Buffer
+        from .work_budget import allocate_native_buffers as allocate_buffers
 
         from .looped_tiling import (
             is_looped_request,
@@ -2958,8 +2967,7 @@ class AtlasNativeBinding:
                             for name, size in zip(names, sizes, strict=True))
             allocation = allocate_buffers(buffers, (bank,))
             if allocation.status != "sat":
-                status = "resource_limit" if allocation.status == "unsat" else "search_timeout"
-                raise NativeCompilationError(status, "loop buffer placement: " + allocation.reason)
+                raise NativeCompilationError("resource_limit", "loop buffer placement: " + allocation.reason)
             addresses = dict(allocation.addresses)
             return {"fixed_inputs":{name:addresses[name] for name in names[:-1]},
                     "fixed_outputs":[addresses[names[-1]]]}
@@ -2977,10 +2985,10 @@ class AtlasNativeBinding:
                     for index in range(len(sources))]
         buffers += [Buffer(f"output:{index}", bank.name, 1, 0, 1, view_of="outputs", view_offset=index)
                     for index in range(len(request.outputs))]
-        # Retain the default allocator wall and work limits.
+        # Keep the same deterministic solver work limit as the other ABI paths.
         result = allocate_buffers(tuple(buffers), (bank,))
         if result.status != "sat":
-            raise NativeCompilationError("resource_limit" if result.status == "unsat" else "search_timeout",
+            raise NativeCompilationError("resource_limit",
                                          "automatic boundary layout: " + result.reason)
         addresses = dict(result.addresses)
         return {
@@ -4451,7 +4459,7 @@ class AtlasNativeBinding:
         if constant_rows:
             plan["constant_inputs"] = constant_rows
         if mxu_dag:
-            from merlin.semantic_compiler.codegen import current_codegen_options
+            from atlas_mlir_native.options import current_codegen_options
 
             plan["codegen"] = {
                 "requested_reduction_unroll": current_codegen_options().reduction_unroll,

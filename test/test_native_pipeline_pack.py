@@ -1,6 +1,6 @@
 """Optional native pipeline and exact on-chip PACK relayout regressions."""
 from __future__ import annotations
-from merlin.semantic_compiler.codegen import codegen_options, current_codegen_options
+from atlas_mlir_native.options import codegen_options, current_codegen_options
 
 from dataclasses import replace
 

@@ -14,7 +14,6 @@ import os
 from dataclasses import replace
 from math import prod
 from pathlib import Path
-from time import monotonic
 
 from merlin.compile.semantic_regions import extract_semantic_region
 from merlin.semantic_compiler.model import TensorType
@@ -172,46 +171,32 @@ def is_staged_mixed(request):
 
 
 def _allocate_staging_frame(buffers, original, bank, label):
-    """Check detailed staging addresses within one inherited allocation wall.
+    """Check detailed staging addresses with deterministic allocation work.
 
     The full checker proves bank bounds, fixed addresses, views, and liveness
     for both the shared-readonly representation and the original buffers.
     Use the deterministic proposal when available, otherwise the generic
-    allocator with only the original deadline's remaining time.
+    allocator with the shared fixed solver work limit.
     """
     from merlin.semantic_compiler.buffer_allocation import (
-        allocate_buffers, allocation_wall_budget, check_buffer_allocation,
-        current_allocation_wall_budget_ms, first_fit_buffer_assignment,
+        check_buffer_allocation, first_fit_buffer_assignment,
     )
+    from .work_budget import allocate_native_buffers
 
     if not buffers or not original:
         raise NativeCompilationError("unsupported_semantics", label + ": nonempty staging buffers required")
-    deadline = monotonic() + current_allocation_wall_budget_ms() / 1000
-
-    def remaining_ms():
-        remaining = int((deadline - monotonic()) * 1000)
-        if remaining <= 0:
-            raise NativeCompilationError("search_timeout", label + ": buffer allocation time budget exhausted")
-        return remaining
-
     def check(slots):
         try:
             check_buffer_allocation(buffers, (bank,), slots)
             check_buffer_allocation(original, (bank,), {buffer.name: slots[buffer.name] for buffer in original})
         except (KeyError, ValueError) as error:
             raise NativeCompilationError("resource_limit", label + ": invalid detailed frame: " + str(error)) from error
-        remaining_ms()
 
     slots = first_fit_buffer_assignment(buffers, (bank,))
-    remaining_ms()
     if slots is None:
-        # Consume only the original deadline's remainder. Never restart a fresh
-        # allowance after proposal/validation or retry an unknown result.
-        with allocation_wall_budget(remaining_ms()):
-            allocated = allocate_buffers(buffers, (bank,))
-        remaining_ms()
+        allocated = allocate_native_buffers(buffers, (bank,))
         if allocated.status != "sat":
-            raise NativeCompilationError("resource_limit" if allocated.status == "unsat" else "search_timeout",
+            raise NativeCompilationError("resource_limit",
                                          label + ": " + allocated.reason)
         slots = dict(allocated.addresses)
     check(slots)
@@ -512,7 +497,8 @@ def boundary_request(region):
 
 def memory_plan(request):
     """Allocate one immutable frame and one private frame, using the shared allocator."""
-    from merlin.semantic_compiler.buffer_allocation import Buffer, allocate_buffers
+    from merlin.semantic_compiler.buffer_allocation import Buffer
+    from .work_budget import allocate_native_buffers as allocate_buffers
 
     if is_staged_mixed(request):
         return mixed_memory_plan(request)[:3]
@@ -576,7 +562,7 @@ def memory_plan(request):
     allocated = allocate_buffers(tuple(buffers), (bank,))
     if allocated.status != "sat":
         raise NativeCompilationError(
-            "resource_limit" if allocated.status == "unsat" else "search_timeout",
+            "resource_limit",
             "resident DRAM allocation: " + allocated.reason,
         )
     slots = {k: v for k, v in allocated.addresses if k in names}
@@ -647,7 +633,7 @@ def compile_resident(
     destination,
     limits,
 ):
-    from merlin.semantic_compiler.codegen import (
+    from atlas_mlir_native.options import (
         choose_reduction_unroll,
         codegen_options,
         current_codegen_options,
@@ -660,7 +646,6 @@ def compile_resident(
     from .private_staging import mark_fragment, promote, storage_policy
     staging_storage = storage_policy()
     promote_staging = staged_bf16 and staging_storage != 'dram'
-    deadline = monotonic() + limits.wall_timeout_s if staged_tiles else None
     cuts, slots, sizes = memory_plan(request)
     abi = plan_abi(request)
     if fixed_inputs != abi["fixed_inputs"] or tuple(fixed_outputs) != tuple(
@@ -684,8 +669,6 @@ def compile_resident(
         )
     )
     for i, region in enumerate(cuts):
-        if deadline is not None and monotonic() >= deadline:
-            raise NativeCompilationError("search_timeout", "staged compilation exceeded its total time budget")
         body = mixed_boundary_request(region) if staged_mixed else bf16_boundary_request(region) if staged_bf16 else (
             boundary_request(region)
             if len([n for n in region.nodes if n.effect == "pure"]) <= 2
@@ -714,7 +697,7 @@ def compile_resident(
                 fixed_outputs=tuple(slots[k] for k in body.outputs),
                 target_source=target_source,
                 destination=folder,
-                limits=replace(limits, wall_timeout_s=max(1, int(deadline - monotonic()))) if deadline else limits,
+                limits=limits,
                 **extra,
             )
         verify_native_publication(
@@ -957,8 +940,6 @@ def compile_resident(
     }
     if staged_tiles:
         manifest["native_check_fingerprint"] = fingerprint
-        if deadline is not None and monotonic() >= deadline:
-            raise NativeCompilationError("search_timeout", "staged publication exceeded its total time budget")
     manifest["stage_artifacts"]["program.bin"] = sha(binary)
     (destination / "program.bin").write_bytes(binary)
     (destination / "manifest.json").write_text(

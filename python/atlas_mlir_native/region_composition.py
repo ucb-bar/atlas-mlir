@@ -7,7 +7,7 @@ host conversions, rewrite addresses, change arithmetic, or join program sets.
 from __future__ import annotations
 
 from .binding import DRAM_BASE, io_memory_base as selected_io_base
-from merlin.semantic_compiler.codegen import current_codegen_options
+from atlas_mlir_native.options import current_codegen_options
 
 import hashlib
 import io
@@ -288,7 +288,7 @@ def link_adjacent_stages(stages, *, buffers, initialized, outputs, destination, 
 
     destination = Path(destination)
     linked = destination / 'linked'
-    from merlin.semantic_compiler.codegen import current_codegen_options
+    from atlas_mlir_native.options import current_codegen_options
     compose_regions(stages, buffers=buffers, initialized=initialized, outputs=outputs,
         destination=linked, tools=os.environ.get('ATLAS_OOT_BIN_DIR', str(Path(target_source) / 'build/bin')),
         pipeline=_native_pipeline(), io_memory_bytes=dram_slots() * TILE_BYTES, rematerialize_constants=True,
@@ -387,7 +387,7 @@ def compile_virtual_with_receipt(virtual, *, tools, pipeline, destination):
     receipt = dict(argv=command, elapsed_s=perf_counter() - started,
         input_sha256=hashlib.sha256(virtual.encode()).hexdigest(),
         output_sha256=hashlib.sha256(machine.encode()).hexdigest(),
-        verifier_limits='compiler defaults', wall_limit_s=30,
+        verifier_limits='compiler defaults',
         tool_sha256={name: hashlib.sha256((tools / name).read_bytes()).hexdigest()
                      for name in ('atlas-opt', 'atlas-emit')})
     if deterministic_receipts_enabled():

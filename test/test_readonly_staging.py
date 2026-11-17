@@ -1,5 +1,5 @@
 """Immutable input caching is bounded and never absorbs a writer or bad span."""
-from merlin.semantic_compiler.codegen import codegen_options, current_codegen_options
+from atlas_mlir_native.options import codegen_options, current_codegen_options
 
 from dataclasses import replace
 import io

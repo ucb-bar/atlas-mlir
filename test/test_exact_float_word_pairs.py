@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 
 import numpy as np
-from merlin.semantic_compiler.codegen import codegen_options, current_codegen_options
+from atlas_mlir_native.options import codegen_options, current_codegen_options
 from atlas_mlir_native import exact_float_device as device
 
 from test_exact_float_device import request

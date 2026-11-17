@@ -9,7 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from merlin.semantic_compiler.codegen import CodegenOptions, codegen_options, current_codegen_options
+from atlas_mlir_native.options import CodegenOptions, codegen_options, current_codegen_options
 from atlas_mlir_native.already_quantized import prepare_source
 from atlas_mlir_native.binding import DRAM_BASE
 from atlas_mlir_native.exponent_page_cache import enabled

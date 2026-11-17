@@ -1,5 +1,5 @@
 """Bounded prefix residency preserves the complete ordered K reduction."""
-from merlin.semantic_compiler.codegen import codegen_options, current_codegen_options
+from atlas_mlir_native.options import codegen_options, current_codegen_options
 
 import os
 import unittest

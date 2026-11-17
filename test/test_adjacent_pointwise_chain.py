@@ -14,7 +14,7 @@ from unittest.mock import patch
 
 import numpy as np
 
-from merlin.semantic_compiler.codegen import codegen_options, current_codegen_options
+from atlas_mlir_native.options import codegen_options, current_codegen_options
 from atlas_mlir_native import adjacent_pointwise_chain as native
 from atlas_mlir_native.binding import TARGET_IDENTITY
 from merlin.semantic_compiler.model import KernelRequest, SemanticNode, TensorType, IndexMap, pointwise_identity_maps

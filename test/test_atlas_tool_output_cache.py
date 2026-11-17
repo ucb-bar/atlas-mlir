@@ -5,7 +5,7 @@ import subprocess
 
 import pytest
 
-from merlin.semantic_compiler.codegen import CodegenOptions, codegen_options, current_codegen_options
+from atlas_mlir_native.options import CodegenOptions, codegen_options, current_codegen_options
 from atlas_mlir_native import binding
 from merlin.semantic_compiler.materialization import materialization_session
 from merlin.semantic_compiler.target_binding import NativeCompilationError

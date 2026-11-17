@@ -1,4 +1,5 @@
 #include "Atlas/AtlasBranchRelaxation.h"
+#include "Atlas/AtlasWorkBudget.h"
 #include "Atlas/AtlasGeneratedArtifact.h"
 #include "Atlas/AtlasOps.h"
 #include "mlir/IR/Builders.h"
@@ -21,6 +22,7 @@ bool nop(Operation *op) {
 }
 
 LogicalResult mlir::atlas::relaxAtlasBranches(ModuleOp module) {
+  AtlasWorkBudget work(module, "branch-relaxation");
   const size_t width = atlasHasDelaySlots(module) ? 2 : 1;
   SmallVector<Operation *> ops;
   for (Operation &op : module.getBody()->getOperations())
@@ -42,6 +44,7 @@ LogicalResult mlir::atlas::relaxAtlasBranches(ModuleOp module) {
     for (auto [pc, op] : llvm::enumerate(ops)) positions[op] = pc;
     bool expanded = false;
     for (size_t pc = 0; pc < ops.size(); ++pc) {
+      if (failed(work.charge())) return failure();
       auto branch = dyn_cast<BranchOp>(ops[pc]);
       if (!branch) continue;
       Operation *target = targets.lookup(branch);

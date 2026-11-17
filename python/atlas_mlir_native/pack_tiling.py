@@ -280,7 +280,7 @@ def compile_pack(
             "compile_error", "pack bindings must be nonnegative allocation slots"
         )
     addresses = tuple(io_base + slot * TILE_BYTES for slot in slots)
-    from merlin.semantic_compiler.codegen import current_codegen_options
+    from atlas_mlir_native.options import current_codegen_options
 
     virtual = virtual_program(
         plan, *addresses, size_limit=current_codegen_options().program_size_limit_bytes

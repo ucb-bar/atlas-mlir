@@ -1,5 +1,5 @@
 """MXU1 residency preserves transport, K order, exponent checks and memory."""
-from merlin.semantic_compiler.codegen import codegen_options, current_codegen_options
+from atlas_mlir_native.options import codegen_options, current_codegen_options
 
 from dataclasses import replace
 import json
@@ -30,7 +30,7 @@ def cycle(physical, layout, memory):
     from npu_model.configs import isa_definition as isa
     from npu_model.configs.hardware.default import DefaultHardwareConfig
     from npu_model.software.program import InstantiableProgram
-    from npu_speed_of_light import roofline
+    from npu_performance import speed_of_light as roofline
     from tools.check_program_decode import decode_binary
     from tools.model_instructions import model_instruction
 

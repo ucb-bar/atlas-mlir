@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from merlin.semantic_compiler.codegen import codegen_options, current_codegen_options
+from atlas_mlir_native.options import codegen_options, current_codegen_options
 from atlas_mlir_native import exact_float_device as device
 from atlas_mlir_native.float_virtual import binary_vector_preflight
 

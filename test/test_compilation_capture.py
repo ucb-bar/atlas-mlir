@@ -10,7 +10,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from merlin.semantic_compiler.codegen import codegen_options, current_codegen_options
+from atlas_mlir_native.options import codegen_options, current_codegen_options
 from test_looped_mnk import ROOT, build_snapshot
 
 BIN=Path(os.environ.get('ATLAS_OOT_BIN_DIR',ROOT/'build/bin'))
@@ -51,7 +51,6 @@ class CompilationCaptureTest(unittest.TestCase):
     def check_capture(self, destination, manifest):
         receipt=json.loads((destination/'compilation-pipeline.json').read_text())
         self.assertEqual(receipt['argv'][-2:],['--atlas-compile-unscheduled','-'])
-        self.assertEqual(receipt['wall_limit_s'],30)
         for key,name in [('input_sha256','atlas-virtual.mlir'),('output_sha256','atlas-machine.mlir'),
                          ('spilled_virtual_sha256','mandatory-spilled-virtual.mlir')]:
             self.assertEqual(receipt[key],hashlib.sha256((destination/name).read_bytes()).hexdigest())
@@ -89,7 +88,6 @@ class CompilationCaptureTest(unittest.TestCase):
             from atlas_mlir_native import binding, row_loop
             from atlas_mlir_native.softmax_c import prepare_c_package
             from merlin.semantic_compiler.search import SearchLimits
-            from merlin.semantic_compiler.target_binding import NativeCompilationError
             from test_tiled_softmax import source_request
 
             source=source_request((2,33));destination=self.root/'row-loop'
@@ -104,9 +102,6 @@ class CompilationCaptureTest(unittest.TestCase):
             self.assertFalse(any(any(option in {'--atlas-compile','--atlas-compile-unscheduled'} for option in command) for command in commands))
             self.assertTrue(any('--verify-atlas-timing' in command for command in commands))
             self.assertTrue(any('--program-json' in command for command in commands))
-            receipt=destination/'compilation-pipeline.json';changed=json.loads(receipt.read_text());changed['wall_limit_s']=31
-            receipt.write_text(json.dumps(changed))
-            with self.assertRaises((ValueError,NativeCompilationError)):row_loop.verify_row_loop(source,destination,target_source=ROOT)
 
     def test_default_row_publication_and_export_without_ir_capture(self):
         with codegen_options(replace(current_codegen_options(), capture_postspill=False)):

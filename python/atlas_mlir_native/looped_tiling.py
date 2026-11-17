@@ -642,7 +642,7 @@ def tuning_key(snapshot, request, fixed_inputs, fixed_outputs, limits):
 
 
 def _operand_reuse_policy():
-    from merlin.semantic_compiler.codegen import current_codegen_options
+    from atlas_mlir_native.options import current_codegen_options
     return current_codegen_options().looped_operand_reuse
 
 def _virtual_schedule(plan, addresses, output, epilogue=None, *, seed_address=None, k_unroll=1):
@@ -667,7 +667,7 @@ def _virtual_schedule(plan, addresses, output, epilogue=None, *, seed_address=No
 
 
 def compile_looped(snapshot, request, *, fixed_inputs, fixed_outputs, target_source, destination, limits):
-    from merlin.semantic_compiler.codegen import choose_reduction_unroll
+    from atlas_mlir_native.options import choose_reduction_unroll
 
     from .binding import (
         DRAM_BASE,
@@ -834,7 +834,7 @@ def compile_looped(snapshot, request, *, fixed_inputs, fixed_outputs, target_sou
             f"attributes {{atlas.program_size_limit_bytes = {codegen['program_size_limit_bytes']} : i64, ",
             1,
         )
-    from merlin.semantic_compiler.codegen import materialization_cache, current_codegen_options
+    from atlas_mlir_native.options import materialization_cache, current_codegen_options
 
     cache = materialization_cache()
     cache_key = (

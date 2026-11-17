@@ -47,7 +47,7 @@ def case(one='0000803f', barrier=False, shape=(32,32)):
 
 class AdjacentPointwiseTest(unittest.TestCase):
     def setUp(self):
-        from merlin.semantic_compiler.codegen import CodegenOptions, codegen_options
+        from atlas_mlir_native.options import CodegenOptions, codegen_options
         options=codegen_options(CodegenOptions(io_memory_bytes=67108864))
         options.__enter__()
         self.addCleanup(options.__exit__,None,None,None)

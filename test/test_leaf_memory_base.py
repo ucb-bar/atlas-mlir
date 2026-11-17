@@ -4,7 +4,7 @@ from dataclasses import replace
 from atlas_mlir_native import activation_quantize_device as quant, row_loop
 from atlas_mlir_native.binding import DRAM_BASE
 from merlin.semantic_compiler.target_binding import NativeCompilationError
-from merlin.semantic_compiler.codegen import CodegenOptions, codegen_options
+from atlas_mlir_native.options import CodegenOptions, codegen_options
 from test_already_quantized import quantizer_source
 from test_tiled_softmax import source_request
 

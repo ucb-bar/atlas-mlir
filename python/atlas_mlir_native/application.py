@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from merlin.semantic_compiler.codegen import current_codegen_options
+from atlas_mlir_native.options import current_codegen_options
 
 import json
 import hashlib
@@ -35,6 +35,7 @@ from .gelu import is_source_gelu
 from .row_softmax import SOFTMAX_POLICY, SOFTMAX_DOMAIN
 from .softmax_precision import lower_semantic_softmax
 from .publication_options import publication_options
+from .work_budget import CountedWorkExhausted
 
 _LEGACY_LAYOUTS = ("transpose", "reshape", "copy")
 _INDEXED_LAYOUTS = ("gather", "insert_slice", "concat")
@@ -146,6 +147,35 @@ class AtlasApplicationAdapter:
     publication_options = staticmethod(publication_options)
 
     @staticmethod
+    def resident_memory_geometry():
+        """Atlas DRAM aperture used by the compiler's persistent allocator."""
+        return dict(dma_base=0x80000000, dma_capacity=0x80000000, alignment=2048)
+
+    @staticmethod
+    def _resident_input_module(region, alternative):
+        kind = dict(alternative.metadata)["kind"]
+        if kind in {"already_quantized", "quantized_epilogue", "quantized_narrowing",
+                    "quantized_epilogue_narrowing", "quantized_operand_permutation"}:
+            from . import quantized_resident
+            return quantized_resident
+        if kind == "layout_device":
+            from . import layout_device
+            return layout_device
+        return None
+
+    @staticmethod
+    def inventory_resident_inputs(region, alternative):
+        module = AtlasApplicationAdapter._resident_input_module(region, alternative)
+        return None if module is None else module.inventory_resident_inputs(region)
+
+    @staticmethod
+    def pack_resident_input(region, node_id, dense_bytes, alternative):
+        module = AtlasApplicationAdapter._resident_input_module(region, alternative)
+        if module is None:
+            raise NativeCompilationError("unsupported_semantics", "selected region has no immutable residency ABI")
+        return module.pack_resident_input(region, node_id, dense_bytes)
+
+    @staticmethod
     def supports_region_materialization(region, alternative):
         # Other kinds retain their complete original compilation path until
         # their own binding contract and byte-equality gates are available.
@@ -228,7 +258,7 @@ class AtlasApplicationAdapter:
         from .private_staging import storage_policy
         from .exponent_page_cache import enabled as exponent_page_cache_enabled
         from .float_virtual import binary_lane_groups, binary_vector_preflight, cast_vector_preflight
-        from merlin.semantic_compiler.codegen import current_codegen_options
+        from atlas_mlir_native.options import current_codegen_options
 
         operand_reuse = reuse_policy()
         staging_storage = storage_policy()
@@ -273,6 +303,18 @@ class AtlasApplicationAdapter:
                 **({"exponent_page_cache": True} if exponent_page_cache_enabled() else {}),
             },
         }
+
+    @staticmethod
+    def deployment_requirements(regions, native_root):
+        from .provider_deployment import deployment_requirements
+
+        return deployment_requirements(regions, native_root)
+
+    @staticmethod
+    def deployment_region_package(region, compiled, name, target_source, paging):
+        from .already_quantized import prepare_c_package
+
+        return prepare_c_package(region, compiled, name, target_source=target_source, paging=paging)
 
     @staticmethod
     def application_binding(name, regions, interface):
@@ -1410,9 +1452,19 @@ class AtlasApplicationAdapter:
 
         prepare = layout_device.prepare_source if kind == "layout_device" else exact_float_application.prepare_plan
         try:
-            prepare(extract_semantic_region(source, (node.id,)))
+            plan = prepare(extract_semantic_region(source, (node.id,)))
         except ValueError:
             return False
+        if kind == "layout_device" and any(segment["mode"] == "ragged_xlu" for segment in plan.segments):
+            # This new single-image route must prove the complete prefix before
+            # it replaces the existing host layout. Other device paths retain
+            # their established planning behavior. Tool failures are not refusals.
+            try:
+                layout_device.prove_plan(plan)
+            except NativeCompilationError as error:
+                if error.status != "resource_limit" or isinstance(error, CountedWorkExhausted):
+                    raise
+                return False
         return True
 
     @staticmethod

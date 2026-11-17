@@ -132,7 +132,7 @@ class ExactFloatTypedTest(unittest.TestCase):
 
     def test_oversized_physical_bound_refused_without_changing_limit(self):
         from merlin.semantic_compiler.target_binding import NativeCompilationError
-        from merlin.semantic_compiler.codegen import CodegenOptions, codegen_options
+        from atlas_mlir_native.options import CodegenOptions, codegen_options
         source=request('bf16_to_f32',32768)
         with tempfile.TemporaryDirectory(prefix='atlas-float-limit-') as directory:
             # The compact image still exceeds the dynamic instruction limit.

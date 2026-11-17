@@ -16,7 +16,7 @@ import unittest
 from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
-from merlin.semantic_compiler.codegen import codegen_options, current_codegen_options
+from atlas_mlir_native.options import codegen_options, current_codegen_options
 
 ROOT = Path(__file__).resolve().parents[1]
 MERLIN = os.environ.get("MERLIN_NATIVE_ROOT")

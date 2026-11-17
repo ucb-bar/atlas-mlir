@@ -1,5 +1,5 @@
 """Scoped compiler recipe selection for provider tests."""
-from merlin.semantic_compiler.codegen import CodegenOptions, codegen_options, current_codegen_options
+from atlas_mlir_native.options import CodegenOptions, codegen_options, current_codegen_options
 from contextlib import ExitStack
 from dataclasses import replace
 

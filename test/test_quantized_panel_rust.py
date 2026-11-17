@@ -12,7 +12,7 @@ from atlas_mlir_native.already_quantized import prepare_source
 from atlas_mlir_native.binding import DRAM_BASE
 from atlas_mlir_native.quantized_loop import execution_layout, virtual_source
 from atlas_mlir_native.restoration_budget import instruction_bound
-from merlin.semantic_compiler.codegen import CodegenOptions, codegen_options
+from atlas_mlir_native.options import CodegenOptions, codegen_options
 from test_already_quantized import source_request
 from test_exponent_restoration import compile_fixture
 from test_quantized_prefix_reuse import memory_fixture

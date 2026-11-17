@@ -10,7 +10,7 @@ from atlas_mlir_native import (
     reduction,
 )
 from atlas_mlir_native.binding import DRAM_BASE, io_memory_base
-from merlin.semantic_compiler.codegen import CodegenOptions, codegen_options
+from atlas_mlir_native.options import CodegenOptions, codegen_options
 from merlin.semantic_compiler.target_binding import NativeCompilationError
 from test_activation_quantize_device import dynamic_source
 from test_bf16_pointwise import request as pointwise_source

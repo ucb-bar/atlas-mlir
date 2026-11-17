@@ -5,7 +5,7 @@ import os
 import pytest
 
 from atlas_mlir_native.row_loop import prepare_plan
-from merlin.semantic_compiler.codegen import CodegenOptions, codegen_options
+from atlas_mlir_native.options import CodegenOptions, codegen_options
 from merlin.semantic_compiler.target_binding import NativeCompilationError
 from test_tiled_softmax import source_request
 

@@ -11,7 +11,7 @@ from unittest.mock import patch
 from atlas_mlir_native.already_quantized import prepare_source
 from atlas_mlir_native import quantized_loop, quantized_loop_c
 from merlin.semantic_compiler.model import ConstantBinding
-from merlin.semantic_compiler.codegen import CodegenOptions, codegen_options
+from atlas_mlir_native.options import CodegenOptions, codegen_options
 from test_already_quantized import source_request
 from test_quantized_epilogue import case
 

@@ -10,7 +10,7 @@ import os
 from dataclasses import dataclass, replace
 from pathlib import Path
 
-from merlin.semantic_compiler.buffer_allocation import Buffer, allocate_buffers
+from merlin.semantic_compiler.buffer_allocation import Buffer
 from merlin.semantic_compiler.model import (
     IndexMap,
     KernelRequest,
@@ -38,6 +38,7 @@ from .binding import (
     dram_slots,
 )
 from .pointwise import input_spec as pointwise_input_spec
+from .work_budget import allocate_native_buffers as allocate_buffers
 
 REDUCTION_POLICY = "bf16-adjacent-fp32-tree-rne-seeded-tile-sum-ltr-chop-v1"
 NONNEGATIVE_NORMAL_REDUCTION_POLICY = "bf16-nonnegative-normal-adjacent-fp32-tree-rne-seeded-tile-sum-ltr-chop-v1"

@@ -14,7 +14,7 @@ import unittest
 from unittest.mock import patch
 from atlas_mlir_native import exact_float_application as app
 from atlas_mlir_native import exact_float_device as device
-from merlin.semantic_compiler.codegen import CodegenOptions,codegen_options
+from atlas_mlir_native.options import CodegenOptions,codegen_options
 from test_exact_float_device import request,host_reference,scalar_execute,OPS
 from atlas_mlir_native.limits import functional_instruction_limit
 ROOT=Path(__file__).resolve().parents[1]

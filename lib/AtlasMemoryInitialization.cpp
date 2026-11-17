@@ -1,4 +1,5 @@
 #include "Atlas/AtlasProofWork.h"
+#include "Atlas/AtlasWorkBudget.h"
 #include "Atlas/AtlasProofLimits.h"
 #include "Atlas/AtlasAddressAnalysis.h"
 #include "Atlas/AtlasOps.h"
@@ -22,22 +23,29 @@ namespace {
 // A union of initialized byte intervals, independent of the allocation solver.
 class InitializedBytes {
   std::map<uint64_t, uint64_t> intervals;
+  AtlasWorkBudget *budget = nullptr;
 public:
+  explicit InitializedBytes(AtlasWorkBudget *budget = nullptr) : budget(budget) {}
   void write(uint64_t first, uint64_t end) {
     auto next = intervals.lower_bound(first);
     if (next != intervals.begin() && std::prev(next)->second >= first)
       next = std::prev(next);
+    auto begin = next;
     while (next != intervals.end() && next->first <= end) {
+      if (budget && failed(budget->charge())) return;
       first = std::min(first, next->first);
       end = std::max(end, next->second);
-      next = intervals.erase(next);
+      ++next;
     }
+    // Preserve the original facts if a charge above refuses this write.
+    intervals.erase(begin, next);
     intervals.emplace(first, end);
   }
   bool intersect(const InitializedBytes &other) {
     std::map<uint64_t, uint64_t> common;
     for (auto [first, end] : intervals)
       for (auto [rightFirst, rightEnd] : other.intervals) {
+        if (budget && failed(budget->charge())) return false;
         auto begin = std::max(first, rightFirst), stop = std::min(end, rightEnd);
         if (begin < stop) common[begin] = stop;
       }
@@ -55,12 +63,13 @@ public:
 LogicalResult mlir::atlas::verifyAtlasOutputInitialization(Operation *operation,
                                                           uint64_t first,
                                                           uint64_t end) {
+  AtlasWorkBudget budget(operation, "source-memory-initialization");
   atlasProofInvocation(AtlasProofKind::SourceInitialization);
   auto function = dyn_cast<func::FuncOp>(operation);
   if (!function || function.isDeclaration()) return failure();
   Liveness liveness(function);
   llvm::DenseMap<Value, uint32_t> values;
-  InitializedBytes initialized;
+  InitializedBytes initialized(&budget);
   auto get = [&](Value v) -> std::optional<uint32_t> {
     auto found = values.find(v);
     return found == values.end() ? std::nullopt : std::optional<uint32_t>(found->second);
@@ -183,6 +192,7 @@ LogicalResult mlir::atlas::verifyAtlasOutputInitialization(Operation *operation,
   AtlasProofStateGraph graph;
   pending.push_back({block, values, initialized, std::nullopt});
   while (!pending.empty()) {
+    if (failed(budget.charge())) return failure();
     auto current = std::move(pending.front()); pending.pop_front();
     block = current.block; values = std::move(current.values); initialized = std::move(current.initialized);
     // Only facts that can be used after this block entry distinguish scalar
@@ -213,13 +223,18 @@ LogicalResult mlir::atlas::verifyAtlasOutputInitialization(Operation *operation,
     }
     auto [entry, fresh] = entries.emplace(key, initialized);
     if (!fresh) {
-      if (!entry->second.intersect(initialized)) continue;
+      bool changed = entry->second.intersect(initialized);
+      if (budget.exhausted()) return failure();
+      if (!changed) continue;
       initialized = entry->second;
     }
     Block *next = nullptr;
     for (Operation *selected : proofOperations[block]) {
       Operation &op = *selected;
+      if (failed(budget.charge())) return failure();
       atlasProofTransfer(AtlasProofKind::SourceInitialization);
+      // Preserve the existing scalar proof bound as well as accounting for
+      // these transfers in the invocation and process-wide work totals.
       if (!remaining--)
         return op.emitOpError("output initialization proof exceeded its scalar work limit");
       // Revisited loop definitions must not retain an earlier iteration's fact.
@@ -299,5 +314,5 @@ LogicalResult mlir::atlas::verifyAtlasOutputInitialization(Operation *operation,
     else if (!isa<func::ReturnOp>(block->getTerminator()))
       return block->getParentOp()->emitOpError("output initialization needs a supported CFG terminator");
   }
-  return success();
+  return failure(budget.exhausted());
 }

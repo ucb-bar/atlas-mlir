@@ -18,7 +18,7 @@ _TILE_BYTES = 2048
 
 
 def storage_policy():
-    from merlin.semantic_compiler.codegen import current_codegen_options
+    from atlas_mlir_native.options import current_codegen_options
     return current_codegen_options().staging_storage
 
 def _name(op):

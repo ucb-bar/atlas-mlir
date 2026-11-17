@@ -105,7 +105,7 @@ class ScalarBroadcastCompilationTest(unittest.TestCase):
                 prepare_c_package(source, compiled, "broadcast", target_source=ROOT)
 
     def test_pin_shape_compiles_with_constant_image_size(self):
-        from merlin.semantic_compiler.codegen import CodegenOptions, codegen_options
+        from atlas_mlir_native.options import CodegenOptions, codegen_options
 
         sizes = []
         with codegen_options(CodegenOptions(io_memory_bytes=16 * 1024 * 1024)):

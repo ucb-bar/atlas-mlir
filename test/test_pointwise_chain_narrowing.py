@@ -11,7 +11,7 @@ import numpy as np
 from atlas_mlir_native import adjacent_pointwise_chain as native
 from atlas_mlir_native.binding import DRAM_BASE
 from atlas_mlir_native.composition_adapter import AdjacentDeviceAdapter
-from merlin.semantic_compiler.codegen import CodegenOptions, codegen_options
+from atlas_mlir_native.options import CodegenOptions, codegen_options
 from merlin.semantic_compiler.model import SemanticNode, pointwise_identity_maps
 from test_adjacent_pointwise_chain import case
 from test_pointwise_narrowing import adapter

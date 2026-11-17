@@ -6,6 +6,7 @@ from merlin.semantic_compiler.allocate import StorageBank
 from merlin.semantic_compiler.buffer_allocation import Buffer, BufferAllocation, check_buffer_allocation
 from merlin.semantic_compiler.target_binding import NativeCompilationError
 from atlas_mlir_native.pointwise import _checked_pointwise_allocation
+from atlas_mlir_native import work_budget
 
 
 class PointwiseAllocationTests(unittest.TestCase):
@@ -40,9 +41,19 @@ class PointwiseAllocationTests(unittest.TestCase):
                    return_value=BufferAllocation('unknown', reason='test budget exhausted')) as allocate:
             with self.assertRaises(NativeCompilationError) as caught:
                 _checked_pointwise_allocation(buffers, bank)
-        self.assertEqual(caught.exception.status, 'search_timeout')
+        self.assertEqual(caught.exception.status, 'resource_limit')
+        self.assertIn('buffer_solver_rlimit_per_query', caught.exception.reason)
         self.assertIn('test budget exhausted', caught.exception.reason)
         self.assertTrue(all(item.fixed_start is not None for item in allocate.call_args.args[0]))
+
+    def test_real_solver_work_exhaustion_refuses_the_valid_proposal(self):
+        bank = StorageBank('external', 'test', 3, 'tile')
+        buffers = (Buffer('a', bank.name, 1, 0, 1), Buffer('out', bank.name, 1, 0, 1))
+        with patch.object(work_budget, 'BUFFER_SOLVER_RLIMIT', 1):
+            with self.assertRaises(NativeCompilationError) as caught:
+                _checked_pointwise_allocation(buffers, bank)
+        self.assertEqual(caught.exception.status, 'resource_limit')
+        self.assertIn('buffer_solver_rlimit_per_query=1', caught.exception.reason)
 
 
 if __name__ == '__main__':

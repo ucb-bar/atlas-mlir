@@ -70,7 +70,7 @@ class LeafMemoryWindowsTest(unittest.TestCase):
                 self.assertFalse(destination.exists())
 
     def package_placement(self, addresses, output, *, shape=(32, 32), memory_base=DRAM_BASE, memory_bytes=262144):
-        from merlin.semantic_compiler.codegen import CodegenOptions, codegen_options
+        from atlas_mlir_native.options import CodegenOptions, codegen_options
         precision = prepare_source(precision_source(shape), bf16_policy=BF16_POINTWISE_POLICY)
         _, plan, _ = prepare_execution_plan(precision.request)
         # Isolate placement validation from earlier inventory/hash validation.
@@ -127,7 +127,7 @@ class ScratchpadPointwiseExportTest(unittest.TestCase):
         from atlas_mlir_native.pointwise_c import prepare_c_package
         source = precision_source()
         precision = prepare_source(source, bf16_policy=BF16_POINTWISE_POLICY)
-        from merlin.semantic_compiler.codegen import CodegenOptions, codegen_options
+        from atlas_mlir_native.options import CodegenOptions, codegen_options
         with codegen_options(CodegenOptions(io_memory_base=0x08000000, io_memory_bytes=65536)), tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             snapshot = build_snapshot(root / "native")
