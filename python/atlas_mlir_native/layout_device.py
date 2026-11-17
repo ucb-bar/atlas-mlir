@@ -206,17 +206,26 @@ def prepare_source(source, *, io_memory_base=None):
 
 
 def virtual_program(plan, *, size_limit=None):
+    """Lower the byte transfers of a checked source layout plan."""
+    return virtual_transfers(plan.segments, input_addresses=plan.input_addresses,
+        output_address=plan.output_address, output_bytes=plan.physical_bytes,
+        io_memory_base=plan.io_memory_base, size_limit=size_limit)
+
+
+def virtual_transfers(segments, *, input_addresses, output_address, output_bytes,
+                      io_memory_base, size_limit=None):
     """Build byte transport from typed virtual DMA, slots, XLU and counted CFG.
 
+    The caller supplies checked affine transfer segments and physical buffers.
     Allocation, instruction timing, DMA waits and all six source contracts are
-    produced by the common compiler. No physical location appears in this IR.
+    produced by the common compiler. Scratch locations remain virtual.
     """
     import itertools
 
     state, tile, spill = "!atlas.virtual_state", "!atlas.virtual_fp8", "!atlas.virtual_spill"
     signed = lambda n: n if n < 2**31 else n - 2**32
     budget = f"atlas.program_size_limit_bytes = {size_limit} : i64, " if size_limit is not None else ""
-    lines = ["module {", f" func.func @layout() -> {state} attributes {{{budget}atlas.input_dram_base = {plan.io_memory_base} : i64, atlas.output_dram_base = {plan.output_address} : i64, atlas.output_dram_bytes = {plan.physical_bytes} : i64}} {{",
+    lines = ["module {", f" func.func @layout() -> {state} attributes {{{budget}atlas.input_dram_base = {io_memory_base} : i64, atlas.output_dram_base = {output_address} : i64, atlas.output_dram_bytes = {output_bytes} : i64}} {{",
              f'  %s0 = "atlas.virtual_start"() : () -> {state}']
     current = "%s0"
     serial = 0
@@ -308,9 +317,9 @@ def virtual_program(plan, *, size_limit=None):
         current = fresh("s")
         lines.append(f" ^{label}_done({current}: {state}):")
 
-    for segment in plan.segments:
-        source_base = plan.input_addresses[segment["input"]] + segment["source_offset"]
-        destination_base = plan.output_address + segment["output_offset"]
+    for segment in segments:
+        source_base = input_addresses[segment["input"]] + segment["source_offset"]
+        destination_base = output_address + segment["output_offset"]
         if segment["mode"] == "scalar":
             # A dense output suffix repeats in a counted loop whenever both
             # pointers advance by DMA beats. Ragged rows may be grouped to

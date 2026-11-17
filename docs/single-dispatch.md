@@ -44,6 +44,11 @@ entries in order and exits through one ECALL. Operation kinds, numeric policies,
 operand uses, DMA lengths, loop bounds and other constants must remain identical.
 Only aligned address literals carried through pointer additions/CFG edges to
 DMA can become parameters. A shape change is not admitted as an address change.
+When body sharing is selected, `compose_regions` also proves the complete
+dynamic instruction bound against the selected software budget before publishing
+the manifest and records a hashed `instruction-bound.json`. This budget remains
+separate from physical IMEM; a one-instruction software budget is refused even
+when the shared image fits.
 
 Both the live-IR address analysis and the independent captured-CFG replay prove
 every incoming address. An unaligned choice cannot hide between aligned minimum
@@ -67,7 +72,58 @@ The focused regression run passed **57 tests and 174 subtests**; one existing
 Python-simulator test was skipped. The new execution checks use Rust with RTL
 numerics. Address replay also rejects forged retained source addresses.
 
-## Remaining implementation order and ownership
+## Device buffer composition
+
+### Device matrix layout handoff
+
+`atlas_mlir_native.matrix_layout.bf16_matrix_transition` connects complete
+32x32-tiled BF16 matrices to dense BF16 storage, in either direction. It uses
+the existing affine DMA lowering and preserves every code bit, including NaN
+payloads and signed zeros. It refuses tails without a padding contract,
+overlapping buffers, unknown encodings and addresses outside the selected I/O
+window. Source edge identity, numerical policy agreement and allocation remain
+the caller's responsibility; this physical conversion cannot establish them.
+
+The matrix multiply → device relayout → dense sign-flip test executes in one
+Rust launch, with all intermediates and guard bytes checked, under both native
+pipelines and across repeated invocations. Its shapes are M32/N64/K32 and
+M64/N96/K65. Standalone conversion checks also cover the full 64x2048 and
+1024x768 layer activation matrices, both directions and every BF16 encoding.
+The final regression run passed 83 tests and 189 subtests; four existing Python
+simulator tests were skipped in favor of Rust execution.
+
+Composition now treats the optional `atlas.input_dram_bytes` as a member-local
+frame extent. It validates its type and bounds but does not reinterpret it as
+an invocation-wide immutable input interval: a later member's input can be an
+earlier member's output. The composed program retains explicit DMA operands and
+the ordinary independent address/initialization checks.
+
+These handoffs are not yet selected automatically for the whole layer. Moving
+packing onto the device can add device DMA work; this feature establishes a
+correct path without host intervention, not a measured layer speedup. Folding
+the permutation into producer/consumer accesses can follow after composition.
+
+Fresh full-layer controls passed with these native tools and the refactored layout
+emitter: all 55/54 selected virtual programs and binaries are byte-identical to
+the previous controls, every final output matches the independent reference,
+and all 63/62 retained intermediates match. TinyLlama remains 69,857,257 cycles
+and SmolVLA remains 367,502,579 cycles. Local receipts are
+`single-dispatch-control-images.json`, `single-dispatch-control-comparison.json`
+and `matrix-layout-final-tests.log` under `out/traffic-audit/`.
+
+An additional structural inventory of the **selected executable images** groups
+35 TinyLlama images into 21 body families and 26 SmolVLA images into 19 families
+when all plain i32 constants are abstracted. Summing the smallest existing image
+per family gives 127,800 and 130,164 bytes, respectively. This is an optimistic
+structural experiment, **not compiled or proved code sharing**: it ignores
+function-policy differences, descriptor/dispatch glue and new boundary programs.
+The remaining margin is too small to assume that parameterizing shapes alone
+will fit the layer. The largest current panel-cached matrix bodies occupy
+49,800/50,516 bytes. Compact counted cache traversal is therefore a concrete
+next target if shared bodies plus glue exceed IMEM; the cache's traffic reuse
+and ordered arithmetic must survive that change.
+
+### Next steps
 
 1. **Connect device buffers across regions.** Merlin owns source dependencies,
    ownership, lifetime allocation and proof that a logical view preserves bytes.

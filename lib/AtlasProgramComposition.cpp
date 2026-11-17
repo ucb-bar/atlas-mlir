@@ -230,7 +230,8 @@ struct ComposeAtlasProgramPass
     SmallVector<std::pair<uint64_t, uint64_t>> outputRanges;
     NamedAttrList shared;
     auto boundary = [](StringRef name) {
-      return name == "atlas.input_dram_base" || name == "atlas.output_dram_base" ||
+      return name == "atlas.input_dram_base" || name == "atlas.input_dram_bytes" ||
+             name == "atlas.output_dram_base" ||
              name == "atlas.output_dram_bytes" || name == "atlas.program_size_limit_bytes";
     };
     for (Attribute entry : entries) {
@@ -271,6 +272,18 @@ struct ComposeAtlasProgramPass
           uint64_t(base.getInt()) + uint64_t(bytes.getInt()) > (uint64_t(1) << 32)) {
         function.emitError("composition requires a bounded output DRAM range");
         return signalPassFailure();
+      }
+      // This optional extent describes a member's input frame, which may be
+      // another member's output. It is not an invocation-wide immutable input
+      // interval. Explicit DMA operands retain the actual read effects and
+      // their independent address/initialization proofs after composition.
+      if (auto raw = function->getAttr("atlas.input_dram_bytes")) {
+        auto extent = dyn_cast<IntegerAttr>(raw);
+        if (!isI64(extent) || extent.getInt() <= 0 ||
+            uint64_t(extent.getInt()) > (uint64_t(1) << 32) - uint64_t(input.getInt())) {
+          function.emitError("composition requires a bounded optional input DRAM extent");
+          return signalPassFailure();
+        }
       }
       outputBegin = std::min(outputBegin, uint64_t(base.getInt()));
       outputEnd = std::max(outputEnd, uint64_t(base.getInt()) + uint64_t(bytes.getInt()));
