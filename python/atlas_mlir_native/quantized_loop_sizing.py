@@ -12,7 +12,6 @@ import os
 from pathlib import Path
 import tempfile
 
-from merlin.semantic_compiler.buffer_allocation import current_allocation_wall_budget_ms
 from atlas_mlir_native.options import current_codegen_options
 from merlin.semantic_compiler.search import SearchLimits
 from merlin.semantic_compiler.target_binding import NativeCompilationError, verify_native_publication
@@ -22,6 +21,7 @@ from .binding import (AtlasNativeBinding, DRAM_BASE, TILE_BYTES, NATIVE_CHECKS,
                       _with_program_size_limit, dram_slots)
 from .restoration_budget import instruction_bound, fallback_tiles
 from .limits import functional_instruction_limit
+from .work_budget import CountedWorkExhausted
 
 # Process-local decisions avoid repeating expensive planning for the same
 # exact source, tools, profile, and limits, including failed attempts.
@@ -72,6 +72,7 @@ class SizingFailure:
     status: str
     reason: str
     directory: Path
+    counted_work: bool = False
 
 
 def untimed_bound(source, report):
@@ -115,8 +116,8 @@ def _identity(plan, virtual, target_source, tools, limits, operand_reuse):
         pipeline_arguments=list(NATIVE_PIPELINES[pipeline]), codegen=options.identity_record(),
         effective_pipeline_arguments=arguments,
         selected_io_memory_bytes=dram_slots()*TILE_BYTES,
-        allocation_timeout_ms=current_allocation_wall_budget_ms(), search_limits=asdict(limits),
-        compiler_proof_limits='defaults', tool_timeout_seconds=30,
+        search_limits=asdict(limits),
+        compiler_proof_limits='defaults',
         physical_instruction_limit=functional_instruction_limit(),
         profile_sha256=AtlasNativeBinding.profile().digest(),
         target_inventory_sha256=_digest(target_source/'docs/selected-variant-inventory.json'),
@@ -193,8 +194,8 @@ def _size_counted(plan, *, target_source=None, limits=None, operand_reuse=None):
     if key in _CACHE:
         result = _CACHE[key]
         if isinstance(result, SizingFailure):
-            raise NativeCompilationError(result.status,
-                result.reason+'; retained identical sizing failure: '+str(result.directory))
+            reason = result.reason+'; retained identical sizing failure: '+str(result.directory)
+            raise CountedWorkExhausted(reason) if result.counted_work else NativeCompilationError(result.status, reason)
         if result.record()['identity'] != identity:
             raise ValueError('checked sizing identity changed')
         return result
@@ -264,7 +265,7 @@ def _size_counted(plan, *, target_source=None, limits=None, operand_reuse=None):
     except NativeCompilationError as error:
         (directory/'checked-failure.json').write_bytes(_json(dict(record,status='FAILED',
             error_status=error.status,error_reason=error.reason)))
-        _CACHE[key] = SizingFailure(error.status,error.reason,directory)
+        _CACHE[key] = SizingFailure(error.status,error.reason,directory,isinstance(error, CountedWorkExhausted))
         raise
     (checked/'atlas-machine.mlir').write_text(machine)
     if report['cfg_contract'] not in machine:
@@ -362,10 +363,8 @@ def _check_construction_evidence(plan, compiled, sizing, route, role, manifest):
             or identity.get('target_identity') != plan.source.target_identity
             or identity.get('codegen') != current_codegen_options().identity_record()
             or identity.get('profile_sha256') != AtlasNativeBinding.profile().digest()
-            or identity.get('allocation_timeout_ms') != current_allocation_wall_budget_ms()
             or identity.get('search_limits') != asdict(SearchLimits())
             or identity.get('compiler_proof_limits') != 'defaults'
-            or identity.get('tool_timeout_seconds') != 30
             or identity.get('physical_instruction_limit') != functional_instruction_limit()
             or any(identity.get('tool_sha256',{}).get(name) != manifest.get(name.replace('-','_')+'_sha256')
                    for name in ('atlas-opt','atlas-emit'))):
@@ -400,7 +399,7 @@ def _check_construction_evidence(plan, compiled, sizing, route, role, manifest):
     if (receipt.get('input_sha256') != identity['virtual_sha256']
             or receipt.get('output_sha256') != sha256(machine.encode()).hexdigest()
             or receipt.get('tool_sha256') != identity['tool_sha256']
-            or receipt.get('wall_limit_s') != 30 or receipt.get('verifier_limits') != 'compiler defaults'):
+            or receipt.get('verifier_limits') != 'compiler defaults'):
         raise ValueError('quantized construction checked lowering receipt differs')
     if reason == 'physical_instruction_bound':
         actual = instruction_bound(virtual,machine,program)
@@ -425,8 +424,7 @@ def publish_route(plan, compiled, sizing, *, target_source=None):
     identity = record.get('identity')
     if identity is not None and (identity['tool_sha256'] != tool_hashes
             or identity['profile_sha256'] != AtlasNativeBinding.profile().digest()
-            or identity['codegen'] != current_codegen_options().identity_record()
-            or identity['allocation_timeout_ms'] != current_allocation_wall_budget_ms()):
+            or identity['codegen'] != current_codegen_options().identity_record()):
         raise ValueError('sizing context changed before native publication')
     programs = []
     evidence = {}

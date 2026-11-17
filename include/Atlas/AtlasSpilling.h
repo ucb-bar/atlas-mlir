@@ -37,7 +37,8 @@ LogicalResult placeAtlasSpillSlots(func::FuncOp function, unsigned words);
 LogicalResult verifyAtlasSpillSlots(func::FuncOp function);
 // Preserve completed MXU accumulators and weights through raw tile saves.
 LogicalResult spillAtlasMXUState(func::FuncOp function, unsigned maxSpills,
-                                unsigned &spills);
+                                unsigned &spills,
+                                StringRef budgetName = "spill-atlas-mxu-state.max-spills");
 void registerSpillAtlasMXUStatePass();
 std::unique_ptr<Pass> createSpillAtlasMXUStatePass();
 void registerSpillAtlasVirtualPass();

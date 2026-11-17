@@ -1034,19 +1034,24 @@ def _with_program_size_limit(arguments, budget):
 def _run(command: list[str], *, input_text: str, diagnostics: list[str] | None = None) -> str:
     from atlas_mlir_native.options import current_codegen_options
 
+    from .work_budget import CountedWorkExhausted, TOOL_HANG_GUARD_SECONDS
+
     command = _with_program_size_limit(
         command, current_codegen_options().program_size_limit_bytes)
     def invoke():
         try:
-            result = subprocess.run(command, input=input_text, text=True, capture_output=True, timeout=30, check=False)
+            result = subprocess.run(command, input=input_text, text=True, capture_output=True, timeout=TOOL_HANG_GUARD_SECONDS, check=False)
         except subprocess.TimeoutExpired as exc:
-            raise NativeCompilationError("search_timeout", f"Atlas tool timed out: {exc}") from exc
+            raise NativeCompilationError("compile_error", f"internal error: Atlas tool hang detector exceeded {TOOL_HANG_GUARD_SECONDS} seconds: {exc}") from exc
         except OSError as exc:
             raise NativeCompilationError("tool_unavailable", f"Atlas tool failed: {exc}") from exc
         if result.returncode:
             if diagnostics is not None:
                 diagnostics.append(result.stderr)
-            raise NativeCompilationError("compile_error", f"Atlas tool rejected selected program: {result.stderr.strip()}")
+            reason = f"Atlas tool rejected selected program: {result.stderr.strip()}"
+            if "work budget exhausted" in result.stderr.lower() or "budget=" in result.stderr:
+                raise CountedWorkExhausted(reason)
+            raise NativeCompilationError("compile_error", reason)
         return json.dumps([result.stdout, result.stderr]).encode()
 
     # Cache only pure stdin/stdout tools. Original request publications and
@@ -1059,7 +1064,7 @@ def _run(command: list[str], *, input_text: str, diagnostics: list[str] | None =
         stat = tool.stat()
         identity = dict(command=command, executable_sha256=_tool_digest(
             str(tool.resolve()), stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns),
-            timeout_seconds=30, codegen=current_codegen_options().identity_record())
+            codegen=current_codegen_options().identity_record())
         payload = cached_tool_output(namespace="atlas.pure_tool.v1", input_bytes=input_text.encode(),
                                      compilation_identity=identity, invoke=invoke)
     else:
@@ -2930,7 +2935,8 @@ class AtlasNativeBinding:
     @staticmethod
     def plan_boundary_abi(request: KernelRequest) -> dict:
         """Place current tile inputs/constants and outputs without source-ID tables."""
-        from merlin.semantic_compiler.buffer_allocation import Buffer, allocate_buffers
+        from merlin.semantic_compiler.buffer_allocation import Buffer
+        from .work_budget import allocate_native_buffers as allocate_buffers
 
         from .looped_tiling import (
             is_looped_request,
@@ -2961,8 +2967,7 @@ class AtlasNativeBinding:
                             for name, size in zip(names, sizes, strict=True))
             allocation = allocate_buffers(buffers, (bank,))
             if allocation.status != "sat":
-                status = "resource_limit" if allocation.status == "unsat" else "search_timeout"
-                raise NativeCompilationError(status, "loop buffer placement: " + allocation.reason)
+                raise NativeCompilationError("resource_limit", "loop buffer placement: " + allocation.reason)
             addresses = dict(allocation.addresses)
             return {"fixed_inputs":{name:addresses[name] for name in names[:-1]},
                     "fixed_outputs":[addresses[names[-1]]]}
@@ -2980,10 +2985,10 @@ class AtlasNativeBinding:
                     for index in range(len(sources))]
         buffers += [Buffer(f"output:{index}", bank.name, 1, 0, 1, view_of="outputs", view_offset=index)
                     for index in range(len(request.outputs))]
-        # Retain the default allocator wall and work limits.
+        # Keep the same deterministic solver work limit as the other ABI paths.
         result = allocate_buffers(tuple(buffers), (bank,))
         if result.status != "sat":
-            raise NativeCompilationError("resource_limit" if result.status == "unsat" else "search_timeout",
+            raise NativeCompilationError("resource_limit",
                                          "automatic boundary layout: " + result.reason)
         addresses = dict(result.addresses)
         return {

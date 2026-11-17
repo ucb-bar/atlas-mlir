@@ -1,4 +1,5 @@
 #include "Atlas/AtlasProofWork.h"
+#include "Atlas/AtlasWorkBudget.h"
 #include "Atlas/AtlasMXUContractVerification.h"
 #include "Atlas/AtlasContractAttr.h"
 #include "Atlas/AtlasGeneratedArtifact.h"
@@ -191,6 +192,7 @@ bool mergeOwnership(PathOwnership &into, const PathOwnership &from) {
 LogicalResult checkPathOwnership(ModuleOp module, ArrayRef<Record> records,
                                  const AtlasStream &stream,
                                  const llvm::DenseMap<Operation *, int32_t> &tagged) {
+  AtlasWorkBudget budget(module, "mxu-contract-dataflow");
   if (stream.starts.empty())
     return success();
   SmallVector<SmallVector<int32_t>> consumers(records.size());
@@ -239,7 +241,9 @@ LogicalResult checkPathOwnership(ModuleOp module, ArrayRef<Record> records,
   // may-pending bits only become true. Producer writes make loop transfer finite.
   auto paths = atlasForwardEntries(stream, PathOwnership(records.size()), [&](size_t block, PathOwnership &state) {
     return transfer(block, state, false); // never fails without diagnosis
-  }, mergeOwnership);
+  }, mergeOwnership,
+      [&](size_t block) -> llvm::ArrayRef<size_t> { return stream.succs[block]; }, &budget);
+  if (failed(paths)) return failure();
   for (size_t block = 0; block < stream.starts.size(); ++block) {
     if (!paths->reached[block])
       continue;

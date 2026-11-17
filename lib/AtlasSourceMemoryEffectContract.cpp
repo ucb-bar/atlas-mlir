@@ -1,4 +1,5 @@
 #include "Atlas/AtlasProofWork.h"
+#include "Atlas/AtlasWorkBudget.h"
 #include "Atlas/AtlasSourceMemoryEffectContract.h"
 #include "Atlas/AtlasContractAttr.h"
 #include "Atlas/AtlasGeneratedArtifact.h"
@@ -173,6 +174,7 @@ FailureOr<DictionaryAttr> mlir::atlas::buildAtlasSourceMemoryEffectContract(
 }
 
 LogicalResult mlir::atlas::verifyAtlasGeneratedSourceMemoryEffectContract(const AtlasVerificationContext &ctx) {
+  AtlasWorkBudget budget(ctx.module, "source-memory-contract-dataflow");
   atlasProofInvocation(AtlasProofKind::SourceMemory);
   ModuleOp module = ctx.module;
   if (failed(requireAtlasGeneratedArtifact(module))) return failure();
@@ -264,7 +266,8 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedSourceMemoryEffectContract(const 
     }
     return success();
   };
-  auto paths = atlasForwardEntries(s, State(effects->size()), [&](size_t block, State &state) { return run(block, state, false); }, merge);
+  auto paths = atlasForwardEntries(s, State(effects->size()), [&](size_t block, State &state) { return run(block, state, false); }, merge,
+      [&](size_t block) -> llvm::ArrayRef<size_t> { return s.succs[block]; }, &budget);
   if (failed(paths)) return failure();
   for (size_t block = 0; block < s.starts.size(); ++block) {
     if (!paths->reached[block]) continue;

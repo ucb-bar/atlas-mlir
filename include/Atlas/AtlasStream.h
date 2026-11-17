@@ -120,7 +120,7 @@ template <typename S> struct AtlasForwardEntries {
 // whether a reached entry changed, and `successors` may replace the edges.
 template <typename S, typename Transfer, typename Join, typename Successors>
 FailureOr<AtlasForwardEntries<S>>
-atlasForwardEntries(const AtlasStream &stream, const S &init, Transfer transfer, Join join, Successors successors) {
+atlasForwardEntries(const AtlasStream &stream, const S &init, Transfer transfer, Join join, Successors successors, AtlasWorkBudget *budget = nullptr) {
   AtlasForwardEntries<S> result{std::vector<S>(stream.starts.size(), init), std::vector<bool>(stream.starts.size(), false)};
   if (stream.starts.empty())
     return result;
@@ -129,6 +129,8 @@ atlasForwardEntries(const AtlasStream &stream, const S &init, Transfer transfer,
   while (!work.empty()) {
     size_t block = work.front();
     work.pop_front();
+    if (budget && failed(budget->charge(1 + stream.blockEnd(block) - stream.starts[block])))
+      return failure();
     S state = result.entries[block];
     if (failed(transfer(block, state)))
       return failure();

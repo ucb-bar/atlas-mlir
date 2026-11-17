@@ -1,4 +1,5 @@
 #include "Atlas/AtlasProofWork.h"
+#include "Atlas/AtlasWorkBudget.h"
 #include "Atlas/AtlasCFGContractVerification.h"
 #include "Atlas/AtlasContractAttr.h"
 #include "Atlas/AtlasGeneratedArtifact.h"
@@ -209,6 +210,7 @@ bool merge(State &to, const State &from) {
 }
 
 FailureOr<DictionaryAttr> mlir::atlas::buildAtlasCFGContract(func::FuncOp function, ArrayRef<VirtualRegisterAssignment> registers) {
+  AtlasWorkBudget budget(function, "cfg-contract-liveness");
   Builder b(function.getContext());
   DenseMap<Value, int32_t> ids, regs;
   DenseMap<Block *, int32_t> blocks;
@@ -307,9 +309,11 @@ FailureOr<DictionaryAttr> mlir::atlas::buildAtlasCFGContract(func::FuncOp functi
   while (changed) {
     changed = false;
     for (int32_t id = nextBlock - 1; id >= 0; --id) {
+      if (failed(budget.charge())) return failure();
       auto incoming = uses[id];
       for (int32_t edge : summaries[id].edges) {
         auto &e = edges[edge];
+        if (failed(budget.charge(live[e.to].size() + e.incoming.size()))) return failure();
         for (int32_t v : live[e.to]) if (!defs[id].count(v)) incoming.insert(v);
         for (int32_t v : e.incoming) if (!defs[id].count(v)) incoming.insert(v);
       }
@@ -333,6 +337,7 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedCFGContract(
     const AtlasVerificationContext &ctx) {
   atlasProofInvocation(AtlasProofKind::CFG);
   ModuleOp module = ctx.module;
+  AtlasWorkBudget budget(module, "cfg-contract-verification");
   if (failed(requireAtlasGeneratedArtifact(module)))
     return failure();
   auto contract = dyn_cast<DictionaryAttr>(module->getAttr(kAtlasCFGContract));
@@ -613,6 +618,7 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedCFGContract(
     std::deque<size_t> work; entries[starts[block.id]] = initial; reached[starts[block.id]] = true; work.push_back(starts[block.id]);
     auto propagate = [&](size_t pc, const State &s) { if (pc >= ops.size()) return; if (!reached[pc]) { reached[pc] = true; entries[pc] = s; work.push_back(pc); } else if (merge(entries[pc],s)) work.push_back(pc); };
     auto transfer = [&](size_t pc, State &s, bool diagnose) -> LogicalResult {
+      if (failed(budget.charge())) return failure();
       atlasProofTransfer(AtlasProofKind::CFG);
       Operation *op = ops[pc];
       auto error = [&](StringRef message) -> LogicalResult {
@@ -896,8 +902,12 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedCFGContract(
       return success();
     };
     while (!work.empty()) {
+      if (failed(budget.charge())) return failure();
       size_t pc = work.front(); work.pop_front(); State s = entries[pc];
-      if (failed(step(pc,s,false))) continue;
+      if (failed(step(pc,s,false))) {
+        if (budget.exhausted()) return failure();
+        continue;
+      }
       Operation *op = ops[pc];
       if (isa<JumpOp,TrapOp>(op)) {
         if (op->hasAttr("atlas.branch_trampoline")) propagate(target(op),s);

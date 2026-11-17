@@ -19,6 +19,7 @@ from merlin.semantic_compiler.target_binding import verify_native_publication
 from . import vector_quantize as device
 from .binding import TARGET_IDENTITY, TILE_BYTES, dram_slots, _native_pipeline
 from .limits import functional_instruction_limit
+from .work_budget import CountedWorkExhausted
 
 STATIC_CHUNK_ELEMENTS = 2048
 STATIC_WHOLE_BODY_MAX_ELEMENTS = 1 << 19
@@ -230,7 +231,7 @@ def prepare_plan(source, *, limits=None, _pipeline=None, _static_capacity=None, 
                     try:
                         prove_plan(device.prepare_plan(body), limits=limits, _pipeline=pipeline)
                     except NativeCompilationError as error:
-                        if error.status != "resource_limit":
+                        if error.status != "resource_limit" or isinstance(error, CountedWorkExhausted):
                             raise
                         refused_bodies[shape] = error
                     else:

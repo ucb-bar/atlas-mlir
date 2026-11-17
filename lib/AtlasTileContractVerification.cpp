@@ -1,4 +1,5 @@
 #include "Atlas/AtlasProofWork.h"
+#include "Atlas/AtlasWorkBudget.h"
 #include "Atlas/AtlasTileContractVerification.h"
 #include "Atlas/AtlasAddressAnalysis.h"
 #include "Atlas/AtlasContractAttr.h"
@@ -176,6 +177,7 @@ LogicalResult checkReferences(ModuleOp module, ArrayRef<Record> records) {
 // joins and PACK's generated loop. They do not prove iteration correspondence.
 LogicalResult checkDependencies(const AtlasStream &s, ArrayRef<Record> records,
                                 const llvm::DenseMap<Operation *, int32_t> &tags) {
+  AtlasWorkBudget budget(s.ops.front(), "tile-contract-dataflow");
   auto transfer = [&](size_t block, llvm::BitVector &facts) {
     for (size_t i = s.starts[block]; i < s.blockEnd(block); ++i) {
       atlasProofTransfer(AtlasProofKind::Tile);
@@ -190,7 +192,9 @@ LogicalResult checkDependencies(const AtlasStream &s, ArrayRef<Record> records,
     return into != before;
   };
   // Unreached blocks keep the empty entry.
-  auto paths = atlasForwardEntries(s, llvm::BitVector(records.size()), transfer, join);
+  auto paths = atlasForwardEntries(s, llvm::BitVector(records.size()), transfer, join,
+      [&](size_t block) -> llvm::ArrayRef<size_t> { return s.succs[block]; }, &budget);
+  if (failed(paths)) return failure();
   for (size_t block = 0; block < s.starts.size(); ++block) {
     llvm::BitVector facts = paths->entries[block];
     for (size_t i = s.starts[block]; i < s.blockEnd(block); ++i) {

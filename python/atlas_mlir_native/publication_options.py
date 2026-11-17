@@ -3,6 +3,8 @@
 from contextlib import contextmanager
 from contextvars import ContextVar
 
+from .work_budget import TOOL_HANG_GUARD_SECONDS
+
 
 _deterministic_receipts = ContextVar("atlas_deterministic_receipts", default=False)
 
@@ -30,4 +32,4 @@ def valid_receipt_timing(receipt):
     if "receipt_mode" in receipt:
         return False
     elapsed = receipt.get("elapsed_s")
-    return type(elapsed) in (int, float) and 0 <= elapsed <= 30
+    return type(elapsed) in (int, float) and 0 <= elapsed <= TOOL_HANG_GUARD_SECONDS
