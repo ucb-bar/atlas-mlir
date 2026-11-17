@@ -62,6 +62,8 @@ def test_counted_reservations_and_relative_exact_image(tmp_path):
     assert result["regions"] == [dict(context_index=0, placement="accelerator", launches_per_invocation=1),
                                   dict(context_index=1, placement="host", launches_per_invocation=0)]
     assert result["host_map"] == dict(imem_address=0x20000, imem_bytes=131072, csr_address=0x40000)
+    assert result["transport_timeout_seconds"] == 60
+    assert result["transport_clock_hz_bound"] == 1_000_000_000
     assert result["host_allocation"]["measurement"] == "declared_reservations"
     assert sum(row["bytes"] for row in result["host_allocation"]["declared_reservations"]) == 65536
     assert result["host_context_reservation_bytes"] == 4096
@@ -351,6 +353,18 @@ def test_standalone_v8_flat_buffers_and_length_checks(tmp_path):
     rows[0]["description"]["launches_per_invocation"] = 2
     assert [(r["address"], r["bytes"]) for r in requirements(tmp_path, rows)["reservations"]] == [
         (BASE, 1024), (BASE + 2048, 1024), (BASE + 4096, 2048), (BASE + 6144, 2048)]
+
+
+@pytest.mark.parametrize("inputs,sizes,output", [
+    ([BASE], [2048], BASE + 1024),
+    ([BASE, BASE + 512], [1024, 1024], BASE + 4096),
+])
+def test_standalone_v8_refuses_overlapping_buffers_within_image(tmp_path, inputs, sizes, output):
+    publish(tmp_path, dict(schema="atlas.native_tile_execution_plan.v8",
+        scope="diagnostic_selected_standalone_core", input_addresses=inputs,
+        input_payload_bytes=sizes, output_addresses=[output], output_bytes=2048))
+    with pytest.raises(NativeCompilationError, match="overlap within an image"):
+        requirements(tmp_path)
 
 
 def test_tiled_rhs_refill_groups_follow_native_n_outer_bounds(tmp_path):

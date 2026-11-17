@@ -110,6 +110,9 @@ def deployment_requirements(regions, native_root):
                     for i, (address, count) in enumerate(zip(addresses, counts, strict=True)):
                         if type(address) is not int or type(count) is not int or count <= 0:
                             refuse("invalid standalone provider buffer")
+                        if any(start < address + count and address < end for start, end, name, _ in tile_buffers
+                               if name.rsplit("/", 1)[0] == relative):
+                            refuse("provider reservations overlap within an image")
                         tile_buffers.append((address, address + count, f"{relative}/{role}_{i}", role))
             elif schema in {"atlas.resident_graph_execution_plan.v1", "atlas.native_tile_execution_plan.v8"}:
                 # Keep reservations even when a receipt promotes individual
@@ -248,6 +251,7 @@ def deployment_requirements(regions, native_root):
                 host_map=dict(imem_address=0x20000, imem_bytes=IMEM_BYTES, csr_address=0x40000),
                 imem_address_convention="host_map.imem_address + image.imem_offset_bytes",
                 max_polls=10000000,
+                transport_timeout_seconds=60, transport_clock_hz_bound=1_000_000_000,
                 runtime=dict(host_type="atlas_host", io_type="atlas_tile_memory_io",
                              start="atlas_host_start", wait="atlas_host_wait",
                              image_completion="ensure_loaded_before_start",
