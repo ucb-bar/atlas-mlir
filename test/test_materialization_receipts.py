@@ -28,7 +28,7 @@ def test_pure_pipeline_receipt_is_byte_identical_across_invocations(tmp_path, mo
     receipt = json.loads(results[0])
     assert "elapsed_s" not in receipt
     assert receipt["receipt_mode"] == "deterministic-v1"
-    assert receipt["wall_limit_s"] == 30 and receipt["verifier_limits"] == "compiler defaults"
+    assert receipt["verifier_limits"] == "compiler defaults"
 
 
 def test_native_sizing_publication_preserves_facts_and_not_operational_cache(tmp_path):
@@ -69,7 +69,7 @@ def test_default_receipt_retains_bounded_elapsed_time(tmp_path, monkeypatch, sel
 
 
 @pytest.mark.parametrize("receipt", [
-    {}, {"elapsed_s": -1}, {"elapsed_s": 31}, {"elapsed_s": True},
+    {}, {"elapsed_s": -1}, {"elapsed_s": 601}, {"elapsed_s": True},
     {"elapsed_s": "1"}, {"elapsed_s": float("nan")},
     {"receipt_mode": None, "elapsed_s": 1},
     {"receipt_mode": "unknown", "elapsed_s": 1},

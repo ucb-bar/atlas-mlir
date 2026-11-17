@@ -45,7 +45,7 @@ Operation *createMXUSave(OpBuilder &builder, Location loc, Value state,
 // branch forwards it to both successors. The destination starts a new local
 // handle. Tensor allocation/spilling owns transport after this boundary.
 LogicalResult materializeMXUEdges(func::FuncOp function, unsigned limit,
-                                 unsigned &spills) {
+                                 unsigned &spills, StringRef budgetName) {
   unsigned work = 0;
   for (Block &block : function.getBody()) {
     for (BlockArgument arg : block.getArguments())
@@ -58,7 +58,9 @@ LogicalResult materializeMXUEdges(func::FuncOp function, unsigned limit,
     work += snapshots.size();
   }
   if (spills > limit || work > limit - spills)
-    return function.emitOpError("MXU CFG materialization work limit exceeded");
+    return function.emitOpError("MXU CFG materialization work limit exceeded")
+           << " (budget=" << budgetName << ", limit=" << limit
+           << ", used=" << spills << ", requested=" << work << ")";
   spills += work;
   for (Block &block : function.getBody()) {
     if (&block == &function.front()) continue;
@@ -124,8 +126,8 @@ struct Resource {
 // their current resident versions, so insertion never changes victim ordering.
 class MXUSpiller {
 public:
-  MXUSpiller(Block &block, unsigned limit, unsigned &spills)
-      : limit(limit), spills(spills) {
+  MXUSpiller(Block &block, unsigned limit, unsigned &spills, StringRef budgetName)
+      : limit(limit), spills(spills), budgetName(budgetName) {
     for (Operation &op : block) {
       unsigned index = operations.size();
       operations.push_back(&op);
@@ -200,6 +202,7 @@ private:
   static constexpr unsigned never = std::numeric_limits<unsigned>::max();
   unsigned limit;
   unsigned &spills;
+  StringRef budgetName;
   SmallVector<Operation *> operations;
   llvm::DenseMap<Value, SmallVector<unsigned>> uses;
   llvm::DenseMap<Value, Resource> resources;
@@ -237,8 +240,14 @@ private:
         farthest = use;
       }
     }
-    if (!victim || spills >= limit)
-      return before->emitOpError("MXU spill rewrite work limit or working slots exhausted");
+    if (!victim)
+      return before->emitOpError("MXU working slots exhausted")
+             << " (resource=mxu-working-slots, limit=" << kVirtualMXUSlots
+             << ", used=" << live.size() << ")";
+    if (spills >= limit)
+      return before->emitOpError("MXU spill rewrite work limit reached")
+             << " (budget=" << budgetName << ", limit=" << limit
+             << ", used=" << spills << ", requested=1)";
     Resource &resource = resources[victim];
     Value tile = resource.source;
     OpBuilder builder(before);
@@ -287,11 +296,11 @@ struct SpillAtlasMXUStatePass
 
 LogicalResult mlir::atlas::spillAtlasMXUState(func::FuncOp function,
                                             unsigned maxSpills,
-                                            unsigned &spills) {
-  if (failed(materializeMXUEdges(function, maxSpills, spills)))
+                                            unsigned &spills, StringRef budgetName) {
+  if (failed(materializeMXUEdges(function, maxSpills, spills, budgetName)))
     return failure();
   for (Block &block : function.getBody())
-    if (failed(MXUSpiller(block, maxSpills, spills).run()))
+    if (failed(MXUSpiller(block, maxSpills, spills, budgetName).run()))
       return failure();
   return success();
 }

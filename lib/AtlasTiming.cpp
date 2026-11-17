@@ -381,7 +381,7 @@ bool mlir::atlas::timing::vpuCanOverlap(const OpInfo &a, const OpInfo &b) {
 
 namespace {
 
-struct Builder {
+struct FootprintBuilder {
   Footprint f;
 
   void x(int reg, bool write, int age, bool atCompletion = false) {
@@ -470,7 +470,7 @@ std::optional<long long> vectorAddress(const Instr &in, const RegValues &regs) {
   return ((alu >> 3) & 0xFFFF) * kLineBytes;
 }
 
-void scalarRegs(Builder &b, const Instr &in) {
+void scalarRegs(FootprintBuilder &b, const Instr &in) {
   const OpInfo &op = *in.op;
   // csrr*i encodes an immediate in rs1.
   bool immediateCsr = op.opClass == OpClass::Csr && op.name.back() == 'i';
@@ -498,7 +498,7 @@ ScalarAccess mlir::atlas::timing::scalarAccess(const Instr &in, const RegValues 
 
 Footprint mlir::atlas::timing::footprintOf(const Instr &in,
                                            const RegValues &regs) {
-  Builder b;
+  FootprintBuilder b;
   const OpInfo &op = *in.op;
   if (in.release && op.opClass != OpClass::Csr) {
     b.f.error = "atlas.complete is only valid on a CSR instruction";
@@ -1020,7 +1020,8 @@ struct EdgeSet {
 
 DepGraph mlir::atlas::timing::buildGraph(const std::vector<Instr> &instrs,
                                          const RegValues &entry,
-                                         const IncomingDma *incomingDma) {
+                                         const IncomingDma *incomingDma,
+                                         AtlasWorkBudget *work) {
   DepGraph g;
   g.nodes = instrs;
   int n = static_cast<int>(instrs.size());
@@ -1033,6 +1034,7 @@ DepGraph mlir::atlas::timing::buildGraph(const std::vector<Instr> &instrs,
   EdgeSet edges{g, {}};
   for (int b = 0; b < n; b++)
     for (int a = 0; a < b; a++) {
+      if (work && failed(work->charge())) return g;
       Dependence d =
           dependence(g.nodes[a], g.footprints[a], g.nodes[b], g.footprints[b]);
       if (d.distance > 0)
@@ -1051,6 +1053,7 @@ DepGraph mlir::atlas::timing::buildGraph(const std::vector<Instr> &instrs,
           g.nodes[k].op->channel == op.channel)
         wait = k;
     for (int k = d + 1; k < n; k++) {
+      if (work && failed(work->charge())) return g;
       EdgeKind kind;
       if (k == wait ||
           !conflictsAtCompletion(g.footprints[d], g.footprints[k], kind))
@@ -1080,6 +1083,7 @@ DepGraph mlir::atlas::timing::buildGraph(const std::vector<Instr> &instrs,
     if (local)
       continue;
     for (int k = w + 1; k < n; k++) {
+      if (work && failed(work->charge())) return g;
       bool guarded = g.nodes[k].op->opClass == OpClass::DmaLoad ||
                      g.nodes[k].op->opClass == OpClass::DmaStore;
       if (incomingDma) {

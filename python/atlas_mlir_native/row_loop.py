@@ -30,6 +30,7 @@ from .binding import (
 from .resident_graph import is_staged_bf16, staged_memory_plan
 from .row_softmax import prepare_row_softmax
 from .limits import DEFAULT_FUNCTIONAL_INSTRUCTION_LIMIT, functional_instruction_limit
+from .work_budget import CountedWorkExhausted
 
 ROW_LOOP_COLUMN_TILES_PER_LAUNCH = 512
 
@@ -271,7 +272,10 @@ def compile_row_loop(snapshot, source, *, target_source, destination, limits, io
     except NativeCompilationError as error:
         diagnostic = destination / "lowering-error.txt"
         diagnostic.write_text(error.reason + "\n")
-        raise NativeCompilationError(error.status, error.reason[:4096] + f"\nFull diagnostic: {diagnostic}") from error
+        msg = error.reason[:4096] + f"\nFull diagnostic: {diagnostic}"
+        if isinstance(error, CountedWorkExhausted):
+            raise CountedWorkExhausted(msg) from error
+        raise NativeCompilationError(error.status, msg) from error
     _run([str(tools / "atlas-opt"), *NATIVE_CHECKS, "--verify-atlas-timing", "-"], input_text=machine)
     program = json.loads(_run([str(tools / "atlas-emit"), "--program-json", "-"], input_text=machine))
     if program.get("selected_rtl_revision") != RTL_REVISION:
@@ -392,7 +396,7 @@ def verify_row_loop(source, compiled, *, target_source, io_memory_base=None):
                 "--mlir-print-ir-module-scope"] if captured else []
     expected = [str(tools / "atlas-opt"), *capture_options, *NATIVE_PIPELINES[pipeline], "-"]
     machine = (compiled / "atlas-machine.mlir").read_text()
-    if (receipt.get("argv") != expected or receipt.get("wall_limit_s") != 30
+    if (receipt.get("argv") != expected
             or receipt.get("verifier_limits") != "compiler defaults"
             or not valid_receipt_timing(receipt)
             or receipt.get("input_sha256") != _sha(virtual.encode())

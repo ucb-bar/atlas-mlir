@@ -404,7 +404,8 @@ class LoopedMNKTest(unittest.TestCase):
         ):
             with self.assertRaises(NativeCompilationError) as error:
                 AtlasNativeBinding.plan_boundary_abi(source)
-            self.assertEqual(error.exception.status, "search_timeout")
+            self.assertEqual(error.exception.status, "resource_limit")
+            self.assertIn("buffer_solver_rlimit_per_query", error.exception.reason)
 
     def test_source_bound_contraction_preserves_windows_and_orients_weights(self):
         import numpy as np

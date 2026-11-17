@@ -1,6 +1,8 @@
 #ifndef ATLAS_TIMING_H
 #define ATLAS_TIMING_H
 
+#include "Atlas/AtlasWorkBudget.h"
+
 // npu_model rtl-match timing rules, ported from atlas-compiler-experiments
 // 3ae2b5d (src/core) with its names. DMA VMEM addresses count words, as in
 // Atlas RTL. An age counts cycles after an instruction issues.
@@ -163,7 +165,8 @@ struct DepGraph {
 // Pending transfers per channel at block entry; null keeps broad barriers.
 using IncomingDma = std::array<std::vector<Footprint>, kAtlasDMAChannels>;
 DepGraph buildGraph(const std::vector<Instr> &instrs, const RegValues &entry,
-                    const IncomingDma *incomingDma = nullptr);
+                    const IncomingDma *incomingDma = nullptr,
+                    AtlasWorkBudget *work = nullptr);
 // Longest path in cycles from each node until everything after it finishes.
 std::vector<int> criticalHeights(const DepGraph &g);
 

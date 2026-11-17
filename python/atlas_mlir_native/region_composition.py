@@ -387,7 +387,7 @@ def compile_virtual_with_receipt(virtual, *, tools, pipeline, destination):
     receipt = dict(argv=command, elapsed_s=perf_counter() - started,
         input_sha256=hashlib.sha256(virtual.encode()).hexdigest(),
         output_sha256=hashlib.sha256(machine.encode()).hexdigest(),
-        verifier_limits='compiler defaults', wall_limit_s=30,
+        verifier_limits='compiler defaults',
         tool_sha256={name: hashlib.sha256((tools / name).read_bytes()).hexdigest()
                      for name in ('atlas-opt', 'atlas-emit')})
     if deterministic_receipts_enabled():
