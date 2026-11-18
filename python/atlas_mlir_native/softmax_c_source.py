@@ -13,7 +13,7 @@ from merlin.semantic_compiler.precision_intake import SourceValueRef
 from merlin.semantic_compiler.precision_transform import BoundaryConversion
 
 from .softmax_precision import input_spec, lower_source_softmax
-from .row_softmax import SOFTMAX_DOMAIN, ROWSPAN80_DOMAIN, ROWSPAN80_MAX_COLUMNS
+from .row_softmax import SOFTMAX_DOMAIN, ROWSPAN80_MAX_COLUMNS, row_span_limit
 
 
 def prepare_source_c_package(
@@ -64,8 +64,8 @@ def render_source_interface(precision, name: str, raw_workspace: int, *, finite_
     if dict(precision.request.nodes[0].attrs).get("input_domain") != score_domain:
         raise ValueError("source interface score domain differs from the checked precision plan")
     shape = precision.request.nodes[0].type.shape
-    if score_domain == ROWSPAN80_DOMAIN and shape[1] > ROWSPAN80_MAX_COLUMNS:
-        raise ValueError("row-relative span80 domain supports at most 1024 columns")
+    if row_span_limit(score_domain) is not None and shape[1] > ROWSPAN80_MAX_COLUMNS:
+        raise ValueError(f"row-relative span{row_span_limit(score_domain)} domain supports at most 1024 columns")
     if input_dtype not in {"f32", "bf16"}:
         raise ValueError("unsupported softmax score dtype")
     if output_dtype not in {"f32", "bf16"}:
@@ -202,7 +202,7 @@ int {name}_source_dispatch(void *ctx, const void *const *inputs, void *const *ou
         "output_dtype": output_dtype,
         "precision_plan": precision.record(),
         **({"additive_mask": {"zero_keeps": True, "finite_exclusion_bits": finite_sentinel_bits,
-                              "scores": "finite absolute value at most 128" if score_domain == ROWSPAN80_DOMAIN else "finite absolute value at most 32",
+                              "scores": "finite absolute value at most 128" if row_span_limit(score_domain) is not None else "finite absolute value at most 32",
                               "rows": "nonempty"}}
            if finite_sentinel_bits is not None else {}),
     }

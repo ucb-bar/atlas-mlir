@@ -21,6 +21,15 @@ MUL_FINITE_ATTRS = (
     ("numeric_semantics", "bf16-product-rne-gradual-underflow-overflow-inf-v1"),
 )
 
+ROW_SUM_NONNEGATIVE_ATTRS = (
+    ("input_domain", "bf16-nonnegative-zero-through-one-including-subnormal-v1"),
+    ("numeric_semantics", "selected-rtl-bf16-row-sum-fp32-rne-tree-bf16-rne-gradual-v1"),
+)
+ADD_NONNEGATIVE_ATTRS = (
+    ("input_domain", "bf16-nonnegative-finite-fp32-rne-finite-sum-v1"),
+    ("numeric_semantics", "selected-f32-rne-bf16-chop-gradual-v1"),
+)
+
 
 def build_bf16_primitive_request(op, *, target_identity=None):
     """Construct one exact-profile representative for native snapshot gating.

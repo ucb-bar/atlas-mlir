@@ -20,10 +20,11 @@ from merlin.semantic_compiler.softmax_source import (
 
 from .binding import TARGET_IDENTITY
 from .graph_precision import DiagnosticGraphPrecision
-from .row_softmax import GUARDED_SOFTMAX_POLICY, MASKED_SOFTMAX_POLICY, SOFTMAX_DOMAIN, SOFTMAX_POLICY, ROWSPAN80_DOMAIN, ROWSPAN80_MAX_COLUMNS
+from .row_softmax import GUARDED_SOFTMAX_POLICY, MASKED_SOFTMAX_POLICY, SOFTMAX_DOMAIN, SOFTMAX_POLICY, ROWSPAN80_DOMAIN, ROWSPAN80_MAX_COLUMNS, ROWSPAN96_DOMAIN, row_span_limit
 
 INPUT_POLICY = "f32-to-bf16-rne-bounded-row-scores-v1"
 ROWSPAN80_INPUT_POLICY = "f32-to-bf16-rne-row-relative-span80-pad32-v1"
+ROWSPAN96_INPUT_POLICY = "f32-to-bf16-rne-row-relative-span96-pad32-v1"
 
 
 def input_spec(score_domain=SOFTMAX_DOMAIN):
@@ -33,11 +34,11 @@ def input_spec(score_domain=SOFTMAX_DOMAIN):
     Values that round outside them are rejected. No small-normal flushing is
     introduced; f32 values that naturally round to BF16 signed zero stay zero.
     """
-    if score_domain not in {SOFTMAX_DOMAIN, ROWSPAN80_DOMAIN}:
+    if score_domain not in {SOFTMAX_DOMAIN, ROWSPAN80_DOMAIN, ROWSPAN96_DOMAIN}:
         raise ValueError("unsupported row-softmax score domain")
-    relative = score_domain == ROWSPAN80_DOMAIN
+    relative = row_span_limit(score_domain) is not None
     return FloatBoundarySpec(
-        ROWSPAN80_INPUT_POLICY if relative else INPUT_POLICY,
+        {ROWSPAN80_DOMAIN: ROWSPAN80_INPUT_POLICY, ROWSPAN96_DOMAIN: ROWSPAN96_INPUT_POLICY}.get(score_domain, INPUT_POLICY),
         "bf16",
         "encode",
         admitted_code_ranges=(
@@ -88,7 +89,7 @@ def lower_semantic_softmax(
         if allow_masked
         else SOFTMAX_POLICY,
         "output_conversion": "bf16-to-f32-exact-v1",
-        **({"maximum_columns": ROWSPAN80_MAX_COLUMNS} if score_domain == ROWSPAN80_DOMAIN else {}),
+        **({"maximum_columns": ROWSPAN80_MAX_COLUMNS} if row_span_limit(score_domain) is not None else {}),
     }
     policy_sha = hashlib.sha256(json.dumps(selected, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
     return _lower_graph(
@@ -121,8 +122,8 @@ def _lower_graph(
     except (ValueError, KeyError) as error:
         raise LinalgBridgeError(str(error)) from error
     score = graph.node(region.scores)
-    if score_domain == ROWSPAN80_DOMAIN and region.matrix_shape[1] > ROWSPAN80_MAX_COLUMNS:
-        raise LinalgBridgeError("row-relative span80 domain supports at most 1024 columns")
+    if row_span_limit(score_domain) is not None and region.matrix_shape[1] > ROWSPAN80_MAX_COLUMNS:
+        raise LinalgBridgeError(f"row-relative span{row_span_limit(score_domain)} domain supports at most 1024 columns")
     masked = isinstance(region, MaskedRowSoftmaxSource)
     boundaries = (region.scores, region.mask) if masked else (region.scores,)
     accounted = {*boundaries, *region.computations, *region.initializers}

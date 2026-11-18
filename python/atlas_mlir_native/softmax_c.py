@@ -21,7 +21,7 @@ from .binding import (
     dram_slots,
 )
 from .layout import pack_bf16_pair_halves
-from .row_softmax import prepare_row_softmax, SOFTMAX_DOMAIN, ROWSPAN80_DOMAIN, ROWSPAN80_MAX_COLUMNS, score_domain as request_score_domain
+from .row_softmax import prepare_row_softmax, SOFTMAX_DOMAIN, ROWSPAN80_MAX_COLUMNS, row_span_limit, score_domain as request_score_domain
 
 
 def prepare_c_package(
@@ -97,7 +97,8 @@ def _prepare_c_package(
     plan = prepare_row_softmax(source)
     if request_score_domain(source) != score_domain:
         raise ValueError("selected C score domain differs from the checked softmax source")
-    relative = score_domain == ROWSPAN80_DOMAIN
+    span = row_span_limit(score_domain)
+    relative = span is not None
     if row_compilations is None and row_loop_compilation is None and (compiled / "manifest.json").is_file():
         if json.loads(member(compiled, "manifest.json")).get("schema") == "atlas.row_loop_compilation.v1":
             row_loop_compilation = compiled
@@ -359,7 +360,7 @@ static void {name}_pack_keep_tile(uint8_t *out,const uint8_t *in,size_t start,si
         from merlin.compile.c_softmax_mask import render_bf16_row_span_preflight
 
         row_domain_helper = render_bf16_row_span_preflight(
-            m, n, name, maximum_lower_bound=-32, maximum_upper_bound=48, maximum_span=80,
+            m, n, name, maximum_lower_bound=-32, maximum_upper_bound=48, maximum_span=span,
             masked=plan.masked, empty_rows_zero=plan.empty_rows_zero,
         )
         row_domain_check = f"  if ({name}_row_span(in,{ 'keep' if plan.masked else '0'})) return {upper}_INPUT_DOMAIN;\n"
@@ -563,7 +564,7 @@ linker script and final host build; use the application's float ABI (lp64d for
 the current Shuttle bring-up).
 
 Input scores must be signed zero or normal BF16 with magnitude at most {128 if relative else 32} and
-exponent code at least 8. {"At most 1024 columns are admitted. Kept row maxima must be in [-32,48], with exact row span at most 80. " if relative else ""}The call checks this domain before writing device
+exponent code at least 8. {"At most 1024 columns are admitted. Kept row maxima must be in [-32,48], with exact row span at most " + str(span) + ". " if relative else ""}The call checks this domain before writing device
 memory. This selected policy uses Atlas exponential/reciprocal approximations
 and tile-wise rounding; it does not promise original-model softmax accuracy.
 
@@ -598,7 +599,7 @@ Standalone-core evidence does not qualify an integrated SoC or FPGA bitstream.
         **({"score_domain": score_domain,
             "input_preflight": {"all_scores": "signed-zero-or-normal-exp-at-least8-abs-at-most128",
                                 "maximum_columns": ROWSPAN80_MAX_COLUMNS,
-                                "kept_row_maximum": [-32, 48], "exact_kept_row_span_at_most": 80,
+                                "kept_row_maximum": [-32, 48], "exact_kept_row_span_at_most": span,
                                 "before_device_io": True}} if relative else {}),
         "tiling": plan.record(),
         "images": images,
