@@ -246,6 +246,8 @@ def deployment_requirements(regions, native_root):
     return dict(schema="merlin.provider_deployment.v1", window=dict(address=base, bytes=size),
                 reservations=reservations, images=images,
                 regions=calls,
+                # Platform compile convention; the physical clock is unconfirmed.
+                sys_clk_freq_hz=30000000,
                 allocation_alignment=ALLOCATION_ALIGNMENT,
                 host_context_reservation_bytes=HOST_CONTEXT_BYTES,
                 host_map=dict(imem_address=0x20000, imem_bytes=IMEM_BYTES, csr_address=0x40000),
@@ -256,7 +258,9 @@ def deployment_requirements(regions, native_root):
                              start="atlas_host_start", wait="atlas_host_wait",
                              image_completion="ensure_loaded_before_start",
                              reload_policy="generated counted ensure_loaded"),
-                host_allocation=dict(address=0x08000000, bytes=65536, measurement="declared_reservations",
+                # Independent section ceilings can exceed the usable linker aggregate.
+                host_allocation=dict(address=0x08000000, bytes=65536, usable_bytes=61440,
+                    measurement="declared_reservations",
                     declared_reservations=[
                         dict(name="code", bytes=36864, includes="embedded instruction images and constants"),
                         dict(name="data", bytes=8192), dict(name="context", bytes=HOST_CONTEXT_BYTES),
