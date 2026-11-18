@@ -49,12 +49,14 @@ cmake -S . -B build -G Ninja \
   -DPython3_EXECUTABLE=/path/to/model-venv/bin/python \
   -DATLAS_NPU_MODEL_ROOT=/path/to/npu_model
 cmake --build build --parallel 2
-ctest --test-dir build --output-on-failure
+PYTHONPATH=/path/to/pinned-merlin-checkout ctest --test-dir build --output-on-failure
 ```
 
 CTest uses Python 3.14 with the pinned npu_model `b97b2f5a` checkout, CPU
 PyTorch 2.11.0+cpu, pytest, tabulate, and the installed Atlas/Merlin dependencies.
 Use an editable model install: its arithmetic corpus is absent from its wheel.
+Several provider tests import Merlin source fixtures; put the pinned Merlin
+checkout root on `PYTHONPATH` for CTest (the production wheel does not need it).
 `-DATLAS_ENABLE_TESTS=OFF` builds the compiler without the model.
 
 CTest runs the portable tests with no hardware. Tests that run the RTL need
