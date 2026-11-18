@@ -50,8 +50,13 @@ from the system runtime; check with `build/bin/atlas-opt --version`.
 imports using `Python3_EXECUTABLE`; CTest adds that path to `PYTHONPATH`.
 Install its dependencies before configuring. CTest sets `ATLAS_RUN_NPU_MODEL=1`,
 `IMPORT_MODEL_PYTHON`, and `IMPORT_MODEL_ROOT` from these settings, so npu_model
-exactness tests run and fail instead of skipping. Other optional execution tests
-still require their explicit environment settings.
+exactness tests run and fail instead of skipping. The qualified functional
+model test also needs Merlin's qualified native backend receipts (see its
+`examples/atlas/whole-model/unchanged_fx/README.md`), selected with
+`-DATLAS_NATIVE_QUALIFICATION=/path/to/qualification.json` and
+`-DATLAS_MEMORY_QUALIFICATION=/path/to/memory-qualification.json`; without them
+it fails. Other optional execution tests still require their explicit
+environment settings.
 
 CTest runs the portable tests with no hardware. Tests that run the RTL need
 `ATLAS_RTL_ROOT`, `ATLAS_MODEL_ROOT`, `ATLAS_ASSEMBLER_ROOT`, `ATLAS_ARC_MODEL`,

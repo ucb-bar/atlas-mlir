@@ -78,7 +78,9 @@ def qualified_functional(physical, layout, memory):
     """Execute decoded instructions with separately authenticated adapters."""
     from dataclasses import fields
     from types import SimpleNamespace
+    import sys
     import torch
+    sys.path.insert(0, str(ROOT.parent / 'merlin/examples/atlas/whole-model/unchanged_fx'))
     import functional_runtime
     from execute_graph import qualified_execution_options
     from model_runtime import authenticate_model
@@ -336,8 +338,12 @@ class QuantizedOperandReuseTest(unittest.TestCase):
                                   source_request(m=33, n=65, k=257, batch=())))
 
     @unittest.skipUnless(os.environ.get('ATLAS_RUN_NPU_MODEL') == '1', 'select the pinned cycle model explicitly')
-    def test_functional_model_tinyllama_k2048_n64_tiles(self):
-
+    def test_functional_model_k2048_n64_tiles(self):
+        # Temporary: one fixed model projection shape (TinyLlama's K=2048). Replace with the generic reference
+        # evaluator over captured model shapes, then delete this case.
+        names = ('ATLAS_NATIVE_QUALIFICATION', 'ATLAS_MEMORY_QUALIFICATION', 'ATLAS_NATIVE_CACHE')
+        missing = [name for name in names if not os.environ.get(name)]
+        self.assertFalse(missing, 'select the qualified native backend: ' + ', '.join(missing))
         with codegen_options(replace(current_codegen_options(), io_memory_bytes=67108864)):
             self.check_cycle_sources((source_request(m=1, n=2048, k=2048, batch=()),), execute=qualified_functional)
 
