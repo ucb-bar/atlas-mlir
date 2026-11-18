@@ -51,6 +51,7 @@ def test_counted_reservations_and_relative_exact_image(tmp_path):
     publish(tmp_path, counted())
     result = requirements(tmp_path)
     assert result["schema"] == "merlin.provider_deployment.v1"
+    assert result["sys_clk_freq_hz"] == 30000000
     assert result["window"] == dict(address=BASE, bytes=786432)
     assert [row["bytes"] for row in result["reservations"]] == [1024, 1024, 2048, 2048, 2048, 2048]
     assert all(row["lifetime"] == dict(scope="region_call", context_index=0)
@@ -65,6 +66,8 @@ def test_counted_reservations_and_relative_exact_image(tmp_path):
     assert result["transport_timeout_seconds"] == 60
     assert result["transport_clock_hz_bound"] == 1_000_000_000
     assert result["host_allocation"]["measurement"] == "declared_reservations"
+    assert result["host_allocation"]["usable_bytes"] == 61440
+    assert result["host_allocation"]["bytes"] == 65536
     assert sum(row["bytes"] for row in result["host_allocation"]["declared_reservations"]) == 65536
     assert result["host_context_reservation_bytes"] == 4096
     assert result["allocation_alignment"] == 64
