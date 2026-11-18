@@ -5,7 +5,7 @@ import sys
 from unittest.mock import patch
 
 import pytest
-from atlas_mlir import driver, toolchain
+from atlas_mlir import cli, driver, toolchain
 
 
 def test_explicit_target_never_borrows_other_installation(tmp_path):
@@ -76,3 +76,42 @@ def test_doctor_detects_changed_packaged_runtime(tmp_path):
         runtime.write_text('altered')
         with pytest.raises(toolchain.ToolchainError, match='hash mismatch'):
             build_record()
+
+
+@pytest.mark.parametrize("failure", ["toolchain", "cache"])
+def test_doctor_distinguishes_rust_failures_from_capture_readiness(failure, tmp_path, monkeypatch, capsys):
+    from merlin.semantic_compiler import snapshot
+
+    bridge = tmp_path / "installed bridge"
+    monkeypatch.setattr(snapshot, "packaged_egg_bridge_path", lambda: bridge)
+    monkeypatch.setattr(cli, "environment_record", lambda **_: {})
+    monkeypatch.setattr(toolchain, "bin_dir", lambda: tmp_path)
+
+    commands = []
+
+    def run(command, step):
+        commands.append(command)
+        if command[0] == "cargo" and command[1] == "--version":
+            if failure == "toolchain":
+                raise toolchain.ToolFailure("rustup could not choose a default toolchain")
+            return "cargo 1.90.0"
+        if command[0] == "rustc":
+            return "rustc 1.90.0\nhost: x86_64-unknown-linux-gnu\n"
+        if command[:2] == ["cargo", "fetch"]:
+            assert "--offline" in command and "--locked" in command
+            assert command[command.index("--manifest-path") + 1] == str(bridge / "Cargo.toml")
+            raise toolchain.ToolFailure("no matching package named `egg` found")
+        return ""
+
+    monkeypatch.setattr(toolchain, "run", run)
+    assert cli.main(["doctor", "--capture"]) == 0
+    assert all(command[0] not in {"cargo", "rustc"} for command in commands)
+    assert cli.main(["doctor", "--capture", "--build"]) == 1
+    error = capsys.readouterr().err
+    if failure == "toolchain":
+        assert "rustup default stable" in error
+        assert "could not choose a default toolchain" in error
+    else:
+        assert "no matching package named `egg` found" in error
+        assert "cargo fetch --locked" in error
+        assert f"'{bridge / 'Cargo.toml'}'" in error

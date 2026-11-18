@@ -27,7 +27,7 @@ def main():
     assert not os.environ.get('PYTHONPATH')
     assert 'site-packages' in str(toolchain.bin_dir())
     assert 'site-packages' in str(toolchain.data_root())
-    run(sys.executable, '-m', 'atlas_mlir', 'doctor', *(['--capture'] if args.capture else []))
+    run(sys.executable, '-m', 'atlas_mlir', 'doctor', *(['--capture', '--build'] if args.capture else []))
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
         run(sys.executable, '-m', 'atlas_mlir', 'demo', '-o', root / 'demo')

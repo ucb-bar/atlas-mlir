@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -70,6 +71,36 @@ def run(command: list[str], step: str) -> str:
 def run_tool(name: str, *arguments: str | Path, step: str) -> str:
     """Run one of the repository's tools/ scripts with this interpreter."""
     return run([sys.executable, str(tool(name)), *map(str, arguments)], step)
+
+
+def check_snapshot_build() -> dict[str, str]:
+    """Check the host Rust tools and Merlin's locked dependencies offline."""
+    from merlin.semantic_compiler.snapshot import packaged_egg_bridge_path
+
+    versions = {}
+    for name, flag in (("cargo", "--version"), ("rustc", "-vV")):
+        try:
+            versions[name] = run([name, flag], f"{name} toolchain check").strip()
+        except (OSError, ToolFailure) as error:
+            raise ToolchainError(
+                f"{name} is required to build a Merlin snapshot. Install Cargo and rustc, "
+                f"or select an installed toolchain with 'rustup default stable'.\n{error}"
+            ) from error
+
+    # Merlin builds a host executable. Dependencies for other targets are
+    # unnecessary even when the lockfile also covers those platforms.
+    host = next((line.removeprefix("host: ") for line in versions["rustc"].splitlines()
+                 if line.startswith("host: ")), None)
+    if not host:
+        raise ToolchainError("rustc -vV did not report a host target for the Merlin bridge")
+    manifest = packaged_egg_bridge_path() / "Cargo.toml"
+    fetch = ["cargo", "fetch", "--locked", "--target", host, "--manifest-path", str(manifest)]
+    try:
+        run([*fetch, "--offline"], "Merlin Rust dependency check")
+    except ToolFailure as error:
+        raise ToolchainError(f"{error}\nTo prepare the locked crates, run:\n  {shlex.join(fetch)}") from error
+    return {"cargo": versions["cargo"], "rustc": versions["rustc"].splitlines()[0],
+            "target": host, "locked_dependencies": "available_offline"}
 
 
 def rtl_revision() -> str:

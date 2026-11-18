@@ -19,9 +19,15 @@ atlasc doctor --capture
 
 Merlin and model2MLIR come from exact Git revisions declared in `pyproject.toml`.
 Merlin uses a source archive at its Git SHA to avoid recursively cloning its LLVM
-submodule. Git is needed for model2MLIR and `setup-capture`. `atlasc build` needs Cargo to build Merlin's
-native snapshot, or an existing snapshot supplied with `--snapshot DIR`.
-There is no local LLVM requirement for an installed wheel.
+submodule. Git is needed for model2MLIR and `setup-capture`. There is no local
+LLVM requirement for an installed wheel.
+
+Before building a new native snapshot, install Cargo and rustc. If you use
+rustup, select a toolchain with `rustup default stable`. Run
+`atlasc doctor --capture --build` to check the Rust tools and Merlin's locked
+crate cache. On a fresh cache, run the `cargo fetch` command printed by doctor
+while online. Merlin then builds the bridge offline. If you supply an existing
+snapshot with `atlasc build --snapshot DIR`, the Rust build check can be skipped.
 
 For atlas-torchao exports, also run `atlasc setup-capture`. This fetches pinned
 exporter and reference sources into `~/.cache/atlas-mlir`. Its exporter modules

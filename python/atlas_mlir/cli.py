@@ -52,6 +52,8 @@ def _doctor(args):
                  "docs/selected-variant-inventory.json"):
         if not (toolchain.data_root() / file).is_file():
             raise toolchain.ToolchainError(f"missing target support file: {file}")
+    if args.build:
+        record["snapshot_build"] = toolchain.check_snapshot_build()
     print(json.dumps(record, indent=2, sort_keys=True))
     print("Atlas tools, support files, hashes and plugin identities checked.")
     return 0
@@ -99,7 +101,8 @@ def main(argv=None):
         return 0
     setup.set_defaults(run=setup_capture)
     dp = commands.add_parser("doctor", help="check tools, build record, dependency pins and unique plugins")
-    dp.add_argument("--capture", action="store_true")
+    dp.add_argument("--capture", action="store_true", help="also check the pinned model capture stack")
+    dp.add_argument("--build", action="store_true", help="also check Rust and the offline Merlin dependency cache")
     dp.set_defaults(run=_doctor)
     commands.add_parser("demo", help="historical standalone captured MLP tile demo")
     commands.add_parser("tile-demo", help="historical direct importer; not the Merlin application path")

@@ -46,12 +46,18 @@ jobs:
           git rev-parse HEAD > SOURCE_REVISION
           python -m pip install build
           python -m build
-      - name: Build and test compiler with the updated numerical model
+      - name: Install compiler test dependencies
         run: |
           "$MODEL_PYTHON" -m pip install dist/*.whl pytest tabulate
           "$MODEL_PYTHON" -m pip install torch==2.11.0+cpu --index-url https://download.pytorch.org/whl/cpu
           "$MODEL_PYTHON" -m pip install --no-deps --editable 'git+https://github.com/ucb-ee194-tapeout/npu_model@b97b2f5a97e432141c4ef8504bec396651d77a8f#egg=npu-model'
           "$MODEL_PYTHON" -m pip install 'm2m @ git+https://github.com/reed-nicolas/model2MLIR.git@ebb1c600e0d7f3205c801d8f00acb960015b32f2'
+      - name: Prepare Merlin's Rust compiler bridge
+        run: |
+          rustup default stable
+          "$MODEL_PYTHON" ci/prepare_merlin_bridge.py
+      - name: Build and test compiler with the updated numerical model
+        run: |
           cmake -S . -B build -G Ninja -DMLIR_DIR="$CONDA_PREFIX/lib/cmake/mlir" -DPython3_EXECUTABLE="$MODEL_PYTHON" -DATLAS_NPU_MODEL_ROOT="$GITHUB_WORKSPACE/out/package-model"
           cmake --build build --parallel 2
           PYTHONPATH="$GITHUB_WORKSPACE/out/package-merlin" ctest --test-dir build --output-on-failure --parallel 2 -E 'atlas-python-test_virtual_evaluator'
@@ -78,6 +84,10 @@ jobs:
           python -m pip install torch==2.11.0+cpu --index-url https://download.pytorch.org/whl/cpu
           python -m pip install 'm2m @ git+https://github.com/reed-nicolas/model2MLIR.git@ebb1c600e0d7f3205c801d8f00acb960015b32f2' ml_dtypes transformers==5.5.4
           atlasc setup-capture
+      - name: Prepare Merlin's Rust compiler bridge
+        run: |
+          rustup default stable
+          python ci/prepare_merlin_bridge.py
       - name: Compile and verify live floating and quantized models outside the checkout
         run: |
           cd "$RUNNER_TEMP"
