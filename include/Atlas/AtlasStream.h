@@ -64,6 +64,15 @@ unsigned atlasStreamDecodeCount();
 // Rejects illegal delay slots and DMA hazards using complete supplied rules.
 LogicalResult checkAtlasStream(
     const AtlasStream &stream, const timing::TimingProvider &provider);
+// Proves DMA ownership on every feasible CFG path using correlated singleton
+// register intervals and conservative widening after maxDisjuncts per block.
+// Unknown entry/load values cover all RV32 values. Explicit atlas.dram_contract
+// inputs can supply immutable DRAM words through completed DMA loads and LW;
+// such proofs retain named invocation assumptions. The provider rules are kept.
+// Only the built-in provider admits interval widening; others fail at the bound.
+LogicalResult checkAtlasDMACFG(
+    const AtlasStream &stream, const timing::TimingProvider &provider,
+    size_t maxDisjuncts = 65536);
 // Checks actual issue spacing, reservations and drained CFG boundaries without
 // consulting a scheduler graph or implicitly using any model timing policy.
 LogicalResult verifyAtlasTimedStream(
@@ -81,6 +90,9 @@ selectAtlasTimingProvider(ModuleOp module, llvm::StringRef requested = {});
 // timing metadata select the named model for compatibility.
 LogicalResult verifyAtlasTiming(const AtlasVerificationContext &ctx);
 LogicalResult verifyAtlasTiming(ModuleOp module);
+// Publish timing metadata only after successful timing verification with this
+// provider. This helper records assumptions; it performs no verification.
+void recordAtlasVerifiedTiming(ModuleOp module, llvm::StringRef provider);
 // Validates explicit timing metadata. Legacy streams without a timing state
 // keep their existing scope; requireTimed rejects explicitly untimed streams.
 LogicalResult verifyAtlasTimingState(ModuleOp module, bool requireTimed = false);
@@ -108,7 +120,7 @@ template <typename S> struct AtlasForwardEntries {
 // whether a reached entry changed, and `successors` may replace the edges.
 template <typename S, typename Transfer, typename Join, typename Successors>
 FailureOr<AtlasForwardEntries<S>>
-atlasForwardEntries(const AtlasStream &stream, const S &init, Transfer transfer, Join join, Successors successors) {
+atlasForwardEntries(const AtlasStream &stream, const S &init, Transfer transfer, Join join, Successors successors, AtlasWorkBudget *budget = nullptr) {
   AtlasForwardEntries<S> result{std::vector<S>(stream.starts.size(), init), std::vector<bool>(stream.starts.size(), false)};
   if (stream.starts.empty())
     return result;
@@ -117,6 +129,8 @@ atlasForwardEntries(const AtlasStream &stream, const S &init, Transfer transfer,
   while (!work.empty()) {
     size_t block = work.front();
     work.pop_front();
+    if (budget && failed(budget->charge(1 + stream.blockEnd(block) - stream.starts[block])))
+      return failure();
     S state = result.entries[block];
     if (failed(transfer(block, state)))
       return failure();

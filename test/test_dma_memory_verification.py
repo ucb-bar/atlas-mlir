@@ -14,7 +14,7 @@ from verification_support import DELAY, TRANSFER, assert_boundaries, constant, d
 
 CONFLICT = "DMA memory conflict"
 UNKNOWN = "cannot prove DMA memory disjointness"
-# Operands no contract can describe (unknown values, non-tile lengths) still exercise the memory check, which runs
+# Unknown operands and invalid lengths still exercise the memory check, which runs
 # before the DMA contract check that then rejects them.
 UNCONTRACTED = "DMA contract"
 
@@ -126,9 +126,24 @@ class DMAMemoryVerificationTest(unittest.TestCase):
         # this checker cannot use it to prove disjointness of writes.
         self.checked(program([*prefix(), *constant(6, 1), ("dma_config", "channel = 0 : i32, base_reg = 6 : i32"),
                               *dram, launch("store"), *second]), UNKNOWN + " in DRAM")
-        for size, diagnostic in ((32, UNCONTRACTED), (64, UNKNOWN + " in DRAM")):
+        for size, diagnostic in ((32, "tile contract"), (64, UNKNOWN + " in DRAM")):
             with self.subTest(dram_end_crosses_32_bits=size == 64):
                 self.checked(program([*prefix(size=size, shared=True), *constant(7, 0xFFFFFFE0), *dram, launch("store"), *second]), diagnostic)
+
+    def test_vmem_bus_window_keeps_program_vmem_in_banks_0_to_2(self) -> None:
+        # VMEM banks 3-5 are a DMA window at 0x200C0000; a program using it must prove its own VMEM accesses below them.
+        high = "program VMEM access must be proven below 786432 bytes"
+        def using(dram: int, work=(), *, base: int = 0x2000) -> str:
+            return program([*constant(7, dram), *constant(4, base), *constant(9, 1024), launch(), *work, wait(),
+                            ("trap", 'kind = "ecall"')])
+        for dram, work, base, diagnostic in ((0x200C0000, (), 0x2000, None), (0x200C0000, (), 0x2FF00, None),
+                                             (0x200C0000, (), 0x30000, high), (0x2017FC00, (), 0x2000, None),
+                                             (0x200C0000, at(0x30000), 0x2000, high), (0x200C0000, at(0x2100), 0x2000, None),
+                                             (0x200BFC00, (), 0x2000, "DMA contract record has invalid v1 geometry"),
+                                             # Without the window, banks 3-5 stay usable.
+                                             (0x90000000, (), 0x30000, None), (0x90000000, at(0x30000), 0x2000, None)):
+            with self.subTest(dram=hex(dram), base=hex(base), vector=bool(work)):
+                self.checked(using(dram, work, base=base), diagnostic)
 
 
 if __name__ == "__main__":

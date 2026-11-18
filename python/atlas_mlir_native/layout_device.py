@@ -1,0 +1,822 @@
+"""Exact affine layouts expressed as typed virtual DMA, slot and XLU operations.
+
+Only raw bytes cross the host boundary. The common compiler allocates and times
+these operations and verifies its six ordinary source contracts.
+"""
+from __future__ import annotations
+
+from .binding import io_memory_base as selected_io_base
+from dataclasses import dataclass, replace
+from hashlib import sha256
+from math import prod, gcd
+from pathlib import Path
+import json
+import os
+
+from merlin.compile.layout_c import _element_bytes, _flat_map
+from merlin.semantic_compiler.model import IndexMap, pointwise_identity_maps
+from merlin.semantic_compiler.target_binding import NativeCompilationError, verify_native_publication
+from .memory_windows import dma_span_in_window
+from .binding import DRAM_BASE, TARGET_IDENTITY, TILE_BYTES, RTL_REVISION, NATIVE_CHECKS, _native_pipeline, _scheduled_virtual_pipeline, _run, dram_slots
+
+
+def _aligned(n):
+    return (n + 31) // 32 * 32
+
+
+def _strides(shape, width=1):
+    return tuple(prod(shape[i + 1:]) * width for i in range(len(shape)))
+
+
+def _flatten(mapping, shape, width):
+    strides = _strides(shape, width)
+    return (sum(a * b for a, b in zip(mapping.offsets, strides, strict=True)),
+            tuple(sum(row[j] * stride for row, stride in zip(mapping.coefficients, strides, strict=True))
+                  for j in range(mapping.loop_rank)))
+
+
+@dataclass(frozen=True)
+class LayoutPlan:
+    source: object
+    operands: tuple
+    output: object
+    width: int
+    segments: tuple
+    io_memory_base: int = DRAM_BASE
+    resident_bindings: tuple = ()
+
+    @property
+    def input_bytes(self):
+        return tuple(prod(node.type.shape) * self.width for node in self.operands)
+
+    @property
+    def input_addresses(self):
+        sizes = self.input_bytes
+        resident = {entry['node_id']: entry['address'] for entry in self.resident_bindings}
+        return tuple(resident.get(node.id, self.io_memory_base + sum(_aligned(n) for n in sizes[:i]))
+                     for i, node in enumerate(self.operands))
+
+    @property
+    def output_bytes(self):
+        return prod(self.output.type.shape) * self.width
+
+    @property
+    def output_address(self):
+        return self.io_memory_base + sum(_aligned(n) for n in self.input_bytes)
+
+    @property
+    def physical_bytes(self):
+        return _aligned(self.output_bytes)
+
+    @property
+    def workspace_bytes(self):
+        return self.output_address - self.io_memory_base + self.physical_bytes
+
+    def record(self):
+        return dict(schema="atlas.layout_device.v1", source_request_digest=self.source.digest(),
+                    **(dict(resident_bindings=list(self.resident_bindings)) if self.resident_bindings else {}),
+                    input_addresses=list(self.input_addresses), input_payload_bytes=[_aligned(n) for n in self.input_bytes],
+                    input_logical_bytes=list(self.input_bytes), output_addresses=[self.output_address],
+                    output_bytes=self.physical_bytes, logical_output_bytes=self.output_bytes,
+                    workspace_bytes=self.workspace_bytes, segments=list(self.segments),
+                    launches_per_invocation=1, runtime_arithmetic="none; raw-byte transport only",
+                    weight_conversion="none", padding="private input tail zero-filled; output tail private")
+
+
+def _segment(index, shape, source_strides, output_strides, source_offset, output_offset, width):
+    # Collapse the common dense suffix into aligned DMA runs. The remainder is
+    # a small counted affine iteration space, independent of tensor names.
+    shape, ss, ds = list(shape), list(source_strides), list(output_strides)
+    block = width
+    while shape and ss[-1] == ds[-1] == block:
+        block *= shape.pop()
+        ss.pop()
+        ds.pop()
+    if block % 32 == 0 and source_offset % 32 == output_offset % 32 == 0 and all(s % 32 == 0 for s in (*ss, *ds)):
+        chunk = gcd(block, 4096)
+        if chunk < block:
+            shape.append(block // chunk)
+            ss.append(chunk)
+            ds.append(chunk)
+        mode, block = "dma", chunk
+    else:
+        # Scalar fallback traverses bytes in dense output order, with one
+        # zero-initialized 32-byte output window and aligned source windows.
+        # It is needed for small ragged inner transposes such as 64 by 5.
+        mode = "scalar"
+        shape, ss, ds = list(shape), list(ss), list(ds)
+        if block != 1:
+            shape.append(block)
+            ss.append(1)
+            ds.append(1)
+        block = 1
+    return dict(input=index, mode=mode, counts=shape, source_strides=ss, output_strides=ds,
+                source_offset=source_offset, output_offset=output_offset, block_bytes=block,
+                source_row_bytes=0, output_row_bytes=0)
+
+
+def _ragged_transpose_words(rows, columns=32):
+    """Pack the requested output rows from cached, padded 32x32 XLU tiles.
+
+    Each part names a cached tile and an aligned little-endian source word,
+    followed by its signed bit shift and destination mask. No padding byte
+    contributes to a logical output word, including words crossing rows.
+    """
+    for destination in range(0, columns * rows, 4):
+        parts = {}
+        for byte in range(4):
+            column, row = divmod(destination + byte, rows)
+            tile, lane = divmod(row, 32)
+            offset = column * 32 + lane
+            key = (tile, offset // 4 * 4, (byte - offset % 4) * 8)
+            parts[key] = parts.get(key, 0) | (255 << (byte * 8))
+        yield destination, tuple((*key, mask) for key, mask in parts.items())
+
+
+def _ragged_transpose_tile_words(rows, tile_rows):
+    """Splice four columns of one transposed tile into a dense slab."""
+    for column in range(4):
+        first, end = column * rows, column * rows + tile_rows
+        for destination in range(first // 4 * 4, (end + 3) // 4 * 4, 4):
+            parts, written = {}, 0
+            for byte in range(4):
+                row = destination + byte - first
+                if not 0 <= row < tile_rows:
+                    continue
+                offset = column * 32 + row
+                key = (offset // 4 * 4, (byte - offset % 4) * 8)
+                mask = 255 << (byte * 8)
+                parts[key] = parts.get(key, 0) | mask
+                written |= mask
+            yield destination, tuple((*key, mask) for key, mask in parts.items()), written
+
+
+def prepare_source(source, *, io_memory_base=None):
+    """Plan byte transport in an explicitly selected device I/O window."""
+    from .options import current_codegen_options
+    io_memory_base = selected_io_base() if io_memory_base is None else io_memory_base
+    if (type(io_memory_base) is not int or io_memory_base < 0 or io_memory_base % 32
+            or io_memory_base + dram_slots() * TILE_BYTES > 1 << 32):
+        raise ValueError("device I/O window must be 32-byte aligned within the 32-bit buffer ABI")
+    from .binding import validate_explicit_io_base
+    validate_explicit_io_base(io_memory_base)
+    if (source.target_identity != TARGET_IDENTITY or source.lowering_policy != "diagnostic"
+            or source.physical_extents or source.boundary_layouts or source.output_layouts
+            or source.output_storages != ("external",)):
+        raise ValueError("device layout needs selected target and dense external output")
+    computations = [node for node in source.nodes if node.effect == "pure"]
+    if len(computations) != 1:
+        raise ValueError("device layout needs one pure source operation")
+    output = computations[0]
+    if source.outputs != (output.id,) or output.op not in {"reshape", "copy", "gather", "transpose", "concat"}:
+        raise ValueError("unsupported device layout operation")
+    operands = tuple(source.node(key) for key in output.inputs)
+    if (not operands or len({node.id for node in operands}) != len(operands)
+            or {node.id for node in source.nodes} != {output.id, *(node.id for node in operands)}
+            or any(node.effect not in {"input", "constant"} or node.inputs or node.index_maps or node.attrs
+                   or node.op != node.effect
+                   or (node.type.dtype, node.type.numerical_policy) != (output.type.dtype, output.type.numerical_policy)
+                   for node in operands)):
+        raise ValueError("device layout needs complete dense operands with unchanged element types")
+    if dict(source.input_storages) != {node.id: "external" for node in operands if node.effect == "input"}:
+        raise ValueError("device layout input storage differs")
+    width = _element_bytes(output.type.dtype)
+    if width not in (1, 2, 4, 8) or any(not 0 < prod(n.type.shape) * width < 1 << 28 for n in (*operands, output)):
+        raise ValueError("device layout extent or element width exceeds selected address domain")
+    constants = {b.node_id: b for b in source.constants}
+    if set(constants) != {node.id for node in operands if node.effect == "constant"}:
+        raise ValueError("device layout constant bindings differ")
+    for node in operands:
+        if node.effect == "constant":
+            constants[node.id].validate_type(node.type)
+    shape = output.type.shape
+    identity = pointwise_identity_maps(len(shape), 1)[0]
+    segments = []
+    if output.op in {"reshape", "copy"}:
+        if (len(operands) != 1 or output.attrs or output.index_maps
+                or prod(operands[0].type.shape) != prod(shape)):
+            raise ValueError("device reshape/copy must preserve dense element order and count")
+        segments.append(_segment(0, (prod(shape),), (width,), (width,), 0, 0, width))
+    elif output.op in {"gather", "transpose"}:
+        if len(operands) != 1 or output.attrs or len(output.index_maps) != 2 or output.index_maps[-1] != identity:
+            raise ValueError("device gather needs one affine source map and identity output")
+        mapping = output.index_maps[0]
+        _flat_map(mapping, shape, operands[0].type.shape)
+        if output.op == "transpose" and (len(mapping.coefficients) != len(shape)
+                or mapping.offsets != (0,) * len(shape)
+                or any(set(row) - {0, 1} or sum(row) != 1 for row in mapping.coefficients)
+                or len({row.index(1) for row in mapping.coefficients}) != len(shape)
+                or tuple(shape[row.index(1)] for row in mapping.coefficients) != operands[0].type.shape):
+            raise ValueError("device transpose needs a complete dimension permutation")
+        offset, strides = _flatten(mapping, operands[0].type.shape, width)
+        if (output.op == "transpose" and width == 1 and len(shape) >= 2
+                and shape[-1] % 32 == shape[-2] % 32 == 0
+                and mapping.coefficients == tuple(tuple(int(j == (i if i < len(shape)-2 else 2*len(shape)-3-i))
+                                                     for j in range(len(shape))) for i in range(len(shape)))):
+            counts = (*shape[:-2], shape[-2] // 32, shape[-1] // 32)
+            ss = (*strides[:-2], strides[-2] * 32, strides[-1] * 32)
+            ds = (*_strides(shape)[:-2], shape[-1] * 32, 32)
+            segments.append(dict(input=0, mode="xlu", counts=list(counts), source_strides=list(ss),
+                                 output_strides=list(ds), source_offset=0, output_offset=0, block_bytes=1024,
+                                 source_row_bytes=operands[0].type.shape[-1], output_row_bytes=shape[-1]))
+        elif (current_codegen_options().device_kv_quantizer
+                and output.op == "transpose" and width == 1 and len(shape) >= 2
+                and shape[-2] % 32 == 0
+                and mapping.coefficients == tuple(tuple(int(j == (i if i < len(shape)-2 else 2*len(shape)-3-i))
+                                                     for j in range(len(shape))) for i in range(len(shape)))):
+            # Reject impossible images before constructing their source. Every
+            # assembled row needs eight word loads and stores; the retained
+            # four-column pack needs at least one load and store per word.
+            # A dense 32-byte source row bypasses assembly for complete tiles.
+            # These are necessary bounds only: admission still requires the
+            # completed image and dynamic instruction proofs below.
+            from .options import current_codegen_options
+            from .limits import functional_instruction_limit
+            rows, columns = shape[-1], shape[-2]
+            assembled_rows = rows % 32 if columns == 32 else rows
+            assembly_words = 16 * assembled_rows
+            retained_rows = min(rows, 32) + (rows % 32 if rows > 32 else 0)
+            retained_assembly = (rows % 32) if columns == 32 else retained_rows
+            image_words = 16 * retained_assembly + 2 * retained_rows + 8 + 16
+            image_bytes = current_codegen_options().program_size_limit_bytes
+            word_limit = 32768 if image_bytes is None else image_bytes // 4
+            slabs = prod(shape[:-2]) * (columns // 32)
+            work = 8 * rows + slabs * (assembly_words + 32 * rows)
+            if image_words > word_limit or work > functional_instruction_limit():
+                raise ValueError("ragged XLU layout exceeds selected image or instruction budget")
+            # Indexed scalar accesses retain their constant byte offset in a
+            # signed 12-bit immediate. The four-column template reaches the
+            # last word of column three in its complete or partial tile.
+            max_offset = (3 * rows + min(rows, 32) - 1) // 4 * 4
+            # The native spill bank has 2^16 words, after eight BF16 DMA
+            # staging tiles. Reserve the three FP8 transport slots as well.
+            slab_words = (8 * rows + 255) // 256 * 256
+            spill_words = (1 << 16) - 8 * (TILE_BYTES // 4)
+            if max_offset > (1 << (12 - 1)) - 1 or slab_words + 3 * 256 > spill_words:
+                raise ValueError("ragged XLU layout exceeds indexed slot encoding or scratch extent")
+            # Whole prefixes remain inside this device image. Each iteration
+            # owns 32 dense output rows, hence both DMA pointer strides align.
+            segments.append(dict(input=0, mode="ragged_xlu", counts=[*shape[:-2], shape[-2] // 32],
+                source_strides=[*strides[:-2], 32],
+                output_strides=[*_strides(shape)[:-2], shape[-1] * 32],
+                source_offset=0, output_offset=0, block_bytes=shape[-1] * 32,
+                source_row_bytes=operands[0].type.shape[-1], output_row_bytes=shape[-1]))
+        else:
+            segments.append(_segment(0, shape, strides, _strides(shape, width), offset, 0, width))
+    else:
+        axis = dict(output.attrs).get("axis")
+        if (type(axis) is not int or not 0 <= axis < len(shape) or output.attrs != (("axis", axis),)
+                or output.index_maps or len(operands) < 2
+                or any(len(node.type.shape) != len(shape) or any(n != shape[i] for i, n in enumerate(node.type.shape) if i != axis) for node in operands)
+                or sum(node.type.shape[axis] for node in operands) != shape[axis]):
+            raise ValueError("device concat axis or dimensions differ")
+        start = 0
+        for index, node in enumerate(operands):
+            segments.append(_segment(index, node.type.shape, _strides(node.type.shape, width), _strides(shape, width), 0,
+                                     start * _strides(shape, width)[axis], width))
+            start += node.type.shape[axis]
+    if any(s["mode"] == "scalar" for s in segments):
+        if len(segments) != 1 or segments[0]["output_offset"] or tuple(segments[0]["output_strides"]) != _strides(tuple(segments[0]["counts"])):
+            raise ValueError("ragged segmented scalar scatter is outside selected layout contract")
+        if prod(segments[0]["counts"]) > 16384:
+            raise ValueError("ragged scalar layout exceeds default proof work budget; aligned DMA/XLU needed")
+    plan = LayoutPlan(source, operands, output, width, tuple(segments), io_memory_base)
+    if plan.workspace_bytes > dram_slots() * TILE_BYTES or plan.io_memory_base + plan.workspace_bytes > 1 << 32:
+        raise ValueError("device layout buffers exceed selected I/O window")
+    if not dma_span_in_window(plan.io_memory_base, plan.workspace_bytes):
+        raise ValueError("device layout buffers leave selected DMA memory windows")
+    from .quantized_resident import validated_bindings
+    bindings = validated_bindings(source, _resident_inventory(plan), staging_base=io_memory_base)
+    return replace(plan, resident_bindings=tuple(bindings)) if bindings else plan
+
+
+def _resident_inventory(plan):
+    return [dict(node_id=node.id, bytes=_aligned(size), alignment=32, kind="dense",
+                 layout=dict(schema="atlas.resident_dense_bytes.v1", source_shape=list(node.type.shape),
+                             source_dtype=node.type.dtype, element_bytes=plan.width,
+                             logical_bytes=size, padding="zero_to_dma_beat"))
+            for node, size in zip(plan.operands, plan.input_bytes, strict=True)]
+
+
+def inventory_resident_inputs(source):
+    """Inventory unchanged dense operands for exact affine device layouts."""
+    plan = prepare_source(source)
+    return _resident_inventory(plan)
+
+
+def pack_resident_input(source, node_id, dense_bytes):
+    """Copy exact source bits and initialize private DMA tail bytes once."""
+    entry = next((entry for entry in inventory_resident_inputs(source) if entry["node_id"] == node_id), None)
+    if entry is None:
+        raise ValueError("input has no resident dense layout: " + str(node_id))
+    raw = bytes(dense_bytes)
+    if len(raw) != entry["layout"]["logical_bytes"]:
+        raise ValueError("resident input byte length differs from its source tensor")
+    return raw + bytes(entry["bytes"] - len(raw))
+
+
+def virtual_program(plan, *, size_limit=None):
+    """Build byte transport from typed virtual DMA, slots, XLU and counted CFG.
+
+    Allocation, instruction timing, DMA waits and all six source contracts are
+    produced by the common compiler. No physical location appears in this IR.
+    """
+    import itertools
+
+    state, tile, spill = "!atlas.virtual_state", "!atlas.virtual_fp8", "!atlas.virtual_spill"
+    signed = lambda n: n if n < 2**31 else n - 2**32
+    budget = f"atlas.program_size_limit_bytes = {size_limit} : i64, " if size_limit is not None else ""
+    lines = ["module {", f" func.func @layout() -> {state} attributes {{{budget}atlas.input_dram_base = {plan.io_memory_base} : i64, atlas.output_dram_base = {plan.output_address} : i64, atlas.output_dram_bytes = {plan.physical_bytes} : i64}} {{",
+             f'  %s0 = "atlas.virtual_start"() : () -> {state}']
+    current = "%s0"
+    serial = 0
+
+    def fresh(prefix):
+        nonlocal serial
+        serial += 1
+        return f"%{prefix}{serial}"
+
+    def constant(n):
+        v = fresh("c")
+        lines.append(f"  {v} = arith.constant {signed(n)} : i32")
+        return v
+
+    def add(base, n):
+        if not n:
+            return base
+        rhs, value = constant(n), fresh("p")
+        lines.append(f"  {value} = arith.addi {base}, {rhs} : i32")
+        return value
+
+    def slot(kind="fp8", words=256):
+        value = fresh("slot")
+        lines.append(f'  {value} = "atlas.virtual_slot"() {{kind = "{kind}", words = {words} : i32, slot_word = -1 : i32, purpose = "scratch"}} : () -> {spill}')
+        return value
+
+    # Slots are declared in the entry block and receive addresses from spilling.
+    source_slot, output_slot, transpose_slot = slot(), slot(), slot()
+    ragged_rows = max((segment["output_row_bytes"] for segment in plan.segments
+                       if segment["mode"] == "ragged_xlu"), default=0)
+    slab_words = (8 * ragged_rows + 255) // 256 * 256
+    slab_slot = slot("raw", slab_words) if ragged_rows else None
+
+    def load(address, size=32):
+        nonlocal current
+        n, token, value = constant(size), fresh("s"), fresh("tile")
+        lines.append(f'  {token}, {value} = "atlas.virtual_dma_load_fp8"({current}, {address}, {n}) : ({state}, i32, i32) -> ({state}, {tile})')
+        current = token
+        return value
+
+    def store(value, address, size=32):
+        nonlocal current
+        n, token = constant(size), fresh("s")
+        lines.append(f'  {token} = "atlas.virtual_dma_store_fp8"({current}, {value}, {address}, {n}) : ({state}, {tile}, i32, i32) -> {state}')
+        current = token
+
+    def save(value, memory):
+        nonlocal current
+        token = fresh("s")
+        lines.append(f'  {token} = "atlas.virtual_save"({current}, {memory}, {value}) : ({state}, {spill}, {tile}) -> {state}')
+        current = token
+
+    def restore(memory):
+        nonlocal current
+        token, value = fresh("s"), fresh("tile")
+        lines.append(f'  {token}, {value} = "atlas.virtual_restore"({current}, {memory}) : ({state}, {spill}) -> ({state}, {tile})')
+        current = token
+        return value
+
+    def scalar_copy(source_memory, source_offset, target_memory, target_offset, width=1,
+                    source_index=None, target_index=None):
+        nonlocal current
+        token, value = fresh("s"), fresh("byte")
+        kind = {1: "lbu", 2: "lhu", 4: "lw"}[width]
+        index, index_type = (f", {source_index}", ", i32") if source_index is not None else ("", "")
+        lines.append(f'  {token}, {value} = "atlas.virtual_slot_load"({current}, {source_memory}{index}) {{kind = "{kind}", byte_offset = {source_offset} : i32}} : ({state}, {spill}{index_type}) -> ({state}, i32)')
+        current = token
+        token = fresh("s")
+        kind = {1: "sb", 2: "sh", 4: "sw"}[width]
+        index, index_type = (f", {target_index}", ", i32") if target_index is not None else ("", "")
+        lines.append(f'  {token} = "atlas.virtual_slot_store"({current}, {target_memory}, {value}{index}) {{kind = "{kind}", byte_offset = {target_offset} : i32}} : ({state}, {spill}, i32{index_type}) -> {state}')
+        current = token
+
+    def scalar_word(memory, offset, index=None):
+        nonlocal current
+        token, value = fresh("s"), fresh("word")
+        operand, index_type = (f", {index}", ", i32") if index is not None else ("", "")
+        lines.append(f'  {token}, {value} = "atlas.virtual_slot_load"({current}, {memory}{operand}) {{kind = "lw", byte_offset = {offset} : i32}} : ({state}, {spill}{index_type}) -> ({state}, i32)')
+        current = token
+        return value
+
+    def put_word(value, offset, memory=None, index=None):
+        nonlocal current
+        token = fresh("s")
+        memory = output_slot if memory is None else memory
+        operand, index_type = (f", {index}", ", i32") if index is not None else ("", "")
+        lines.append(f'  {token} = "atlas.virtual_slot_store"({current}, {memory}, {value}{operand}) {{kind = "sw", byte_offset = {offset} : i32}} : ({state}, {spill}, i32{index_type}) -> {state}')
+        current = token
+
+    def binary(kind, left, right):
+        result = fresh("word")
+        lines.append(f"  {result} = arith.{kind} {left}, {right} : i32")
+        return result
+
+    def xlu_tile(sp, source_row_bytes, rows=32):
+        # Partial source rows never read outside the complete source matrix.
+        # The existing strided assembly serves both aligned and ragged paths.
+        if rows == 32 and source_row_bytes == 32:
+            value = load(sp, 1024)
+            save(value, output_slot)
+        else:
+            rows_per_window = max(1, (1024 - 32) // source_row_bytes + 1)
+            for first_row in range(0, rows, rows_per_window):
+                count = min(rows_per_window, rows - first_row)
+                size = (count - 1) * source_row_bytes + 32
+                loaded = load(add(sp, first_row * source_row_bytes), size)
+                save(loaded, source_slot)
+                if first_row == 0:
+                    save(loaded, output_slot)
+                    save(loaded, transpose_slot)
+                for row in range(first_row, first_row + count):
+                    for word in range(8):
+                        scalar_copy(source_slot, (row - first_row) * source_row_bytes + word * 4,
+                                    transpose_slot, row * 32 + word * 4, 4)
+            value = restore(transpose_slot)
+        transposed = fresh("tile")
+        lines.append(f'  {transposed} = "atlas.virtual_xlu_transpose"({value}) : ({tile}) -> {tile}')
+        return transposed
+
+    def ragged_transport(sp, dp, segment):
+        rows = segment["output_row_bytes"]
+
+        def tile_transport(source, destination_index, tile_rows):
+            value = xlu_tile(source, segment["source_row_bytes"], tile_rows)
+            save(value, transpose_slot)
+
+            def pack_rows(source_index, target_index):
+                cached_words = {}
+                for destination, parts, written in _ragged_transpose_tile_words(rows, tile_rows):
+                    packed = None
+                    for offset, shift, mask in parts:
+                        if offset not in cached_words:
+                            cached_words[offset] = scalar_word(transpose_slot, offset, source_index)
+                        word = cached_words[offset]
+                        if shift:
+                            word = binary("shli" if shift > 0 else "shrui", word, constant(abs(shift)))
+                        shifted_mask = ((0xffffffff << shift) & 0xffffffff) if shift >= 0 else (0xffffffff >> -shift)
+                        if shifted_mask != mask:
+                            word = binary("andi", word, constant(mask))
+                        packed = word if packed is None else binary("ori", packed, word)
+                    # With at least three rows remaining, a full tile's
+                    # trailing word cannot reach the next column. Its upper
+                    # bytes are supplied by a later tile of the same column.
+                    preserve = written != 0xffffffff and (
+                        tile_rows != 32 or rows % 32 < 3 or not written & 1)
+                    if preserve:
+                        previous = scalar_word(slab_slot, destination, target_index)
+                        previous = binary("andi", previous, constant(0xffffffff ^ written))
+                        packed = binary("ori", previous, packed)
+                    put_word(packed, destination, slab_slot, target_index)
+            # Four columns occupy R words; their tile rows advance by 32 words
+            # in the transposed cache. Tile iterations advance eight slab words.
+            repeat(8, constant(0), destination_index, 32, rows, pack_rows)
+
+        full_tiles, tail = divmod(rows, 32)
+        if full_tiles:
+            repeat(full_tiles, sp, constant(0), 32 * segment["source_row_bytes"], 8,
+                   lambda source, destination: tile_transport(source, destination, 32))
+        if tail:
+            tile_transport(add(sp, full_tiles * 32 * segment["source_row_bytes"]),
+                           constant(full_tiles * 8), tail)
+
+        def publish(source_index, destination):
+            for word in range(8):
+                scalar_copy(slab_slot, word * 4, output_slot, word * 4, 4,
+                            source_index=source_index)
+            store(restore(output_slot), destination)
+        repeat(rows, constant(0), dp, 8, 32, publish)
+
+    def repeat(count, source, destination, source_stride, destination_stride, body):
+        nonlocal current
+        if count == 1:
+            body(source, destination)
+            return
+        label = fresh("loop")[1:]
+        zero = constant(0)
+        lines.append(f"  cf.br ^{label}({current}, {zero}, {source}, {destination} : {state}, i32, i32, i32)")
+        token, index, sp, dp = fresh("s"), fresh("i"), fresh("p"), fresh("p")
+        lines.append(f" ^{label}({token}: {state}, {index}: i32, {sp}: i32, {dp}: i32):")
+        limit, more = constant(count), fresh("more")
+        lines.append(f"  {more} = arith.cmpi ult, {index}, {limit} : i32")
+        lines.append(f"  cf.cond_br {more}, ^{label}_body({token} : {state}), ^{label}_done({token} : {state})")
+        before = fresh("s")
+        lines.append(f" ^{label}_body({before}: {state}):")
+        current = before
+        # A constant pointer is retained directly when its stride is zero.
+        body(sp if source_stride else source, dp if destination_stride else destination)
+        next_index = add(index, 1)
+        next_source = add(sp, source_stride)
+        next_destination = add(dp, destination_stride)
+        lines.append(f"  cf.br ^{label}({current}, {next_index}, {next_source}, {next_destination} : {state}, i32, i32, i32)")
+        current = fresh("s")
+        lines.append(f" ^{label}_done({current}: {state}):")
+
+    if slab_slot is not None:
+        # Indexed writes preserve an initialized footprint under the buffer
+        # contract. Establish it once before any counted prefix traversal.
+        zero = constant(0)
+        def initialize(index, unused):
+            for word in range(8):
+                put_word(zero, word * 4, slab_slot, index if ragged_rows > 1 else None)
+        repeat(ragged_rows, zero, zero, 8, 0, initialize)
+
+    for segment in plan.segments:
+        source_base = plan.input_addresses[segment["input"]] + segment["source_offset"]
+        destination_base = plan.output_address + segment["output_offset"]
+        if segment["mode"] == "scalar":
+            # A dense output suffix repeats in a counted loop whenever both
+            # pointers advance by DMA beats. Ragged rows may be grouped to
+            # reach that alignment without interpreting any stored bits.
+            counts = list(segment["counts"])
+            ss, ds = segment["source_strides"], segment["output_strides"]
+            repeat_count, source_step, output_step = 1, 0, 0
+            for dimension, count in enumerate(counts):
+                if count == 1:
+                    continue
+                if ss[dimension] >= 0:
+                    group = 32 // gcd(ss[dimension], 32)
+                    group = group * (32 // gcd(ds[dimension], 32)) // gcd(group, 32 // gcd(ds[dimension], 32))
+                    if count % group == 0:
+                        counts[dimension] = group
+                        repeat_count = count // group
+                        source_step, output_step = ss[dimension] * group, ds[dimension] * group
+                break
+            mapping = {}
+            for coordinate in itertools.product(*(range(n) for n in counts)):
+                source = source_base % 32 + sum(i * stride for i, stride in zip(coordinate, ss))
+                destination = sum(i * stride for i, stride in zip(coordinate, ds))
+                mapping[destination] = source
+            # Negative affine maps remain compile-time addresses; the counted
+            # address proof intentionally accepts only forward nonwrapping runs.
+            source_origin = source_base // 32 * 32
+            minimum = min(mapping.values()) // 32 * 32
+            source_origin += minimum
+            mapping = {destination: source - minimum for destination, source in mapping.items()}
+
+            def scalar_transport(sp, dp):
+                for output_start in range(0, len(mapping), 32):
+                    members = [(i, mapping[i]) for i in range(output_start, min(output_start + 32, len(mapping)))]
+                    windows = sorted({source // 32 * 32 for _, source in members})
+                    if all(source == windows[0] + i - output_start for i, source in members):
+                        store(load(add(sp, windows[0])), add(dp, output_start))
+                        continue
+                    for window_index, window in enumerate(windows):
+                        value = load(add(sp, window))
+                        save(value, source_slot)
+                        if window_index == 0:
+                            save(value, output_slot)
+                        for i, source in members:
+                            if source // 32 * 32 == window:
+                                scalar_copy(source_slot, source - window, output_slot, i - output_start)
+                    store(restore(output_slot), add(dp, output_start))
+
+            repeat(repeat_count, constant(source_origin), constant(destination_base),
+                   source_step, output_step, scalar_transport)
+            continue
+
+        def transport(sp, dp):
+            if segment["mode"] == "dma":
+                for start in range(0, segment["block_bytes"], 1024):
+                    size = min(1024, segment["block_bytes"] - start)
+                    store(load(add(sp, start), size), add(dp, start), size)
+                return
+            if segment["mode"] == "ragged_xlu":
+                ragged_transport(sp, dp, segment)
+                return
+            # Assemble and transpose the existing strided 32x32 raw tile.
+            transposed = xlu_tile(sp, segment["source_row_bytes"])
+            if segment["output_row_bytes"] == 32:
+                store(transposed, dp, 1024)
+            else:
+                save(transposed, transpose_slot)
+                for row in range(32):
+                    for word in range(8):
+                        scalar_copy(transpose_slot, row * 32 + word * 4, output_slot, word * 4, 4)
+                    store(restore(output_slot), add(dp, row * segment["output_row_bytes"]))
+
+        counts = segment["counts"]
+        ss, ds = segment["source_strides"], segment["output_strides"]
+        def affine_runs(dimension, sp, dp):
+            if dimension == len(counts):
+                transport(sp, dp)
+                return
+            if ss[dimension] >= 0 and ds[dimension] >= 0:
+                repeat(counts[dimension], sp, dp, ss[dimension], ds[dimension],
+                       lambda source, destination: affine_runs(dimension + 1, source, destination))
+            else:
+                for index in range(counts[dimension]):
+                    affine_runs(dimension + 1, add(sp, index * ss[dimension]), add(dp, index * ds[dimension]))
+        affine_runs(0, constant(source_base), constant(destination_base))
+    lines.extend((f"  return {current} : {state}", " }", "}", ""))
+    return "\n".join(lines)
+
+def prove_plan(plan, *, target_source=None, limits=None):
+    """Lower and prove one complete image without publishing any artifacts."""
+    if target_source is None:
+        target_source = Path(__file__).resolve().parents[2]
+    from .options import current_codegen_options
+    virtual = virtual_program(plan, size_limit=current_codegen_options().program_size_limit_bytes)
+    pipeline = _native_pipeline()
+    tools = Path(os.environ.get("ATLAS_OOT_BIN_DIR", Path(target_source) / "build/bin"))
+    try:
+        machine = _run([str(tools / "atlas-opt"), *_scheduled_virtual_pipeline(pipeline), "-"], input_text=virtual)
+    except NativeCompilationError as error:
+        import re
+        if error.status == "compile_error" and re.search(
+                r"\blowered program exceeds the [1-9][0-9]*-word policy limit\b", error.reason):
+            raise NativeCompilationError("resource_limit", error.reason) from error
+        raise
+    # The mandatory pipeline ends in the private finalizer's full
+    # verifyAtlasArtifact(llvmBlock=true), including all six contracts, strict
+    # timing/CFG DMA, machine/LLVM checks, and the original timing metadata.
+    # Its immutable result needs no duplicate postcheck. Optimized retains it.
+    if pipeline != "mandatory":
+        _run([str(tools / "atlas-opt"), *NATIVE_CHECKS, "--verify-atlas-timing", "-"], input_text=machine)
+    emitted = _run([str(tools / "atlas-emit"), "--program-json", "-"], input_text=machine)
+    try:
+        program = json.loads(emitted)
+    except json.JSONDecodeError as error:
+        raise NativeCompilationError("compile_error", "layout emitter returned invalid program JSON: " + str(error)) from error
+    if not isinstance(program, dict):
+        raise NativeCompilationError("compile_error", "layout emitter returned a non-object program")
+    if program.get("selected_rtl_revision") != RTL_REVISION:
+        raise NativeCompilationError("unqualified_target", "layout emitter RTL differs")
+    from .restoration_budget import instruction_bound
+    # A failed analyzer is a compiler error, not evidence of a resource refusal.
+    # Only a completed bound that exceeds the policy is host eligible.
+    try:
+        bound = instruction_bound(virtual, machine, program)
+    except (ValueError, KeyError, IndexError) as error:
+        raise NativeCompilationError("compile_error", "layout instruction bound is unproved: " + str(error)) from error
+    if not bound["admitted"]:
+        raise NativeCompilationError("resource_limit", "layout worst-case instruction bound exceeds 1000000: " + str(bound["instruction_bound"]))
+    budget = current_codegen_options().program_size_limit_bytes
+    if budget is not None and len(program["instructions"]) * 4 > budget:
+        raise NativeCompilationError("resource_limit", "device layout exceeds selected program budget")
+    return virtual, machine, program, bound, pipeline
+
+
+def compile_source(snapshot, source, *, target_source, destination, limits, io_memory_base=None):
+    io_memory_base = selected_io_base() if io_memory_base is None else io_memory_base
+    plan = prepare_source(source, io_memory_base=io_memory_base)
+    from . import layout_prefix_application
+    schedule = layout_prefix_application.prepare_plan(plan)
+    if schedule is not None:
+        if plan.resident_bindings:
+            raise NativeCompilationError("unsupported_semantics", "resident layouts require an admitted single device program")
+        return layout_prefix_application.compile_source(snapshot, source, schedule,
+            target_source=target_source, destination=destination, limits=limits)
+    virtual, machine, program, bound, pipeline = prove_plan(plan, target_source=target_source, limits=limits)
+    binary = b"".join(row["word_u32"].to_bytes(4, "little") for row in program["instructions"])
+    destination = Path(destination)
+    destination.mkdir(parents=True, exist_ok=False)
+    for member, record in {"source-request.json": source.record(), "execution_plan.json": plan.record(), "physical-program.json": program,
+                           "layout-instruction-bound.json": bound}.items():
+        (destination / member).write_text(json.dumps(record, sort_keys=True, indent=2) + "\n")
+    for member, payload in {"program.bin": binary, "atlas-virtual.mlir": virtual.encode(), "atlas-machine.mlir": machine.encode()}.items():
+        (destination / member).write_bytes(payload)
+    manifest = dict(schema="atlas.native_layout_device.v1", artifact_kind="program", engine="merlin_native",
+                    request_digest=source.digest(), target_identity=source.target_identity,
+                    binary_sha256=sha256(binary).hexdigest(), selected_rtl_revision=RTL_REVISION, lowering_pipeline=pipeline,
+                    execution_plan_sha256=sha256((destination / "execution_plan.json").read_bytes()).hexdigest(),
+                    stage_artifacts={p.name: sha256(p.read_bytes()).hexdigest() for p in sorted(destination.iterdir())})
+    (destination / "manifest.json").write_text(json.dumps(manifest, sort_keys=True, indent=2) + "\n")
+    return manifest
+
+
+def prepare_c_package(source, compiled, name, *, target_source, runtime_linkage="separate", io_memory_base=None):
+    io_memory_base = selected_io_base() if io_memory_base is None else io_memory_base
+    from merlin.compile.c_sources import c_source_pair
+    from .c_runtime import program_array, runtime_headers, runtime_members
+    plan = prepare_source(source, io_memory_base=io_memory_base)
+    compiled, target_source = Path(compiled), Path(target_source)
+    if (compiled / "layout-prefix-manifest.json").exists():
+        if plan.resident_bindings:
+            raise NativeCompilationError("unsupported_semantics", "resident layouts require an admitted single device program")
+        from .layout_prefix_application import prepare_c_package as prepare_prefix
+        return prepare_prefix(source, compiled, name, target_source=target_source, runtime_linkage=runtime_linkage,
+                              io_memory_base=io_memory_base)
+    manifest = json.loads((compiled / "manifest.json").read_text())
+    verify_native_publication(compiled, manifest, engine="merlin_native", request_digest=source.digest(), target_identity=source.target_identity)
+    from .options import current_codegen_options
+    virtual = virtual_program(plan, size_limit=current_codegen_options().program_size_limit_bytes)
+    if (json.loads((compiled / "source-request.json").read_text()) != source.record()
+            or json.loads((compiled / "execution_plan.json").read_text()) != plan.record()
+            or (compiled / "atlas-virtual.mlir").read_text() != virtual):
+        raise ValueError("device layout source or execution plan differs from publication")
+    tools = Path(os.environ.get("ATLAS_OOT_BIN_DIR", target_source / "build/bin"))
+    machine = _run([str(tools / "atlas-opt"), *_scheduled_virtual_pipeline(manifest["lowering_pipeline"]), "-"], input_text=virtual)
+    if machine != (compiled / "atlas-machine.mlir").read_text():
+        raise ValueError("device layout machine source differs")
+    emitted = _run([str(tools / "atlas-emit"), "--program-json", "-"], input_text=machine)
+    try:
+        program = json.loads(emitted)
+    except json.JSONDecodeError as error:
+        raise NativeCompilationError("compile_error", "layout emitter returned invalid program JSON: " + str(error)) from error
+    if not isinstance(program, dict):
+        raise NativeCompilationError("compile_error", "layout emitter returned a non-object program")
+    binary = b"".join(row["word_u32"].to_bytes(4, "little") for row in program["instructions"])
+    if binary != (compiled / "program.bin").read_bytes():
+        raise ValueError("device layout binary differs")
+    from .restoration_budget import instruction_bound
+    saved_bound = json.loads((compiled / "layout-instruction-bound.json").read_text())
+    bound = instruction_bound(virtual, machine, program, schema=saved_bound["schema"])
+    if not bound["admitted"] or json.loads((compiled / "layout-instruction-bound.json").read_text()) != bound:
+        raise ValueError("device layout instruction bound differs or exceeds default")
+    inputs = [key for key, _ in source.input_storages]
+    bindings = {b.node_id: b for b in source.constants}
+    upper = name.upper()
+    buffers = [f"{{{address}ULL,{_aligned(size)}u,ATLAS_HOST_DEVICE_READ}}" for address, size in zip(plan.input_addresses, plan.input_bytes)]
+    buffers.append(f"{{{plan.output_address}ULL,{plan.physical_bytes}u,ATLAS_HOST_DEVICE_WRITE}}")
+    constants, writes, checks = [], [], []
+    resident_ids = {entry["node_id"] for entry in plan.resident_bindings}
+    for index, node in enumerate(plan.operands):
+        if node.id in resident_ids:
+            continue
+        size, address = plan.input_bytes[index], plan.input_addresses[index]
+        if node.effect == "constant":
+            raw = bytes.fromhex(bindings[node.id].data_hex)
+            constants.append(f"static const uint8_t {name}_constant_{index}[{len(raw)}]={{{','.join(map(str, raw))}}};")
+            pointer = f"{name}_constant_{index}"
+        else:
+            port = inputs.index(node.id)
+            pointer = f"inputs[{port}]"
+            checks.extend((f"!{name}_valid({pointer},{size}u)",
+                           f"{name}_overlap({pointer},{size}u,outputs[0],{plan.output_bytes}u)"))
+        writes.append(f"if (region->io.write(region->io.context,{address}ULL,{pointer},{size}u)) return {upper}_MEMORY_ERROR;")
+        if size % 32:
+            writes.append(f"if (region->io.write(region->io.context,{address + size}ULL,{name}_zero,{_aligned(size)-size}u)) return {upper}_MEMORY_ERROR;")
+    for pointer in ["outputs[0]", *(f"inputs[{inputs.index(node.id)}]" for node in plan.operands if node.effect == "input" and node.id not in resident_ids)]:
+        size = plan.output_bytes if pointer == "outputs[0]" else plan.input_bytes[next(i for i, n in enumerate(plan.operands) if n.effect == "input" and f"inputs[{inputs.index(n.id)}]" == pointer)]
+        checks.extend(f"{name}_overlap({pointer},{size}u,{context},sizeof(*{context}))" for context in ("ctx", "region", "region->host"))
+    declarations = f'''
+#define {upper}_WORKSPACE_BYTES 1u
+#define {upper}_SOURCE_WORKSPACE_BYTES 1u
+typedef enum {{ {upper}_OK=0,{upper}_INVALID,{upper}_MEMORY_ERROR,{upper}_DEVICE_ERROR }} {name}_status;
+typedef struct {{ atlas_host *host; atlas_tile_memory_io io; size_t max_polls; atlas_host_buffer buffers[{len(buffers)}]; }} {name}_context;
+typedef struct {{ {name}_context *region; }} {name}_source_context;
+{name}_status {name}_bind({name}_context *,atlas_host *,atlas_tile_memory_io,void *,size_t,size_t);
+{name}_status {name}_source_bind({name}_source_context *,{name}_context *,void *,size_t);
+int {name}_source_dispatch(void *,const void *const *,void *const *);
+'''
+    implementation = f'''
+#include <string.h>
+{program_array(name + '_words', binary)}
+{os.linesep.join(constants)}
+''' + (f"static const uint8_t {name}_zero[32]={{0}};\n" if any(size % 32 and node.id not in resident_ids for node, size in zip(plan.operands, plan.input_bytes)) else "") + f'''
+static int {name}_valid(const void *p,size_t n) {{ return p && (uintptr_t)p<=UINTPTR_MAX-n; }}
+static int {name}_overlap(const void *a,size_t an,const void *b,size_t bn) {{
+  return (uintptr_t)a<(uintptr_t)b+bn && (uintptr_t)b<(uintptr_t)a+an;
+}}
+{name}_status {name}_bind({name}_context *ctx,atlas_host *host,atlas_tile_memory_io io,void *scratch,size_t bytes,size_t polls) {{
+  (void)scratch;(void)bytes;
+  if (!ctx || !host || !host->mmio.read32 || !host->mmio.write32 || host->active || !io.write || !io.read || !polls ||
+      {name}_overlap(ctx,sizeof(*ctx),host,sizeof(*host))) return {upper}_INVALID;
+  *ctx=({name}_context){{host,io,polls,{{{','.join(buffers)}}}}};return {upper}_OK;
+}}
+{name}_status {name}_source_bind({name}_source_context *ctx,{name}_context *region,void *scratch,size_t bytes) {{
+  (void)scratch;(void)bytes;
+  if (!ctx || !region || !region->host || region->host->active ||
+      {name}_overlap(ctx,sizeof(*ctx),region,sizeof(*region)) ||
+      {name}_overlap(ctx,sizeof(*ctx),region->host,sizeof(*region->host))) return {upper}_INVALID;
+  ctx->region=region;return {upper}_OK;
+}}
+int {name}_source_dispatch(void *opaque,const void *const *inputs,void *const *outputs) {{
+  {'(void)inputs;' if not inputs else ''}
+  {name}_source_context *ctx=opaque;
+  if (!ctx || !ctx->region || {'!inputs || ' if inputs else ''}!outputs || !{name}_valid(outputs[0],{plan.output_bytes}u)) return {upper}_INVALID;
+  {name}_context *region=ctx->region;
+  if (!region->host || region->host->active || !region->io.write || !region->io.read || !region->max_polls ||
+      {' || '.join(checks)}) return {upper}_INVALID;
+  {os.linesep.join(writes)}
+  atlas_host_result status=atlas_host_ensure_loaded(region->host,{name}_words,{len(binary)//4}u);
+  if (status==ATLAS_HOST_OK) status=atlas_host_start(region->host,region->buffers,{len(buffers)}u);
+  if (status==ATLAS_HOST_OK) status=atlas_host_wait(region->host,region->max_polls);
+  if (status!=ATLAS_HOST_OK) return {upper}_DEVICE_ERROR;
+  if (region->io.read(region->io.context,{plan.output_address}ULL,outputs[0],{plan.output_bytes}u)) return {upper}_MEMORY_ERROR;
+  return {upper}_OK;
+}}
+'''
+    public = runtime_headers(target_source / "runtime")
+    members, files, runtime = runtime_members(public, (target_source / "runtime/atlas_host.c").read_text(), runtime_linkage)
+    rendered = c_source_pair(name, public_headers=public, private_headers={}, sources={**members, "layout.c": implementation}, declarations=declarations)
+    files.update({key: value.encode() for key, value in rendered.items()})
+    files["program.bin"] = binary
+    record = dict(kind="layout_device", workspace_bytes=1, source_workspace_bytes=1,
+                  context_type=name + "_context", source_context_type=name + "_source_context",
+                  binding_function=name + "_bind", source_binding_function=name + "_source_bind",
+                  source_dispatch_function=name + "_source_dispatch", dispatch_function=name + "_source_dispatch",
+                  input_node_ids=inputs, output_node_ids=list(source.outputs), launches_per_invocation=1,
+                  **(dict(resident_bindings=list(plan.resident_bindings)) if plan.resident_bindings else {}),
+                  layout_device_plan=plan.record(), native_manifest_sha256=sha256((compiled / "manifest.json").read_bytes()).hexdigest(), **runtime)
+    return record, files

@@ -173,7 +173,10 @@ class GraphPrecisionTest(unittest.TestCase):
         if not cli.is_file():
             self.skipTest("install merlin-targetgen for the CLI integration")
         environment = os.environ.copy()
-        environment["PYTHONPATH"] = os.pathsep.join((str(ROOT / "python"), str(Path(MERLIN) / "src")))
+        environment["PYTHONPATH"] = os.pathsep.join((
+            str(ROOT / "python"), str(Path(MERLIN) / "src"),
+            environment.get("PYTHONPATH", ""),
+        ))
         with tempfile.TemporaryDirectory(dir=os.environ.get("TMPDIR")) as directory:
             root = Path(directory)
             snapshot = build_native_snapshot(

@@ -14,6 +14,9 @@ struct AtlasCompileOptions : PassPipelineOptions<AtlasCompileOptions> {
       *this, "allocation-report",
       llvm::cl::desc("Write the allocation plan as JSON to this file, also "
                      "when it does not fit")};
+  Option<bool> enhancedVirtualScheduling{
+      *this, "enhanced-virtual-scheduling", llvm::cl::init(false),
+      llvm::cl::desc("Enable register-aware scheduling and address sinking")};
   Option<bool> guardedPack{
       *this, "guarded-pack", llvm::cl::desc("Convert proven-finite PACK through MXU"),
       llvm::cl::init(false)};

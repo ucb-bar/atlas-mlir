@@ -7,6 +7,7 @@
 #include "mlir/IR/IRMapping.h"
 #include "mlir/Pass/Pass.h"
 #include "llvm/ADT/SmallPtrSet.h"
+#include "llvm/ADT/STLExtras.h"
 #include <algorithm>
 #include <limits>
 
@@ -149,12 +150,17 @@ struct ComposeAtlasProgramPass
       SmallVector<Operation *> remove;
       for (Block &original : function.getBody()) {
         Block *block = mapping.lookup(&original);
-        for (Operation &op : *block) {
+        for (Operation &op : llvm::make_early_inc_range(*block)) {
           StringRef kind = op.getName().getStringRef();
           if (kind == "atlas.virtual_start") {
             op.getResult(0).replaceAllUsesWith(incoming);
             remove.push_back(&op);
           }
+          // Slots declare invocation-local storage and have no runtime
+          // operands. Keep their handles dominating every cloned access in
+          // the actual entry block, as the slot verifier requires.
+          if (kind == "atlas.virtual_slot")
+            op.moveBefore(header, header->end());
         }
       }
       for (Operation *op : remove) op->erase();
@@ -182,10 +188,11 @@ struct ComposeAtlasProgramPass
         ret.erase();
       }
     }
-    builder.setInsertionPointToEnd(header);
+    builder.setInsertionPointToStart(header);
     OperationState start(module.getLoc(), "atlas.virtual_start");
     start.addTypes(state);
     Operation *begun = builder.create(start);
+    builder.setInsertionPointToEnd(header);
     cf::BranchOp::create(builder, module.getLoc(), starts.front(), begun->getResults());
     for (Operation *function : originals) function->erase();
     module->removeAttr("atlas.program_entries");

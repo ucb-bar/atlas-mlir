@@ -3,7 +3,6 @@
 import ctypes
 import dataclasses
 import hashlib
-import importlib.metadata
 import json
 import os
 import shutil
@@ -17,6 +16,7 @@ from test_looped_mnk import ROOT, build_snapshot
 
 def check_source_c_call(
     self, package, initial, binary, execute, values, wanted_bytes, invalid_values=(), *, source_dtype="f32",
+    output_dtype=None, expected_status=0, check_launch_inputs=None,
 ):
     from atlas_mlir_native.binding import DRAM_BASE
 
@@ -37,8 +37,15 @@ def check_source_c_call(
     if source_dtype == "bf16":
         client_source = client_source.replace("const float *const *inputs,float *output",
                                               "const uint8_t *const *inputs,uint8_t *output")
+    elif source_dtype == "opaque":
+        client_source = client_source.replace("const float *const *inputs,float *output",
+                                              "const void *const *inputs,void *output")
+        client_source = client_source.replace("return pointwise_source_run(&source,inputs,output,0);",
+            "void *outputs[]={output}; return pointwise_source_dispatch(&source,inputs,outputs);")
     elif source_dtype != "f32":
         raise ValueError("unsupported source test dtype")
+    if output_dtype == "bf16" and source_dtype == "f32":
+        client_source = client_source.replace("float *output", "uint8_t *output")
     (package / "client.c").write_text(client_source)
     subprocess.run(
         [
@@ -95,7 +102,10 @@ def check_source_c_call(
                     b"".join(words[i].to_bytes(4, "little") for i in range(len(words))),
                     binary,
                 )
-                self.assertEqual(memory, initial)
+                if check_launch_inputs is None:
+                    self.assertEqual(memory, initial)
+                else:
+                    check_launch_inputs(memory)
                 memory[:] = execute(memory)
                 polls = 0
         except (AssertionError, RuntimeError, ValueError, KeyError, OSError) as error:
@@ -138,10 +148,11 @@ def check_source_c_call(
                 inputs,
                 ctypes.addressof(result) + 16,
             ),
-            0,
+            expected_status,
         )
         self.assertEqual(errors, [])
-        self.assertEqual(result.raw[16 : 16 + len(wanted_bytes)], wanted_bytes)
+        self.assertEqual(result.raw[16 : 16 + len(wanted_bytes)],
+                         wanted_bytes if expected_status == 0 else bytes([0xA7]) * len(wanted_bytes))
         self.assertEqual(result.raw[:16], bytes([0xA7]) * 16)
         self.assertEqual(
             result.raw[16 + len(wanted_bytes) : -1],
@@ -159,6 +170,17 @@ def check_source_c_call(
         self.assertEqual(words, {})
         self.assertEqual(memory, initial)
         self.assertEqual(result.raw[:-1], bytes([0xA7]) * (len(wanted_bytes) + 32))
+    if source_dtype == "opaque" or output_dtype == "bf16" and source_dtype == "f32":
+        # Mixed-width publication must still refuse an output inside an input.
+        memory[:] = initial
+        words.clear()
+        polls = None
+        before = [value.tobytes() for value in values]
+        inputs = (ctypes.c_void_p * len(values))(*(value.ctypes.data for value in values))
+        self.assertEqual(client.call(*callbacks, inputs, values[0].ctypes.data), 1)
+        self.assertEqual([value.tobytes() for value in values], before)
+        self.assertEqual(words, {})
+        self.assertEqual(memory, initial)
 
 
 @unittest.skipUnless(
@@ -187,7 +209,7 @@ class PointwiseLoopTest(unittest.TestCase):
         self._check_pointwise_cases(bf16_sources=False, affine_cast=True)
 
     def test_large_io_window_executes_in_one_launch_per_invocation(self):
-        from merlin.semantic_compiler.codegen import CodegenOptions, codegen_options
+        from atlas_mlir_native.options import CodegenOptions, codegen_options
 
         with codegen_options(CodegenOptions(io_memory_bytes=1048576)):
             self._check_pointwise_cases(bf16_sources=False, large=True)
@@ -224,14 +246,12 @@ class PointwiseLoopTest(unittest.TestCase):
         from npu_model.logging import LoggerConfig
         from npu_model.simulation import Simulation
         from npu_model.software.program import InstantiableProgram
-        from test_spill_model_execution import MODEL_REVISION, model_instruction
+        from test_spill_model_execution import model_instruction
+        from test_mxu1_cap448 import authenticate_model
 
         from tools.check_program_decode import decode_binary
 
-        origin = json.loads(importlib.metadata.distribution("npu-model").read_text("direct_url.json") or "{}")
-        self.assertTrue(
-            MODEL_REVISION in origin.get("url", "") or origin.get("vcs_info", {}).get("commit_id") == MODEL_REVISION
-        )
+        self.assertTrue(authenticate_model(Path(os.environ["NPU_MODEL_ROOT"])))
         torch.set_num_threads(1)
         spec = input_spec()
         spec.encode(np.array([0.0, -0.0, 2.0**-63, -(2.0**63)], dtype=np.float32))

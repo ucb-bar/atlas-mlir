@@ -96,8 +96,10 @@ A BF16 register pair holds a 32x32 tile as two 32-row registers of 16 lanes
 | `VLOAD`, `VSTORE` | Works | Raw byte copy between VMEM and a matrix register. The RTL needs a 1 KiB aligned base and a transfer inside one VMEM bank; the verifier does not check this, so the compiler must. | [test_vload_vstore_reference.py](../test/test_vload_vstore_reference.py) |
 | `VLI.ALL` | Works | Writes the raw 16-bit immediate (no conversion) to every lane of both registers in the pair. | [test_vli_all_reference.py](../test/test_vli_all_reference.py) |
 | `VLI.ROW`, `VLI.COL`, `VLI.ONE` | Works | Raw 16-bit immediate. ROW fills row 0 of both registers in the pair. COL fills lane 0 of every row and ONE fills row 0, lane 0, each in one register only; all other lanes of that register become zero. | [test_vli_selective_reference.py](../test/test_vli_selective_reference.py) |
-| `VFP8PACK`, `VFP8UNPACK` | Limited | E8M0 scale code `c` means 2^(c-127), set with `SELI`. Pack joins two consecutive physical BF16 rows into one 32-byte FP8 row: packed row 0 is rows 0 and 1 of the first register. Only powers of two and zero checked. | [test_vpu_e8m0_pack_reference.py](../test/test_vpu_e8m0_pack_reference.py) |
+| `VFP8PACK`, `VFP8UNPACK` | Limited | Raw scale code `c` means 2^min(c-127,127), set with `SELI`. Pack joins two consecutive physical BF16 rows into one 32-byte FP8 row: packed row 0 is rows 0 and 1 of the first register. Only powers of two and zero checked. | [test_vpu_e8m0_pack_reference.py](../test/test_vpu_e8m0_pack_reference.py) |
 | `VTRPOSE.XLU` | Works | 32x32 byte transpose. Reads the whole source before writing, so source and destination may be the same register. | [test_xlu_reference.py](../test/test_xlu_reference.py) |
+
+The later [raw PACK scale audit](pack-scale-domain.md) establishes all byte codes 0..255 by source and npu_model execution. The exponent shift clamps at +127, so raw 255 aliases 254. The checked-in hardware PACK test uses codes 126 and 128; the wider software admission is not additional hardware execution evidence. FP8 pop has the opposite scale direction and a reserved-code difference described in that audit.
 
 ## Scalar control
 
