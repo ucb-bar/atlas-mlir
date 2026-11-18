@@ -285,7 +285,8 @@ def test_fixed_binding_refuses_undersized_allocation():
     with pytest.raises(ValueError, match="deployment allocation differs for device_scratch"):
         application_binding("sample", regions(), contract)
 
-def test_real_exact_float_full_and_tail_placement(tmp_path):
+@pytest.mark.parametrize("private_output", [False, True])
+def test_real_exact_float_full_and_tail_placement(tmp_path, private_output):
     from copy import deepcopy
     from test_exact_float_device import request
     from atlas_mlir_native import exact_float_application as exact
@@ -300,7 +301,7 @@ def test_real_exact_float_full_and_tail_placement(tmp_path):
     with codegen_options(options):
         compiled = tmp_path / 'segments' / 'float'
         exact.compile_source(None, source, target_source=Path(__file__).resolve().parents[1],
-                             destination=compiled, limits=None)
+                             destination=compiled, limits=None, private_output=private_output)
         package = exact.prepare_c_package(source, compiled, 'float',
                                           target_source=Path(__file__).resolve().parents[1])
         rows = [dict(id='float', placement='accelerator', context_index=0,

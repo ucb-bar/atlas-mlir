@@ -185,7 +185,10 @@ def deployment_requirements(regions, native_root):
             if not parent.is_relative_to(root):
                 refuse("exact float publication escapes deployment root")
             source = KernelRequest.from_record(json.loads((parent / "source-request.json").read_bytes()))
-            schedule = prepare_plan(source)
+            saved_schedule = json.loads((parent / "float-schedule.json").read_bytes())
+            schedule = prepare_plan(source,
+                private_output=saved_schedule.get("private_output", False),
+                _chunk_elements=saved_schedule.get("chunk_elements"))
             manifest = json.loads((parent / "float-manifest.json").read_bytes())
             _verify_publication(parent, manifest, schedule)
             expected = [(parent / row["path"]).relative_to(root).as_posix()
