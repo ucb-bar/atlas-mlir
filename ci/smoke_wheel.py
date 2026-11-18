@@ -58,7 +58,8 @@ def main():
         assert report['status'] == 'verified'
         assert report['route'] == 'merlin-model2mlir-application'
         assert list((out / 'application').rglob('program.bin'))
-        assert (out / 'application/combined/application_combined.c').is_file()
+        manifest = json.loads((out / 'application/manifest.json').read_text())
+        assert (out / 'application/c-package' / manifest['application_interface']['source']).is_file()
         assert not (out / 'compile-inputs/inputs.npz').exists()
         if args.quantized:
             check_quantized(root, out / 'snapshot')
