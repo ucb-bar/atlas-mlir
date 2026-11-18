@@ -72,7 +72,7 @@ def test_default_receipt_retains_bounded_elapsed_time(tmp_path, monkeypatch, sel
     {}, {"elapsed_s": -1}, {"elapsed_s": 601}, {"elapsed_s": True},
     {"elapsed_s": "1"}, {"elapsed_s": float("nan")},
     {"receipt_mode": None, "elapsed_s": 1},
-    {"receipt_mode": "unknown", "elapsed_s": 1},
+    {"receipt_mode": "unknown", "elapsed_s": 1}, {"receipt_mode": "unknown"},
     {"receipt_mode": "deterministic-v1", "elapsed_s": 1},
 ])
 def test_missing_or_invalid_default_timing_is_rejected(receipt):
@@ -80,12 +80,13 @@ def test_missing_or_invalid_default_timing_is_rejected(receipt):
 
 
 @pytest.mark.parametrize("deterministic", [False, True])
-def test_receipt_verification_requires_matching_invocation_mode(deterministic):
+def test_receipt_verification_follows_the_declared_receipt_mode(deterministic):
+    # Verification may run in a later invocation than the compile, so the receipt's declared mode decides.
     default_receipt = {"elapsed_s": 1.25}
     deterministic_receipt = {"receipt_mode": "deterministic-v1"}
     with publication_options(deterministic_receipts=deterministic):
-        assert valid_receipt_timing(default_receipt) is (not deterministic)
-        assert valid_receipt_timing(deterministic_receipt) is deterministic
+        assert valid_receipt_timing(default_receipt)
+        assert valid_receipt_timing(deterministic_receipt)
         assert not valid_receipt_timing({})
         assert not valid_receipt_timing(dict(deterministic_receipt, elapsed_s=1.25))
 

@@ -26,10 +26,12 @@ def publication_options(*, deterministic_receipts=False):
 
 
 def valid_receipt_timing(receipt):
-    """Require bounded timing by default and a declared deterministic mode."""
-    if deterministic_receipts_enabled():
-        return receipt.get("receipt_mode") == "deterministic-v1" and "elapsed_s" not in receipt
+    """Require bounded timing, or the declared deterministic mode with no timing.
+
+    The receipt's own mode decides, because verification may run in a later
+    invocation than the compile that wrote the receipt.
+    """
     if "receipt_mode" in receipt:
-        return False
+        return receipt["receipt_mode"] == "deterministic-v1" and "elapsed_s" not in receipt
     elapsed = receipt.get("elapsed_s")
     return type(elapsed) in (int, float) and 0 <= elapsed <= TOOL_HANG_GUARD_SECONDS
