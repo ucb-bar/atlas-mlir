@@ -1,5 +1,6 @@
 #include "Atlas/AtlasBoundaryABI.h"
 #include "Atlas/AtlasOps.h"
+#include "Atlas/AtlasTarget.h"
 #include <algorithm>
 
 using namespace mlir;
@@ -34,14 +35,24 @@ FailureOr<AtlasBoundaryABI> AtlasBoundaryABI::read(func::FuncOp function,
   int64_t in = input.getValue().getSExtValue();
   int64_t out = output.getValue().getSExtValue();
   auto aligned32 = [](int64_t base) {
-    return base >= 0x80000000LL && base < (1LL << 32) &&
-           base % kAtlasRegisterBytes == 0;
+    return base >= 0 && atlasDMAMemorySpan(uint64_t(base), 1) &&
+           base % 32 == 0;
   };
   if (!aligned32(in) || !aligned32(out))
     return error("DRAM bases must be aligned 32-bit selected-memory addresses");
   AtlasBoundaryABI abi;
   abi.inputBase = uint64_t(in);
   abi.outputBase = uint64_t(out);
+  if (Attribute raw = function->getAttr("atlas.output_dram_bytes")) {
+    auto bytes = dyn_cast<IntegerAttr>(raw);
+    if (!bytes || !bytes.getType().isSignlessInteger(64) ||
+        bytes.getInt() <= 0 || bytes.getInt() % 32)
+      return error("output DRAM extent must be positive 32-byte-aligned i64 bytes");
+    abi.outputBytes = uint64_t(bytes.getInt());
+    // Explicit DMA regions prove each transfer's source interval separately;
+    // they have no implicit indexed input tile reserving a complete 2 KiB.
+    if (!hasAtlasBoundaryTiles(function)) abi.inputSlots = 0;
+  }
   function.walk([&](Operation *op) {
     if (isa<VirtualInputFP8Op, VirtualInputBF16Op>(op))
       abi.inputSlots = std::max(abi.inputSlots, slotIndex(op) + 1);
@@ -53,7 +64,9 @@ FailureOr<AtlasBoundaryABI> AtlasBoundaryABI::read(func::FuncOp function,
 
 LogicalResult AtlasBoundaryABI::verifySpans(func::FuncOp function,
                                             bool diagnose) const {
-  if (inputEnd() <= (1ULL << 32) && outputEnd() <= (1ULL << 32) &&
+  if ((!inputSlots || atlasDMAMemorySpan(inputBase, inputEnd() - inputBase)) &&
+      atlasDMAMemorySpan(outputBase, outputEnd() - outputBase) &&
+      inputEnd() <= (1ULL << 32) && outputEnd() <= (1ULL << 32) &&
       (inputBase >= outputEnd() || outputBase >= inputEnd()))
     return success();
   if (diagnose)

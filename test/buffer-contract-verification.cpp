@@ -1,5 +1,6 @@
 #include "Atlas/AtlasBufferContractVerification.h"
 #include "Atlas/AtlasContractAttr.h"
+#include "Atlas/AtlasTarget.h"
 #include "Atlas/AtlasVerificationContext.h"
 #include "Atlas/AtlasVirtualAllocation.h"
 #include "VerificationTestSupport.h"
@@ -175,6 +176,124 @@ struct Stream : IssuedStream {
     return accepts(*module);
   }
 };
+
+// Hand-built source records let the buffer proof's recurrence checks run
+// independently of CFG authentication and the indexed-access range proof.
+// The issued loop writes two words per iteration and reads its last word.
+struct CountedStream : Stream {
+  SmallVector<Attribute> values, blocks, edges, operations;
+  explicit CountedStream(MLIRContext &context, bool splitExitDMA = false) : Stream(context) {
+    auto array = [&](StringRef name, ArrayRef<int32_t> ids) { return b.getNamedAttr(name, b.getDenseI32ArrayAttr(ids)); };
+    auto value = [&](StringRef def, int block, ArrayRef<int32_t> operands = {}) {
+      return b.getDictionaryAttr({text("def", def), i("block", block), array("operands", operands)});
+    };
+    for (int n : {0, 1, 2, 4}) values.push_back(with(value("arith.constant", 0), "constant", b.getI32IntegerAttr(n)));
+    values.push_back(value("argument", 1)); // counter
+    values.push_back(value("argument", 1)); // word pointer
+    values.push_back(with(value("arith.cmpi", 1, {4, 3}), "predicate", b.getI32IntegerAttr(6))); // ult
+    values.push_back(value("arith.addi", 2, {4, 1}));
+    values.push_back(value("arith.addi", 2, {5, 2}));
+    values.push_back(value("atlas.virtual_slot_load", 3));
+    auto edge = [&](int from, int to, ArrayRef<int32_t> incoming) {
+      edges.push_back(b.getDictionaryAttr({i("from", from), i("to", to), array("incoming", incoming)}));
+    };
+    edge(0, 1, {0, 0}); edge(1, 2, {}); edge(1, 3, {}); edge(2, 1, {7, 8});
+    auto sourceBlock = [&](int id, ArrayRef<int32_t> args, ArrayRef<int32_t> ops, ArrayRef<int32_t> exits, int condition = -1) {
+      blocks.push_back(b.getDictionaryAttr({i("id", id), i("condition", condition), array("args", args), array("operations", ops), array("edges", exits)}));
+    };
+    sourceBlock(0, {}, {}, {0}); sourceBlock(1, {4, 5}, {0}, {1, 2}, 6);
+    sourceBlock(2, {}, {1, 2, 3, 4}, {3}); sourceBlock(3, {}, {5}, {});
+    operations.push_back(b.getDictionaryAttr({i("id", 0), text("name", "arith.cmpi")}));
+    uint32_t slot = fixed().spillWord;
+    auto access = [&](int id, bool store, int offset) {
+      int command = record(store ? "slot_index_store" : "slot_load", slot * 4 + offset, store ? 28 : 4);
+      operations.push_back(b.getDictionaryAttr({i("id", id), text("name", store ? "atlas.virtual_slot_store" : "atlas.virtual_slot_load"),
+          text("kind", store ? "sw" : "lw"), i("slot_word", slot), i("slot_words", kAtlasRegisterWords), text("slot_kind", "raw"),
+          i("byte_offset", offset), array("operands", store ? ArrayRef<int32_t>({0, 5}) : ArrayRef<int32_t>()),
+          array("results", store ? ArrayRef<int32_t>() : ArrayRef<int32_t>({9})), array("tile_commands", {command})}));
+    };
+    access(1, true, 0); access(2, true, 4);
+    operations.push_back(b.getDictionaryAttr({i("id", 3), text("name", "arith.addi")}));
+    operations.push_back(b.getDictionaryAttr({i("id", 4), text("name", "arith.addi")}));
+    access(5, false, 28);
+
+    block = 0;
+    constant(10, 0); constant(11, 0); constant(12, 4); constant(13, slot * 4);
+    block = 1;
+    size_t header = ops.size();
+    Operation *exit = emit("atlas.branch", {text("kind", "bgeu"), i("lhs", 10), i("rhs", 12), i("offset_bytes", 0)});
+    nop();
+    block = 2;
+    emit("atlas.alu_imm", {text("kind", "slli"), i("dst", 14), i("src", 11), i("immediate", 2)});
+    emit("atlas.alu_reg", {text("kind", "add"), i("dst", 14), i("lhs", 13), i("rhs", 14)});
+    for (int n : {0, 1}) emit("atlas.scalar_store", {text("kind", "sw"), i("src", 0), i("base", 14), i("offset", n * 4)}, n);
+    emit("atlas.alu_imm", {text("kind", "addi"), i("dst", 10), i("src", 10), i("immediate", 1)});
+    emit("atlas.alu_imm", {text("kind", "addi"), i("dst", 11), i("src", 11), i("immediate", 2)});
+    Operation *back = jump(); nop(); aim(back, header);
+    block = 3;
+    size_t exitPC = ops.size();
+    if (splitExitDMA) {
+      int launch = record("dma_load", slot * 4, 1024);
+      constant(4, slot);
+      emit("atlas.dma", {text("direction", "load"), i("channel", 0), i("reg", 4), i("dram", 5), i("size", 9)}, launch);
+      // A machine split inside this source block must not reassert the loop's
+      // initialization after the DMA has invalidated it and before its WAIT.
+      Operation *split = jump(); nop(); aim(split, ops.size());
+    }
+    emit("atlas.scalar_load", {text("kind", "lw"), i("dst", 15), i("base", 13), i("offset", 28)}, 2);
+    aim(exit, exitPC);
+  }
+  void change(SmallVectorImpl<Attribute> &records, unsigned id, StringRef field, int value) {
+    records[id] = with(cast<DictionaryAttr>(records[id]), field, b.getI32IntegerAttr(value));
+  }
+  void change(SmallVectorImpl<Attribute> &records, unsigned id, StringRef field, ArrayRef<int32_t> ids) {
+    records[id] = with(cast<DictionaryAttr>(records[id]), field, b.getDenseI32ArrayAttr(ids));
+  }
+  bool verify() {
+    halt();
+    auto cfg = b.getDictionaryAttr({b.getNamedAttr("values", b.getArrayAttr(values)), b.getNamedAttr("blocks", b.getArrayAttr(blocks)),
+        b.getNamedAttr("edges", b.getArrayAttr(edges)), b.getNamedAttr("operations", b.getArrayAttr(operations))});
+    auto function = *source->getOps<func::FuncOp>().begin();
+    auto contract = buildAtlasBufferContract(function, cfg, b.getArrayAttr(tiles));
+    if (failed(contract)) return false;
+    markGenerated(cfg, b.getArrayAttr(tiles), b.getDictionaryAttr({}), *contract);
+    return accepts(*module);
+  }
+};
+
+void countedInitializations(MLIRContext &context) {
+  struct Case { StringRef name; bool accepted; std::function<void(CountedStream &)> mutate; };
+  const std::vector<Case> cases = {
+      {"a counted contiguous word loop initializes its exact exit footprint", true, [](CountedStream &) {}},
+      {"commuted addition operands retain the counted proof", true, [](CountedStream &s) { s.change(s.values, 7, "operands", {1, 4}); s.change(s.values, 8, "operands", {2, 5}); }},
+      {"a larger count may initialize more bytes within the slot", true, [](CountedStream &s) { s.change(s.values, 3, "constant", 5); }},
+      {"a smaller count leaves the final word uninitialized", false, [](CountedStream &s) { s.change(s.values, 3, "constant", 3); }},
+      {"a zero count establishes no initialization", false, [](CountedStream &s) { s.change(s.values, 3, "constant", 0); }},
+      {"an oversized count cannot initialize beyond the slot", false, [](CountedStream &s) { s.change(s.values, 3, "constant", kAtlasRegisterWords); }},
+      {"the counted proof requires an unsigned strict predicate", false, [](CountedStream &s) { s.change(s.values, 6, "predicate", 7); }},
+      {"the counter must be seeded with zero", false, [](CountedStream &s) { s.change(s.edges, 0, "incoming", {1, 0}); }},
+      {"the pointer must be seeded with zero", false, [](CountedStream &s) { s.change(s.edges, 0, "incoming", {0, 1}); }},
+      {"the counter must advance by exactly one", false, [](CountedStream &s) { s.change(s.values, 7, "operands", {4, 2}); }},
+      {"the pointer stride must match the store count", false, [](CountedStream &s) { s.change(s.values, 8, "operands", {5, 1}); }},
+      {"the body must be the true successor and the exit the false successor", false, [](CountedStream &s) { s.change(s.blocks, 1, "edges", {2, 1}); }},
+      {"duplicate store offsets establish no counted footprint", false, [](CountedStream &s) { s.change(s.operations, 2, "byte_offset", 0); s.change(s.tiles, 1, "vmem_byte", fixed().spillWord * 4); }},
+      {"a gap between word stores establishes no counted footprint", false, [](CountedStream &s) { s.change(s.operations, 2, "byte_offset", 8); s.change(s.tiles, 1, "vmem_byte", fixed().spillWord * 4 + 8); }},
+      {"partial stores establish no counted word footprint", false, [](CountedStream &s) {
+         s.operations[2] = with(cast<DictionaryAttr>(s.operations[2]), "kind", s.b.getStringAttr("sh"));
+         s.change(s.tiles, 1, "bytes", 26);
+      }},
+  };
+  for (const Case &c : cases) {
+    CountedStream s(context);
+    c.mutate(s); diagnostics.clear();
+    bool accepted = s.verify();
+    check(c.accepted ? accepted : !accepted && diagnosed("buffer contract: scalar slot load reads an uninitialized byte"), c.name, diagnostics);
+  }
+  CountedStream split(context, true);
+  diagnostics.clear();
+  check(!split.verify() && diagnosed("buffer contract: scalar slot load reads an uninitialized byte"),
+        "a machine split in the exit source block does not reinitialize a pending DMA's bytes", diagnostics);
+}
 constexpr uint32_t A = 0x8000; // a VMEM byte; DMA and vector bases hold word A / 4
 // Must-join: a word survives a join (a skipped overwrite) or loop header (an overwriting body) only when every path keeps it.
 void joins(MLIRContext &context) {
@@ -248,5 +367,5 @@ void emptyStream(MLIRContext &context) {
 } // namespace
 
 void atlas_test::runBufferContract(MLIRContext &context) {
-  records(context); pack(context); joins(context); strayStores(context); readback(context); emptyStream(context);
+  records(context); pack(context); countedInitializations(context); joins(context); strayStores(context); readback(context); emptyStream(context);
 }

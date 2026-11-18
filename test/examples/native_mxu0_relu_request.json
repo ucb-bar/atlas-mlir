@@ -1,5 +1,5 @@
 {
-  "schema": "merlin.semantic_kernel.v2",
+  "schema": "merlin.semantic_kernel.v5",
   "nodes": [
     {
       "id": "x",
@@ -181,8 +181,15 @@
     "x": "external",
     "w": "external"
   },
-  "target_identity": "atlas-rtl-0079c0541111197741a231c002e3843fa6f545b2:movement-mxu01-vpu-pack-tile-v21",
+  "target_identity": "atlas-rtl-0079c0541111197741a231c002e3843fa6f545b2:movement-mxu01-vpu-pack-tile-v24",
   "lowering_policy": "diagnostic",
   "source_identity": "",
-  "constants": []
+  "constants": [],
+  "physical_extents": {},
+  "output_layouts": [],
+  "boundary_layouts": {},
+  "input_order": [
+    "x",
+    "w"
+  ]
 }

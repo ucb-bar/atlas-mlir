@@ -1,0 +1,7 @@
+#ifndef ATLAS_TARGET_CONFIG_H
+#define ATLAS_TARGET_CONFIG_H
+namespace mlir::atlas {
+// Selected source configuration, also consumed by the host runtime tools.
+constexpr unsigned kAtlasIMEMCapacityBytes = @ATLAS_IMEM_BYTES@;
+}
+#endif

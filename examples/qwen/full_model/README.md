@@ -59,7 +59,7 @@ Existing environments/checkouts can be selected with `--capture-python`,
 | --- | --- |
 | `deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B` | `ad9f0ae0864d7fbcd1cd905e3c6c5b069cc8b562` |
 | `ucb-bar/atlas-kernels` | `80c5f27d4bcded9c1ca7618a17ffcdbae2be7a39` |
-| `ucb-ee194-tapeout/npu_model` | `47b8599d8ffbe5ddd96059ffe2b5be2427a410f5` |
+| `ucb-ee194-tapeout/npu_model` | `b97b2f5a97e432141c4ef8504bec396651d77a8f` |
 
 The capture stack is Python 3.12, CPU Torch 2.10.0, Transformers 4.44.0 and
 torch-mlir 20261001. Device simulation uses Python 3.14 and CPU Torch 2.11.0.
@@ -80,3 +80,7 @@ All datasets, checkpoints, tensor captures, programs and images remain under
 ignored local output directories. Only source code, mapping policy and Markdown
 reports are tracked. The Package workflow checks wheel installation, PyTorch
 capture and Qwen capture regressions; it does not run this full-model campaign.
+
+The root [README](../../../README.md) describes the Merlin-backed `atlasc build`
+application path. This inventory/benchmark script retains its separate capture
+environment; historical MODEL-BENCH results have not been relabeled as new runs.

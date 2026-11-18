@@ -4,31 +4,29 @@ For the wheel quickstart, see the [README](../README.md). This guide contains
 source-build instructions, capture dependencies and optional test setup.
 Run the commands from the repository root.
 
-## Capture dependencies
+## Capture and application compilation
 
-The capture extra pins PyTorch 2.10.0 and torch-mlir 20261001; CI covers
-Python 3.10/3.12. For CPU-only PyTorch (or if your index lacks torch-mlir):
+See the [README](../README.md) for the Merlin-backed build, raw export loader,
+explicit precision policy, and Python 3.12 CPU capture setup. `atlasc build` does
+not use torch-mlir. The Python API has the same loader contract:
 
-```sh
-python -m pip install torch==2.10.0 --index-url https://download.pytorch.org/whl/cpu
-python -m pip install torch-mlir==20261001 -f https://github.com/llvm/torch-mlir/releases/expanded_assets/v20261001
+```python
+from pathlib import Path
+from atlas_mlir import build
+result = build(Path("model.py"), out=Path("atlas-out/model"),
+               dtype="fp32", precision_policy=Path("precision.py"),
+               application_memory_bytes=536870912)
 ```
 
-## Advanced driver usage
+`--capture-python` selects a separate interpreter with the same pinned Atlas,
+Merlin and model2MLIR installations. `--snapshot` reuses a native snapshot;
+otherwise Cargo builds one in the output directory. `--recipe`, `--board`,
+`--application-residency` and `--application-region-loop` forward selections to
+Merlin. No compiler failure falls back to the standalone tile path.
 
-`atlasc build model.pt2` accepts `torch.export.save` files. Use `-o DIR` to choose
-the output directory and `--force` to replace an earlier build. A RISC-V compiler
-on PATH adds a bare-metal host ELF; `--host-cc clang` selects Clang with LLD, and
-`--no-host-elf` skips the link. `atlasc doctor` checks the base package;
-`atlasc doctor --capture` also checks PyTorch capture imports.
-
-The Python API is `from atlas_mlir import compile; result = compile(model, inputs,
-"atlas-out/model")`. Already captured graphs use `atlasc build --linalg FILE
---arguments MANIFEST --weights WEIGHTS [--inputs INPUTS]`.
-
-The default `fp8` policy uses diagnostic FP8/BF16 arithmetic. Use `--policy
-policy.json` to select an explicit numerical policy. See the
-[binding guide](native-merlin-binding.md) for supported operations and shapes.
+The historical torch-mlir path is explicitly `atlasc tile-demo`; its optional
+`[tile-demo]` dependencies belong in a separate environment because they use
+PyTorch 2.10.0 instead of the application compiler's 2.11.0+cpu.
 
 ## Build from source
 
@@ -48,10 +46,16 @@ For compiler development, use the separate editable Python/CMake workflow:
 python -m pip install -e '.[test]'
 cmake -S . -B build -G Ninja \
   -DMLIR_DIR=/path/to/llvm-install/lib/cmake/mlir -DCMAKE_BUILD_TYPE=Release \
-  -DPython3_EXECUTABLE="$(command -v python)"
+  -DPython3_EXECUTABLE=/path/to/model-venv/bin/python \
+  -DATLAS_NPU_MODEL_ROOT=/path/to/npu_model
 cmake --build build --parallel 2
 ctest --test-dir build --output-on-failure
 ```
+
+CTest uses Python 3.14 with the pinned npu_model `b97b2f5a` checkout, CPU
+PyTorch 2.11.0+cpu, pytest, tabulate, and the installed Atlas/Merlin dependencies.
+Use an editable model install: its arithmetic corpus is absent from its wheel.
+`-DATLAS_ENABLE_TESTS=OFF` builds the compiler without the model.
 
 CTest runs the portable tests with no hardware. Tests that run the RTL need
 `ATLAS_RTL_ROOT`, `ATLAS_MODEL_ROOT`, `ATLAS_ASSEMBLER_ROOT`, `ATLAS_ARC_MODEL`,
@@ -101,3 +105,4 @@ for base-package and PyTorch smoke tests. Artifacts are downloadable after the
 build. Configure the **Package** workflow's checks as required in branch
 protection to enforce the gate; the workflow itself cannot change repository
 branch-protection settings. No PyPI credentials are needed.
+

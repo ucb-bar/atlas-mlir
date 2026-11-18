@@ -6,7 +6,8 @@
 namespace mlir::atlas {
 void registerLowerAtlasVirtualToMachinePass();
 std::unique_ptr<Pass>
-createLowerAtlasVirtualToMachinePass(llvm::StringRef allocationReport = "");
+createLowerAtlasVirtualToMachinePass(llvm::StringRef allocationReport = "",
+                                    unsigned programSizeLimit = 0);
 }
 
 #endif

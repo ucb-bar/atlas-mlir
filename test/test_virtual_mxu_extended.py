@@ -7,7 +7,7 @@ import unittest
 
 import atlas_assembler as assembler
 from test_virtual_lowering import BIN, ROOT, emitted, lower, object_words, run, shorten_delay
-from test_virtual_mxu_handles import STATE, FP8, BF16, acc, load, accumulate, readout
+from test_virtual_mxu_handles import STATE, FP8, BF16, acc, load, reset, accumulate, readout
 from test_virtual_mxu_lowering import instructions
 
 
@@ -36,11 +36,12 @@ def fp8_readout(before: str, after: str, tile: str, handle: str,
             f'({STATE}, {acc(unit)}, {SCALE}) -> ({STATE}, {FP8})')
 
 
-def program(*body: str, final_state: str = "s3", tile: str = "y") -> str:
+def program(*body: str, final_state: str = "s3", tile: str = "y", retain_bf16: bool = False) -> str:
+    retention = "atlas.retain_bf16_accumulators, " if retain_bf16 else ""
     return "\n".join([
         "module {",
         f"  func.func @seeded() -> {STATE} attributes "
-        "{atlas.input_dram_base = 2415919104 : i64, "
+        f"{{{retention}atlas.input_dram_base = 2415919104 : i64, "
         "atlas.output_dram_base = 2415935488 : i64} {",
         f'    %io0 = "atlas.virtual_start"() : () -> {STATE}',
         f'    %io1, %seed = "atlas.virtual_input_bf16"(%io0) '
@@ -146,6 +147,125 @@ class VirtualMXUExtendedTest(unittest.TestCase):
                     self.assertTrue(all(entry["fields"]["unit"] == unit for entry in mxu))
                     self.assertTrue(all(entry["fields"]["accumulate"] for entry in mxu
                                         if entry["operation"] == "atlas.mxu_matmul"))
+
+    def test_bf16_readout_and_sole_same_unit_reload_retain_accumulator(self) -> None:
+        for unit in (0, 1):
+            with self.subTest(unit=unit):
+                _, entries = self.checked(program(
+                    load("io3", "s0", "weight", unit),
+                    seed("s0", "s1", "a0", unit, "bf16"),
+                    accumulate("s1", "s2", "a1", "a0", unit=unit),
+                    readout("s2", "s3", "intermediate", "a1", unit),
+                    seed("s3", "s4", "a2", unit, "bf16", "intermediate"),
+                    accumulate("s4", "s5", "a3", "a2", unit=unit),
+                    readout("s5", "s6", "y", "a3", unit), final_state="s6", retain_bf16=True,
+                ))
+                mxu = [row for row in entries if row["operation"].startswith("atlas.mxu_")]
+                self.assertEqual([row["operation"] for row in mxu], [
+                    "atlas.mxu_push", "atlas.mxu_push", "atlas.mxu_matmul",
+                    "atlas.mxu_matmul", "atlas.mxu_pop",
+                ])
+                self.assertEqual([row["fields"]["kind"] for row in mxu
+                                  if row["operation"] == "atlas.mxu_push"],
+                                 ["weight_fp8", "acc_bf16"])
+
+    def test_bf16_materialization_stays_for_multiple_uses_other_unit_and_cfg_edge(self) -> None:
+        for unit in (0, 1):
+            for reason in ("multiple_uses", "other_unit", "cfg_edge"):
+                with self.subTest(unit=unit, reason=reason):
+                    target = 1 - unit if reason == "other_unit" else unit
+                    body = [seed("io3", "s0", "a0", unit, "bf16"),
+                            readout("s0", "s1", "intermediate", "a0", unit)]
+                    state_name, tile_name = "s1", "intermediate"
+                    if reason == "multiple_uses":
+                        body.append(f'    %observed = "atlas.virtual_vpu_unary"(%intermediate) '
+                                    f'{{kind = "relu"}} : ({BF16}) -> {BF16}')
+                    elif reason == "cfg_edge":
+                        body.extend([f"    cf.br ^next(%s1, %intermediate : {STATE}, {BF16})",
+                                     f"  ^next(%next_state: {STATE}, %next_tile: {BF16}):"])
+                        state_name, tile_name = "next_state", "next_tile"
+                    body.extend([seed(state_name, "s2", "a1", target, "bf16", tile_name),
+                                 readout("s2", "s3", "y", "a1", target)])
+                    _, entries = self.checked(program(*body, retain_bf16=True))
+                    self.assertEqual(sum(row["operation"] == "atlas.mxu_pop" for row in entries), 2)
+                    self.assertEqual(sum(row["operation"] == "atlas.mxu_push" and
+                                         row["fields"]["kind"] == "acc_bf16" for row in entries), 2)
+
+    def test_bf16_retention_requires_explicit_qualification(self) -> None:
+        for unit in (0, 1):
+            with self.subTest(unit=unit):
+                _, entries = self.checked(program(
+                    seed("io3", "s0", "a0", unit, "bf16"),
+                    readout("s0", "s1", "intermediate", "a0", unit),
+                    seed("s1", "s2", "a1", unit, "bf16", "intermediate"),
+                    readout("s2", "s3", "y", "a1", unit),
+                ))
+                self.assertEqual(sum(row["operation"] == "atlas.mxu_pop" for row in entries), 2)
+                self.assertEqual(sum(row["operation"] == "atlas.mxu_push" and
+                                     row["fields"]["kind"] == "acc_bf16" for row in entries), 2)
+
+    def test_bf16_retention_falls_back_when_live_state_crosses_legacy_matmul(self) -> None:
+        for unit in (0, 1):
+            with self.subTest(unit=unit):
+                _, entries = self.checked(program(
+                    seed("io3", "s0", "a0", unit, "bf16"),
+                    readout("s0", "s1", "intermediate", "a0", unit),
+                    f'    %legacy = "atlas.virtual_mxu_matmul"(%x, %w) '
+                    f'{{unit = {unit} : i32}} : ({FP8}, {FP8}) -> {BF16}',
+                    seed("s1", "s2", "a1", unit, "bf16", "intermediate"),
+                    readout("s2", "s3", "y", "a1", unit), retain_bf16=True,
+                ))
+                self.assertEqual(sum(row["operation"] == "atlas.mxu_pop" for row in entries), 3)
+
+    def test_bf16_retention_falls_back_when_extended_lifetime_exceeds_slots(self) -> None:
+        for unit in (0, 1):
+            with self.subTest(unit=unit):
+                virtual = program(
+                    seed("io3", "s0", "a0", unit, "bf16"),
+                    readout("s0", "s1", "intermediate", "a0", unit),
+                    load("s1", "s2", "weight", unit),
+                    reset("s2", "s3", "b0", unit=unit),
+                    reset("s3", "s4", "c0", unit=unit),
+                    readout("s4", "s5", "other_b", "b0", unit),
+                    readout("s5", "s6", "other_c", "c0", unit),
+                    seed("s6", "s7", "a1", unit, "bf16", "intermediate"),
+                    readout("s7", "s8", "y", "a1", unit), final_state="s8", retain_bf16=True,
+                )
+                machine = lower(virtual)
+                for option in ("--verify-atlas-machine-stream", "--verify-atlas-generated-schedule",
+                               "--verify-atlas-timing"):
+                    result = run("atlas-opt", machine, option)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(sum(row["operation"] == "atlas.mxu_pop"
+                                     for row in instructions(machine)), 4)
+
+    def test_unrolled_prefetch_keeps_ordered_cfg_boundaries_and_verified_machine(self) -> None:
+        from atlas_mlir_native.looped_tiling import _virtual, prepare_plan
+        from test_looped_mnk import source_request
+
+        # Eighteen K tiles exercise the unrolled body and its one-tile tail.
+        plan = prepare_plan(source_request(33, 65, 545))
+        for factor in (4, 8):
+            virtual = _virtual(plan, (0x90000000, 0x90010000), 0x90020000,
+                               k_unroll=factor)
+            body = virtual.split("  ^ku_body(", 1)[1].split("  ^ku_tail(", 1)[0]
+            first_compute = body.index('"atlas.virtual_mxu_load_weight"')
+            self.assertEqual(body[:first_compute].count('"atlas.virtual_dma_load_fp8"'), 8)
+            pipelines = ("--atlas-compile-unscheduled", "--atlas-compile") if factor == 4 else ("--atlas-compile-unscheduled",)
+            for pipeline in pipelines:
+                with self.subTest(factor=factor, pipeline=pipeline):
+                    lowered = run("atlas-opt", virtual, pipeline)
+                    self.assertEqual(lowered.returncode, 0, lowered.stderr)
+                    for option in ("--verify-atlas-machine-stream", "--verify-atlas-generated-schedule",
+                                   "--verify-atlas-timing"):
+                        checked = run("atlas-opt", lowered.stdout, option)
+                        self.assertEqual(checked.returncode, 0, checked.stderr)
+                    entries = instructions(lowered.stdout)
+                    # A final readout for the first step, repeated body, and
+                    # tail remains. Only intra-block raw copies disappear.
+                    self.assertEqual(sum(row["operation"] == "atlas.mxu_pop" for row in entries), 3)
+                    self.assertEqual(sum(row["operation"] == "atlas.mxu_push" and
+                                         row["fields"]["kind"] == "acc_bf16" for row in entries), 2)
 
     def test_example_and_fp8_readout_to_legacy_matmul(self) -> None:
         self.checked(EXAMPLE.read_text())

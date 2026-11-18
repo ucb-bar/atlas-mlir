@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 @unittest.skipUnless(
     importlib.util.find_spec("torch") and importlib.util.find_spec("torch_mlir"),
-    "requires the capture extra",
+    "requires the historical tile-demo capture environment",
 )
 class QwenCaptureTest(unittest.TestCase):
     @classmethod

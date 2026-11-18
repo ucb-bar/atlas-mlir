@@ -16,8 +16,8 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[2]
 HERE = Path(__file__).resolve().parent
-MERLIN = "85db5fb4e6eeb0ffe24c5a9938da8da8f255701d"
-MODEL = "337e9f249f938a1dff007ddf8a763e5cd4b3aa2b"
+MERLIN = "650cc3400858515bd2722db2603bf35ee6a05f2f"
+MODEL = "b97b2f5a97e432141c4ef8504bec396651d77a8f"
 
 
 def run(command, **kwargs):
@@ -29,7 +29,7 @@ def setup(deps):
         raise SystemExit("setup needs uv, git and cargo on PATH")
     deps.mkdir(parents=True, exist_ok=True)
     for name, remote, revision in (
-        ("merlin", "https://github.com/ucb-bar/merlin.git", MERLIN),
+        ("merlin", "https://github.com/reed-nicolas/merlin.git", MERLIN),
         ("npu-model", "https://github.com/ucb-ee194-tapeout/npu_model.git", MODEL),
     ):
         dest = deps / name
@@ -44,7 +44,7 @@ def setup(deps):
         if observed != revision:
             raise SystemExit(f"{dest}: expected {revision}, got {observed}")
     for name, version, requirements in (
-        ("capture", "3.12", ["numpy", "safetensors", "xdsl==0.65.0"]),
+        ("capture", "3.12", ["numpy", "safetensors", "xdsl==0.68.0"]),
         (
             "merlin-env",
             "3.14",
@@ -57,13 +57,13 @@ def setup(deps):
                 "pyyaml",
             ],
         ),
-        ("model-env", "3.14", ["numpy", "safetensors", "xdsl==0.65.0", "tabulate"]),
+        ("model-env", "3.14", ["numpy", "safetensors", "xdsl==0.68.0", "tabulate"]),
     ):
         dest = deps / name
         if not dest.exists():
             run(["uv", "venv", "--python", version, dest])
         run(["uv", "pip", "install", "--python", dest / "bin/python", *requirements])
-    for name, torch_version in (("capture", "2.10.0"), ("model-env", "2.11.0")):
+    for name, torch_version in (("capture", "2.10.0+cpu"), ("model-env", "2.11.0+cpu")):
         run(
             [
                 "uv",
@@ -102,7 +102,7 @@ def setup(deps):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--setup", action="store_true")
-    parser.add_argument("--deps", type=Path, default=ROOT / "out/qwen-deps")
+    parser.add_argument("--deps", type=Path, default=ROOT / "out/qwen-deps-merlin")
     parser.add_argument("-o", "--out", type=Path, default=ROOT / "atlas-out/qwen")
     parser.add_argument("--panel", choices=("positive", "signed"), default="positive")
     parser.add_argument("--capture-python", type=Path)

@@ -1,7 +1,12 @@
 add_mlir_dialect_library(MLIRAtlas
+  AtlasProofWork.cpp
+  AtlasWorkBudget.cpp
   AtlasDialect.cpp
   AtlasTypes.cpp
   AtlasOps.cpp
+  AtlasAddressAnalysis.cpp
+  AtlasMemoryInitialization.cpp
+  AtlasAddressVerification.cpp
   AtlasEncoding.cpp
   AtlasToLLVM.cpp
   AtlasStreamVerification.cpp
@@ -34,6 +39,8 @@ add_mlir_dialect_library(MLIRAtlas
   AtlasSourceMemoryEffectContract.cpp
   AtlasBufferContractVerification.cpp
   AtlasGeneratedArtifact.cpp
+  AtlasBranchRelaxation.cpp
+  AtlasProgramComposition.cpp
   AtlasGeneratedSchedule.cpp
   AtlasVerificationContext.cpp
   DEPENDS MLIRAtlasOpsIncGen

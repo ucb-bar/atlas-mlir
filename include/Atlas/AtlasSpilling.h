@@ -18,6 +18,8 @@ Value atlasAccessedSlot(Operation *op);
 // The value a save writes to its slot or a restore reads back; null for a
 // slot copy.
 Value atlasSlotValue(Operation *op);
+// Optional runtime element index of a scalar slot access.
+Value atlasSlotIndex(Operation *op);
 // The spill value a spill store produces and its reload reads.
 Value atlasSpillSaved(Operation *op);
 // The tile a spill store saves or a reload restores.
@@ -35,11 +37,12 @@ LogicalResult placeAtlasSpillSlots(func::FuncOp function, unsigned words);
 LogicalResult verifyAtlasSpillSlots(func::FuncOp function);
 // Preserve completed MXU accumulators and weights through raw tile saves.
 LogicalResult spillAtlasMXUState(func::FuncOp function, unsigned maxSpills,
-                                unsigned &spills);
+                                unsigned &spills,
+                                StringRef budgetName = "spill-atlas-mxu-state.max-spills");
 void registerSpillAtlasMXUStatePass();
 std::unique_ptr<Pass> createSpillAtlasMXUStatePass();
 void registerSpillAtlasVirtualPass();
-std::unique_ptr<Pass> createSpillAtlasVirtualPass();
+std::unique_ptr<Pass> createSpillAtlasVirtualPass(bool enhancedVirtualScheduling = false);
 } // namespace mlir::atlas
 
 #endif

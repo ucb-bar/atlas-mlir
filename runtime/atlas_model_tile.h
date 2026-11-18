@@ -10,8 +10,8 @@
 extern "C" {
 #endif
 
-enum { ATLAS_MODEL_TILE_EDGE = 32, ATLAS_MODEL_TILE_FP8_BYTES = 1024,
-       ATLAS_MODEL_TILE_BF16_BYTES = 2048, ATLAS_MODEL_TILE_SCRATCH_BYTES = 8192 };
+enum { ATLAS_MODEL_TILE_EDGE = 32, ATLAS_MODEL_TILE_FP8_BYTES = ATLAS_FP8_TILE_BYTES,
+       ATLAS_MODEL_TILE_BF16_BYTES = ATLAS_BF16_TILE_BYTES, ATLAS_MODEL_TILE_SCRATCH_BYTES = 8192 };
 
 /* MLIR's ranked two-dimensional f32 memref descriptor on a 64-bit host. */
 typedef struct {
@@ -41,16 +41,6 @@ typedef struct {
 typedef int (*atlas_tile_pack)(const float *source, uint8_t *destination);
 typedef int (*atlas_tile_unpack)(const volatile uint8_t *source,
                                  float *destination);
-typedef int (*atlas_tile_write)(void *context, uintptr_t address,
-                                const uint8_t *source, size_t bytes);
-typedef int (*atlas_tile_read)(void *context, uintptr_t address,
-                               uint8_t *destination, size_t bytes);
-
-typedef struct {
-  atlas_tile_write write;
-  atlas_tile_read read;
-  void *context;
-} atlas_tile_memory_io;
 
 typedef struct {
   atlas_host *host;

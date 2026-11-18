@@ -16,3 +16,5 @@ __pycache__/
 
 # Generated Qwen results stay local; checked-in reports are Markdown.
 /examples/qwen/results/
+# Stamped by the release build before creating the source archive.
+/SOURCE_REVISION

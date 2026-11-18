@@ -1,0 +1,23 @@
+{
+  "schema": "merlin.semantic_kernel.v2",
+  "nodes": [
+    {
+      "id": "scores", "op": "input", "inputs": [],
+      "type": {"shape": [33, 65], "dtype": "bf16", "numerical_policy": "raw-bit-pattern"},
+      "attrs": {"input_domain": "bf16-signed-zero-or-normal-exp8-to132-abs-at-most32-v1"},
+      "effect": "input", "index_maps": []
+    },
+    {
+      "id": "probabilities", "op": "softmax", "inputs": ["scores"],
+      "type": {
+        "shape": [33, 65], "dtype": "bf16",
+        "numerical_policy": "bf16-tiled-row-softmax-ltr-fp32-rne-chop-rcp-lut-v1"
+      },
+      "attrs": {"axis": 1}, "effect": "pure", "index_maps": []
+    }
+  ],
+  "outputs": ["probabilities"], "output_storages": ["external"],
+  "input_storages": {"scores": "external"},
+  "target_identity": "atlas-rtl-0079c0541111197741a231c002e3843fa6f545b2:movement-mxu01-vpu-pack-tile-v24",
+  "lowering_policy": "diagnostic", "source_identity": "", "constants": []
+}

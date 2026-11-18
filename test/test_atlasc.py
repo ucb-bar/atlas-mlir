@@ -19,7 +19,7 @@ from safetensors.numpy import save_file
 from atlas_mlir import toolchain
 from atlas_mlir.cli import main
 from atlas_mlir.capture import Capture
-from atlas_mlir.driver import build
+from atlas_mlir.tile_demo import build
 
 ROOT = Path(__file__).resolve().parents[1]
 EXAMPLES = ROOT / "test/examples"
@@ -51,7 +51,7 @@ class AtlascBuildTest(unittest.TestCase):
 
     def test_captured_linalg_builds_the_importer_program_and_host_files(self) -> None:
         out = self.root / "build"
-        self.assertEqual(atlasc("build", *CAPTURED, "--inputs", str(self.inputs),
+        self.assertEqual(atlasc("tile-demo", *CAPTURED, "--inputs", str(self.inputs),
                                 "--policy", str(POLICY), "-o", str(out)), 0)
         direct = self.root / "direct"
         subprocess.run([sys.executable, str(ROOT / "tools/compile_atlas_linalg_tile.py"),
@@ -87,7 +87,7 @@ class AtlascBuildTest(unittest.TestCase):
 
     def test_fp8_preset_places_every_contraction_on_mxu0(self) -> None:
         out = self.root / "build"
-        self.assertEqual(atlasc("build", *CAPTURED, "--no-host-elf", "-o", str(out)), 0)
+        self.assertEqual(atlasc("tile-demo", *CAPTURED, "--no-host-elf", "-o", str(out)), 0)
         policy = json.loads((out / "policy.json").read_text())
         self.assertEqual(policy["mxu_units"], [0, 0])
         self.assertNotIn("softmax_realization", policy)
@@ -97,14 +97,14 @@ class AtlascBuildTest(unittest.TestCase):
 
     def test_output_directory_is_fresh_or_an_earlier_build(self) -> None:
         out = self.root / "build"
-        arguments = ("build", *CAPTURED, "--no-host-elf", "-o", str(out))
+        arguments = ("tile-demo", *CAPTURED, "--no-host-elf", "-o", str(out))
         self.assertEqual(atlasc(*arguments), 0)
         self.assertEqual(atlasc(*arguments), 1)
         self.assertEqual(atlasc(*arguments, "--force"), 0)
         foreign = self.root / "foreign"
         foreign.mkdir()
         (foreign / "keep.txt").write_text("not an atlasc build\n")
-        self.assertEqual(atlasc("build", *CAPTURED, "--no-host-elf", "--force",
+        self.assertEqual(atlasc("tile-demo", *CAPTURED, "--no-host-elf", "--force",
                                 "-o", str(foreign)), 1)
         self.assertTrue((foreign / "keep.txt").is_file())
 
@@ -116,17 +116,17 @@ class AtlascBuildTest(unittest.TestCase):
 
     def test_bundled_demo_and_missing_file_diagnostic(self) -> None:
         self.assertEqual(atlasc("demo", "-o", str(self.root / "demo")), 0)
-        self.assertEqual(atlasc("build", "--linalg", str(self.root / "missing.mlir"),
+        self.assertEqual(atlasc("tile-demo", "--linalg", str(self.root / "missing.mlir"),
                                 *CAPTURED[2:], "-o", str(self.root / "missing")), 1)
 
     @unittest.skipUnless(importlib.util.find_spec("torch") and importlib.util.find_spec("torch_mlir"),
                          "capturing a PyTorch model needs torch and torch-mlir")
     def test_pytorch_loader_compiles_to_the_model2mlir_program(self) -> None:
         captured = self.root / "captured"
-        self.assertEqual(atlasc("build", *CAPTURED, "--policy", str(POLICY), "--no-host-elf",
+        self.assertEqual(atlasc("tile-demo", *CAPTURED, "--policy", str(POLICY), "--no-host-elf",
                                 "-o", str(captured)), 0)
         out = self.root / "pytorch"
-        self.assertEqual(atlasc("build", str(ROOT / "test/models/directed_mlp32.py"),
+        self.assertEqual(atlasc("tile-demo", str(ROOT / "test/models/directed_mlp32.py"),
                                 "--policy", str(POLICY), "--no-host-elf", "-o", str(out)), 0)
         self.assertEqual(json.loads((out / "capture/arguments.json").read_text()),
                          json.loads((EXAMPLES / "captured_mlp32_arguments.json").read_text()))

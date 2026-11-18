@@ -1,3 +1,4 @@
+#include "Atlas/AtlasAddressAnalysis.h"
 #include "Atlas/AtlasGeneratedSchedule.h"
 #include "Atlas/AtlasBufferContractVerification.h"
 #include "Atlas/AtlasDMAContractVerification.h"
@@ -31,11 +32,14 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedSchedule(
     const AtlasVerificationContext &ctx) {
   assert(ctx.generated && "generated checks require the structural stage");
   ModuleOp module = ctx.module;
-  if (ctx.words.size() > kAtlasGeneratedWordLimit)
+  auto limit = atlasProgramWordLimit(module);
+  if (failed(limit)) return failure();
+  if (ctx.words.size() > *limit)
     return module.emitOpError("generated program exceeds the ")
-           << kAtlasGeneratedWordLimit << "-word policy limit ("
+           << *limit << "-word policy limit ("
            << ctx.words.size() << " words, including inserted delays)";
   if (failed(verifyAtlasTimingState(module)) || failed(requireAtlasGeneratedArtifact(module)) ||
+      failed(verifyAtlasBoundedDMAAddresses(ctx)) ||
       failed(verifyAtlasGeneratedDMAMemory(ctx)) || failed(verifyAtlasGeneratedDMAContract(ctx)) ||
       failed(verifyAtlasGeneratedMXUContract(ctx)) || failed(verifyAtlasGeneratedTileContract(ctx)) ||
       failed(verifyAtlasGeneratedCFGContract(ctx)) ||

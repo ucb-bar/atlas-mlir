@@ -100,7 +100,10 @@ class CompiledProgramAtlasCoreDiagnosticTest extends AnyFlatSpec with PeekPokeAP
                                inputBasesOverride: Seq[Long] = Seq.empty,
                                outputBaseOverride: Long = 0L,
                                inputPayloadsOverride: Seq[Array[Byte]] = Seq.empty,
-                               outputCells: Int = 1024)
+                               outputCells: Int = 1024,
+                               inputReadCountsOverride: Seq[Int] = Seq.empty,
+                               residentBuffers: Boolean = false,
+                               cycleLimit: Int = 20000)
 
   it should "restart after ECALL and preserve the memory ABI" in {
     val path = Paths.get(sys.env.getOrElse("ATLAS_DMA_DECODE_PROGRAM",
@@ -241,11 +244,17 @@ class CompiledProgramAtlasCoreDiagnosticTest extends AnyFlatSpec with PeekPokeAP
         val properties = new Properties()
         val stream = Files.newInputStream(root.resolve("manifest.properties"))
         try properties.load(stream) finally stream.close()
-        assert(properties.getProperty("schema") == "atlas.rtl_tile_fixture.v1")
+        val schema = properties.getProperty("schema")
+        assert(schema == "atlas.rtl_tile_fixture.v1" || schema == "atlas.rtl_tile_fixture.v2" ||
+          schema == "atlas.rtl_tile_fixture.v3")
+        val resident = schema == "atlas.rtl_tile_fixture.v3"
+        val limit = if (resident) 128 else 16
+        val cycleLimit = if (resident) properties.getProperty("max_cycles").toInt else 20000
+        assert(cycleLimit >= 1 && cycleLimit <= 10000000)
         val name = properties.getProperty("name")
         assert(name != null && name.matches("[a-z][a-z0-9_]*"))
         val count = properties.getProperty("input_count").toInt
-        assert(count >= 1 && count <= 16)
+        assert(count >= 1 && count <= limit)
         val addresses = (0 until count).map { index =>
           java.lang.Long.decode(properties.getProperty(s"input.$index.address")).longValue()
         }
@@ -266,7 +275,7 @@ class CompiledProgramAtlasCoreDiagnosticTest extends AnyFlatSpec with PeekPokeAP
         assert(outputBase > 0 && outputBase % 32 == 0)
         val expected = Files.readAllBytes(root.resolve("expected.bin"))
         val outputCount = Option(properties.getProperty("output_count")).map(_.toInt).getOrElse(1)
-        assert(outputCount >= 1 && outputCount <= 16 && expected.length == outputCount * 2048)
+        assert(outputCount >= 1 && outputCount <= limit && expected.length == outputCount * 2048)
         assert(ranges.forall { case (start, end) =>
           end <= outputBase || start >= outputBase + expected.length
         })
@@ -285,7 +294,15 @@ class CompiledProgramAtlasCoreDiagnosticTest extends AnyFlatSpec with PeekPokeAP
           programOverride = extraProgram,
           inputBasesOverride = addresses,
           outputBaseOverride = outputBase,
-          inputPayloadsOverride = inputs, outputCells = expected.length / 2)
+          inputPayloadsOverride = inputs, outputCells = expected.length / 2,
+          residentBuffers = resident,
+          cycleLimit = cycleLimit,
+          inputReadCountsOverride = (0 until count).map { index =>
+            val repeats = if (schema == "atlas.rtl_tile_fixture.v2")
+              properties.getProperty(s"input.$index.read_count").toInt else 1
+            assert(repeats >= 1 && repeats <= 4096)
+            repeats
+          })
       }
       val cases = arithmeticCases ++ tailCases ++ mxu1Cases ++ k64Cases ++ extraCases
       assert(cases.map(_.name).distinct.size == cases.size)
@@ -317,6 +334,10 @@ class CompiledProgramAtlasCoreDiagnosticTest extends AnyFlatSpec with PeekPokeAP
           (0 until caseInputLengths(source)).foreach(i =>
             dram(base + i) = caseInputByte(source, i))
         }
+        // Adjacent input buffers may occupy the guard addresses. Preserve
+        // their actual pre-launch bytes rather than assuming uninitialized DRAM.
+        val prefixGuard = (1 to 32).map(i => dram(caseOutputBases.head - i))
+        val suffixGuard = (0 until 32).map(i => dram(caseOutputBases.last + 1024 + i))
         val responses = mutable.Queue.empty[Pending]
         val transactions = mutable.ArrayBuffer.empty[(Int, Long)]
         val delayedMemory = testCase.mStart >= 0 || testCase.k64 ||
@@ -326,7 +347,7 @@ class CompiledProgramAtlasCoreDiagnosticTest extends AnyFlatSpec with PeekPokeAP
         var seenRunning = false
         var completed = false
         var cycles = 0
-        while (!completed && cycles < 20000) {
+        while (!completed && cycles < testCase.cycleLimit) {
           val requestReady = !delayedMemory || cycles % 7 < 4
           dut.io.dmaTL.a.ready.poke(requestReady.B)
           val responseAvailable = responses.nonEmpty && responses.front.readyCycle <= cycles
@@ -383,11 +404,23 @@ class CompiledProgramAtlasCoreDiagnosticTest extends AnyFlatSpec with PeekPokeAP
         }
         assert(completed, s"${testCase.name}: core did not drain and halt in $cycles cycles")
         val expectedTransactions =
-          caseInputBases.zip(caseInputLengths).flatMap { case (base, length) =>
-            (0 until length / 32).map(i => (4, base + 32L * i))
+          caseInputBases.zip(caseInputLengths).zipWithIndex.flatMap { case ((base, length), index) =>
+            val repeats = if (testCase.inputReadCountsOverride.nonEmpty)
+              testCase.inputReadCountsOverride(index) else 1
+            (0 until repeats).flatMap(_ => (0 until length / 32).map(i => (4, base + 32L * i)))
           } ++
           caseOutputBases.flatMap(base => (0 until 32).map(i => (0, base + 32L * i)))
-        assert(transactions.sorted == expectedTransactions.sorted,
+        if (testCase.residentBuffers) {
+          val outputStart = caseOutputBases.head
+          val outputEnd = outputStart + testCase.outputCells * 2L
+          assert(transactions.forall { case (opcode, address) =>
+            val output = outputStart <= address && address + 32 <= outputEnd
+            val input = caseInputBases.zip(caseInputLengths).exists { case (base, length) =>
+              base <= address && address + 32 <= base + length
+            }
+            (opcode == 0 && output) || (opcode == 4 && (input || output))
+          }, s"${testCase.name}: DMA access exceeds initialized input or private output storage")
+        } else assert(transactions.sorted == expectedTransactions.sorted,
           s"${testCase.name}: unexpected DMA address/operation set")
         (0 until testCase.outputCells).foreach { cell =>
           val addr = caseOutputBases.head + 2L * cell
@@ -408,9 +441,9 @@ class CompiledProgramAtlasCoreDiagnosticTest extends AnyFlatSpec with PeekPokeAP
             logicalOutput(logical) = dram(physical) | (dram(physical + 1) << 8)
           }
         }
-        assert((1 to 32).forall(i => dram(caseOutputBases.head - i) == 0xa5),
+        assert((1 to 32).forall(i => dram(caseOutputBases.head - i) == prefixGuard(i - 1)),
           s"${testCase.name}: output prefix guard changed")
-        assert((0 until 32).forall(i => dram(caseOutputBases.last + 1024 + i) == 0xa5),
+        assert((0 until 32).forall(i => dram(caseOutputBases.last + 1024 + i) == suffixGuard(i)),
           s"${testCase.name}: output suffix guard changed")
         assert(caseInputBases.zipWithIndex.forall { case (base, source) =>
           (0 until caseInputLengths(source)).forall(i =>
@@ -431,7 +464,8 @@ class CompiledProgramAtlasCoreDiagnosticTest extends AnyFlatSpec with PeekPokeAP
             Files.write(Paths.get(directory, s"${testCase.name}.bin"), bytes)
           }
         }
-        println(s"Selected AtlasCore ${testCase.name}: ${transactions.size} DMA beats, ${testCase.outputCells} BF16 cells, $cycles cycles")
+        val outputUnit = if (testCase.residentBuffers) "output words" else "BF16 cells"
+        println(s"Selected AtlasCore ${testCase.name}: ${transactions.size} DMA beats, ${testCase.outputCells} $outputUnit, $cycles cycles")
       }
       assert(logicalOutput.indices.forall { index =>
         logicalOutput(index) == tailBF16(index / 65, index % 65)

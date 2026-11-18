@@ -15,7 +15,7 @@ import subprocess
 ROOT = Path(__file__).resolve().parents[3]
 HERE = Path(__file__).resolve().parent
 KERNELS = "80c5f27d4bcded9c1ca7618a17ffcdbae2be7a39"
-MODEL = "47b8599d8ffbe5ddd96059ffe2b5be2427a410f5"
+MODEL = "b97b2f5a97e432141c4ef8504bec396651d77a8f"
 
 
 def run(command, **kwargs):
@@ -58,8 +58,8 @@ def setup(args):
         MODEL,
     )
     for name, version, torch in (
-        ("capture", "3.12", "2.10.0"),
-        ("model", "3.14", "2.11.0"),
+        ("capture", "3.12", "2.10.0+cpu"),
+        ("model", "3.14", "2.11.0+cpu"),
     ):
         env = args.deps / name
         if not env.exists():
@@ -100,7 +100,7 @@ def setup(args):
             "transformers==4.44.0",
             "accelerate",
             "torch-mlir==20261001",
-            "xdsl==0.65.0",
+            "xdsl==0.68.0",
         ]
     )
     run(

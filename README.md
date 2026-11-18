@@ -1,118 +1,154 @@
 # Atlas MLIR
 
-Atlas MLIR compiles supported PyTorch and Linalg workloads into programs for the
-Atlas NPU. The pip package includes `atlasc`, the native `atlas-opt` and
-`atlas-emit` tools, and the Atlas plugin for Merlin.
+Atlas MLIR compiles supported PyTorch workloads for the Atlas NPU. The `atlas-mlir`
+wheel includes `atlasc`, native `atlas-opt` / `atlas-emit` binaries and their libraries,
+the Atlas Merlin provider, the model2MLIR export adapter, and runtime ABI sources.
 
-## Install and run `atlasc`
+## Install
 
-On `feat/qwen-kernels`, `atlasc` is the command-line entry point for compiling
-supported PyTorch and captured Linalg workloads. Use Python 3.12 on Linux
-x86-64 and the wheel supplied with this branch, or download and unzip its
-**Package** GitHub Actions artifact:
+Use Linux x86-64 and Python **3.12 or newer**. Download the wheel from the Package
+workflow, then install the CPU capture stack:
 
 ```sh
 python3.12 -m venv .venv
-source .venv/bin/activate
-python -m pip install ./atlas_mlir-*.whl
-atlasc doctor
-atlasc demo
-```
-
-The bundled MLP demo needs no PyTorch or local LLVM installation. It writes the
-device binary, MLIR, host headers and a report to `atlas-out/demo`. Running the
-compiled program requires an Atlas model or device.
-
-## Compile a PyTorch reference with `atlasc`
-
-In the same environment, install the tested CPU capture dependencies:
-
-```sh
-python -m pip install torch==2.10.0 --index-url https://download.pytorch.org/whl/cpu
-python -m pip install torch-mlir==20261001 -f https://github.com/llvm/torch-mlir/releases/expanded_assets/v20261001
+. .venv/bin/activate
+python -m pip install torch==2.11.0+cpu --index-url https://download.pytorch.org/whl/cpu
+python -m pip install './atlas_mlir-0.2.0-py3-none-linux_x86_64.whl[capture]'
 atlasc doctor --capture
 ```
 
-Save your reference as `model.py`, defining `get_model_and_inputs()`. For example:
+Merlin and model2MLIR come from exact Git revisions declared in `pyproject.toml`.
+Git is needed during installation. `atlasc build` needs Cargo to build Merlin's
+native snapshot, or an existing snapshot supplied with `--snapshot DIR`.
+There is no local LLVM requirement for an installed wheel.
+
+For atlas-torchao exports, also run `atlasc setup-capture`. This fetches pinned
+exporter and reference sources into `~/.cache/atlas-mlir`. Its exporter modules
+are not correctly exposed by its upstream pip metadata, which also pins a
+conflicting xDSL version. The capture worker loads the checked source modules;
+it does not install that project's unrelated training dependencies. Set
+`ATLAS_TORCHAO_ROOT` to use an existing checkout at the same pin. Install additional
+model dependencies such as `transformers==5.5.4` if your loader uses them.
+
+Use a fresh environment: `atlas-mlir` owns both plugin registrations. Do not install
+`atlas-mlir-native-support` or the separate `atlas-m2m-adapter` beside it.
+
+## Compile a PyTorch reference through Merlin
+
+The default flow is:
+
+```text
+live PyTorch loader / atlas-torchao raw export
+  → Merlin capture worker → model2MLIR fx_importer (+ Atlas adapter)
+  → Merlin stage-capture → native-compile --application → native-verify
+```
+
+`fx_importer` is model2MLIR's xDSL importer. This path does not use torch-mlir.
+Merlin owns application partitioning, cross-region loops, residency, and host C
+composition. Atlas compiles its selected regions and supplies the runtime ABI.
+
+A floating loader defines `get_model_and_inputs()` and returns an evaluated model
+and an input tuple. Compile it with an **explicit** application precision policy:
+
+```sh
+atlasc build model.py --dtype fp32 \
+  --precision-policy precision.py --application-memory-bytes 536870912 \
+  -o atlas-out/model
+```
+
+`precision.py` defines `get_precision_policy(source_sha256)` and returns the
+existing Atlas/Merlin policy dictionary for that source, with the supplied hash.
+Use the policy names and domains in Merlin's target `software-spec.yaml` and its
+model examples, or the [Atlas binding guide](docs/native-merlin-binding.md).
+The CLI does not invent a numerical preset. The arena budget is explicit and
+must fit the selected application and deployment.
+
+A source-bound JSON policy is also accepted. For policies that are selected after
+inspecting the captured IR, use two steps:
+
+```sh
+atlasc capture model.py --dtype fp32 -o atlas-out/capture
+# Select precision.json for the exact atlas-out/capture/model.mlir SHA-256.
+atlasc build --capture atlas-out/capture --precision-policy precision.json \
+  --application-memory-bytes 536870912 -o atlas-out/model
+```
+
+### Already-quantized atlas-torchao exports
+
+Follow Merlin's live adapter loader convention. The loader reconstructs the model
+with the export's **raw codes, exponents and other tensors**. It exposes
+`normalize_capture` and returns the result of `prepare_model`; this is adapter
+capture, not weight quantization:
 
 ```python
-import torch
+from atlas_mlir_native.capture import normalize_capture, prepare_model
 
 
 def get_model_and_inputs():
-    model = torch.nn.Sequential(torch.nn.Linear(32, 32), torch.nn.ReLU(),
-                                torch.nn.Linear(32, 32)).eval()
-    return model, (torch.ones(32, 32),)
+    model, inputs = load_my_raw_export()  # Your architecture and authenticated raw state.
+    return prepare_model(
+        model, inputs, "export/manifest.json", "export/policy.json",
+        expected_contract_sha256=CONTRACT_SHA256,
+        expected_policy_sha256=POLICY_SHA256,
+    )
 ```
 
-Compile it into an Atlas device program and host headers:
+The full example loader in pinned Merlin is
+`examples/atlas/whole-model/unchanged_fx/adapter_loader.py`. It also illustrates
+wrapper prefixes and source-bound model boundaries.
 
 ```sh
-atlasc build model.py -o atlas-out/model --no-host-elf
+atlasc build model.py --dtype bf16 \
+  --contract export/manifest.json --quant-policy export/policy.json \
+  --expected-contract-sha256 "$CONTRACT_SHA256" \
+  --expected-policy-sha256 "$POLICY_SHA256" \
+  --precision-policy precision.py --application-memory-bytes 536870912 \
+  -o atlas-out/model
 ```
 
-`atlasc` captures the reference, applies the FP8/BF16 policy, schedules and
-allocates Atlas instructions, and emits `atlas-out/model/compiled/program.bin`.
-The output also includes captured and lowered MLIR, packed constants, host
-headers and `report.json` with input addresses and program information.
-Running the program on `npu_model` or hardware is a separate step.
+Use hashes from the selected export receipt. Adapter validation refuses altered
+bytes, unsupported folded exports, and mismatched state. Existing quantized
+captures retain their `already_materialized` metadata through `--capture`;
+`--already-quantized` is also available explicitly. Saved `.pt2` files are not
+qualified intake for this flow.
 
-| Command | Use |
-| --- | --- |
-| `atlasc doctor` | Check the installed compiler and support files. |
-| `atlasc doctor --capture` | Also check the PyTorch capture dependencies. |
-| `atlasc demo` | Compile the bundled MLP without installing PyTorch. |
-| `atlasc build model.py --no-host-elf` | Compile a PyTorch loader. |
-| `atlasc build model.pt2 --no-host-elf` | Compile a saved `torch.export` program. |
-| `atlasc build --help` | Show policies, captured-Linalg inputs and other options. |
+## Outputs and scope
 
-Outputs default to `atlas-out/<model-name>`; use `-o DIR` for another location.
-Choose a fresh directory or use `--force` to replace an earlier `atlasc` build.
-Omit `--no-host-elf` to also build a host ELF when a supported RISC-V compiler
-is installed. See [setup](docs/setup.md) for source builds and the Python API.
+`application/` contains Merlin's manifest, program set, external parameter blob,
+and combined host C. `verification.json` records compiler replay;
+`report.json` records dependency identities, wheel/tool/library hashes, source
+policy hash and relative artifact paths. `logs/` holds each stage's diagnostics.
+`--force` only replaces an earlier `atlasc` output. A timeout aborts compilation.
 
-Compilation currently supports static 32×32 tile graphs with FP8/BF16 precision
-policies that change results relative to float32. See the
-[binding guide](docs/native-merlin-binding.md) for supported graphs and policies.
+Compilation and replay are **diagnostic**, not device execution or full-model
+accuracy qualification. Link and run the application with Merlin's deployment
+flow for your board. Numerical checks use a separate Python 3.14 environment,
+CPU PyTorch `2.11.0+cpu`, and npu_model `b97b2f5a`.
+
+`atlasc demo` runs the bundled historical standalone MLP tile example without
+PyTorch. `atlasc tile-demo` exposes its direct Linalg importer and optional
+diagnostic host ELF. Those demo paths are separate from `atlasc build`.
+
+## Qwen kernels on this branch
+
+The [Qwen campaign](examples/qwen/README.md) retains the attention, SwiGLU and
+projection experiments, and [full-model workflow](examples/qwen/full_model/README.md)
+contains pretrained-model inventory and boundary extraction. Their scripts are
+in the checkout, not the wheel. The new `atlasc build` interface above is shared
+with `feat/pip-package`; historical campaign reports retain their original pins.
 
 ## Development and documentation
 
-For source builds, dependency versions, advanced flags and optional hardware
-tests, see [setup and development](docs/setup.md). CI builds and tests wheels
-on pushes and pull requests and makes the artifacts available for download.
-
-## Qwen kernel experiments
-
-Keep a checkout of `feat/qwen-kernels` alongside the installed wheel for the
-Qwen scripts. With `uv`, Git and Cargo available, run from the checkout:
-
-```sh
-python examples/qwen/run.py --setup
-python examples/qwen/run.py
-```
-
-This campaign uses the installed Atlas tools with Qwen-specific Merlin graph
-policies and numerical model checks. Its setup creates separate capture and
-simulation environments. Use it for the attention and SwiGLU benchmarks;
-`atlasc build` supports the standalone importer's tile graphs and does not
-compile the full Qwen model. See the [Qwen setup guide](examples/qwen/README.md).
-
-The [pretrained model bringup](docs/qwen-model-bringup.md) exports the real
-Qwen session, extracts validated PyTorch regions, and benchmarks model-derived
-kernel launches. Start with its [reproduction commands](examples/qwen/full_model/README.md).
-
-See the [measured results and compiler recommendations](docs/qwen-results.md)
-and the [reproduction instructions](examples/qwen/README.md). The workloads
-are plain PyTorch subgraphs of DeepSeek-R1-Distill-Qwen-1.5B.
-
-## Read next
+See [setup](docs/setup.md) for source builds and tests and
+[package implementation](docs/pip-package-plan.md) for dependency pins and
+qualification boundaries. Conda MLIR 23.1.2 is the wheel build toolchain;
+equivalence with the backend kit's LLVM revision `a47bddcc` is not established.
 
 | Guide | Covers |
 | --- | --- |
-| [Setup and development](docs/setup.md) | Source builds, dependencies and tests. |
 | [Compiler pipeline](docs/compiler-pipeline.md) | Virtual SSA, machine IR, scheduling and emission. |
 | [Dialect reference](docs/dialect-reference.md) | Operations, verifiers and passes. |
-| [Merlin binding](docs/native-merlin-binding.md) | Supported graphs and native compilation. |
+| [Merlin binding](docs/native-merlin-binding.md) | Supported graphs and precision policies. |
 | [Host launch](docs/host-launch.md) | Runtime, host ELF and device launch. |
 | [Examples](examples/handoff/README.md) | End-to-end compiler flows. |
 | [Hardware status](docs/hardware-status.md) | RTL revision, validation and known limits. |

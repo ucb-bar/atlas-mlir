@@ -29,7 +29,7 @@
   "outputs": ["summed"],
   "output_storages": ["external"],
   "input_storages": {"scores": "external"},
-  "target_identity": "atlas-rtl-0079c0541111197741a231c002e3843fa6f545b2:movement-mxu01-vpu-pack-tile-v21",
+  "target_identity": "atlas-rtl-0079c0541111197741a231c002e3843fa6f545b2:movement-mxu01-vpu-pack-tile-v24",
   "lowering_policy": "diagnostic",
   "source_identity": "",
   "constants": []

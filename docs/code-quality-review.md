@@ -42,7 +42,7 @@ The order of passes from virtual IR to machine code is spelled out by hand in fo
 | Where | Boundary→DMA | MXU spill | Schedule | Spill | Notes |
 |---|---|---|---|---|---|
 | `python/atlas_mlir_native/binding.py:151-165` "mandatory" | no | no | no | yes | **the default** |
-| `python/atlas_mlir_native/binding.py:156-163` "optimized" | yes | yes | yes | yes | only with `ATLAS_NATIVE_PIPELINE=optimized` |
+| `python/atlas_mlir_native/binding.py:156-163` "optimized" | yes | yes | yes | yes | only with `--native-pipeline optimized` |
 | `tools/compile_atlas_linalg_tile.py:811-816` | yes | no | yes | yes | |
 | `tools/lower_atlas_program.py:40-63` | **no** | opt-in | yes | opt-in (`--spill`) | stage-preserving driver |
 | `tools/export_llvm_handoff.py:73` | no | no | no | no | |
@@ -71,7 +71,7 @@ spells out a pass list. The driver's `--spill` and `--timing` options are gone:
 it always runs the full pipeline. Output is unchanged on all 21 compilable
 examples, except for the driver and the exporter, which now produce the full
 pipeline's result. Left for a team decision: which pipeline the binding uses
-by default (`ATLAS_NATIVE_PIPELINE`).
+by default (`--native-pipeline`).
 
 ### 1.2 "Does this value take a register?" decided in 11 places (High)
 
@@ -369,12 +369,11 @@ intentionally reserved" (`AtlasRegisterAllocationVerification.cpp:141`) without
 saying why. The register checker's content model proves the sharing is safe,
 but the table should say *why* the roles can share a register.
 
-### 2.9 Behavior chosen by environment variables (Low)
+### 2.9 Explicit pipeline options and tool locations (Low)
 
-Pipeline choice (`ATLAS_NATIVE_PIPELINE`) and tool locations
-(`ATLAS_OOT_BIN_DIR`, `binding.py:3447`) come from the environment, with
-defaults that pick the slower path. Prefer explicit arguments with logged
-values.
+Pipeline choice now uses the explicit `--native-pipeline` argument and is
+recorded in the compiler options identity. Tool locations
+(`ATLAS_OOT_BIN_DIR`, `binding.py:3447`) remain environment configuration.
 
 ---
 

@@ -7,10 +7,16 @@
 namespace mlir::atlas {
 
 struct AtlasCompileOptions : PassPipelineOptions<AtlasCompileOptions> {
+  Option<unsigned> programSizeLimit{
+      *this, "program-size-limit-bytes", llvm::cl::init(0),
+      llvm::cl::desc("Optional smaller instruction-memory budget in bytes")};
   Option<std::string> allocationReport{
       *this, "allocation-report",
       llvm::cl::desc("Write the allocation plan as JSON to this file, also "
                      "when it does not fit")};
+  Option<bool> enhancedVirtualScheduling{
+      *this, "enhanced-virtual-scheduling", llvm::cl::init(false),
+      llvm::cl::desc("Enable register-aware scheduling and address sinking")};
   Option<bool> guardedPack{
       *this, "guarded-pack", llvm::cl::desc("Convert proven-finite PACK through MXU"),
       llvm::cl::init(false)};

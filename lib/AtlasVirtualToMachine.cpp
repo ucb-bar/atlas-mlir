@@ -1,3 +1,4 @@
+#include "llvm/ADT/TypeSwitch.h"
 #include "Atlas/AtlasVirtualToMachine.h"
 #include "Atlas/AtlasBoundaryABI.h"
 #include "Atlas/AtlasImmutableWeightReuse.h"
@@ -10,10 +11,13 @@
 #include "Atlas/AtlasTileContractVerification.h"
 #include "Atlas/AtlasEncoding.h"
 #include "Atlas/AtlasGeneratedArtifact.h"
+#include "Atlas/AtlasBranchRelaxation.h"
 #include "Atlas/AtlasVirtualAllocation.h"
 #include "Atlas/AtlasOps.h"
+#include "Atlas/AtlasAddressAnalysis.h"
 #include "Atlas/AtlasSpilling.h"
 #include "Atlas/AtlasVirtualVerification.h"
+#include "Atlas/AtlasWorkBudget.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -38,6 +42,60 @@ using namespace mlir::atlas;
 
 namespace {
 
+// BF16 accumulator readout and reload only copy raw BF16 storage. Each
+// matmul already writes its BF16 result, so retaining that accumulator does
+// not remove an arithmetic rounding boundary. Restrict the rewrite to a
+// sole reload on the same unit in the same block. In particular, values
+// crossing CFG edges and FP8 readouts keep their explicit materialization.
+bool foldBF16AccumulatorRoundTrips(func::FuncOp function) {
+  bool changed = false;
+  for (Block &block : function.getBody()) {
+    for (Operation &operation : llvm::make_early_inc_range(block)) {
+      auto reload = dyn_cast<VirtualMXULoadAccBF16Op>(&operation);
+      if (!reload)
+        continue;
+      auto readout = reload.getSrc().getDefiningOp<VirtualMXUReadoutBF16Op>();
+      if (!readout || readout->getBlock() != &block ||
+          !readout.getValue().hasOneUse() ||
+          readout.getAcc().getType() != reload.getAcc().getType())
+        continue;
+      reload.getAcc().replaceAllUsesWith(readout.getAcc());
+      reload.getNext().replaceAllUsesWith(reload.getState());
+      reload.erase();
+      readout.getNext().replaceAllUsesWith(readout.getState());
+      readout.erase();
+      changed = true;
+    }
+  }
+  return changed;
+}
+
+LogicalResult retainBF16Accumulators(ModuleOp module, func::FuncOp function) {
+  // Extending an accumulator lifetime may cross a legacy matmul or exceed
+  // the two physical slots. Trial the complete virtual contract and actual
+  // allocator, then keep the original function if either rejects it.
+  OwningOpRef<ModuleOp> trial(cast<ModuleOp>(module->clone()));
+  auto candidate = *trial->getOps<func::FuncOp>().begin();
+  if (!foldBF16AccumulatorRoundTrips(candidate))
+    return success();
+  VirtualAllocationPlan allocation;
+  LogicalResult fits = failure();
+  {
+    ScopedDiagnosticHandler suppress(function.getContext(), [](Diagnostic &) {
+      return success();
+    });
+    if (succeeded(verifyAtlasVirtualModule(*trial)) &&
+        succeeded(allocation.allocate(candidate)))
+      fits = allocation.verify();
+  }
+  if (allocation.workBudgetExhausted() || AtlasWorkBudget::anyExhausted())
+    return function.emitOpError("register-allocation work budget exhausted during accumulator retention trial");
+  if (failed(fits))
+    return success();
+  function.getBody().takeBody(candidate.getBody());
+  return success();
+}
+
 class VirtualPlanner {
 public:
   VirtualPlanner(ModuleOp module, func::FuncOp function)
@@ -45,6 +103,9 @@ public:
         emitter(module.getContext()) {}
 
   LogicalResult plan() {
+    auto limit = atlasProgramWordLimit(function);
+    if (failed(limit)) return failure();
+    wordLimit = *limit;
     if (failed(readABI()))
       return failure();
     emitted = ModuleOp::create(module.getLoc());
@@ -83,6 +144,7 @@ public:
 
     for (Block &block : function.getBody()) {
       currentCFGBlock = cfgBlocks.lookup(&block);
+      scalarSlotBases = {};
       mark(labelFor(&block));
       for (Operation &op : block) {
         // A load's staging VLOADs go right before its first use, or before a
@@ -95,6 +157,9 @@ public:
           for (Value operand : op.getOperands())
             flushLoad(operand, op.getLoc());
         }
+        if (!isa<VirtualSlotLoadOp, VirtualSlotStoreOp>(op) &&
+            op.getName().getDialectNamespace() != "arith")
+          scalarSlotBases = {};
         size_t first = planned.size();
         if (failed(lowerOperation(op)))
           return failure();
@@ -115,8 +180,8 @@ public:
       }
     }
     loweredWords = planned.size();
-    if (planned.size() > kAtlasGeneratedWordLimit)
-      return function.emitOpError("lowered program exceeds the 2048-word policy limit");
+    if (planned.size() > wordLimit)
+      return function.emitOpError("lowered program exceeds the ") << wordLimit << "-word policy limit";
     return resolveTargets();
   }
 
@@ -133,6 +198,8 @@ public:
         unsigned reg = kind == RegisterKind::BF16 ? allocation.tile(value) : allocation.fp8(value);
         registers.push_back({value, reg});
         cfgRegisters.push_back({value, reg});
+      } else if (isVirtualScalarImmediate(value)) {
+        cfgRegisters.push_back({value, 0}); // literal identity, no physical register
       } else if (isa<VirtualMXUWeightType, VirtualMXUAccType>(value.getType())) {
         mxuAssignments.push_back({value, allocation.mxu(value)});
       }
@@ -160,6 +227,8 @@ public:
     if (failed(sourceMemoryContract) || failed(bufferContract))
       return failure();
     (*emitted)->setAttrs(module->getAttrs());
+    if (auto limit = function->getAttr(kAtlasProgramSizeLimit))
+      (*emitted)->setAttr(kAtlasProgramSizeLimit, limit);
     Builder builder(module.getContext());
     (*emitted)->setAttr(kAtlasGeneratedMarker, builder.getStringAttr(kAtlasGeneratedVersion));
     (*emitted)->setAttr(kAtlasTimingState, builder.getStringAttr("untimed"));
@@ -178,6 +247,8 @@ public:
     (*emitted)->setAttr(kAtlasBufferContract, *bufferContract);
     (*emitted)->setAttr("atlas.input_dram_base", builder.getI64IntegerAttr(abi.inputBase));
     (*emitted)->setAttr("atlas.output_dram_base", builder.getI64IntegerAttr(abi.outputBase));
+    if (auto bytes = function->getAttr("atlas.output_dram_bytes"))
+      (*emitted)->setAttr("atlas.output_dram_bytes", bytes);
     (*emitted)->setAttr("atlas.scalar_arg_regs", builder.getDenseI32ArrayAttr(allocation.scalarArguments()));
     if (controlBase)
       (*emitted)->setAttr("atlas.control_dram_base", builder.getI64IntegerAttr(*controlBase));
@@ -187,6 +258,7 @@ public:
       (*emitted)->setAttr("atlas.control_argument_types", builder.getDenseI32ArrayAttr(types));
     }
     llvm::SmallVector<uint32_t> words;
+    if (failed(relaxAtlasBranches(*emitted))) return failure();
     if (failed(verifyAtlasArtifact(*emitted, /*llvmBlock=*/true, words,
                                    /*allowPendingDMAWaits=*/true)))
       return failure();
@@ -206,12 +278,67 @@ public:
     if (loweredWords)
       report["untimed_words"] =
           llvm::json::Object{{"words", *loweredWords},
-                             {"limit", kAtlasGeneratedWordLimit}};
+                             {"limit", wordLimit}};
     return report;
   }
 
+  // Resource planning captures the same source CFG and placements used by
+  // materialize(), without building its memory-initialization proofs. This
+  // is only a rejection aid: neither the contract nor the planned words have
+  // passed the generated-artifact checks, and no machine IR is published.
+  LogicalResult addResourcePlanningReport(llvm::json::Object &report) {
+    SmallVector<VirtualRegisterAssignment> registers;
+    auto placement = [&](Value value) {
+      auto kind = registerKindOf(value);
+      if (kind == RegisterKind::Scalar)
+        registers.push_back({value, allocation.scalar(value)});
+      else if (kind)
+        registers.push_back({value, *kind == RegisterKind::BF16
+                                        ? allocation.tile(value)
+                                        : allocation.fp8(value)});
+      else if (isVirtualScalarImmediate(value))
+        registers.push_back({value, 0});
+    };
+    for (Block &block : function.getBody()) {
+      for (Value value : block.getArguments()) placement(value);
+      for (Operation &operation : block)
+        for (Value value : operation.getResults()) placement(value);
+    }
+    auto contract = buildAtlasCFGContract(function, registers);
+    if (failed(contract)) return failure();
+    std::string text;
+    llvm::raw_string_ostream stream(text);
+    stream << kAtlasCFGContract << " = " << *contract;
+    report["cfg_contract"] = stream.str();
+    std::vector<int64_t> counts(cfgBlocks.size(), 0);
+    bool helper = false;
+    for (Operation *operation : planned) {
+      auto owner = operation->getAttrOfType<IntegerAttr>(kAtlasTagCFGBlock);
+      if (!owner || owner.getInt() < 0 ||
+          uint64_t(owner.getInt()) >= counts.size())
+        return function.emitOpError("planned word lacks source CFG ownership");
+      ++counts[owner.getInt()];
+      helper |= operation->hasAttr(kAtlasTagCFGHelper);
+    }
+    llvm::json::Array blocks;
+    for (Block &block : function.getBody()) {
+      int32_t id = cfgBlocks.lookup(&block);
+      llvm::json::Array successors;
+      for (Block *successor : block.getSuccessors())
+        successors.push_back(cfgBlocks.lookup(successor));
+      blocks.push_back(llvm::json::Object{
+          {"id", id}, {"planned_words", counts[id]},
+          {"successors", std::move(successors)}});
+    }
+    report["cfg_blocks"] = std::move(blocks);
+    report["planned_helper_control"] = helper;
+    return success();
+  }
+
 private:
-  bool cfgTracked(Value v) const { return registerKindOf(v).has_value(); }
+  bool cfgTracked(Value v) const {
+    return registerKindOf(v).has_value() || isVirtualScalarImmediate(v);
+  }
 
   IntegerAttr i32(int64_t value) { return attrs.getI32IntegerAttr(value); }
   StringAttr str(StringRef value) { return attrs.getStringAttr(value); }
@@ -309,7 +436,7 @@ private:
         return function.emitOpError(
             "scalar arguments require atlas.control_dram_base mailbox binding");
       int64_t address = control.getValue().getSExtValue();
-      if (address < 0x80000000LL ||
+      if (!atlasDMAMemorySpan(uint64_t(address), kAtlasRegisterBytes) ||
           address > std::numeric_limits<uint32_t>::max() ||
           address % kAtlasRegisterBytes)
         return function.emitOpError(
@@ -326,15 +453,14 @@ private:
         std::optional<VirtualDMATransfer> transfer = virtualDMATransfer(op);
         if (!transfer)
           return WalkResult::advance();
-        auto address = constantAddress(transfer->dram->get());
+        auto address = provenI32AddressSpan(transfer->dram->get(), op);
         if (!address) {
-          op->emitOpError("DMA address is not statically known");
+          op->emitOpError("DMA address has no checked bound");
           return WalkResult::interrupt();
         }
-        bool fp8 = isa<VirtualDMALoadFP8Op, VirtualDMAStoreFP8Op>(op);
-        uint64_t end = static_cast<uint64_t>(*address) +
-                       (fp8 ? kAtlasRegisterBytes : kAtlasBF16TileBytes);
-        if (*address < controlEnd && *controlBase < end) {
+        uint64_t end = static_cast<uint64_t>(address->last) +
+                       *provenI32(transfer->size->get());
+        if (address->first < controlEnd && *controlBase < end) {
           op->emitOpError("explicit DMA span overlaps the control mailbox");
           return WalkResult::interrupt();
         }
@@ -486,6 +612,19 @@ private:
     capture(placement.dramReg, dramByte);
     capture(placement.sizeReg, sizeBytes);
     materializeScalar(placement.stagingReg, placement.stagingWord, loc);
+    // A prefix load defines the complete virtual tile: private staging tail
+    // is zeroed by ordinary scheduled vector writes before DMA overlays it.
+    unsigned bytes = *provenI32(sizeBytes);
+    if (!src && bytes < placement.halves * kAtlasRegisterBytes) {
+      emit<VLIOp>(loc, "all", fixed().tensorTemporary, 0);
+      for (unsigned half = 0; half < placement.halves; ++half) {
+        materializeScalar(placement.stagingReg,
+                          placement.stagingWord + half * kAtlasRegisterWords, loc);
+        emit<VStoreOp>(loc, fixed().tensorTemporary + half,
+                       placement.stagingReg, 0, "raw");
+      }
+      materializeScalar(placement.stagingReg, placement.stagingWord, loc);
+    }
     if (src) {
       for (unsigned half = 0; half < placement.halves; ++half) {
         if (half)
@@ -564,10 +703,11 @@ private:
   }
 
   LogicalResult lowerPack(VirtualPackFP8Op pack) {
-    // Only the E8M0 scale codes observed on the selected RTL are admitted.
-    if (pack.getScaleCode() < 122 || pack.getScaleCode() > 128)
-      return pack.emitOpError(
-          "virtual-to-machine pack admits observed E8M0 scale codes 122..128 only");
+    // Source-proven raw ERF bytes, not just the historically observed 122..128.
+    // The signed exponent shift clamps at +127, so 255 aliases 254.
+    // See docs/pack-scale-domain.md for source and model-execution evidence.
+    // Read the signed attribute in the op verifier before using its accessor.
+    if (failed(pack.verify())) return failure();
     Location loc = pack.getLoc();
     emit<ScalarLoadOp>(loc, "seli", /*dst=*/fixed().scaleReg, /*base=*/0,
         /*offset=*/pack.getScaleCode());
@@ -630,6 +770,16 @@ private:
 
   LogicalResult lowerOperation(Operation &op) {
     Location loc = op.getLoc();
+    if (auto pack = dyn_cast<VirtualRawPackFP8Op>(op)) {
+      materializeScalar(fixed().outputBaseReg, fixed().packWord * 4, loc);
+      emit<ScalarStoreOp>(loc, "sw", scalar(pack.getScale()), fixed().outputBaseReg, 0);
+      tagTileCommand();
+      emit<ScalarLoadOp>(loc, "seld", fixed().scaleReg, fixed().outputBaseReg, 0);
+      tagTileCommand();
+      emit<VPUPackOp>(loc, "bf16_to_fp8", fp8(pack.getResult()),
+                     tile(pack.getSrc()), fixed().scaleReg);
+      return success();
+    }
     if (auto control = dyn_cast<VirtualControlOp>(op)) {
       unsigned reg = scalar(control.getValue());
       emit<ScalarLoadOp>(loc, "lw", /*dst=*/reg, /*base=*/0,
@@ -646,6 +796,55 @@ private:
     }
     if (isa<VirtualStartOp, VirtualScaleConstantOp>(op))
       return success();
+    if (isa<VirtualSlotLoadOp, VirtualSlotStoreOp>(op)) {
+      auto slot = atlasAccessedSlot(&op).getDefiningOp<VirtualSlotOp>();
+      bool load = isa<VirtualSlotLoadOp>(op);
+      uint32_t offset = uint32_t(op.getAttrOfType<IntegerAttr>("byte_offset").getInt());
+      unsigned base = load ? fixed().inputBaseReg : fixed().outputBaseReg;
+      unsigned index = load ? 0 : 1;
+      uint32_t address = uint32_t(slot.getSlotWord()) * 4;
+      if (Value runtimeIndex = atlasSlotIndex(&op)) {
+        StringRef kind = op.getAttrOfType<StringAttr>("kind").getValue();
+        unsigned shift = kind == "lw" || kind == "sw" ? 2 : kind == "lhu" || kind == "sh" ? 1 : 0;
+        // The runtime index is in access-width elements. The verifier proves
+        // this scaled index cannot wrap or escape the allocated slot.
+        if (scalarSlotBases[index] != address) {
+          materializeScalar(base, address, loc);
+          scalarSlotBases[index] = address;
+        }
+        unsigned temporary = fixed().scalarTemporary;
+        if (shift) {
+          emit<ALUImmOp>(loc, "slli", temporary, scalar(runtimeIndex), shift);
+          emit<ALURegOp>(loc, "add", temporary, base, temporary);
+        } else {
+          emit<ALURegOp>(loc, "add", temporary, base, scalar(runtimeIndex));
+        }
+        unsigned reg = scalar(atlasSlotValue(&op));
+        if (load) emit<ScalarLoadOp>(loc, kind, reg, temporary, offset);
+        else emit<ScalarStoreOp>(loc, kind, reg, temporary, offset);
+        tagTileCommand();
+        return success();
+      }
+      // The allocator reserves independent scalar bases for slot reads and
+      // writes. Constant offsets fit the scalar addressing immediate; runs of
+      // lane accesses retain each base until another operation may clobber it.
+      if (offset > 2047) {
+        address += offset;
+        offset = 0;
+      }
+      if (scalarSlotBases[index] != address) {
+        materializeScalar(base, address, loc);
+        scalarSlotBases[index] = address;
+      }
+      StringRef kind = op.getAttrOfType<StringAttr>("kind").getValue();
+      unsigned reg = scalar(atlasSlotValue(&op));
+      if (load)
+        emit<ScalarLoadOp>(loc, kind, reg, base, offset);
+      else
+        emit<ScalarStoreOp>(loc, kind, reg, base, offset);
+      tagTileCommand();
+      return success();
+    }
     if (isAtlasSlotAccess(&op)) {
       auto source = atlasAccessedSlot(&op).getDefiningOp<VirtualSlotOp>();
       auto copyOp = dyn_cast<VirtualSlotCopyOp>(op);
@@ -840,15 +1039,44 @@ private:
       auto value = dyn_cast<IntegerAttr>(constant.getValue());
       if (!value)
         return constant.emitOpError("only integer control constants lower to Atlas");
-      if (isVirtualDMAImmediate(constant.getResult()))
-        return success(); // each launch builds it (launchDMA)
+      if (isVirtualDMAImmediate(constant.getResult()) || isVirtualScalarImmediate(constant.getResult()))
+        return success(); // DMA and ALU users encode these literals directly.
       materializeScalar(scalar(constant.getResult()),
-                        static_cast<uint32_t>(value.getValue().getSExtValue()), loc);
+                        static_cast<uint32_t>(value.getValue().getZExtValue()), loc);
+      return success();
+    }
+    if (auto immediate = scalarImmediateFor(&op)) {
+      unsigned dst = scalar(op.getResult(0));
+      emit<ALUImmOp>(loc, immediate->kind, dst, scalar(immediate->source), immediate->immediate);
+      if (immediate->finish == "invert")
+        emit<ALUImmOp>(loc, "xori", dst, dst, 1);
+      else if (immediate->finish == "eq")
+        emit<ALUImmOp>(loc, "sltiu", dst, dst, 1);
+      else if (immediate->finish == "ne")
+        emit<ALURegOp>(loc, "sltu", dst, 0, dst);
       return success();
     }
     if (auto addi = dyn_cast<arith::AddIOp>(op)) {
       emit<ALURegOp>(loc, "add", /*dst=*/scalar(addi.getResult()),
           /*lhs=*/scalar(addi.getLhs()), /*rhs=*/scalar(addi.getRhs()));
+      return success();
+    }
+    StringRef bitKind = llvm::TypeSwitch<Operation *, StringRef>(&op)
+        .Case<arith::SubIOp>([](auto) { return "sub"; })
+        .Case<arith::AndIOp>([](auto) { return "and"; })
+        .Case<arith::OrIOp>([](auto) { return "or"; })
+        .Case<arith::XOrIOp>([](auto) { return "xor"; })
+        .Case<arith::ShLIOp>([](auto) { return "sll"; })
+        .Case<arith::ShRUIOp>([](auto) { return "srl"; })
+        .Default([](auto) { return StringRef(); });
+    if (!bitKind.empty()) {
+      emit<ALURegOp>(loc, bitKind, scalar(op.getResult(0)),
+          scalar(op.getOperand(0)), scalar(op.getOperand(1)));
+      return success();
+    }
+    if (auto extension = dyn_cast<arith::ExtUIOp>(op)) {
+      emit<ALUImmOp>(loc, "andi", scalar(extension.getOut()),
+          scalar(extension.getIn()), 1);
       return success();
     }
     if (auto cmp = dyn_cast<arith::CmpIOp>(op))
@@ -927,7 +1155,7 @@ private:
                             static_cast<int64_t>(pc));
       auto branch = dyn_cast<BranchOp>(planned[pc]);
       int64_t bound = branch ? 4096 : 1048576;
-      if (offset < -bound || offset > bound - 2)
+      if (!branch && (offset < -bound || offset > bound - 2))
         return function.emitOpError("virtual CFG target exceeds selected branch range");
       if (branch)
         branch.setOffsetBytesAttr(i32(offset));
@@ -960,10 +1188,12 @@ private:
   unsigned nextLabel = 0;
   unsigned nextMXUCommand = 0;
   unsigned nextTileCommand = 0;
+  std::array<std::optional<uint32_t>, 2> scalarSlotBases{};
   llvm::DenseMap<Value, PendingLoad> pendingLoads;
   SmallVector<Value> pendingOrder;
   AtlasBoundaryABI abi;
   std::optional<uint64_t> controlBase;
+  unsigned wordLimit = kAtlasGeneratedWordLimit;
   bool allocated = false;
   std::optional<size_t> loweredWords;
 };
@@ -983,14 +1213,33 @@ struct LowerAtlasVirtualToMachinePass
            "or schedule-atlas-stream then times it";
   }
 
+  Option<unsigned> programSizeLimit{*this, "program-size-limit-bytes",
+      llvm::cl::desc("Smaller deployment budget within selected physical IMEM"), llvm::cl::init(0)};
+
   Option<std::string> allocationReport{
       *this, "allocation-report",
       llvm::cl::desc("Write the allocation plan as JSON to this file, also "
                      "when it does not fit, with every error the lowering "
                      "reports")};
 
+  Option<std::string> resourcePlanningReport{
+      *this, "resource-planning-report",
+      llvm::cl::desc("Write an unqualified resource-only plan as JSON, leaving "
+                     "virtual IR unchanged; does not emit or verify machine IR")};
+
   void runOnOperation() override {
     ModuleOp module = getOperation();
+    if (!resourcePlanningReport.empty() && !allocationReport.empty()) {
+      module.emitError("resource-planning-report and allocation-report are mutually exclusive");
+      return signalPassFailure();
+    }
+    // The normal lowering may rewrite source weights and accumulator lives.
+    // Apply those same rewrites privately for a resource-only query.
+    OwningOpRef<ModuleOp> resourceModule;
+    if (!resourcePlanningReport.empty()) {
+      resourceModule = cast<ModuleOp>(module->clone());
+      module = *resourceModule;
+    }
     if (failed(verifyAtlasVirtualModule(module)))
       return signalPassFailure();
     if (!llvm::hasSingleElement(module.getBody()->getOperations())) {
@@ -1002,9 +1251,15 @@ struct LowerAtlasVirtualToMachinePass
       module.emitError("virtual-to-machine lowering requires func.func CFG form");
       return signalPassFailure();
     }
-    reuseAtlasImmutableWeights(function);
+    if (programSizeLimit)
+      function->setAttr(kAtlasProgramSizeLimit, IntegerAttr::get(IntegerType::get(&getContext(), 64), programSizeLimit));
+    if (failed(reuseAtlasImmutableWeights(function)))
+      return signalPassFailure();
+    if (function->getAttrOfType<UnitAttr>("atlas.retain_bf16_accumulators") &&
+        failed(retainBF16Accumulators(module, function)))
+      return signalPassFailure();
     VirtualPlanner planner(module, function);
-    if (allocationReport.empty()) {
+    if (allocationReport.empty() && resourcePlanningReport.empty()) {
       if (failed(planner.plan()) || failed(planner.materialize()))
         signalPassFailure();
       return;
@@ -1021,16 +1276,28 @@ struct LowerAtlasVirtualToMachinePass
       });
       lowered = planner.plan();
       report = planner.report();
-      if (succeeded(lowered))
-        lowered = planner.materialize();
+      if (succeeded(lowered)) {
+        if (!resourcePlanningReport.empty())
+          lowered = planner.addResourcePlanningReport(report);
+        else
+          lowered = planner.materialize();
+      }
     }
     // Planning can fit but materialization can still reject its contracts.
     // Never publish a successful report for a failed lowering.
-    report["fits"] = succeeded(lowered);
+    if (resourcePlanningReport.empty()) {
+      report["fits"] = succeeded(lowered);
+    } else {
+      report["schema"] = "atlas.virtual_resource_plan.v1";
+      report["planning_succeeded"] = succeeded(lowered);
+      report["machine_artifact_qualified"] = false;
+    }
     report["failures"] = std::move(failures);
     std::string error;
     std::unique_ptr<llvm::ToolOutputFile> file =
-        openOutputFile(allocationReport, &error);
+        openOutputFile(resourcePlanningReport.empty() ? allocationReport
+                                                     : resourcePlanningReport,
+                       &error);
     if (!file) {
       module.emitError(error);
       return signalPassFailure();
@@ -1056,8 +1323,10 @@ void mlir::atlas::registerLowerAtlasVirtualToMachinePass() {
 }
 
 std::unique_ptr<Pass>
-mlir::atlas::createLowerAtlasVirtualToMachinePass(StringRef allocationReport) {
+mlir::atlas::createLowerAtlasVirtualToMachinePass(StringRef allocationReport,
+                                                unsigned programSizeLimit) {
   auto pass = std::make_unique<LowerAtlasVirtualToMachinePass>();
   pass->allocationReport = allocationReport.str();
+  pass->programSizeLimit = programSizeLimit;
   return pass;
 }

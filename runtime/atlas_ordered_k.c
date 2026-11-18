@@ -1,7 +1,7 @@
 #include "atlas_ordered_k.h"
 
-enum { ATLAS_ORDERED_K_EDGE = 32, ATLAS_ORDERED_K_INPUT_BYTES = 1024,
-       ATLAS_ORDERED_K_OUTPUT_BYTES = 2048, ATLAS_ORDERED_K_INPUT_SLOTS = 128 };
+enum { ATLAS_ORDERED_K_EDGE = 32, ATLAS_ORDERED_K_INPUT_BYTES = ATLAS_FP8_TILE_BYTES,
+       ATLAS_ORDERED_K_OUTPUT_BYTES = ATLAS_BF16_TILE_BYTES, ATLAS_ORDERED_K_INPUT_SLOTS = 128 };
 
 static int valid_device_range(uintptr_t address, size_t bytes) {
   return address && address <= UINT32_MAX && bytes &&
@@ -126,7 +126,7 @@ atlas_ordered_k_status atlas_ordered_k_run(
       return ATLAS_ORDERED_K_MEMORY_ERROR;
   }
 
-  atlas_host_result host_result = atlas_host_load(tile->host, tile->program_words,
+  atlas_host_result host_result = atlas_host_ensure_loaded(tile->host, tile->program_words,
                                                   tile->program_word_count);
   if (device_result)
     *device_result = host_result;

@@ -20,7 +20,7 @@ wheel. From that checkout:
 ```sh
 python3.12 -m venv .venv
 source .venv/bin/activate
-python -m pip install /path/to/atlas_mlir-0.1.0-py3-none-linux_x86_64.whl
+python -m pip install /path/to/atlas_mlir-0.2.0-py3-none-linux_x86_64.whl
 atlasc doctor
 atlasc demo
 ```
@@ -34,7 +34,7 @@ python3 examples/qwen/run.py
 ```
 
 Setup downloads pinned Merlin and NPU-model sources and creates three isolated
-Python environments under `out/qwen-deps`: capture, Merlin selection, and
+Python environments under `out/qwen-deps-merlin`: capture, Merlin selection, and
 numerical simulation. It does not modify sibling checkouts. Cargo's locked
 bridge dependencies are fetched during setup; snapshot construction is offline.
 The setup step installs PyTorch and torch-mlir in the capture environment, so
@@ -50,10 +50,15 @@ For already prepared environments, override `--capture-python`,
 Dependency checkouts must be clean at the recorded pins. `ATLAS_OOT_BIN_DIR`
 selects another compiler build.
 
-Use this campaign for the Qwen attention and SwiGLU experiments: it supplies
-their Merlin graph policies and numerical checks. `atlasc build model.py` is
-the simpler standalone importer for its supported tile graphs; it does not
-replace the Qwen campaign or compile the complete pretrained model.
+The root [README](../../README.md) documents the new `atlasc build` flow through
+model2MLIR and Merlin application compilation. It requires an explicit precision
+policy and supports authenticated atlas-torchao raw exports. This existing
+microbenchmark campaign retains its historical torch-mlir capture for reproducing
+the attention/SwiGLU experiments; it is separate from the new application intake.
+Its Merlin and numerical model pins now match the package. Existing Markdown
+performance reports describe their recorded older revisions and are not new
+measurements of this integration. Setup uses a new dependency directory so it
+does not overwrite an earlier pinned campaign environment.
 
 The campaign captures all workloads, then compiles supported graphs through
 Merlin and Atlas and executes their emitted instructions on the NPU model.

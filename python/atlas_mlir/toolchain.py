@@ -22,21 +22,31 @@ class ToolFailure(RuntimeError):
     """A compiler or packaging step refused its input or failed."""
 
 
-def data_root() -> Path:
+def data_root(target_source: str | Path | None = None) -> Path:
     """The wheel's copy of tools/, runtime/, docs/ and the startup files, or the source tree.
 
     Both have the same layout, so the tools/ scripts find their sibling files either way.
     """
-    for root in (PACKAGE / "share", SOURCE_ROOT):
+    override = target_source or os.environ.get("ATLAS_ROOT")
+    candidates = (Path(override),) if override else (PACKAGE / "share", SOURCE_ROOT)
+    for root in candidates:
         if (root / "tools/compile_atlas_linalg_tile.py").is_file():
             return root
     raise ToolchainError("Atlas support files are missing; reinstall atlas-mlir")
 
 
-def bin_dir() -> Path:
+def bin_dir(target_source: str | Path | None = None) -> Path:
     """ATLAS_OOT_BIN_DIR if set, else the wheel's tools, else a source build in build/bin."""
     override = os.environ.get("ATLAS_OOT_BIN_DIR")
-    candidates = [Path(override)] if override else [PACKAGE / "bin", SOURCE_ROOT / "build/bin"]
+    if override:
+        candidates = [Path(override)]
+    elif target_source is not None:
+        root = Path(target_source).resolve()
+        # A wheel's share/ and bin/ are siblings. An explicit target must never
+        # silently borrow binaries from an unrelated checkout or installation.
+        candidates = [root.parent / "bin"] if root == (PACKAGE / "share").resolve() else [root / "build/bin"]
+    else:
+        candidates = [PACKAGE / "bin", SOURCE_ROOT / "build/bin"]
     for directory in candidates:
         if all((directory / name).is_file() for name in ("atlas-opt", "atlas-emit")):
             return directory

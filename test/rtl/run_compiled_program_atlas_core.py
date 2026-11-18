@@ -45,20 +45,24 @@ def one_jar(entries: list[Path], prefix: str) -> Path:
     return found[0]
 
 
-def fixture_identity(directory: Path) -> tuple[str, int, int, int, str]:
+def fixture_identity(directory: Path) -> tuple[str, int, int | None, int, str]:
     manifest = directory / "manifest.properties"
     if not manifest.is_file():
         raise ValueError(f"missing fixture manifest: {manifest}")
     properties = dict(line.split("=", 1) for line in manifest.read_text().splitlines()
                       if line and not line.startswith("#") and "=" in line)
-    if properties.get("schema") != "atlas.rtl_tile_fixture.v1":
+    schema = properties.get("schema")
+    if schema not in {"atlas.rtl_tile_fixture.v1", "atlas.rtl_tile_fixture.v2", "atlas.rtl_tile_fixture.v3"}:
         raise ValueError("unsupported RTL fixture schema")
     name = properties.get("name", "")
     if re.fullmatch(r"[a-z][a-z0-9_]*", name) is None or name in CASE_NAMES:
         raise ValueError("fixture name is invalid or duplicates a built-in case")
     count = int(properties.get("input_count", "0"))
-    if count < 1 or count > 16:
-        raise ValueError("fixture input count must be between 1 and 16")
+    limit = 128 if schema == "atlas.rtl_tile_fixture.v3" else 16
+    if schema == "atlas.rtl_tile_fixture.v3" and not 1 <= int(properties.get("max_cycles", "0")) <= 10000000:
+        raise ValueError("resident fixture needs an explicit positive cycle watchdog at most 10000000")
+    if count < 1 or count > limit:
+        raise ValueError(f"fixture input count must be between 1 and {limit}")
     files = [manifest, directory / "program.bin", directory / "expected.bin"]
     files += [directory / f"input-{index}.bin" for index in range(count)]
     if not all(path.is_file() for path in files):
@@ -67,9 +71,13 @@ def fixture_identity(directory: Path) -> tuple[str, int, int, int, str]:
         raise ValueError("fixture program SHA-256 does not match its manifest")
     input_lengths = [(directory / f"input-{index}.bin").stat().st_size
                      for index in range(count)]
+    read_counts = ([int(properties[f"input.{i}.read_count"]) for i in range(count)]
+                   if schema == "atlas.rtl_tile_fixture.v2" else [1] * count)
+    if any(not 1 <= value <= 4096 for value in read_counts):
+        raise ValueError("fixture input read counts must be between 1 and 4096")
     expected_bytes = (directory / "expected.bin").stat().st_size
     output_count = int(properties.get("output_count", "1"))
-    if (not 1 <= output_count <= 16 or expected_bytes != 2048 * output_count or any(
+    if (not 1 <= output_count <= limit or expected_bytes != 2048 * output_count or any(
         length not in (1024, 2048) for length in input_lengths
     )):
         raise ValueError("fixture input/output byte count is invalid")
@@ -89,7 +97,9 @@ def fixture_identity(directory: Path) -> tuple[str, int, int, int, str]:
     combined = hashlib.sha256()
     for path in files:
         combined.update(path.name.encode() + b"\0" + bytes.fromhex(digest(path)))
-    return name, count, sum(input_lengths) // 32, expected_bytes // 2, combined.hexdigest()
+    read_beats = (None if schema == "atlas.rtl_tile_fixture.v3" else
+                  sum(length * repeats for length, repeats in zip(input_lengths, read_counts, strict=True)) // 32)
+    return name, count, read_beats, expected_bytes // 2, combined.hexdigest()
 
 
 def run_logged(command: list[str], *, log: Path, env: dict[str, str]) -> float:
@@ -214,7 +224,9 @@ def main(argv: list[str] | None = None) -> int:
     }
     if fixtures:
         report["fixtures"] = [{"name": name, "input_count": count,
-                               "read_beats": read_beats, "bf16_cells": cells,
+                               "read_beats": read_beats, "checked_output_words": cells,
+                               **({"bf16_cells": cells} if read_beats is not None else {}),
+                               "dma_check": "bounded_addresses" if read_beats is None else "exact_transaction_multiset",
                                "sha256": sha,
                                "program_sha256": digest(directory / "program.bin")}
                               for (name, count, read_beats, cells, sha), directory
@@ -240,23 +252,24 @@ def main(argv: list[str] | None = None) -> int:
         ], log=out / "rtl-test.log", env=env)
         log = re.sub(r"\x1b\[[0-9;]*m", "", (out / "rtl-test.log").read_text())
         cases = re.findall(
-            r"Selected AtlasCore ([a-z0-9_]+): (\d+) DMA beats, (\d+) BF16 cells, (\d+) cycles",
+            r"Selected AtlasCore ([a-z0-9_]+): (\d+) DMA beats, (\d+) (?:BF16 cells|output words), (\d+) cycles",
             log,
         )
         expected_names = CASE_NAMES + tuple(item[0] for item in fixtures)
-        fixture_beats = {name: read_beats + cells // 16
+        fixture_beats = {name: (read_beats + cells // 16 if read_beats is not None else None)
                          for name, _, read_beats, cells, _ in fixtures}
         fixture_cells = {name: cells for name, _, _, cells, _ in fixtures}
         if tuple(name for name, _, _, _ in cases) != expected_names or \
-                any(int(beats) != fixture_beats.get(
+                any((fixture_beats.get(name, 0) is not None and int(beats) != fixture_beats.get(
                     name, 192 if name.startswith("k64_") else 128)
-                    or int(cells) != fixture_cells.get(name, 1024)
+                    ) or int(cells) != fixture_cells.get(name, 1024)
                     for name, beats, cells, _ in cases) or \
                 "Selected AtlasCore tail_grid: 6 launches, 2145 BF16 logical cells" not in log or \
                 "Tests: succeeded 1, failed 0" not in log:
             raise RuntimeError("RTL run did not report all expected passing launches")
         report["cases"] = [{"name": name, "dma_beats": int(beats),
-                            "bf16_cells": int(cells), "cycles": int(cycles)}
+                            **({"bf16_cells": int(cells)} if fixture_beats.get(name, 0) is not None else {}),
+                            "checked_output_words": int(cells), "cycles": int(cycles)}
                            for name, beats, cells, cycles in cases]
         report["observed_outputs"] = [
             {"name": name, "sha256": digest(out / "observed" / f"{name}.bin")}

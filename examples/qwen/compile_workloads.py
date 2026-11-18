@@ -28,7 +28,7 @@ from merlin.semantic_compiler.target_binding import (
 from merlin.semantic_compiler.linalg_bridge import LinalgBridgeError
 from merlin.semantic_compiler.precision_transform import build_diagnostic_matmul_tile
 
-MERLIN_REVISION = "85db5fb4e6eeb0ffe24c5a9938da8da8f255701d"
+MERLIN_REVISION = "650cc3400858515bd2722db2603bf35ee6a05f2f"
 
 
 def write(path, value):

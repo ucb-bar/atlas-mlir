@@ -130,7 +130,7 @@ atlas_model_tile_status atlas_graph_run_memrefs(
     offset += slot->payload_bytes;
   }
 
-  atlas_host_result host_result = atlas_host_load(
+  atlas_host_result host_result = atlas_host_ensure_loaded(
       binding->host, binding->program_words, binding->program_word_count);
   if (device_result) *device_result = host_result;
   if (host_result != ATLAS_HOST_OK) {
