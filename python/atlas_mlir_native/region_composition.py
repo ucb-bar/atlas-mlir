@@ -147,6 +147,7 @@ def compose_regions(
     stages, *, buffers, initialized, outputs, destination, tools=None,
     pipeline="mandatory", io_memory_bytes=262144, program_size_limit_bytes=None,
     rematerialize_constants=False, io_memory_base=None,
+    share_bodies=False,
 ):
     """Compile ordered explicit-DMA stages, with no host work between stages.
 
@@ -170,7 +171,8 @@ def compose_regions(
     fragments = [_prepare_source(stage, by_name, program_size_limit_bytes) for stage in stages]
     destination = Path(destination)
     destination.mkdir(parents=True, exist_ok=False)
-    virtual = compose_fragments(fragments, tools=tools, boundaries_lowered=True)
+    virtual = compose_fragments(fragments, tools=tools, boundaries_lowered=True,
+                                share_bodies=share_bodies)
     if rematerialize_constants:
         virtual = rematerialize_scalar_constants(virtual)
     (destination / "atlas-virtual.mlir").write_text(virtual)
@@ -182,6 +184,14 @@ def compose_regions(
     traps = [row for row in program["instructions"] if row["operation"] == "atlas.trap"]
     if len(traps) != 1 or traps[0]["fields"]["kind"] != "ecall":
         raise ValueError("composition must encode exactly one completion ECALL")
+    instruction_proof = None
+    if share_bodies:
+        from .limits import functional_instruction_limit
+        from .restoration_budget import instruction_bound
+        instruction_proof = instruction_bound(virtual, machine, program,
+            max_instructions=functional_instruction_limit())
+        if not instruction_proof['admitted']:
+            raise ValueError("shared composition exceeds the selected execution instruction budget")
     binary = b"".join(row["word_u32"].to_bytes(4, "little") for row in program["instructions"])
     # Capacity is checked by the backend after scheduling and encoding. Also
     # enforce the explicitly requested ceiling on the final published bytes.
@@ -200,6 +210,8 @@ def compose_regions(
                     "source_sha256": hashlib.sha256(stage.source.encode()).hexdigest()} for stage in stages],
         "physical_contract": "caller_declared; no inferred boundary conversions or source equivalence",
     }
+    if share_bodies:
+        execution["share_bodies"] = True
     if io_memory_base is not None:
         execution["io_memory_base"] = io_memory_base
     (destination / "atlas-machine.mlir").write_text(machine)
@@ -210,6 +222,9 @@ def compose_regions(
                       "execution_plan.json", "compilation-pipeline.json")
     if (destination / "mandatory-spilled-virtual.mlir").is_file():
         artifact_names += ("mandatory-spilled-virtual.mlir",)
+    if instruction_proof is not None:
+        (destination / "instruction-bound.json").write_text(json.dumps(instruction_proof, indent=2) + "\n")
+        artifact_names += ("instruction-bound.json",)
     manifest = {
         "schema": "atlas.region_composition.v1", "artifact_kind": "program",
         "selected_rtl_revision": RTL_REVISION, "program_bytes": len(binary),

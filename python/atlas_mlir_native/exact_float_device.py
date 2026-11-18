@@ -1,8 +1,10 @@
 """Exact source float operations through the common Atlas virtual pipeline.
 
-Every checked operation scans its whole source domain before storing results.
-NaNs and invalid infinity cancellation produce a device status with no output
-writes. Sign flips accept all encodings and preserve NaN payloads.
+By default, checked operations scan the whole source domain before storing
+results. NaNs and invalid infinity cancellation then return a device status
+without output writes. Explicitly private binary results allow tile-local
+validation; callers must discard the entire result on failure. Sign flips
+accept all encodings and preserve NaN payloads.
 """
 from .binding import io_memory_base as selected_io_base
 
@@ -26,11 +28,23 @@ MAX_LEAF_ELEMENTS = {"bf16_to_f32": 20480, "f32_to_bf16": 18432,
                      "bf16_neg": 43008, "f32_neg": 43008,
                      "bf16_add": 1024, "bf16_sub": 1024}
 
+# Conservative scheduling envelope for private binary tiles, including the
+# scalar fallback. It only selects a candidate size: compilation and replay
+# independently prove the complete physical instruction bound and IMEM size.
+PRIVATE_BINARY_TILE_ELEMENTS = 1024
+PRIVATE_BINARY_TILE_INSTRUCTIONS = 640 * PRIVATE_BINARY_TILE_ELEMENTS
+PRIVATE_BINARY_FIXED_INSTRUCTIONS = 4096
+
 
 def max_leaf_elements(plan):
     """Scale the conservative slice policy; prove the actual image separately."""
     from .limits import DEFAULT_FUNCTIONAL_INSTRUCTION_LIMIT, functional_instruction_limit
-    factor = max(1, functional_instruction_limit() // DEFAULT_FUNCTIONAL_INSTRUCTION_LIMIT)
+    budget = functional_instruction_limit()
+    if plan.private_output:
+        tiles = max(1, (budget - PRIVATE_BINARY_FIXED_INSTRUCTIONS)
+                    // PRIVATE_BINARY_TILE_INSTRUCTIONS)
+        return tiles * PRIVATE_BINARY_TILE_ELEMENTS
+    factor = max(1, budget // DEFAULT_FUNCTIONAL_INSTRUCTION_LIMIT)
     maximum = MAX_LEAF_ELEMENTS[plan.op] * factor
     if plan.op in ('bf16_add', 'bf16_sub'):
         # One route word per tile in the private 2-KiB admission table.
@@ -57,6 +71,8 @@ class FloatPlan:
     width: int
     output_width: int
     io_memory_base: int = DRAM_BASE
+    private_output: bool = False
+    repeated_input: object = None
     @property
     def op(self): return self.node.op
     @property
@@ -64,7 +80,20 @@ class FloatPlan:
     @property
     def input_bytes(self): return _aligned(self.count,self.tile_lanes)*self.width
     @property
-    def output_address(self): return self.io_memory_base+len(self.operands)*self.input_bytes
+    def cached_tiles(self):
+        from .float_operand_cache import cached_tiles
+        return cached_tiles(self)
+    @property
+    def input_payload_bytes(self):
+        return tuple(self.cached_tiles*self.tile_lanes*self.width
+                     if self.cached_tiles and i == self.repeated_input.port else self.input_bytes
+                     for i in range(len(self.operands)))
+    @property
+    def input_addresses(self):
+        sizes = self.input_payload_bytes
+        return tuple(self.io_memory_base+sum(sizes[:i]) for i in range(len(sizes)))
+    @property
+    def output_address(self): return self.io_memory_base+sum(self.input_payload_bytes)
     @property
     def output_bytes(self): return _aligned(self.count,self.tile_lanes)*self.output_width
     @property
@@ -75,13 +104,19 @@ class FloatPlan:
         from .binding import TILE_BYTES,dram_slots
         return dict(operation=self.op,count=self.count,input_count=len(self.operands),right_input=[n.id for n in self.operands].index(self.node.inputs[-1]),source_request_digest=self.source.digest(),io_memory_bytes=dram_slots()*TILE_BYTES)
     def record(self):
-        return dict(schema="atlas.exact_float.v1",source_request_digest=self.source.digest(),operation=self.op,
+        return dict(schema="atlas.exact_float.v1",
+                    **({"private_output": True, "publication_contract": "device result is private until zero status; discard all result bytes on failure"} if self.private_output else {}),
+                    **({"input_cache": dict(self.repeated_input.record(), tiles=self.cached_tiles,
+                        initialization="each invocation", transport="complete repeated dense tile cycle")}
+                       if self.cached_tiles else {}),
+                    source_request_digest=self.source.digest(),operation=self.op,
                     input_node_ids=[n.id for n in self.operands],output_node_ids=[self.node.id],
-                    input_addresses=[self.io_memory_base+i*self.input_bytes for i in range(len(self.operands))],
-                    input_payload_bytes=[self.input_bytes]*len(self.operands),output_addresses=[self.output_address],
+                    input_addresses=list(self.input_addresses),
+                    input_payload_bytes=list(self.input_payload_bytes),output_addresses=[self.output_address],
                     output_bytes=self.output_bytes+32,result_buffer_bytes=self.output_bytes,status_address=self.status_address,workspace_bytes=self.workspace_bytes,
                     logical_output_bytes=self.count*self.output_width,runtime_arithmetic="none",launches_per_invocation=1,
-                    boundary_transport_layout="contiguous-full-tile-DMA-with-private-zero-padding",
+                    boundary_transport_layout=("compact-repeated-input-cycle-and-dense-private-output" if self.cached_tiles
+                                               else "contiguous-full-tile-DMA-with-private-zero-padding"),
                     arithmetic_routes=["qualified-residual-vector", "pair-row-sum-vector", "exceptional-scalar"] if self.op in ("bf16_add","bf16_sub") else ["scalar-bit-arithmetic"],
                     verification="common-virtual-scheduling-allocation-and-all-generated-contracts",
                     vector_admission={"qualified":"signed-zero or abs-code2f80..4f80",
@@ -117,11 +152,21 @@ def prepare_source_plan(source, *, io_memory_base=None):
     return plan
 
 
-def prepare_plan(source, *, io_memory_base=None):
+def prepare_plan(source, *, io_memory_base=None, private_output=False, input_layout=None, cache_input=False):
     """Admit a physical leaf only when its complete frame fits DMA memory."""
     from .binding import dram_slots, TILE_BYTES
 
     plan = prepare_source_plan(source, io_memory_base=io_memory_base)
+    if type(private_output) is not bool or private_output and plan.op not in ('bf16_add', 'bf16_sub'):
+        raise ValueError('private float publication currently requires an exact binary operation')
+    if private_output:
+        from dataclasses import replace
+        plan = replace(plan, private_output=True)
+    if type(cache_input) is not bool:
+        raise ValueError('input cache selection must be Boolean')
+    if cache_input:
+        from .float_operand_cache import with_repeated_input
+        plan = with_repeated_input(plan, input_layout)
     if (plan.workspace_bytes > dram_slots() * TILE_BYTES
             or not dma_span_in_window(plan.io_memory_base, plan.workspace_bytes)):
         raise ValueError("exact float buffers leave selected DMA memory windows")
@@ -204,14 +249,15 @@ def machine_program(p):
     return _run([str(tools/"atlas-opt"),*_scheduled_virtual_pipeline(),"-"],input_text=virtual_program(p))
 
 
-def compile_source(snapshot,region,*,target_source,destination,limits,io_memory_base=None):
+def compile_source(snapshot,region,*,target_source,destination,limits,io_memory_base=None,private_output=False,input_layout=None,cache_input=False):
     io_memory_base = selected_io_base() if io_memory_base is None else io_memory_base
     import hashlib,json,os
     from pathlib import Path
     from atlas_mlir_native.options import current_codegen_options
     from merlin.semantic_compiler.target_binding import verify_native_publication
     from .binding import NATIVE_CHECKS,RTL_REVISION,_run
-    p=prepare_plan(region,io_memory_base=io_memory_base)
+    p=prepare_plan(region,io_memory_base=io_memory_base,private_output=private_output,
+                   input_layout=input_layout,cache_input=cache_input)
     maximum=max_leaf_elements(p)
     if p.count>maximum: raise ValueError(f"exact float leaf requires at most {maximum} elements")
     if p.workspace_bytes>p.descriptor()["io_memory_bytes"]: raise ValueError("exact float exceeds selected I/O window")
@@ -251,7 +297,7 @@ def compile_source(snapshot,region,*,target_source,destination,limits,io_memory_
     return manifest
 
 
-def prepare_c_package(region,compiled,name,*,target_source,runtime_linkage="separate",io_memory_base=None,input_layout=None):
+def prepare_c_package(region,compiled,name,*,target_source,runtime_linkage="separate",io_memory_base=None,input_layout=None,private_output=False,cache_input=False):
     io_memory_base = selected_io_base() if io_memory_base is None else io_memory_base
     import hashlib,json,os
     from pathlib import Path
@@ -261,7 +307,8 @@ def prepare_c_package(region,compiled,name,*,target_source,runtime_linkage="sepa
     from .binding import NATIVE_CHECKS,_run
     from .c_runtime import RUNTIME_SHARED_FILES,program_array,runtime_headers,runtime_members
     if runtime_linkage!="separate":raise ValueError("exact float requires shared runtime linkage")
-    p=prepare_plan(region,io_memory_base=io_memory_base);compiled,target_source=Path(compiled),Path(target_source)
+    p=prepare_plan(region,io_memory_base=io_memory_base,private_output=private_output,
+                   input_layout=input_layout,cache_input=cache_input);compiled,target_source=Path(compiled),Path(target_source)
     manifest=json.loads((compiled/"manifest.json").read_text())
     verify_native_publication(compiled,manifest,engine="merlin_native",request_digest=region.digest(),target_identity=region.target_identity)
     if (json.loads((compiled/"source-request.json").read_text())!=region.record() or
@@ -309,7 +356,8 @@ def prepare_c_package(region,compiled,name,*,target_source,runtime_linkage="sepa
         # Source operands may alias each other, as permitted by the source ABI.
         if ptr.startswith("outputs"):
             for other,osize in values[:i]:checks.append(f"  if ({name}_overlap({ptr},{size}u,{other},{osize}u)) return {upper}_INVALID;")
-    buffers=[f"{{{p.io_memory_base+i*p.input_bytes}u,{p.input_bytes}u,ATLAS_HOST_DEVICE_READ}}" for i in range(n)]
+    buffers=[f"{{{address}u,{size}u,ATLAS_HOST_DEVICE_READ}}"
+             for address,size in zip(p.input_addresses,p.input_payload_bytes,strict=True)]
     buffers += [f"{{{p.output_address}u,{p.output_bytes+32}u,ATLAS_HOST_DEVICE_WRITE}}"]
     declarations=f'''
 #define {upper}_WORKSPACE_BYTES {p.workspace_bytes}u
@@ -323,13 +371,21 @@ int {name}_source_dispatch(void *,const void *const *,void *const *);
 '''
     copies=[];transfers=[]
     for i in range(n):
-        at=i*p.input_bytes
+        at=p.input_addresses[i]-p.io_memory_base
+        payload=p.input_payload_bytes[i]
+        copied=logical
         if i == mapped_index:
-            copies.append(f"  if ({name}_pack_input(region->workspace+{at}u,inputs[{i}],ctx->input_first,{p.count}u)) return {upper}_INVALID;")
+            first="ctx->input_first"
+            count=p.count
+            if p.cached_tiles and i == p.repeated_input.port:
+                first=f"ctx->input_first%{p.repeated_input.period}u"
+                count=payload//p.width
+                copied=payload
+            copies.append(f"  if ({name}_pack_input(region->workspace+{at}u,inputs[{i}],{first},{count}u)) return {upper}_INVALID;")
         else:
             copies.append(f"  __builtin_memcpy(region->workspace+{at}u,inputs[{i}],{logical}u);")
-        copies.append(f"  __builtin_memset(region->workspace+{at+logical}u,0,{p.input_bytes-logical}u);")
-        transfer=f"  if (region->io.write(region->io.context,{p.io_memory_base+at}u,region->workspace+{at}u,{p.input_bytes}u)) return {upper}_MEMORY_ERROR;"
+        copies.append(f"  __builtin_memset(region->workspace+{at+copied}u,0,{payload-copied}u);")
+        transfer=f"  if (region->io.write(region->io.context,{p.io_memory_base+at}u,region->workspace+{at}u,{payload}u)) return {upper}_MEMORY_ERROR;"
         # Validate every packed slice before any device I/O.
         (transfers if input_layout is not None else copies).append(transfer)
     copies.extend(transfers)

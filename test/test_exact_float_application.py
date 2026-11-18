@@ -88,8 +88,9 @@ class ExactFloatModelTest(unittest.TestCase):
             directory=Path(directory)
             for op in OPS:
                 # Two genuine chunks prove atomic publication on late failure.
-                count=app.prepare_plan(request(op,device.MAX_LEAF_ELEMENTS[op]+3)).chunk_elements+3
-                source=request(op,count);p=app.prepare_plan(source);compiled=directory/op
+                private=op in ('bf16_add','bf16_sub')
+                count=app.prepare_plan(request(op,device.MAX_LEAF_ELEMENTS[op]+3),private_output=private).chunk_elements+3
+                source=request(op,count);p=app.prepare_plan(source,private_output=private);compiled=directory/op
                 manifest=app.compile_source(None,source,target_source=ROOT,destination=compiled,limits=None)
                 exported=app.prepare_c_package(source,compiled,'float_test',target_source=ROOT)
                 package=directory/(op+'-c');package.mkdir()

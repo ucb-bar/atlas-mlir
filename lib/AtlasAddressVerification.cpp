@@ -302,6 +302,24 @@ private:
     if (v.def == "arith.cmpi" && v.type == "i1") return I32AddressSpan{0,1};
     if (v.def != "argument") return std::nullopt;
     const auto &h = blocks[v.block];
+    auto argument = std::find(h.args.begin(), h.args.end(), id);
+    if (argument == h.args.end()) return std::nullopt;
+    unsigned argumentIndex = argument - h.args.begin();
+    std::optional<I32AddressSpan> incoming;
+    bool complete = !h.predecessors.empty();
+    for (int edge : h.predecessors) {
+      auto range = prove(edges[edge].incoming[argumentIndex], useBlock);
+      if (!range || (!unsignedRange && (range->first % 32 || range->last % 32))) {
+        complete = false;
+        break;
+      }
+      if (!incoming) incoming = range;
+      else {
+        incoming->first = std::min(incoming->first, range->first);
+        incoming->last = std::max(incoming->last, range->last);
+      }
+    }
+    if (complete) return incoming;
     if (h.edges.size() != 2 || !validValue(h.condition) || h.predecessors.size() != 2)
       return std::nullopt;
     int body = edges[h.edges[0]].to;

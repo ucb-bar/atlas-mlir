@@ -581,7 +581,7 @@ def plan_abi(request):
     }
 
 
-def compose_fragments(fragments, *, tools, boundaries_lowered=False):
+def compose_fragments(fragments, *, tools, boundaries_lowered=False, share_bodies=False):
     """Link parsed functions; never rewrite SSA names or addresses as text."""
     from xdsl.dialects.builtin import ArrayAttr, ModuleOp, StringAttr
     from xdsl.dialects.func import FuncOp
@@ -589,6 +589,8 @@ def compose_fragments(fragments, *, tools, boundaries_lowered=False):
 
     from merlin.frontends.linalg_mlir import parse_mlir_text
 
+    if type(share_bodies) is not bool:
+        raise ValueError('program body sharing must be Boolean')
     functions, names = [], []
     for i, text in enumerate(fragments):
         explicit = text if boundaries_lowered else _run(
@@ -618,7 +620,8 @@ def compose_fragments(fragments, *, tools, boundaries_lowered=False):
     stream = io.StringIO()
     Printer(stream=stream).print_op(linked)
     return _run(
-        [str(tools / "atlas-opt"), "--compose-atlas-program", "-"],
+        [str(tools / "atlas-opt"),
+         "--compose-atlas-program=share-bodies=true" if share_bodies else "--compose-atlas-program", "-"],
         input_text=stream.getvalue(),
     )
 

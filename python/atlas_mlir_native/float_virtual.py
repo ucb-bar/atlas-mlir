@@ -183,12 +183,12 @@ def cast_vector_refusal(b):
 
 
 def binary_vector_refusal(b):
-    """Min/max of both absolute operands proves a stronger nonzero domain.
+    """Prove signed zero or magnitude in [2^-32, 2^32] using vector extrema.
 
-    Selected RTL min/max compares ordered BF16 bits, including NaNs. For every
-    encoding x, max(x, x * -1) is in [0x2f80, 0x4f80] exactly when abs(x) is.
-    The two reductions preserve extrema across all lanes. Zeros and everything
-    outside this interval decline to the existing scalar classification.
+    Ordered-bit extrema reject NaNs and out-of-range magnitudes. The ordinary
+    nonzero case needs only min/max. If the minimum is zero, a bounded probe
+    distinguishes other zeros from small nonzero lanes without a scalar scan.
+    This only selects a route; arithmetic still reads the original operands.
     """
     negative_one = b.splat(0xbf80)
     absolute = []
@@ -203,8 +203,35 @@ def binary_vector_refusal(b):
         b.save('pairs', value)
         extrema.append(b.load('pairs', 0, 2))
     minimum, maximum = extrema
-    return b.binary('or', b.compare('ult', minimum, b.constant(0x2f80)),
-                    b.compare('ult', b.constant(0x4f80), maximum))
+    upper_bad = b.compare('ult', b.constant(0x4f80), maximum)
+    outside = b.binary('or', b.compare('ult', minimum, b.constant(0x2f80)), upper_bad)
+    has_zero = b.value(f'arith.cmpi eq, {minimum}, {b.constant(0)} : i32')
+    b.lines.append(f'    cf.cond_br {has_zero}, ^zero_domain({b.state} : {S}), '
+                   f'^vector_domain_done({b.state},{outside} : {S},i32)')
+    b.lines.append(f'  ^zero_domain(%zero_domain_state: {S}):')
+    b.state = '%zero_domain_state'
+
+    # For finite a >= 0, t = min(a, 2^-32) * 2^32 lies in [0, 1].
+    # t*(1-t) is zero exactly at t=0 or t=1. Any nonzero BF16 a below
+    # 2^-32 produces t >= 2^-101, so the probe cannot underflow to zero.
+    # The nearest t below one is 255/256: subtraction cannot round to zero
+    # either. NaNs and infinities are rejected by the original upper bound.
+    probes = []
+    lower, inverse, one = b.splat(0x2f80), b.splat(0x4f80), b.splat(0x3f80)
+    for slot in ('left', 'right'):
+        value = b.restore(slot)
+        magnitude = b.vector_binary('max', value, b.vector_binary('mul', value, negative_one))
+        scaled = b.vector_binary('mul', b.vector_binary('min', magnitude, lower), inverse)
+        probes.append(b.vector_binary('mul', scaled, b.vector_binary('sub', one, scaled)))
+    probe = b.vector_binary('max', *probes)
+    for axis in ('col', 'row'):
+        probe = b.value(f'"atlas.virtual_vpu_reduce"({probe}) {{kind = "{axis}_max"}} : ({T}) -> {T}')
+    b.save('pairs', probe)
+    outside = b.binary('or', upper_bad, b.compare('ne', b.load('pairs', 0, 2), b.constant(0)))
+    b.lines.append(f'    cf.br ^vector_domain_done({b.state},{outside} : {S},i32)')
+    b.lines.append(f'  ^vector_domain_done(%vector_domain_state: {S},%vector_domain_bad: i32):')
+    b.state = '%vector_domain_state'
+    return '%vector_domain_bad'
 
 
 def binary_qualified_refusal(b, left, right):
@@ -255,33 +282,44 @@ def virtual_program(p):
     group_binary=binary_lane_groups()
     vector_preflight=binary_vector_preflight()
     vector_cast=cast_vector_preflight() and p.op == 'bf16_to_f32'
-    lines=['module {',f'  func.func @exact_float() -> {S} attributes {{atlas.input_dram_base = {p.io_memory_base} : i64, atlas.input_dram_bytes = {len(p.operands)*p.input_bytes} : i64, atlas.output_dram_base = {p.output_address} : i64, atlas.output_dram_bytes = {p.output_bytes+32} : i64}} {{',f'    %start = "atlas.virtual_start"() : () -> {S}']
+    lines=['module {',f'  func.func @exact_float() -> {S} attributes {{atlas.input_dram_base = {p.io_memory_base} : i64, atlas.input_dram_bytes = {p.output_address-p.io_memory_base} : i64, atlas.output_dram_base = {p.output_address} : i64, atlas.output_dram_bytes = {p.output_bytes+32} : i64}} {{',f'    %start = "atlas.virtual_start"() : () -> {S}']
     b=Builder(lines);c=b.constant;op=b.binary;cmp=b.compare
     lanes=p.tile_lanes;tiles=p.input_bytes//(lanes*p.width)
     binary=p.op in ('bf16_add','bf16_sub')
+    private = p.private_output
     # Binary route caching is selected independently of the lowering pipeline.
     binary_routes=binary and (group_binary or vector_preflight or current_codegen_options().exact_binary_routes)
     # One word per tile retains route admission across the complete input
     # preflight. Arithmetic starts only after every tile passed validation.
-    if binary_routes and tiles > 512:
+    if binary_routes and not private and tiles > 512:
         raise ValueError('exact binary route table exceeds one 2048-byte slot')
     slots=(('left','result','pairs','status') if expand_unary and not binary
-           else ('left','right','result','pairs','status')) + (('routes',) if binary_routes else ())
+           else ('left','right','result','pairs','status')) + (('routes',) if binary_routes and not private else ())
     for slot in slots:b.slot(slot)
     zero=b.splat(0)
     for slot in slots:b.save(slot,zero)
+    if p.cached_tiles:
+        from .float_operand_cache import initialize_cache, restore_cached_input
+        initialize_cache(b,p)
     flag=c(0)
-    phases=('check','compute') if not p.op.endswith('_neg') else ('compute',)
+    phases = ('private',) if private else ('check','compute') if not p.op.endswith('_neg') else ('compute',)
     for phase in phases:
-        pointers=[c(p.io_memory_base),c(p.io_memory_base+[n.id for n in p.operands].index(p.node.inputs[-1])*p.input_bytes),c(p.output_address)]
+        right_index=[n.id for n in p.operands].index(p.node.inputs[-1])
+        pointers=[c(p.input_addresses[0]),c(p.input_addresses[right_index]),c(p.output_address)]
         def tile_body(tile,values):
-            bad,ap,bp,out=values
+            bad,ap,bp,out=values[:4]
             # A one-tile binary preflight leaves both immutable inputs in VMEM.
-            if not (binary_routes and tiles == 1 and phase == 'compute'):
+            if p.cached_tiles:
+                for slot,index,address in (('left',0,ap),('right',right_index,bp)):
+                    if index == p.repeated_input.port:
+                        restore_cached_input(b,p,slot,values[4])
+                    else:
+                        b.save(slot,b.dma_load(address,lanes*p.width))
+            elif not (binary_routes and tiles == 1 and phase == 'compute'):
                 a=b.dma_load(ap,lanes*p.width);b.save('left',a)
                 if binary or not expand_unary:
                     b.save('right',b.dma_load(bp,lanes*p.width) if len(p.operands)>1 else a)
-            if phase=='check':
+            if phase in ('check', 'private'):
                 if binary_routes:
                     if vector_preflight:
                         outside = binary_vector_refusal(b)
@@ -304,7 +342,8 @@ def virtual_program(p):
                     lines.append(f'    cf.br ^binary_checked({b.state},{flags} : {S},i32)')
                     lines.append(f'  ^binary_checked(%binary_checked_state: {S},%binary_flags: i32):')
                     b.state='%binary_checked_state';flags='%binary_flags'
-                    b.store('routes',tile,flags,4)
+                    if not private:
+                        b.store('routes',tile,flags,4)
                     bad=op('or',bad,op('shr',flags,c(2)))
                 def validate(index,acc):
                     a,d=b.inputs(p,index)
@@ -314,10 +353,19 @@ def virtual_program(p):
                 elif not binary_routes:
                     bad,=(b.loop('preflight_lane',lanes,[bad],validate) if binary or not expand_unary
                           else b.unary_lanes(lanes,[bad],validate))
-            else:
+            if phase != 'check':
+                if private:
+                    # Application output remains private until the status has
+                    # been checked. Validate this tile, consume it while still
+                    # resident, and skip publication after any invalid input.
+                    valid = b.value(f'arith.cmpi eq, {bad}, {c(0)} : i32')
+                    lines.append(f'    cf.cond_br {valid}, ^private_compute({b.state} : {S}), ^private_complete({b.state} : {S})')
+                    lines.append(f'  ^private_compute(%private_compute_state: {S}):')
+                    b.state = '%private_compute_state'
                 if binary:
                     if binary_routes:
-                        flags=b.load('routes',tile,4)
+                        if not private:
+                            flags=b.load('routes',tile,4)
                         qbad,rbad=op('and',flags,c(1)),op('and',flags,c(2))
                     else:
                         def classify(index,acc):
@@ -375,8 +423,16 @@ def virtual_program(p):
                     lines.append(f'    cf.br ^publish({b.state} : {S})')
                     lines.append(f'  ^publish(%publish_state: {S}):');b.state='%publish_state'
                 b.dma_store(out,b.restore('result'),lanes*p.output_width)
-            return [bad,op('add',ap,c(lanes*p.width)),op('add',bp,c(lanes*p.width)),op('add',out,c(lanes*p.output_width))]
-        flag,*_=b.loop(phase+'_tile',tiles,[flag,*pointers],tile_body)
+                if private:
+                    lines.append(f'    cf.br ^private_complete({b.state} : {S})')
+                    lines.append(f'  ^private_complete(%private_complete_state: {S}):')
+                    b.state = '%private_complete_state'
+            advanced=[bad,op('add',ap,c(lanes*p.width)),op('add',bp,c(lanes*p.width)),op('add',out,c(lanes*p.output_width))]
+            if p.cached_tiles:
+                next_cache=op('add',values[4],c(1))
+                advanced.append(b.select(next_cache,c(0),cmp('ult',next_cache,c(p.cached_tiles))))
+            return advanced
+        flag,*_=b.loop(phase+'_tile',tiles,[flag,*pointers,*([c(0)] if p.cached_tiles else [])],tile_body)
         if phase=='check':
             accepted=b.value(f'arith.cmpi eq, {flag}, {c(0)} : i32')
             lines.append(f'    cf.cond_br {accepted}, ^accepted({b.state} : {S}), ^done({b.state},{flag} : {S},i32)')

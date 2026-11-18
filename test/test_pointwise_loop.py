@@ -16,7 +16,7 @@ from test_looped_mnk import ROOT, build_snapshot
 
 def check_source_c_call(
     self, package, initial, binary, execute, values, wanted_bytes, invalid_values=(), *, source_dtype="f32",
-    output_dtype=None, expected_status=0, check_launch_inputs=None,
+    output_dtype=None, expected_status=0, check_launch_inputs=None, output_exponent=None,
 ):
     from atlas_mlir_native.binding import DRAM_BASE
 
@@ -46,26 +46,40 @@ def check_source_c_call(
         raise ValueError("unsupported source test dtype")
     if output_dtype == "bf16" and source_dtype == "f32":
         client_source = client_source.replace("float *output", "uint8_t *output")
+    if output_exponent is not None:
+        client_source = client_source.replace("float *output", "uint8_t *output")
+        client_source = client_source.replace("pointwise_source_run(&source,inputs,output,0)",
+            "pointwise_source_run(&source,inputs,output,(int32_t *)(output+" + str(len(wanted_bytes)-4) + "),0)")
+        client_source = client_source.replace("void *outputs[]={output};",
+            "void *outputs[]={output,(uint8_t *)output+" + str(len(wanted_bytes)-4) + "};")
+    if output_exponent is not None:
+        alias_source = client_source.replace('int call(', 'int call_alias(')
+        alias_source = alias_source.replace('(uint8_t *)output+' + str(len(wanted_bytes)-4), '(uint8_t *)output')
+        alias_source = alias_source.replace('(int32_t *)(output+' + str(len(wanted_bytes)-4) + ')', '(int32_t *)output')
+        client_source += alias_source
     (package / "client.c").write_text(client_source)
-    subprocess.run(
-        [
-            shutil.which("cc"),
-            "-std=c11",
-            "-O2",
-            "-Wall",
-            "-Wextra",
-            "-Werror",
-            "-shared",
-            "-fPIC",
-            "pointwise.c",
-            "client.c",
-            "-o",
-            "client.so",
-        ],
-        cwd=package,
-        check=True,
-        capture_output=True,
-    )
+    try:
+        subprocess.run(
+            [
+                shutil.which("cc"),
+                "-std=c11",
+                "-O2",
+                "-Wall",
+                "-Wextra",
+                "-Werror",
+                "-shared",
+                "-fPIC",
+                "pointwise.c",
+                "client.c",
+                "-o",
+                "client.so",
+            ],
+            cwd=package,
+            check=True,
+            capture_output=True,
+        )
+    except subprocess.CalledProcessError as error:
+        raise RuntimeError(error.stderr.decode()) from error
     client = ctypes.CDLL(str(package / "client.so"))
     rd_type = ctypes.CFUNCTYPE(ctypes.c_uint32, ctypes.c_void_p, ctypes.c_size_t)
     wr_type = ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_uint32)
@@ -78,6 +92,7 @@ def check_source_c_call(
     )
     memory, words, errors = bytearray(initial), {}, []
     polls = None
+    fail_read = False
 
     def read32(_, address):
         nonlocal polls
@@ -112,6 +127,8 @@ def check_source_c_call(
             errors.append(repr(error))
 
     def transfer(address, pointer, size, write):
+        if fail_read and not write:
+            return 1
         at = address - DRAM_BASE
         if not 0 <= at <= len(memory) - size:
             return 1
@@ -159,6 +176,21 @@ def check_source_c_call(
             bytes([0xA7]) * 16,
         )
         self.assertEqual([value.tobytes() for value in values], before)
+    if output_exponent is not None:
+        client.call_alias.argtypes = client.call.argtypes
+        for invoke, status, fail_read in ((client.call_alias, 1, False), (client.call, 3, True)):
+            memory[:] = initial
+            words.clear()
+            polls = None
+            result = ctypes.create_string_buffer(bytes([0xA7]) * (len(wanted_bytes)+32))
+            inputs = (ctypes.c_void_p * len(values))(*(value.ctypes.data for value in values))
+            self.assertEqual(invoke(*callbacks, inputs, ctypes.addressof(result)+16), status)
+            self.assertEqual(errors, [])
+            self.assertEqual(result.raw[:-1], bytes([0xA7]) * (len(wanted_bytes)+32))
+            if status == 1:
+                self.assertEqual(words, {})
+                self.assertEqual(memory, initial)
+        fail_read = False
     for rejected in invalid_values:
         memory[:] = initial
         words.clear()
@@ -170,7 +202,7 @@ def check_source_c_call(
         self.assertEqual(words, {})
         self.assertEqual(memory, initial)
         self.assertEqual(result.raw[:-1], bytes([0xA7]) * (len(wanted_bytes) + 32))
-    if source_dtype == "opaque" or output_dtype == "bf16" and source_dtype == "f32":
+    if source_dtype == "opaque" or output_dtype == "bf16" and source_dtype == "f32" or output_exponent is not None:
         # Mixed-width publication must still refuse an output inside an input.
         memory[:] = initial
         words.clear()

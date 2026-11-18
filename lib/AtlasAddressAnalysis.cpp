@@ -35,6 +35,38 @@ private:
   bool scalar;
   llvm::DenseSet<Value> active;
 
+  // A shared stage may receive different addresses from a finite set of
+  // callers. Prove every edge, including both arms targeting the same block.
+  // Checking each range's alignment prevents an unaligned interior choice
+  // from disappearing behind aligned minimum/maximum endpoints.
+  std::optional<I32AddressSpan> incomingRange(BlockArgument argument) {
+    Block *block = argument.getOwner();
+    unsigned position = argument.getArgNumber();
+    std::optional<I32AddressSpan> result;
+    auto include = [&](ValueRange values) {
+      if (position >= values.size()) return false;
+      auto range = prove(values[position]);
+      if (!range || (!scalar && (range->first % 32 || range->last % 32)))
+        return false;
+      if (!result) result = range;
+      else {
+        result->first = std::min(result->first, range->first);
+        result->last = std::max(result->last, range->last);
+      }
+      return true;
+    };
+    for (Block *predecessor : block->getPredecessors()) {
+      Operation *terminator = predecessor->getTerminator();
+      if (auto branch = dyn_cast<cf::BranchOp>(terminator)) {
+        if (!include(branch.getDestOperands())) return std::nullopt;
+      } else if (auto branch = dyn_cast<cf::CondBranchOp>(terminator)) {
+        if (branch.getTrueDest() == block && !include(branch.getTrueDestOperands())) return std::nullopt;
+        if (branch.getFalseDest() == block && !include(branch.getFalseDestOperands())) return std::nullopt;
+      } else return std::nullopt;
+    }
+    return result;
+  }
+
   // Recognize an increment without treating wrapping arithmetic as unbounded
   // integer arithmetic. The induction proof below bounds every observed value.
   std::optional<uint32_t> increment(Value next, Value current) {
@@ -170,6 +202,7 @@ private:
     }
     auto pointer = dyn_cast<BlockArgument>(value);
     if (!pointer) return std::nullopt;
+    if (auto range = incomingRange(pointer)) return range;
     Block *header = pointer.getOwner();
     auto branch = dyn_cast<cf::CondBranchOp>(header->getTerminator());
     if (!branch || branch.getTrueDest() == branch.getFalseDest() ||
