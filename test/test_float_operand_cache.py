@@ -11,7 +11,7 @@ from atlas_mlir_native import exact_float_application as application
 from atlas_mlir_native import exact_float_device as device
 from atlas_mlir_native import float_input_layout as folded
 from atlas_mlir_native.private_staging import PRIVATE_STAGING_TILE_LIMIT
-from merlin.semantic_compiler.codegen import codegen_options,current_codegen_options
+from atlas_mlir_native.options import codegen_options,current_codegen_options
 from test_float_input_layout import fixture,run_c_rust_layout
 
 ROOT=Path(__file__).resolve().parents[1]
