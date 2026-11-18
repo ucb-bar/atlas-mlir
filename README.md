@@ -52,8 +52,10 @@ from the system runtime; check with `build/bin/atlas-opt --version`.
 `ATLAS_NPU_MODEL_ROOT` must name a usable `npu_model` checkout (tested at
 `b97b2f5` with Python 3.14). Configure checks its assembler and RTL numerics
 imports using `Python3_EXECUTABLE`; CTest adds that path to `PYTHONPATH`.
-Install its dependencies before configuring. Optional execution tests still
-require their explicit environment settings.
+Install its dependencies before configuring. CTest sets `ATLAS_RUN_NPU_MODEL=1`,
+`IMPORT_MODEL_PYTHON`, and `IMPORT_MODEL_ROOT` from these settings, so npu_model
+exactness tests run and fail instead of skipping. Other optional execution tests
+still require their explicit environment settings.
 
 CTest runs the portable tests with no hardware. Tests that run the RTL need
 `ATLAS_RTL_ROOT`, `ATLAS_MODEL_ROOT`, `ATLAS_ASSEMBLER_ROOT`, `ATLAS_ARC_MODEL`,
@@ -73,7 +75,7 @@ export PYTHONPATH="$MERLIN_NATIVE_ROOT/src:$MERLIN_NATIVE_ROOT:$NPU_MODEL_ROOT${
 ```
 
 These are test dependencies; ordinary compilation does not consume the model
-or its reference results. Hardware and model-execution tests remain opt-in.
+or its reference results. Hardware tests remain opt-in.
 
 The full native C export tests also need Clang with RISC-V target support, both
 on `PATH` and in `ATLAS_LLVM_BIN`. The native independence test uses
