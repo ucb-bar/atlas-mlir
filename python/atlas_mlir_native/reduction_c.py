@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from atlas_mlir import toolchain
+
 from .binding import io_memory_base as selected_io_base
 
 import hashlib
@@ -109,7 +111,7 @@ def prepare_c_package(source, compiled, name, *, target_source, runtime_linkage=
     pipeline = manifest.get("lowering_pipeline")
     if pipeline not in NATIVE_PIPELINES:
         raise ValueError("reduction has an unknown lowering pipeline")
-    tools = Path(os.environ.get("ATLAS_OOT_BIN_DIR", target_source / "build/bin"))
+    tools = toolchain.bin_dir(target_source)
     machine = _run([str(tools / "atlas-opt"), *NATIVE_PIPELINES[pipeline], "-"], input_text=virtual)
     _run(
         [str(tools / "atlas-opt"), *NATIVE_CHECKS, "--verify-atlas-timing", "-"],

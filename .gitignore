@@ -13,3 +13,6 @@
 __pycache__/
 *.pyc
 *.egg-info/
+
+# Stamped by the release build before creating the source archive.
+/SOURCE_REVISION

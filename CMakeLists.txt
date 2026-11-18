@@ -83,13 +83,24 @@ if(SKBUILD)
       endif()
     endforeach()
   ]] ${wheel})
+  find_package(Python3 REQUIRED COMPONENTS Interpreter)
+  if(NOT EXISTS "${PROJECT_SOURCE_DIR}/.git" AND EXISTS "${PROJECT_SOURCE_DIR}/SOURCE_REVISION")
+    file(READ "${PROJECT_SOURCE_DIR}/SOURCE_REVISION" ATLAS_SOURCE_REVISION)
+    string(STRIP "${ATLAS_SOURCE_REVISION}" ATLAS_SOURCE_REVISION)
+    set(ATLAS_SOURCE_DIRTY 0)
+  else()
+    execute_process(COMMAND git rev-parse HEAD WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+      OUTPUT_VARIABLE ATLAS_SOURCE_REVISION OUTPUT_STRIP_TRAILING_WHITESPACE COMMAND_ERROR_IS_FATAL ANY)
+    execute_process(COMMAND git diff --quiet HEAD WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+      RESULT_VARIABLE ATLAS_SOURCE_DIRTY)
+  endif()
   set(share atlas_mlir/share)
-  install(PROGRAMS tools/compile_atlas_linalg_tile.py tools/atlas_boot_pack.py
-    tools/atlas_captured_host_data.py tools/atlas_host_embed.py
-    DESTINATION ${share}/tools ${wheel})
+  install(DIRECTORY tools/ DESTINATION ${share}/tools ${wheel}
+    FILES_MATCHING PATTERN "*.py")
   install(FILES docs/selected-variant-inventory.json DESTINATION ${share}/docs ${wheel})
-  install(FILES runtime/atlas_host.c runtime/atlas_host.h runtime/atlas_run.c
-    runtime/selected-host-map.json DESTINATION ${share}/runtime ${wheel})
+  install(DIRECTORY runtime/ DESTINATION ${share}/runtime ${wheel}
+    FILES_MATCHING PATTERN "*.c" PATTERN "*.h" PATTERN "*.json"
+    PATTERN "*.S" PATTERN "*.ld")
   install(FILES examples/handoff/captured_attention_mlp/start.S
     examples/handoff/captured_attention_mlp/link.ld
     DESTINATION ${share}/examples/handoff/captured_attention_mlp ${wheel})
@@ -97,6 +108,11 @@ if(SKBUILD)
     test/examples/captured_mlp32_arguments.json
     test/examples/captured_mlp32_weights.safetensors
     DESTINATION ${share}/test/examples ${wheel})
+  install(CODE "execute_process(COMMAND \"${Python3_EXECUTABLE}\" \"${PROJECT_SOURCE_DIR}/ci/write_build_record.py\"
+    --package \"\${CMAKE_INSTALL_PREFIX}/atlas_mlir\"
+    --revision \"${ATLAS_SOURCE_REVISION}\" --dirty \"${ATLAS_SOURCE_DIRTY}\"
+    --llvm \"${LLVM_PACKAGE_VERSION}\" --compiler \"${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION}\"
+    COMMAND_ERROR_IS_FATAL ANY)" ${wheel})
 endif()
 
 if(NOT ATLAS_ENABLE_TESTS)

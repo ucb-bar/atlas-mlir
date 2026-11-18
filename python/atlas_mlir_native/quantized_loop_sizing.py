@@ -4,6 +4,8 @@ An allocated untimed plan can reject an image: timing only adds words with
 the same CFG ownership. Passing that lower bound never admits an image. Only
 the fully checked physical program supplies the final per-launch bound.
 """
+
+from atlas_mlir import toolchain
 from dataclasses import asdict, dataclass
 from hashlib import sha256
 import json
@@ -167,7 +169,7 @@ def _size_counted(plan, *, target_source=None, limits=None, operand_reuse=None):
     from .quantized_loop import _execution_geometry, execution_layout, virtual_source
     from .region_composition import compile_virtual_with_receipt
 
-    target_source = Path(target_source or os.environ.get('ATLAS_ROOT', Path(__file__).resolve().parents[2]))
+    target_source = toolchain.data_root(target_source)
     limits = SearchLimits() if limits is None else limits
     from .quantized_operand_reuse import reuse_policy
     operand_reuse = reuse_policy() if operand_reuse is None else operand_reuse
@@ -188,7 +190,7 @@ def _size_counted(plan, *, target_source=None, limits=None, operand_reuse=None):
         return Sizing(None,_json(dict(base,route='k32_tiles',reason='selected_dram_window')))
     layout = execution_layout(plan, operand_reuse=operand_reuse)
     virtual = virtual_source(plan,layout)
-    tools = Path(os.environ.get('ATLAS_OOT_BIN_DIR',target_source/'build/bin'))
+    tools = toolchain.bin_dir(target_source)
     identity = _identity(plan,virtual,target_source,tools,limits,operand_reuse)
     key = sha256(_json(identity)).hexdigest()
     if key in _CACHE:
@@ -418,8 +420,8 @@ def publish_route(plan, compiled, sizing, *, target_source=None):
     from .already_quantized import _native_bodies
 
     record = sizing.record()
-    target_source = Path(target_source or os.environ.get('ATLAS_ROOT',Path(__file__).resolve().parents[2]))
-    tools = Path(os.environ.get('ATLAS_OOT_BIN_DIR',target_source/'build/bin'))
+    target_source = toolchain.data_root(target_source)
+    tools = toolchain.bin_dir(target_source)
     tool_hashes = {name:_digest(tools/name) for name in ('atlas-opt','atlas-emit')}
     identity = record.get('identity')
     if identity is not None and (identity['tool_sha256'] != tool_hashes

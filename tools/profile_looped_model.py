@@ -42,7 +42,7 @@ def measure(args):
     decoded = decode_binary(inventory, binary)
     instructions = [model_instruction(row, inventory, isa) for row in decoded["instructions"]]
     origin = json.loads(importlib.metadata.distribution("npu-model").read_text("direct_url.json") or "{}")
-    revision = "337e9f249f938a1dff007ddf8a763e5cd4b3aa2b"
+    revision = "b97b2f5a97e432141c4ef8504bec396651d77a8f"
     if revision not in origin.get("url", "") and origin.get("vcs_info", {}).get("commit_id") != revision:
         raise ValueError("install the documented model revision before profiling")
     torch.set_num_threads(1)

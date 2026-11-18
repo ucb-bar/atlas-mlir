@@ -7,6 +7,8 @@ No floating-point interpretation, conversion, or arithmetic is performed.
 
 from __future__ import annotations
 
+from atlas_mlir import toolchain
+
 from .binding import io_memory_base as selected_io_base
 
 from dataclasses import dataclass
@@ -121,7 +123,7 @@ def compile_source(snapshot, source, *, target_source, destination, limits):
 
     plan = prepare_source(source)
     virtual = virtual_program(plan, size_limit=current_codegen_options().program_size_limit_bytes)
-    tools = Path(os.environ.get("ATLAS_OOT_BIN_DIR", Path(target_source) / "build/bin"))
+    tools = toolchain.bin_dir(target_source)
     pipeline = _native_pipeline()
     machine = _run([str(tools / "atlas-opt"), *_scheduled_virtual_pipeline(pipeline), "-"], input_text=virtual)
     _run([str(tools / "atlas-opt"), *NATIVE_CHECKS, "--verify-atlas-timing", "-"], input_text=machine)
@@ -161,7 +163,7 @@ def prepare_c_package(source, compiled, name, *, target_source, runtime_linkage=
             or (compiled / "constant-tile.bin").read_bytes() != plan.tile):
         raise ValueError("scalar broadcast source or constant tile differs from publication")
     # Replay source lowering and final encoding, not only mutable manifest hashes.
-    tools = Path(os.environ.get("ATLAS_OOT_BIN_DIR", target_source / "build/bin"))
+    tools = toolchain.bin_dir(target_source)
     virtual = (compiled / "atlas-virtual.mlir").read_text()
     from atlas_mlir_native.options import current_codegen_options
     if virtual != virtual_program(plan, size_limit=current_codegen_options().program_size_limit_bytes):

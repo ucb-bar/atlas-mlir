@@ -5,6 +5,8 @@ these operations and verifies its six ordinary source contracts.
 """
 from __future__ import annotations
 
+from atlas_mlir import toolchain
+
 from .binding import io_memory_base as selected_io_base
 from dataclasses import dataclass, replace
 from hashlib import sha256
@@ -623,11 +625,11 @@ def virtual_program(plan, *, size_limit=None):
 def prove_plan(plan, *, target_source=None, limits=None):
     """Lower and prove one complete image without publishing any artifacts."""
     if target_source is None:
-        target_source = Path(__file__).resolve().parents[2]
+        target_source = toolchain.data_root()
     from .options import current_codegen_options
     virtual = virtual_program(plan, size_limit=current_codegen_options().program_size_limit_bytes)
     pipeline = _native_pipeline()
-    tools = Path(os.environ.get("ATLAS_OOT_BIN_DIR", Path(target_source) / "build/bin"))
+    tools = toolchain.bin_dir(target_source)
     try:
         machine = _run([str(tools / "atlas-opt"), *_scheduled_virtual_pipeline(pipeline), "-"], input_text=virtual)
     except NativeCompilationError as error:
@@ -714,7 +716,7 @@ def prepare_c_package(source, compiled, name, *, target_source, runtime_linkage=
             or json.loads((compiled / "execution_plan.json").read_text()) != plan.record()
             or (compiled / "atlas-virtual.mlir").read_text() != virtual):
         raise ValueError("device layout source or execution plan differs from publication")
-    tools = Path(os.environ.get("ATLAS_OOT_BIN_DIR", target_source / "build/bin"))
+    tools = toolchain.bin_dir(target_source)
     machine = _run([str(tools / "atlas-opt"), *_scheduled_virtual_pipeline(manifest["lowering_pipeline"]), "-"], input_text=virtual)
     if machine != (compiled / "atlas-machine.mlir").read_text():
         raise ValueError("device layout machine source differs")

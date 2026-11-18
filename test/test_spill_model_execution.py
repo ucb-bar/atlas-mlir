@@ -27,7 +27,7 @@ from test_spill_resources import (
 )
 from test_virtual_spilling import ROOT, compile_program, pressure
 
-MODEL_REVISION = '337e9f249f938a1dff007ddf8a763e5cd4b3aa2b'
+MODEL_REVISION = 'b97b2f5a97e432141c4ef8504bec396651d77a8f'
 
 
 from tools.model_instructions import model_instruction

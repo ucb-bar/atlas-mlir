@@ -1,6 +1,8 @@
 """Exact activation quantization through ordinary virtual source contracts."""
 from __future__ import annotations
 
+from atlas_mlir import toolchain
+
 from .binding import io_memory_base as selected_io_base
 
 from dataclasses import dataclass
@@ -133,8 +135,8 @@ def prove_plan(plan, *, target_source=None, limits=None, _pipeline=None):
     from merlin.semantic_compiler.target_binding import NativeCompilationError
     from .binding import NATIVE_CHECKS, RTL_REVISION, _run, _native_pipeline, _scheduled_virtual_pipeline
     if target_source is None:
-        target_source = Path(__file__).resolve().parents[2]
-    tools=Path(os.environ.get('ATLAS_OOT_BIN_DIR', Path(target_source)/'build/bin'))
+        target_source = toolchain.data_root()
+    tools=toolchain.bin_dir(target_source)
     virtual=virtual_program(plan)
     pipeline = _native_pipeline() if _pipeline is None else _pipeline
     if pipeline not in ("mandatory", "optimized"):
@@ -218,7 +220,7 @@ def prepare_c_package(region, compiled, name, *, target_source, runtime_linkage=
         json.loads((compiled/'execution_plan.json').read_text()) != plan.record() or
         (compiled/'atlas-virtual.mlir').read_text() != virtual_program(plan)):
         raise ValueError('activation quantizer publication differs from the exact source descriptor')
-    tools=Path(os.environ.get('ATLAS_OOT_BIN_DIR',target_source/'build/bin'))
+    tools=toolchain.bin_dir(target_source)
     pipeline = manifest.get('lowering_pipeline')
     if pipeline not in NATIVE_PIPELINES:
         raise ValueError('unknown activation quantizer lowering pipeline')

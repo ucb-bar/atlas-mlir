@@ -60,11 +60,11 @@ def invoke(replay):
         return apply_external_quantization(model, inputs, config)
 
 
-def test_entry_point_is_unique_and_owned_by_adapter_distribution():
+def test_entry_point_is_unique_and_owned_by_atlas_distribution():
     entries = [entry for entry in importlib.metadata.entry_points(group="m2m.quantization_adapters")
                if entry.name == "atlas_fp8"]
     assert len(entries) == 1
-    assert entries[0].dist.metadata["Name"] == "atlas-m2m-adapter"
+    assert entries[0].dist.metadata["Name"] == "atlas-mlir"
     assert entries[0].load() is atlas_fp8_adapter
 
 

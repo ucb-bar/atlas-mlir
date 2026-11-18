@@ -1,6 +1,8 @@
 """Target-owned counted tile loops for unchanged quantized operands."""
 from __future__ import annotations
 
+from atlas_mlir import toolchain
+
 from dataclasses import asdict
 from hashlib import sha256
 import json
@@ -213,7 +215,7 @@ def _compile_source(snapshot, source, plan, *, target_source, destination, limit
         selections['epilogue'] = dict(request_digest=body.digest(),check_fingerprint=selected.check_fingerprint,
                                      instructions=names,descriptor=expected,allocation=asdict(selected.allocation))
     virtual = virtual_source(plan, layout)
-    tools = Path(os.environ.get('ATLAS_OOT_BIN_DIR', Path(target_source)/'build/bin'))
+    tools = toolchain.bin_dir(target_source)
     destination = Path(destination)
     destination.mkdir(parents=True, exist_ok=False)
     # Sizing is not native publication: semantic body selection above and

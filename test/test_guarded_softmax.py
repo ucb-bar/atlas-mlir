@@ -143,8 +143,10 @@ class GuardedSoftmaxTest(unittest.TestCase):
         from tools.check_program_decode import decode_binary
         from tools.model_instructions import model_instruction
 
-        origin = json.loads(importlib.metadata.distribution("npu-model").read_text("direct_url.json"))
-        self.assertIn("337e9f249f938a1dff007ddf8a763e5cd4b3aa2b", origin.get("url", ""))
+        from model_provenance import require_model_revision
+        import npu_model
+        require_model_revision(importlib.metadata.distribution("npu-model"), npu_model.__file__,
+                               "b97b2f5a97e432141c4ef8504bec396651d77a8f")
         plan = prepare_row_softmax(lower_semantic_softmax(self.source, allow_guarded=True).request)
         program_root = self.artifact / "segments/region_000"
         body_root = program_root / "body"

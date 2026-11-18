@@ -88,7 +88,7 @@ def measure(args):
     from tools.check_program_decode import decode_binary
     from tools.model_instructions import model_instruction
 
-    revision = "337e9f249f938a1dff007ddf8a763e5cd4b3aa2b"
+    revision = "b97b2f5a97e432141c4ef8504bec396651d77a8f"
     origin = json.loads(
         importlib.metadata.distribution("npu-model").read_text("direct_url.json")
         or "{}"

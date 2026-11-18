@@ -4,6 +4,8 @@ The transition reproduces the removed division encoder on logical reduction
 values. Rejected values become admitted padding before device arithmetic, and
 the accumulated status is checked before any source result is published.
 """
+
+from atlas_mlir import toolchain
 from .binding import io_memory_base as selected_io_base
 
 from dataclasses import replace
@@ -144,7 +146,7 @@ def compile_group(group, snapshot, *, target_source, destination, limits):
         target_source=target_source, destination=destination / 'division', limits=limits,
         io_memory_base=group['io_memory_base'])
     final = virtual_program(plan, addresses, output, descriptor)
-    tools = Path(os.environ.get('ATLAS_OOT_BIN_DIR', target_source / 'build/bin'))
+    tools = toolchain.bin_dir(target_source)
     virtual = compose_fragments([(destination / 'square-reduction/atlas-virtual.mlir').read_text(),
                                  transition_source(group), final], tools=tools, boundaries_lowered=True)
     virtual = rematerialize_scalar_constants(virtual)

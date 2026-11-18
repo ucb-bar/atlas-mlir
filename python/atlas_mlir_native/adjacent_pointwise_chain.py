@@ -1,4 +1,6 @@
 """Compose ordinary three-operation pointwise chains with device boundaries."""
+
+from atlas_mlir import toolchain
 from dataclasses import replace
 import json
 from math import prod
@@ -194,7 +196,7 @@ def compile_group(group, snapshot, *, target_source, destination, limits):
             target_source=target_source, destination=member, limits=limits, ordinary_abi=True,
             io_memory_base=group['io_memory_base'])
         descriptors.append(descriptor); selections.append(selection)
-    tools=Path(os.environ.get('ATLAS_OOT_BIN_DIR',target_source/'build/bin'))
+    tools=toolchain.bin_dir(target_source)
     virtual=virtual_group(group,descriptors,tools=tools)
     compile_adjacent_virtual(virtual, destination=destination, target_source=target_source)
     publish_adjacent_group(group, destination, kind='adjacent_pointwise_chain', execution=execution_plan(group),

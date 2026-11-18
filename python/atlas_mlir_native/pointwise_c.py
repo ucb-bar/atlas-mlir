@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from atlas_mlir import toolchain
+
 import hashlib
 import json
 import os
@@ -134,7 +136,7 @@ def prepare_precision_c_package(precision, compiled, name, *, target_source, run
     pipeline = manifest.get("lowering_pipeline")
     if pipeline not in NATIVE_PIPELINES:
         raise ValueError("pointwise compilation has an unknown lowering pipeline")
-    tools = Path(os.environ.get("ATLAS_OOT_BIN_DIR", target_source / "build/bin"))
+    tools = toolchain.bin_dir(target_source)
     machine = _run(
         [str(tools / "atlas-opt"), *NATIVE_PIPELINES[pipeline], "-"],
         input_text=virtual_program(plan, addresses, output, descriptor),

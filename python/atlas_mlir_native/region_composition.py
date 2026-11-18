@@ -6,6 +6,8 @@ host conversions, rewrite addresses, change arithmetic, or join program sets.
 
 from __future__ import annotations
 
+from atlas_mlir import toolchain
+
 from .binding import DRAM_BASE, io_memory_base as selected_io_base
 from atlas_mlir_native.options import current_codegen_options
 
@@ -166,7 +168,7 @@ def compose_regions(
         raise ValueError("composition pipeline must be mandatory or optimized")
     if program_size_limit_bytes is not None and (type(program_size_limit_bytes) is not int or program_size_limit_bytes <= 0):
         raise ValueError("composition code budget must be positive")
-    tools = Path(tools or os.environ.get("ATLAS_OOT_BIN_DIR", "build/bin"))
+    tools = Path(tools) if tools else toolchain.bin_dir()
     fragments = [_prepare_source(stage, by_name, program_size_limit_bytes) for stage in stages]
     destination = Path(destination)
     destination.mkdir(parents=True, exist_ok=False)
@@ -265,7 +267,7 @@ def compile_adjacent_virtual(virtual, *, destination, target_source):
     """Lower one linked body through the selected registered compiler pipeline."""
     from .binding import NATIVE_CHECKS, NATIVE_PIPELINES, RTL_REVISION, _native_pipeline, _run
 
-    tools = Path(os.environ.get('ATLAS_OOT_BIN_DIR', Path(target_source) / 'build/bin'))
+    tools = toolchain.bin_dir(target_source)
     machine = compile_virtual_with_receipt(virtual, tools=tools, pipeline=_native_pipeline(), destination=destination)
     _run([str(tools / 'atlas-opt'), *NATIVE_CHECKS, '--verify-atlas-timing', '-'], input_text=machine)
     program = json.loads(_run([str(tools / 'atlas-emit'), '--program-json', '-'], input_text=machine))
@@ -290,7 +292,7 @@ def link_adjacent_stages(stages, *, buffers, initialized, outputs, destination, 
     linked = destination / 'linked'
     from atlas_mlir_native.options import current_codegen_options
     compose_regions(stages, buffers=buffers, initialized=initialized, outputs=outputs,
-        destination=linked, tools=os.environ.get('ATLAS_OOT_BIN_DIR', str(Path(target_source) / 'build/bin')),
+        destination=linked, tools=str(toolchain.bin_dir(target_source)),
         pipeline=_native_pipeline(), io_memory_bytes=dram_slots() * TILE_BYTES, rematerialize_constants=True,
         program_size_limit_bytes=current_codegen_options().program_size_limit_bytes,
         io_memory_base=io_memory_base)

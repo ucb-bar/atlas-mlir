@@ -7,6 +7,8 @@ physical input lane, including padding, must be initialized by its producer.
 
 from __future__ import annotations
 
+from atlas_mlir import toolchain
+
 import hashlib
 import json
 import os
@@ -287,7 +289,7 @@ def compile_pack(
     )
     evidence = select_body(snapshot, plan, limits=limits)
     destination.mkdir(parents=True, exist_ok=False)
-    tools = Path(os.environ.get("ATLAS_OOT_BIN_DIR", target_source / "build/bin"))
+    tools = toolchain.bin_dir(target_source)
     pipeline = _native_pipeline()
     machine = _run(
         [str(tools / "atlas-opt"), *NATIVE_PIPELINES[pipeline], "-"], input_text=virtual

@@ -1,7 +1,12 @@
 #include "atlas_host.h"
 
 #include <limits.h>
+#ifdef ATLAS_STANDALONE_MEMOPS
+/* The diagnostic reset-entry runner provides these without a C library. */
+void *memcpy(void *destination, const void *source, size_t bytes);
+#else
 #include <string.h>
+#endif
 
 enum { ATLAS_HALTED = 1, ATLAS_HALT_REASON_SHIFT = 1, ATLAS_ECALL = 2 };
 

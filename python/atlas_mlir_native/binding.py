@@ -4106,13 +4106,10 @@ class AtlasNativeBinding:
 
             from atlas_mlir import toolchain
             # Respect an explicit target build; installed wheels carry their own tools.
-            if "ATLAS_OOT_BIN_DIR" not in os.environ and (target_source / "build/bin").is_dir():
-                tool_dir = target_source / "build/bin"
-            else:
-                try:
-                    tool_dir = toolchain.bin_dir()
-                except toolchain.ToolchainError as exc:
-                    raise NativeCompilationError("tool_unavailable", str(exc)) from exc
+            try:
+                tool_dir = toolchain.bin_dir(target_source)
+            except toolchain.ToolchainError as exc:
+                raise NativeCompilationError("tool_unavailable", str(exc)) from exc
             atlas_opt, atlas_emit = tool_dir / "atlas-opt", tool_dir / "atlas-emit"
             if not atlas_opt.is_file() or not atlas_emit.is_file():
                 raise NativeCompilationError("tool_unavailable", "Atlas OOT lowerer or emitter is unavailable")

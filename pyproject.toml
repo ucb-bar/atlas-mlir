@@ -4,23 +4,29 @@ build-backend = "scikit_build_core.build"
 
 [project]
 name = "atlas-mlir"
-version = "0.1.0"
+version = "0.2.0"
 description = "Atlas NPU compiler: PyTorch model to Atlas program and host ELF, and the Merlin native binding"
 readme = "README.md"
 license = {file = "LICENSE"}
-# 3.10 is the Python in Chipyard's conda environment; torch-mlir publishes
-# wheels for 3.10-3.12.
-requires-python = ">=3.10"
+# Merlin uses Python 3.12 syntax. The numerical model runs separately on 3.14.
+requires-python = ">=3.12"
 dependencies = [
   "numpy",
   "safetensors",
-  "xdsl>=0.65.0,<0.69",
+  "xdsl==0.68.0",
+  "merlin[semantic-search] @ git+https://github.com/reed-nicolas/merlin.git@650cc3400858515bd2722db2603bf35ee6a05f2f",
 ]
 
 [project.optional-dependencies]
 test = ["pytest", "numpy", "safetensors"]
 # Captured Linalg and the native tools do not need a PyTorch installation.
-capture = ["torch==2.10.0", "torch-mlir==20261001"]
+capture = [
+  "torch==2.11.0+cpu",
+  "ml_dtypes>=0.4.0",
+  "m2m @ git+https://github.com/reed-nicolas/model2MLIR.git@ebb1c600e0d7f3205c801d8f00acb960015b32f2",
+]
+# Optional, isolated historical demo only. Not used by atlasc build.
+tile-demo = ["torch==2.10.0+cpu", "torch-mlir==20261001"]
 
 [project.scripts]
 atlasc = "atlas_mlir.cli:main"
@@ -30,16 +36,20 @@ atlas-emit = "atlas_mlir.toolchain:atlas_emit"
 [project.entry-points."merlin.native_target_compilers"]
 atlas = "atlas_mlir_native.binding:AtlasNativeBinding"
 
+[project.entry-points."m2m.quantization_adapters"]
+atlas_fp8 = "atlas_m2m_adapter:atlas_fp8_adapter"
+
 [tool.scikit-build]
 minimum-version = "build-system.requires"
 cmake.version = ">=3.22"
 cmake.build-type = "Release"
 # The tools do not use the Python ABI: one wheel per platform.
 wheel.py-api = "py3"
-wheel.packages = ["python/atlas_mlir", "python/atlas_mlir_native"]
+wheel.packages = ["python/atlas_mlir", "python/atlas_mlir_native", "adapter/atlas_m2m_adapter"]
 install.components = ["atlas-wheel"]
 install.strip = true
 sdist.exclude = ["build", "out", "notes.md"]
+sdist.include = ["SOURCE_REVISION"]
 
 [tool.scikit-build.cmake.define]
 ATLAS_ENABLE_TESTS = "OFF"

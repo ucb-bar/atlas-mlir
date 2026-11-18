@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from atlas_mlir import toolchain
+
 import hashlib
 import json
 from pathlib import Path
@@ -63,7 +65,7 @@ def prepare_c_package(
             request_path,
             compiled,
             name,
-            target_source=target_source or Path(__file__).resolve().parents[2],
+            target_source=target_source or toolchain.data_root(),
             runtime_linkage=runtime_linkage,
             compile_inputs=compile_inputs,
             semantic_source=semantic_source,
@@ -208,7 +210,7 @@ def prepare_c_package(
         or binary != b"".join(row["word_u32"].to_bytes(4, "little") for row in program["instructions"])
     ):
         raise ValueError("loop binary differs from the selected instruction words")
-    runtime = (target_source or Path(__file__).resolve().parents[2]) / "runtime"
+    runtime = (target_source or toolchain.data_root()) / "runtime"
     # Runtime ownership stays with the explicitly selected target checkout.
     if not (runtime / "atlas_host.h").is_file():
         raise ValueError("selected Atlas runtime sources are unavailable")

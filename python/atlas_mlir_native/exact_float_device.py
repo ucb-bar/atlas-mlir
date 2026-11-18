@@ -4,6 +4,8 @@ Every checked operation scans its whole source domain before storing results.
 NaNs and invalid infinity cancellation produce a device status with no output
 writes. Sign flips accept all encodings and preserve NaN payloads.
 """
+
+from atlas_mlir import toolchain
 from .binding import io_memory_base as selected_io_base
 
 from dataclasses import dataclass
@@ -200,7 +202,7 @@ def machine_program(p):
     import os
     from pathlib import Path
     from .binding import _scheduled_virtual_pipeline, _run
-    tools=Path(os.environ.get("ATLAS_OOT_BIN_DIR",Path(__file__).resolve().parents[2]/"build/bin"))
+    tools=toolchain.bin_dir()
     return _run([str(tools/"atlas-opt"),*_scheduled_virtual_pipeline(),"-"],input_text=virtual_program(p))
 
 
@@ -215,7 +217,7 @@ def compile_source(snapshot,region,*,target_source,destination,limits,io_memory_
     maximum=max_leaf_elements(p)
     if p.count>maximum: raise ValueError(f"exact float leaf requires at most {maximum} elements")
     if p.workspace_bytes>p.descriptor()["io_memory_bytes"]: raise ValueError("exact float exceeds selected I/O window")
-    tools=Path(os.environ.get("ATLAS_OOT_BIN_DIR",Path(target_source)/"build/bin"))
+    tools=toolchain.bin_dir(target_source)
     virtual=virtual_program(p)
     machine=machine_program(p)
     _run([str(tools/"atlas-opt"),*NATIVE_CHECKS,"--verify-atlas-timing","-"],input_text=machine)
@@ -269,7 +271,7 @@ def prepare_c_package(region,compiled,name,*,target_source,runtime_linkage="sepa
         json.loads((compiled/"execution_plan.json").read_text())!=p.record() or
         (compiled/"atlas-virtual.mlir").read_text()!=virtual_program(p)):
         raise ValueError("exact float publication differs from complete source descriptor")
-    tools=Path(os.environ.get("ATLAS_OOT_BIN_DIR",target_source/"build/bin"))
+    tools=toolchain.bin_dir(target_source)
     machine=machine_program(p)
     if machine!=(compiled/"atlas-machine.mlir").read_text():raise ValueError("exact float machine differs from source replay")
     _run([str(tools/"atlas-opt"),*NATIVE_CHECKS,"--verify-atlas-timing","-"],input_text=machine)

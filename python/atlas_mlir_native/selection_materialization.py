@@ -1,5 +1,7 @@
 """Independent source rebinding of retained native tile selection evidence."""
 
+from atlas_mlir import toolchain
+
 from .binding import DRAM_BASE, io_memory_base as selected_io_base
 
 from dataclasses import replace
@@ -240,7 +242,7 @@ def bind_row_loop(original, canonical, materialized, destination, capture, *, ta
     body, canonical_body = plan.tiling.regions[0].request, checked.tiling.regions[0].request
     destination.mkdir(parents=True, exist_ok=False)
     bind_tile(body, canonical_body, materialized / "body", destination / "body", capture)
-    tools = Path(os.environ.get("ATLAS_OOT_BIN_DIR", Path(target_source) / "build/bin"))
+    tools = toolchain.bin_dir(target_source)
     explicit = _run([str(tools / "atlas-opt"), "--lower-atlas-virtual-boundary-to-dma", "-"],
                     input_text=(destination / "body/atlas-virtual.mlir").read_text())
     virtual = row_loop.virtual_program(plan, explicit)

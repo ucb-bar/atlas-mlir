@@ -7,6 +7,8 @@ route changes arithmetic, infers precision, or inserts CPU computation.
 
 from __future__ import annotations
 
+from atlas_mlir import toolchain
+
 import hashlib
 import io
 import json
@@ -656,7 +658,7 @@ def compile_resident(
             "resident graph requires its checked automatic frame layout",
         )
     destination.mkdir(parents=True, exist_ok=False)
-    tools = Path(os.environ.get("ATLAS_OOT_BIN_DIR", target_source / "build/bin"))
+    tools = toolchain.bin_dir(target_source)
     from xdsl.dialects.builtin import IntegerAttr
     from xdsl.printer import Printer
 

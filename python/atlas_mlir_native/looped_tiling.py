@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from atlas_mlir import toolchain
+
 import hashlib
 import json
 import os
@@ -615,7 +617,7 @@ def tuning_key(snapshot, request, fixed_inputs, fixed_outputs, limits):
     from .private_staging import storage_policy
     from .exponent_page_cache import enabled as exponent_page_cache_enabled
 
-    tool = Path(os.environ["ATLAS_OOT_BIN_DIR"]) / "atlas-opt"
+    tool = toolchain.bin_dir() / "atlas-opt"
     staging_storage = storage_policy()
     return {
         "request_digest": request.digest(),
@@ -826,7 +828,7 @@ def compile_looped(snapshot, request, *, fixed_inputs, fixed_outputs, target_sou
         seed_address=ranges[2][0] if seed else None, k_unroll=unroll,
     )
     codegen.update(schedule)
-    tools = Path(os.environ.get("ATLAS_OOT_BIN_DIR", target_source / "build/bin"))
+    tools = toolchain.bin_dir(target_source)
     pipeline = _native_pipeline()
     if codegen["program_size_limit_bytes"] is not None:
         virtual = virtual.replace(

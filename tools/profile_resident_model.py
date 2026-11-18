@@ -205,7 +205,7 @@ def measure(args):
     from merlin.semantic_compiler.reference import TensorValue
     from merlin.semantic_compiler.target_binding import verify_native_publication
 
-    revision = "337e9f249f938a1dff007ddf8a763e5cd4b3aa2b"
+    revision = "b97b2f5a97e432141c4ef8504bec396651d77a8f"
     origin = json.loads(
         importlib.metadata.distribution("npu-model").read_text("direct_url.json")
         or "{}"

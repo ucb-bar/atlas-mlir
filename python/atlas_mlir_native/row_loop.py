@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from atlas_mlir import toolchain
+
 from .binding import io_memory_base as selected_io_base
 
 import hashlib
@@ -260,7 +262,7 @@ def compile_row_loop(snapshot, source, *, target_source, destination, limits, io
         request_digest=body.digest(),
         target_identity=source.target_identity,
     )
-    tools = Path(os.environ.get("ATLAS_OOT_BIN_DIR", target_source / "build/bin"))
+    tools = toolchain.bin_dir(target_source)
     explicit = _run(
         [str(tools / "atlas-opt"), "--lower-atlas-virtual-boundary-to-dma", "-"],
         input_text=(destination / "body/atlas-virtual.mlir").read_text(),
@@ -370,7 +372,7 @@ def verify_row_loop(source, compiled, *, target_source, io_memory_base=None):
         != _sha((target_source / "docs/selected-variant-inventory.json").read_bytes())
     ):
         raise ValueError("row loop differs from its source, selected body or physical frame")
-    tools = Path(os.environ.get("ATLAS_OOT_BIN_DIR", target_source / "build/bin"))
+    tools = toolchain.bin_dir(target_source)
     for key, filename in (("atlas_opt_sha256", "atlas-opt"), ("atlas_emit_sha256", "atlas-emit")):
         if manifest.get(key) != _sha((tools / filename).read_bytes()):
             raise ValueError("row-loop lowering tool changed")

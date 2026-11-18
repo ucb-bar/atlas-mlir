@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from atlas_mlir import toolchain
+
 from atlas_mlir_native.options import current_codegen_options
 
 import json
@@ -272,7 +274,7 @@ class AtlasApplicationAdapter:
         for side in ("resident_inputs", "resident_outputs"):
             choice[side] = [names.get(name, name) for name in choice[side]]
         policy = {key: value for key, value in vars(self).items() if key != "original_source_sha256"}
-        tools = Path(os.environ.get("ATLAS_OOT_BIN_DIR", Path(__file__).resolve().parents[2] / "build/bin"))
+        tools = toolchain.bin_dir()
         tool_identities = {}
         for tool in (tools / "atlas-opt", tools / "atlas-emit"):
             if tool.is_file():

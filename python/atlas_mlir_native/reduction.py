@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from atlas_mlir import toolchain
+
 from .binding import io_memory_base as selected_io_base
 
 import hashlib
@@ -436,7 +438,7 @@ def compile_reduction(
         target_identity=request.target_identity,
     )
     required = selected_body_descriptors(plan, destination / "body")
-    tools = Path(os.environ.get("ATLAS_OOT_BIN_DIR", target_source / "build/bin"))
+    tools = toolchain.bin_dir(target_source)
     virtual = virtual_program(plan, addresses[:2], addresses[2])
     pipeline = _native_pipeline()
     mandatory = _run(

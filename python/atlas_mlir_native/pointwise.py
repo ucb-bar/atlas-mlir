@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from atlas_mlir import toolchain
+
 from .binding import io_memory_base as selected_io_base
 
 import hashlib
@@ -592,7 +594,7 @@ def compile_pointwise(
     )
     descriptor = selected_body_descriptor(plan, destination / "body")
     virtual = virtual_program(plan, addresses, output, descriptor)
-    tools = Path(os.environ.get("ATLAS_OOT_BIN_DIR", target_source / "build/bin"))
+    tools = toolchain.bin_dir(target_source)
     pipeline = _native_pipeline()
     mandatory = compile_virtual_with_receipt(virtual, tools=tools, pipeline="mandatory", destination=destination)
     _run(

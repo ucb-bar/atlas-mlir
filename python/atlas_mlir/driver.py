@@ -1,120 +1,193 @@
-"""atlasc build: model -> capture -> policy -> importer -> program.bin -> host ELF."""
-
+"""Thin orchestration of Merlin's authenticated capture and application compiler."""
 from __future__ import annotations
 
+from dataclasses import dataclass
 import hashlib
+import importlib.util
 import json
-import shutil
-from dataclasses import dataclass, field
+import os
 from pathlib import Path
-from typing import Any
+import signal
+import subprocess
+import sys
 
-from . import host, policy as policies, toolchain
-from .capture import Capture, capture, load
+from . import toolchain
+from .tile_demo import _fresh
 
-MARKER = ".atlasc"
+MERLIN_REVISION = "650cc3400858515bd2722db2603bf35ee6a05f2f"
 
 
-@dataclass
+@dataclass(frozen=True)
 class BuildResult:
     out: Path
-    program: Path
-    words: int
-    elf: Path | None
+    application: Path
     report: Path
-    notes: list[str] = field(default_factory=list)
+    verification: Path
 
 
-def _sha256(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
+def _run(command, *, log: Path, timeout: float, env=None):
+    """Abort the process tree on timeout; never retry a different numerical path."""
+    log.parent.mkdir(parents=True, exist_ok=True)
+    with log.open("w") as stream:
+        process = subprocess.Popen(list(map(str, command)), stdout=stream,
+                                   stderr=subprocess.STDOUT, env=env, start_new_session=True)
+        try:
+            status = process.wait(timeout=timeout)
+        except (subprocess.TimeoutExpired, KeyboardInterrupt) as error:
+            os.killpg(process.pid, signal.SIGKILL)
+            process.wait()
+            if isinstance(error, KeyboardInterrupt):
+                raise
+            raise toolchain.ToolFailure(f"{log.stem} timed out; build aborted. See {log}") from error
+    if status:
+        tail = "\n".join(log.read_text(errors="replace").splitlines()[-12:])
+        raise toolchain.ToolFailure(f"{log.stem} failed ({status}); see {log}\n{tail}")
 
 
-def _fresh(out: Path, force: bool) -> None:
-    """The tools refuse stale output, so each build gets an empty directory.
+def _authenticated(path, expected, label):
+    if path is None or expected is None:
+        raise ValueError(f"{label} requires a file and its independently selected expected SHA-256")
+    path = Path(path).resolve(strict=True)
+    if hashlib.sha256(path.read_bytes()).hexdigest() != expected:
+        raise ValueError(f"{label} SHA-256 differs from the selected export")
+    return path
 
-    --force only replaces a directory an earlier atlasc build made.
+
+def capture(source: Path, *, out: Path, dtype: str = "bf16", contract=None,
+            quant_policy=None, expected_contract_sha256=None, expected_policy_sha256=None,
+            capture_python=None, timeout=1800, env=None):
+    source = Path(source).resolve(strict=True)
+    if source.suffix != ".py":
+        raise ValueError("Merlin intake requires a live .py loader exposing get_model_and_inputs(); saved .pt2 intake is not qualified")
+    out = Path(out).resolve()
+    if out.exists():
+        raise FileExistsError(f"capture output must be fresh: {out}")
+    quantized = any(x is not None for x in (contract, quant_policy,
+                    expected_contract_sha256, expected_policy_sha256))
+    args = []
+    if quantized:
+        contract = _authenticated(contract, expected_contract_sha256, "contract")
+        quant_policy = _authenticated(quant_policy, expected_policy_sha256, "quantization policy")
+        args = ["--already-quantized", "--quant-adapter", "atlas_fp8", "--contract", contract,
+                "--policy", quant_policy, "--expected-contract-sha256", expected_contract_sha256,
+                "--expected-policy-sha256", expected_policy_sha256]
+    _run([capture_python or sys.executable, "-m", "atlas_mlir._capture_worker",
+          "--loader", source, "--dtype", dtype, "--out", out, "--materialize-bundle", *args],
+         log=out.parent / (out.name + ".log"), timeout=timeout, env=env)
+    return out
+
+
+def build(source: Path | None = None, *, out: Path, precision_policy: Path,
+          captured: Path | None = None, snapshot: Path | None = None,
+          dtype="bf16", contract=None, quant_policy=None, expected_contract_sha256=None,
+          expected_policy_sha256=None, capture_python=None, target_source=None,
+          already_quantized=False, application_parameters="external",
+          application_name="application", application_memory_bytes=None,
+          io_memory_bytes=None, recipe=None, board=None, application_residency=False,
+          application_region_loop=False, force=False, timeout=1800) -> BuildResult:
+    """Compile a live loader or a materialized Merlin capture, then replay verification.
+
+    Precision policy must be selected by the caller and bound to exact source IR.
+    There is no guessed policy, alternate importer, or failure fallback.
     """
-    if out.exists() and any(out.iterdir()):
-        if not force:
-            raise FileExistsError(f"{out} is not empty; pass --force to replace an earlier build")
-        if not (out / MARKER).is_file():
-            raise FileExistsError(f"{out} was not made by atlasc; refusing to replace it")
-        shutil.rmtree(out)
-    out.mkdir(parents=True, exist_ok=True)
-    (out / MARKER).write_text("atlasc build output\n")
-
-
-def _load_inputs(path: Path | None) -> dict[str, Any] | None:
-    if path is None:
-        return None
-    from safetensors.numpy import load_file
-    return load_file(str(path))
-
-
-def build(source: Path | None = None, *, out: Path, model: Any = None,
-          inputs: tuple[Any, ...] | None = None, captured: Capture | None = None,
-          example_inputs: Path | None = None, policy: str | Path = "fp8",
-          force: bool = False, host_cc: str | None = None, host_elf: bool = True) -> BuildResult:
-    """Compile one model. Give a loader .py or .pt2 path, a model and inputs, or a capture."""
-    out = Path(out)
-    bins = toolchain.bin_dir()
+    if (source is None) == (captured is None):
+        raise ValueError("give exactly one loader or --capture directory")
+    if application_memory_bytes is None or application_memory_bytes <= 0:
+        raise ValueError("application_memory_bytes must be an explicit positive arena budget")
+    precision_policy = Path(precision_policy).resolve(strict=True)
+    if captured is not None and any(x is not None for x in (contract, quant_policy,
+            expected_contract_sha256, expected_policy_sha256)):
+        raise ValueError("export contract options belong to live capture, not --capture")
+    source = Path(source).resolve(strict=True) if source is not None else None
+    captured = Path(captured).resolve(strict=True) if captured is not None else None
+    snapshot = Path(snapshot).resolve(strict=True) if snapshot is not None else None
+    out = Path(out).resolve()
+    # Never let --force delete any of the selected inputs.
+    for path in (source, captured, snapshot, precision_policy, contract, quant_policy):
+        if path is not None and Path(path).resolve().is_relative_to(out):
+            raise ValueError("build inputs must be outside the output directory")
+    target = toolchain.data_root(target_source).resolve()
+    bins = toolchain.bin_dir(target)
+    from .provenance import environment_record
+    provenance = environment_record()
     _fresh(out, force)
-    if captured is None:
-        if model is None:
-            if source is None:
-                raise ValueError("give a model source, a model and inputs, or a captured Linalg")
-            model, inputs = load(Path(source))
-        captured = capture(model, tuple(inputs), out / "capture")
-        example_inputs = captured.inputs
-    elif example_inputs is None:
-        example_inputs = captured.inputs
-
-    linalg = captured.linalg.read_text()
-    policy_path = out / "policy.json"
-    policy_path.write_text(json.dumps(policies.resolve(policy, linalg), indent=2) + "\n")
-    compiled = out / "compiled"
-    toolchain.run_tool("compile_atlas_linalg_tile.py", "--linalg", captured.linalg,
-                       "--argument-manifest", captured.arguments, "--weights", captured.weights,
-                       "--policy", policy_path, "--atlas-bin-dir", bins,
-                       "--output-dir", compiled, step="compile")
-    program = compiled / "program.bin"
-    words = program.stat().st_size // 4
-
-    cc = toolchain.host_cc(host_cc) if host_elf else None
-    packaged = host.package(compiled, out, _load_inputs(example_inputs), cc)
-    notes = []
-    if not host_elf:
-        packaged["elf_skipped"] = "--no-host-elf"
-    if packaged.get("elf_skipped"):
-        notes.append(f"host ELF skipped: {packaged['elf_skipped']}")
-
-    manifest = json.loads((compiled / "import-manifest.json").read_text())
-    report = {
-        "schema": "atlas_mlir.build_report.v1",
-        "status": "compiled",
-        "source": str(source) if source else None,
-        "selected_rtl_revision": manifest["selected_rtl_revision"],
-        "policy": str(policy),
-        "mxu_units": manifest["mxu_units"],
-        "program": {"path": str(program), "words": words, "sha256": _sha256(program)},
-        "inputs": [{"name": slot["source_key"], "dram_address": hex(slot["dram_address"]),
-                    "role": slot["physical_role"]}
-                   for slot in manifest["input_slots"] if slot["source_kind"] == "input"],
-        "outputs": [{"index": row["index"], "dram_address": hex(row["dram_address"]),
-                     "layout": row["physical_layout"]} for row in manifest["outputs"]],
-        "host": packaged,
-        "toolchain": {"bin_dir": str(bins), "host_cc": cc},
-        "notes": notes,
-    }
+    env = os.environ.copy()
+    env.update(ATLAS_OOT_BIN_DIR=str(bins), PYTHONNOUSERSITE="1", OMP_NUM_THREADS="1",
+               MKL_NUM_THREADS="1", OPENBLAS_NUM_THREADS="1")
+    command = [sys.executable, "-m", "merlin.targetgen.cli"]
+    steps = []
+    def run(name, arguments):
+        _run([*command, *arguments], log=out / "logs" / (name + ".log"), timeout=timeout, env=env)
+        steps.append(name)
+    report = {"schema": "atlas_mlir.build_report.v2", "status": "building",
+              "route": "merlin-model2mlir-application", "qualification": "diagnostic",
+              "environment": provenance, "steps": steps,
+              "target": {"tools": {name: hashlib.sha256((bins / name).read_bytes()).hexdigest()
+                                      for name in ("atlas-opt", "atlas-emit")},
+                         "inventory_sha256": hashlib.sha256((target / "docs/selected-variant-inventory.json").read_bytes()).hexdigest()}}
     report_path = out / "report.json"
-    report_path.write_text(json.dumps(report, indent=2) + "\n")
-    elf = Path(packaged["elf"]) if packaged["elf"] else None
-    return BuildResult(out, program, words, elf, report_path, notes)
+    try:
+        if captured is None:
+            captured = capture(source, out=out / "capture", dtype=dtype, contract=contract,
+                quant_policy=quant_policy, expected_contract_sha256=expected_contract_sha256,
+                expected_policy_sha256=expected_policy_sha256, capture_python=capture_python,
+                timeout=timeout, env=env)
+            steps.append("capture")
+        capture_record = captured / "atlasc-environment.json"
+        if capture_record.is_file():
+            report["capture_environment"] = json.loads(capture_record.read_text())
+        meta = json.loads((captured / "meta.json").read_text())
+        quantized = already_quantized or contract is not None or meta.get("capture_quantization") == "already_materialized"
+        if precision_policy.suffix == ".py":
+            # A caller-owned policy factory can bind its explicit choices to this
+            # capture. Never rewrite a JSON policy's existing source identity.
+            spec = importlib.util.spec_from_file_location("_atlasc_precision_policy", precision_policy)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            source_hash = hashlib.sha256((captured / "model.mlir").read_bytes()).hexdigest()
+            selected_policy = module.get_precision_policy(source_hash)
+            precision_policy = out / "precision-policy.json"
+            precision_policy.write_text(json.dumps(selected_policy, sort_keys=True, indent=2) + "\n")
+        staged = out / "compile-inputs"
+        run("stage-capture", ["stage-capture", "--capture", captured,
+                             "--precision-policy", precision_policy, "--out", staged])
+        geometry = ["--io-memory-bytes", str(io_memory_bytes)] if io_memory_bytes else []
+        if snapshot is None:
+            snapshot = out / "snapshot"
+            run("native-build", ["native-build", "--engine", "merlin_native", "--support", "atlas",
+                "--source-revision", MERLIN_REVISION, "--cargo-target-dir", out / "cargo",
+                *geometry, "--out", snapshot])
+        common = ["--engine", "merlin_native", "--support", "atlas", "--snapshot", snapshot,
+                  "--target-source", target, "--compile-inputs", staged, "--application",
+                  "--application-parameters", application_parameters, "--mode", "diagnostic", *geometry]
+        if quantized:
+            common += ["--already-quantized"]
+        for flag, value in (("--recipe", recipe), ("--board", board)):
+            if value:
+                common += [flag, value]
+        if application_residency:
+            common += ["--application-residency"]
+        compile_options = ["--application-name", application_name, "--abi", "auto", "--deterministic-receipts"]
+        if application_memory_bytes is not None:
+            compile_options += ["--application-memory-bytes", str(application_memory_bytes)]
+        if application_region_loop:
+            compile_options += ["--application-region-loop"]
+        application = out / "application"
+        run("native-compile", ["native-compile", *common, *compile_options, "--out", application])
+        verification = out / "verification.json"
+        run("native-verify", ["native-verify", *common, "--artifact", application, "--out", verification])
+        report.update(status="verified", application="application", verification="verification.json",
+                      precision_policy_sha256=hashlib.sha256(precision_policy.read_bytes()).hexdigest(),
+                      artifacts={str(p.relative_to(out)): hashlib.sha256(p.read_bytes()).hexdigest()
+                                 for directory in (application, staged)
+                                 for p in sorted(directory.rglob("*")) if p.is_file()})
+    except (Exception, KeyboardInterrupt) as error:
+        report.update(status="failed", error=str(error))
+        raise
+    finally:
+        report_path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
+    return BuildResult(out, application, report_path, verification)
 
 
-def compile(model: Any, inputs: tuple[Any, ...], out: str | Path, *,
-            policy: str | Path = "fp8", force: bool = False,
-            host_cc: str | None = None) -> BuildResult:
-    """Python entry point: compile a torch.nn.Module (or ExportedProgram) for Atlas."""
-    return build(out=Path(out), model=model, inputs=tuple(inputs), policy=policy,
-                 force=force, host_cc=host_cc)
+# Python callers use the same loader/capture contract as the command-line interface.
+compile = build
