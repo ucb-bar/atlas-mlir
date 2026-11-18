@@ -112,9 +112,10 @@ class BF16DomainsNativeTest(unittest.TestCase):
     def test_selected_native_domains_and_constant_mask_roles(self):
         from merlin.semantic_compiler.model import ConstantBinding
         from merlin.semantic_compiler.target_binding import NativeCompilationError
-        for op,mode in (("sub_bf16_nonnan","sub"),("exp_bf16_nonpositive","exp"),("mul_bf16_finite","mul")):
+        for op,mode in (("sub_bf16_nonnan","sub"),("exp_bf16_nonpositive","exp"),("mul_bf16_finite","mul"),
+                        ("add_bf16_nonnegative","add"),("row_sum_bf16_nonnegative","row_sum")):
             program = self.compile(request_for(op),op)
-            rows = [row for row in program["instructions"] if row["operation"] in ("atlas.vpu_unary","atlas.vpu_binary")]
+            rows = [row for row in program["instructions"] if row["operation"] in ("atlas.vpu_unary","atlas.vpu_binary","atlas.vpu_reduce")]
             self.assertEqual([row["fields"]["kind"] for row in rows],[mode])
         base = request_for("sub_bf16_nonnan")
         for port in (0,1):

@@ -374,6 +374,48 @@ def evaluate_bf16_row_sum(node, operands: tuple[TensorValue, ...]) -> TensorValu
     return TensorValue(node.type, tuple(output))
 
 
+def evaluate_bf16_row_sum_nonnegative(node, operands: tuple[TensorValue, ...]) -> TensorValue:
+    """Adjacent FP32 RNE tree on nonnegative BF16 through one, with gradual underflow."""
+    from .bf16_domains import ROW_SUM_NONNEGATIVE_ATTRS, _positive_bf16_rne_gradual
+    if (node.op != "row_sum_bf16_nonnegative" or len(operands) != 1
+            or node.type.shape != (32, 32) or node.type.dtype != "bf16"
+            or node.type.numerical_policy != "raw-bit-pattern" or operands[0].type != node.type
+            or node.index_maps != _ROW_REDUCE_MAPS or node.attrs != ROW_SUM_NONNEGATIVE_ATTRS):
+        raise ValueError("nonnegative BF16 row sum has an unsupported semantic contract")
+    output = []
+    for row in range(32):
+        values = list(operands[0].elements[row * 32:(row + 1) * 32])
+        if any(type(code) is not int or not 0 <= code <= 0x3f80 for code in values):
+            raise ValueError("nonnegative BF16 row sum requires zero through one")
+        values = [code << 16 for code in values]
+        while len(values) > 1:
+            values = [_f32_add_rne(values[i], values[i + 1]) for i in range(0, len(values), 2)]
+        value = Fraction(struct.unpack("<f", struct.pack("<I", values[0]))[0])
+        winner = _positive_bf16_rne_gradual(value) if value else 0
+        output.extend((winner,) * 32)
+    return TensorValue(node.type, tuple(output))
+
+
+def evaluate_bf16_add_nonnegative(node, operands: tuple[TensorValue, ...]) -> TensorValue:
+    """Nonnegative finite FP32 RNE addition followed by BF16 chop, including subnormals."""
+    from .bf16_domains import ADD_NONNEGATIVE_ATTRS
+    if (node.op != "add_bf16_nonnegative" or len(operands) != 2
+            or node.type.shape != (32, 32) or node.type.dtype != "bf16"
+            or node.type.numerical_policy != "raw-bit-pattern"
+            or any(operand.type != node.type for operand in operands)
+            or node.index_maps != pointwise_identity_maps(2, 2) or node.attrs != ADD_NONNEGATIVE_ATTRS):
+        raise ValueError("nonnegative BF16 addition has an unsupported semantic contract")
+    output = []
+    for left, right in zip(operands[0].elements, operands[1].elements, strict=True):
+        if any(type(code) is not int or not 0 <= code <= 0x7f7f for code in (left, right)):
+            raise ValueError("nonnegative BF16 addition requires finite nonnegative inputs")
+        result = _f32_add_rne(left << 16, right << 16) >> 16
+        if result >= 0x7f80:
+            raise ValueError("nonnegative BF16 addition overflows FP32")
+        output.append(result)
+    return TensorValue(node.type, tuple(output))
+
+
 def evaluate_seeded_bf16_reduction(node, operands: tuple[TensorValue, ...]) -> TensorValue:
     """Interpret logical reduction axes without the compiler's tiler or packer."""
     from .reduction import NONNEGATIVE_NORMAL_REDUCTION_POLICY, REDUCTION_POLICIES

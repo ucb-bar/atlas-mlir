@@ -20,12 +20,19 @@ GUARDED_SOFTMAX_POLICY = "bf16-tiled-masked-row-softmax-empty-zero-v1"
 SOFTMAX_DOMAIN = "bf16-signed-zero-or-normal-exp8-to132-abs-at-most32-v1"
 ROWSPAN80_DOMAIN = "bf16-row-relative-span80-pad32-v1"
 ROWSPAN80_MAX_COLUMNS = 1024
+ROWSPAN96_DOMAIN = "bf16-row-relative-span96-pad32-v1"
+ROWSPAN96_MAX_COLUMNS = 1024
+
+
+def row_span_limit(domain):
+    """Return the explicitly selected row span, or None for the absolute domain."""
+    return {ROWSPAN80_DOMAIN: 80, ROWSPAN96_DOMAIN: 96}.get(domain)
 
 
 def score_domain(request):
     attrs = dict(request.nodes[0].attrs)
     domain = attrs.get("input_domain")
-    if domain not in {SOFTMAX_DOMAIN, ROWSPAN80_DOMAIN}:
+    if domain not in {SOFTMAX_DOMAIN, ROWSPAN80_DOMAIN, ROWSPAN96_DOMAIN}:
         raise ValueError("unsupported row-softmax score domain")
     return domain
 
@@ -40,11 +47,14 @@ def prepare_row_softmax(request):
         or request.lowering_policy != "diagnostic"
         or len(request.nodes) != (3 if masked else 2)
         or len(request.nodes[0].type.shape) != 2
-        or request.nodes[0].attrs not in {(("input_domain", SOFTMAX_DOMAIN),), (("input_domain", ROWSPAN80_DOMAIN),)}
+        or request.nodes[0].attrs not in {
+            (("input_domain", SOFTMAX_DOMAIN),), (("input_domain", ROWSPAN80_DOMAIN),),
+            (("input_domain", ROWSPAN96_DOMAIN),),
+        }
         or request.nodes[0].type.dtype != "bf16"
         or request.nodes[0].type.shape[1] > (
             ROWSPAN80_MAX_COLUMNS
-            if request.nodes[0].attrs == (("input_domain", ROWSPAN80_DOMAIN),)
+            if dict(request.nodes[0].attrs).get("input_domain") in {ROWSPAN80_DOMAIN, ROWSPAN96_DOMAIN}
             else 65536
         )
         or request.boundary_layouts
@@ -65,6 +75,11 @@ def prepare_row_softmax(request):
         "reciprocal": "atlas.vpu_recip_bf16_wide_tile",
         "multiply": "atlas.vpu_mul_bf16_zero_tile",
     }
+    if score_domain(request) == ROWSPAN96_DOMAIN:
+        names.update(exp="atlas.vpu_exp_bf16_nonpositive_tile",
+                     multiply="atlas.vpu_mul_bf16_finite_tile",
+                     row_sum="atlas.vpu_row_sum_bf16_nonnegative_tile",
+                     combine_sum="atlas.vpu_add_bf16_nonnegative_tile")
     shape = tuple(axis.minimum for axis in catalog[names["row_max"]].output_axis_bounds)
     return decompose_row_softmax(
         request,
@@ -86,13 +101,17 @@ def prepare_inputs(plan, source: bytes, keep: bytes | None = None):
     valid and padding differences in [-80,0]. Exponentials remain normal.
     At most 1024 columns in the row-relative domain keep the minimum final
     probability normal under the selected reciprocal and product primitives.
+    The separately selected span96 domain retains the maximum and column
+    bounds but permits exact spans up to 96, including subnormal exponential
+    results. Its numerical qualification is separate from input admission.
     Padding is masked after exponentiation and cannot affect normalization.
     """
     if plan != prepare_row_softmax(plan.source):
         raise ValueError("softmax tiling differs from the selected source and primitive catalog")
     if type(source) is not bytes or len(source) != plan.shape[0] * plan.shape[1] * 2:
         raise ValueError("softmax source bytes differ from its complete shape")
-    relative = score_domain(plan.source) == ROWSPAN80_DOMAIN
+    domain = score_domain(plan.source)
+    relative = row_span_limit(domain) is not None
     for (code,) in struct.iter_unpack("<H", source):
         magnitude = code & 0x7FFF
         limit, exponent_limit = (0x4300, 134) if relative else (0x4200, 132)
@@ -103,8 +122,8 @@ def prepare_inputs(plan, source: bytes, keep: bytes | None = None):
             if keep[at : at + 2] == b"\0\0" and source[at : at + 2] != plan.pad_element:
                 raise ValueError("masked scores must use the selected finite padding value")
     if relative:
-        validate_row_span80(source, plan.shape, keep if plan.masked else None, empty_rows_zero=plan.empty_rows_zero,
-                            masked=plan.masked)
+        validate_row_span(source, plan.shape, keep if plan.masked else None, domain=domain,
+                          empty_rows_zero=plan.empty_rows_zero, masked=plan.masked)
     return tuple(
         {name: pack_bf16_pair_halves(payload) for name, payload in group.items()}
         for group in materialize_row_softmax_inputs(plan, source, keep)
@@ -112,15 +131,24 @@ def prepare_inputs(plan, source: bytes, keep: bytes | None = None):
 
 
 def validate_row_span80(source, shape, keep=None, *, empty_rows_zero=False, masked=False):
+    """Validate the immutable span80 policy."""
+    return validate_row_span(source, shape, keep, domain=ROWSPAN80_DOMAIN,
+                             empty_rows_zero=empty_rows_zero, masked=masked)
+
+
+def validate_row_span(source, shape, keep=None, *, domain, empty_rows_zero=False, masked=False):
     """Prove row-relative bounds exactly on already-encoded BF16 values.
 
     Fraction prevents a tiny positive maximum and -80 minimum from silently
     passing when their mathematical difference rounds to 80 in host float.
     The caller validates finite code ranges before invoking this check.
     """
+    span = row_span_limit(domain)
+    if span is None:
+        raise ValueError("unsupported row-relative softmax domain")
     rows, columns = shape
     if columns > ROWSPAN80_MAX_COLUMNS:
-        raise ValueError("row-relative span80 domain supports at most 1024 columns")
+        raise ValueError(f"row-relative span{span} domain supports at most 1024 columns")
     if masked and (type(keep) is not bytes or len(keep) != len(source)):
         raise ValueError("row-relative masked softmax needs a complete keep buffer")
     for row in range(rows):
@@ -140,5 +168,5 @@ def validate_row_span80(source, shape, keep=None, *, empty_rows_zero=False, mask
                 continue
             raise ValueError("row-relative softmax needs a nonempty row")
         maximum, minimum = max(values), min(values)
-        if not -32 <= maximum <= 48 or Fraction(maximum)-Fraction(minimum) > 80:
-            raise ValueError("softmax row is outside the selected row-relative span80 domain")
+        if not -32 <= maximum <= 48 or Fraction(maximum)-Fraction(minimum) > span:
+            raise ValueError(f"softmax row is outside the selected row-relative span{span} domain")

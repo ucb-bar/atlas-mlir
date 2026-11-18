@@ -61,7 +61,9 @@ from .layout import pack_bf16_pair_halves
 from .pack_lane import ROUNDED_PACK_DOMAIN, ROUNDED_PACK_POLICY, ROUNDED_PACK_RANGE
 from .bf16_domains import (EXP_NONPOSITIVE_ATTRS as BF16_EXP_NONPOSITIVE_ATTRS,
                           SUB_NONNAN_ATTRS as BF16_SUB_NONNAN_ATTRS,
-                          MUL_FINITE_ATTRS as BF16_MUL_FINITE_ATTRS)
+                          MUL_FINITE_ATTRS as BF16_MUL_FINITE_ATTRS,
+                          ROW_SUM_NONNEGATIVE_ATTRS as BF16_ROW_SUM_NONNEGATIVE_ATTRS,
+                          ADD_NONNEGATIVE_ATTRS as BF16_ADD_NONNEGATIVE_ATTRS)
 
 RTL_REVISION = "0079c0541111197741a231c002e3843fa6f545b2"
 TARGET_IDENTITY = f"atlas-rtl-{RTL_REVISION}:movement-mxu01-vpu-pack-tile-v24"
@@ -201,10 +203,12 @@ BF16_UNARY_MODES = {
 BF16_ROW_REDUCTION_ATTRS = {
     "row_max_bf16": BF16_ROW_MAX_ATTRS,
     "row_sum_bf16": BF16_ROW_SUM_ATTRS,
+    "row_sum_bf16_nonnegative": BF16_ROW_SUM_NONNEGATIVE_ATTRS,
 }
 BF16_ROW_REDUCTION_MODES = {
     "atlas.vpu_row_max_bf16_tile": "row_max",
     "atlas.vpu_row_sum_bf16_tile": "row_sum",
+    "atlas.vpu_row_sum_bf16_nonnegative_tile": "row_sum",
 }
 BF16_BINARY_ATTRS = {
     "add_bf16": BF16_ADD_ATTRS,
@@ -214,6 +218,7 @@ BF16_BINARY_ATTRS = {
     **BF16_RNE_BINARY_ATTRS,
     "sub_bf16_nonnan": BF16_SUB_NONNAN_ATTRS,
     "mul_bf16_finite": BF16_MUL_FINITE_ATTRS,
+    "add_bf16_nonnegative": BF16_ADD_NONNEGATIVE_ATTRS,
     "max_bf16": BF16_MAX_ATTRS,
 }
 BF16_BINARY_MODES = {
@@ -227,6 +232,7 @@ BF16_BINARY_MODES = {
     "atlas.vpu_sub_bf16_rne_tile": "sub",
     "atlas.vpu_sub_bf16_nonnan_tile": "sub",
     "atlas.vpu_mul_bf16_finite_tile": "mul",
+    "atlas.vpu_add_bf16_nonnegative_tile": "add",
     "atlas.vpu_max_bf16_tile": "max",
 }
 TILE_BYTES = 2048
@@ -3634,9 +3640,12 @@ class AtlasNativeBinding:
                     name=f"atlas.vpu_{op}_tile", computation=op, required_attrs=attrs)
             for op, attrs in {**BF16_ZERO_BINARY_ATTRS, **BF16_RNE_BINARY_ATTRS,
                               "sub_bf16_nonnan": BF16_SUB_NONNAN_ATTRS,
-                              "mul_bf16_finite": BF16_MUL_FINITE_ATTRS}.items()
+                              "mul_bf16_finite": BF16_MUL_FINITE_ATTRS,
+                              "add_bf16_nonnegative": BF16_ADD_NONNEGATIVE_ATTRS}.items()
         )
         descriptors += (
+            replace(by_name["atlas.vpu_row_sum_bf16_tile"], name="atlas.vpu_row_sum_bf16_nonnegative_tile",
+                    computation="row_sum_bf16_nonnegative", required_attrs=BF16_ROW_SUM_NONNEGATIVE_ATTRS),
             replace(by_name["atlas.vpu_exp_bf16_tile"], name="atlas.vpu_exp_bf16_nonpositive_tile",
                     computation="exp_bf16_nonpositive", required_attrs=BF16_EXP_NONPOSITIVE_ATTRS),
             replace(by_name["atlas.vpu_add_bf16_tile"], name="atlas.vpu_max_bf16_tile",
@@ -3911,6 +3920,10 @@ class AtlasNativeBinding:
                     invalid = False
                 except ValueError:
                     invalid = True
+            if domain == BF16_ROW_SUM_NONNEGATIVE_ATTRS[0][1]:
+                invalid = any(code > 0x3f80 for code in codes)
+            if domain == BF16_ADD_NONNEGATIVE_ATTRS[0][1]:
+                invalid = any(code > 0x7f7f for code in codes)
             if domain == BF16_MUL_FINITE_ATTRS[0][1]:
                 invalid = any((code >> 7) & 255 == 255 for code in codes)
             if invalid:

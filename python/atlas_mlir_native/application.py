@@ -404,7 +404,8 @@ class AtlasApplicationAdapter:
                     raise NativeCompilationError("unsupported_semantics", "already-quantized source exp policy differs")
             selected_mask = policy.get("already_quantized_mask")
             if "already_quantized_mask" in policy and selected_mask not in {
-                "bf16-minfinite-zero-bounded32-nonempty-v1", "bf16-minfinite-zero-rowspan80-nonempty-v1"
+                "bf16-minfinite-zero-bounded32-nonempty-v1", "bf16-minfinite-zero-rowspan80-nonempty-v1",
+                "bf16-minfinite-zero-rowspan96-nonempty-v1"
             }:
                 raise NativeCompilationError("unsupported_semantics", "already-quantized finite mask policy differs")
             remove = {"already_quantized", "already_quantized_mask", "source_exp", *(("bf16_pointwise",) if extra_bf16 is not None else ())}
@@ -425,6 +426,8 @@ class AtlasApplicationAdapter:
                 self.already_quantized_mask_sentinel = 0xff7f0000
                 if selected_mask == "bf16-minfinite-zero-rowspan80-nonempty-v1":
                     self.already_quantized_score_domain = "bf16-row-relative-span80-pad32-v1"
+                elif selected_mask == "bf16-minfinite-zero-rowspan96-nonempty-v1":
+                    self.already_quantized_score_domain = "bf16-row-relative-span96-pad32-v1"
             self.already_quantized = True
             return
         if policy.get("schema") == "atlas.diagnostic_normalization_application_precision.v1":
