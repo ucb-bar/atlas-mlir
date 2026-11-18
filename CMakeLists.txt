@@ -59,6 +59,15 @@ set(atlas_python_environment
   ATLAS_RUN_NPU_MODEL=1
   "IMPORT_MODEL_PYTHON=${Python3_EXECUTABLE}"
   "IMPORT_MODEL_ROOT=${ATLAS_NPU_MODEL_ROOT}")
+# The qualified functional backend needs Merlin's arithmetic and memory qualification receipts.
+set(ATLAS_NATIVE_QUALIFICATION "" CACHE FILEPATH
+  "Merlin qualified native arithmetic receipt for the functional model tests")
+set(ATLAS_MEMORY_QUALIFICATION "" CACHE FILEPATH
+  "Merlin qualified memory receipt for the functional model tests")
+list(APPEND atlas_python_environment
+  "ATLAS_NATIVE_QUALIFICATION=${ATLAS_NATIVE_QUALIFICATION}"
+  "ATLAS_MEMORY_QUALIFICATION=${ATLAS_MEMORY_QUALIFICATION}"
+  "ATLAS_NATIVE_CACHE=${PROJECT_BINARY_DIR}/native-cache")
 # One test per Python test module, run from test/ as discovery would, with the
 # native binding package importable. Modules with test functions or pytest
 # fixtures use pytest; the rest are unittest suites.
