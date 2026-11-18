@@ -15,6 +15,7 @@ from pathlib import Path
 import numpy as np
 from test_looped_mnk import ROOT, build_snapshot
 from test_softmax_primitives import _reciprocal, _rounded_sum
+from test_virtual_ssa import run
 from test_vpu_row_sum_reference import _tree_row
 
 
@@ -376,11 +377,32 @@ class TiledSoftmaxTest(unittest.TestCase):
                         self.assertEqual(simulation.get_stats().runtime_errors, 0)
                         expected = (fixture / "expected.bin").read_bytes()
                         address = int(fields["output.address"], 0) - program.dram_base
+                        result = bytes(state.read_dram(program.dram_base, len(initial)).tolist())
+                        execution = json.loads((destination / "execution_plan.json").read_text())
+                        staging = execution.get("staging_workspace")
+                        if staging is not None:
+                            # A staged program keeps its intermediates in a declared DRAM workspace that
+                            # also holds the outputs; the backend refuses a store outside that window.
+                            at = staging["address"] - program.dram_base
+                            end = at + staging["bytes"]
+                            self.assertTrue(at <= address and address + len(expected) <= end <= len(initial))
+                            for index in range(int(fields["input_count"])):
+                                start = int(fields[f"input.{index}.address"], 0) - program.dram_base
+                                self.assertTrue(start + 2048 <= at or end <= start)
+                            window = (
+                                f"atlas.output_dram_base = {staging['address']} : i64, "
+                                f"atlas.output_dram_bytes = {{}} : i64"
+                            )
+                            virtual = (destination / "atlas-virtual.mlir").read_text()
+                            self.assertIn(window.format(staging["bytes"]), virtual)
+                            shrunk = virtual.replace(
+                                window.format(staging["bytes"]), window.format(staging["bytes"] - 2048)
+                            )
+                            refused = run("atlas-opt", shrunk, "--verify-atlas-virtual-stream")
+                            self.assertIn("DMA store exceeds the declared output buffer", refused.stderr)
+                            initial[at:end] = result[at:end]
                         initial[address : address + len(expected)] = expected
-                        self.assertEqual(
-                            bytes(state.read_dram(program.dram_base, len(initial)).tolist()),
-                            bytes(initial),
-                        )
+                        self.assertEqual(result, bytes(initial))
                     finally:
                         state.close()
 
