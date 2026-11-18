@@ -44,11 +44,13 @@ def main():
         policy.write_text('from atlas_mlir_native.binding import TARGET_IDENTITY\n'
                           'from atlas_mlir_native.application_precision import SCALED_CONTRACTION_POLICY\n'
                           'from atlas_mlir_native.row_softmax import SOFTMAX_POLICY\n'
+                          'from atlas_mlir_native.pointwise import POINTWISE_POLICY\n'
                           'def get_precision_policy(source_sha256):\n'
-                          '    return dict(schema="atlas.diagnostic_application_precision.v1",\n'
+                          '    return dict(schema="atlas.diagnostic_application_precision.v4",\n'
                           '        source_sha256=source_sha256, target_identity=TARGET_IDENTITY,\n'
                           '        contraction=dict(policy=SCALED_CONTRACTION_POLICY, operand_scale_exponents=[4,4]),\n'
-                          '        row_softmax=SOFTMAX_POLICY, host_support=["transpose","reshape","copy"])\n')
+                          '        row_softmax=SOFTMAX_POLICY, host_support=["transpose","reshape","copy"],\n'
+                          '        epilogues=["relu"], pointwise=POINTWISE_POLICY)\n')
         out = root / 'build'
         run(sys.executable, '-m', 'atlas_mlir', 'build', loader, '--dtype', 'fp32',
             '--precision-policy', policy, '--application-memory-bytes', '1048576', '-o', out)
