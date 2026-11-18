@@ -10,7 +10,7 @@ import pytest
 from atlas_mlir_native import exact_float_application as application
 from atlas_mlir_native import exact_float_device as device
 from atlas_mlir_native.application_materialization import bind_exact_float
-from merlin.semantic_compiler.codegen import codegen_options, current_codegen_options
+from atlas_mlir_native.options import codegen_options, current_codegen_options
 from test_exact_float_device import request
 
 ROOT = Path(__file__).resolve().parents[1]
