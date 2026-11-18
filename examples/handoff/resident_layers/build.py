@@ -3,7 +3,6 @@
 
 import argparse
 import json
-import os
 import subprocess
 import sys
 import time
@@ -39,7 +38,6 @@ def main():
     args.out.mkdir(parents=True)
     output = args.out.resolve()
     (output / "logs").mkdir()
-    environment = {**os.environ, "ATLAS_NATIVE_PIPELINE": args.pipeline}
     commands = []
 
     def run(stage, arguments):
@@ -49,7 +47,7 @@ def main():
             (output / "logs" / (stage + ".stdout")).open("w") as stdout,
             (output / "logs" / (stage + ".stderr")).open("w") as stderr,
         ):
-            result = subprocess.run(command, stdout=stdout, stderr=stderr, env=environment, check=False)
+            result = subprocess.run(command, stdout=stdout, stderr=stderr, check=False)
         commands.append(
             {"stage": stage, "argv": command, "returncode": result.returncode, "seconds": time.monotonic() - start}
         )
@@ -75,6 +73,9 @@ def main():
         "diagnostic",
         "--io-memory-bytes",
         args.io_memory_bytes,
+        "--native-pipeline",
+        args.pipeline,
+        *(["--static-quantizer-sizing", "--exact-binary-routes"] if args.pipeline == "optimized" else []),
     ]
     run(
         "compile",
@@ -142,7 +143,12 @@ def main():
 
         from merlin.semantic_compiler.codegen import CodegenOptions, codegen_options
 
-        with codegen_options(CodegenOptions(io_memory_bytes=args.io_memory_bytes)):
+        with codegen_options(CodegenOptions(
+            io_memory_bytes=args.io_memory_bytes,
+            native_pipeline=args.pipeline,
+            static_quantizer_sizing=args.pipeline == "optimized",
+            exact_binary_routes=args.pipeline == "optimized",
+        )):
             record, files = prepare_c_package(
                 output / "compiler/source-request.json",
                 output / "compiler",

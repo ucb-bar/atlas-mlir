@@ -1,4 +1,5 @@
 #include "Atlas/AtlasScheduling.h"
+#include "Atlas/AtlasWorkBudget.h"
 #include "Atlas/AtlasGeneratedArtifact.h"
 #include "Atlas/AtlasGeneratedSchedule.h"
 #include "Atlas/AtlasStream.h"
@@ -39,7 +40,9 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block, bool generated,
   auto op = [&](int i) { return s.ops[begin + i]; };
   auto name = [&](int i) { return op(i)->getName().getStringRef().str(); };
 
-  DepGraph g = buildGraph(nodes, s.entry[block]);
+  AtlasWorkBudget work(s.ops[begin], "machine-scheduling");
+  DepGraph g = buildGraph(nodes, s.entry[block], nullptr, &work);
+  if (work.exhausted()) return failure();
   if (generated) {
     // Preserve the generated DMA interval policy while allowing its permitted
     // compute to overlap. Transfers on several channels may be pending at
@@ -100,6 +103,7 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block, bool generated,
     int best = -1, bestWait = -1;
     bool otherWork = false;
     for (int i = 0; i < nb; i++) {
+      if (failed(work.charge())) return failure();
       if (issue[i] >= 0 || waitingPreds[i] > 0)
         continue;
       if (!isWait(i))
@@ -141,8 +145,11 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block, bool generated,
         if (t >= nb || waitingPreds[t] != 1)
           continue;
         int c = std::max(cycle + 1, earliest[t]);
-        while (!table.conflict(nodes[t], g.footprints[t], c).empty())
+        for (;;) {
+          if (failed(work.charge())) return failure();
+          if (table.conflict(nodes[t], g.footprints[t], c).empty()) break;
           c++;
+        }
         if (critical < 0 || height[t] > height[critical] ||
             (height[t] == height[critical] && c < firstUse)) {
           critical = t;
@@ -220,6 +227,7 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block, bool generated,
         cycle = std::max(nextFree, earliest[i]);
         reason[i] = cycle > nextFree ? why[i] : "";
         for (;;) {
+          if (failed(work.charge())) return failure();
           std::string busy = table.conflict(nodes[i], g.footprints[i], cycle);
           if (busy.empty())
             break;
@@ -265,6 +273,7 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block, bool generated,
     if (slot >= 0)
       raise(earliest[slot] - 1, "delay slot: " + why[slot]);
     for (;;) {
+      if (failed(work.charge())) return failure();
       std::string busy =
           table.conflict(nodes[term], g.footprints[term], termCycle);
       if (busy.empty() && slot >= 0) {

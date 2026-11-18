@@ -9,7 +9,6 @@ from pathlib import Path
 
 from merlin.semantic_compiler.buffer_allocation import (
     Buffer,
-    allocate_buffers,
     check_buffer_allocation,
 )
 from merlin.semantic_compiler.model import SemanticNode
@@ -17,6 +16,7 @@ from merlin.semantic_compiler.target_binding import (
     NativeCompilationError,
     verify_native_publication,
 )
+from .work_budget import allocate_native_buffers as allocate_buffers
 
 
 def chunk_bodies(request, plan):
@@ -72,7 +72,7 @@ def place_frames(request, plan, fixed_inputs, fixed_outputs):
     result = allocate_buffers(buffers, (bank,))
     if result.status != "sat":
         raise NativeCompilationError(
-            "infeasible_candidate" if result.status == "unsat" else "search_timeout",
+            "infeasible_candidate",
             "chunk buffer placement: " + result.reason,
         )
     frames = dict(result.addresses)
@@ -120,6 +120,8 @@ def compile_members(snapshot, request, plan, *, fixed_inputs, fixed_outputs, roo
 
 def compile_chunked(snapshot, request, plan, *, fixed_inputs, fixed_outputs, target_source, destination, limits):
     """Publish a full-source request with a checked, flat set of native bodies."""
+    from .binding import DRAM_BASE, DRAM_SLOTS, io_memory_base, dram_slots, TILE_BYTES
+
     destination.mkdir(parents=True, exist_ok=False)
     segments = destination / "segments"
     segments.mkdir()
@@ -164,6 +166,8 @@ def compile_chunked(snapshot, request, plan, *, fixed_inputs, fixed_outputs, tar
         "execution_requires": "ordered_chunked_host_dispatch",
         "segments": rows,
         "native_snapshot_sha256": hashlib.sha256((snapshot.root / "manifest.json").read_bytes()).hexdigest(),
+        **({"io_memory_base": io_memory_base()} if io_memory_base() != DRAM_BASE else {}),
+        **({"io_memory_bytes": dram_slots() * TILE_BYTES} if dram_slots() != DRAM_SLOTS else {}),
         "chunk_lowering_source_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
         "stage_artifacts": {
             path.relative_to(destination).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest()

@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from merlin.compile.c_conversions import render_f32_operand_c
+from merlin.compile.c_conversions import render_f32_operand_c, render_bf16_codes_c
 from merlin.frontends.compile_inputs import load_compile_inputs
 from merlin.semantic_compiler.guarded_softmax_source import GuardedMaskedRowSoftmaxSource
 from merlin.semantic_compiler.model import TensorType
@@ -13,6 +13,7 @@ from merlin.semantic_compiler.precision_intake import SourceValueRef
 from merlin.semantic_compiler.precision_transform import BoundaryConversion
 
 from .softmax_precision import input_spec, lower_source_softmax
+from .row_softmax import SOFTMAX_DOMAIN, ROWSPAN80_DOMAIN, ROWSPAN80_MAX_COLUMNS
 
 
 def prepare_source_c_package(
@@ -58,16 +59,29 @@ def prepare_source_c_package(
     return result, files
 
 
-def render_source_interface(precision, name: str, raw_workspace: int):
+def render_source_interface(precision, name: str, raw_workspace: int, *, finite_sentinel_bits=None,
+                            score_domain=SOFTMAX_DOMAIN, input_dtype="f32", output_dtype="f32"):
+    if dict(precision.request.nodes[0].attrs).get("input_domain") != score_domain:
+        raise ValueError("source interface score domain differs from the checked precision plan")
     shape = precision.request.nodes[0].type.shape
+    if score_domain == ROWSPAN80_DOMAIN and shape[1] > ROWSPAN80_MAX_COLUMNS:
+        raise ValueError("row-relative span80 domain supports at most 1024 columns")
+    if input_dtype not in {"f32", "bf16"}:
+        raise ValueError("unsupported softmax score dtype")
+    if output_dtype not in {"f32", "bf16"}:
+        raise ValueError("unsupported softmax publication dtype")
+    output_type = "float" if output_dtype == "f32" else "uint8_t"
     count = shape[0] * shape[1]
+    output_bytes = count * (4 if output_dtype == "f32" else 2)
     masked = hasattr(precision.source_region, "mask")
     guarded = isinstance(precision.source_region, GuardedMaskedRowSoftmaxSource)
-    input_type = "void" if guarded else "float"
-    encoded, floats, scratch = count * 2, count * 4, count * (6 if masked else 4)
+    input_type = "void" if guarded or input_dtype == "bf16" else "float"
+    encoded, input_bytes, scratch = count * 2, count * (2 if input_dtype == "bf16" else 4), count * (6 if masked else 4)
     output_offset = encoded * (2 if masked else 1)
     arity = 2 if masked else 1
     mask_checks = ""
+    if finite_sentinel_bits is not None and (not masked or guarded):
+        raise ValueError("finite sentinel is only admitted for an additive masked softmax")
     if masked:
         from math import prod
 
@@ -75,11 +89,12 @@ def render_source_interface(precision, name: str, raw_workspace: int):
 
         region = precision.source_region
         mask_bytes = prod(region.mask_shape) * (1 if guarded else 4)
-        helpers = render_masked_softmax_inputs(region, region.mask_shape, input_spec(), b"\x00\xc2", name + "_masked")
+        helpers = render_masked_softmax_inputs(region, region.mask_shape, input_spec(score_domain), b"\x00\xc2", name + "_masked",
+                                               finite_sentinel_bits=finite_sentinel_bits, score_dtype=input_dtype)
         conversion_call = f"{name}_masked_prepare(inputs[0],inputs[1],ctx->workspace,ctx->workspace+{encoded}u)"
         mask_checks = f"""
   if (!{name}_valid(inputs[1],{mask_bytes}u) ||
-      {name}_overlap(inputs[1],{mask_bytes}u,out,{floats}u) ||
+      {name}_overlap(inputs[1],{mask_bytes}u,out,{output_bytes}u) ||
       {name}_overlap(inputs[1],{mask_bytes}u,ctx->workspace,{scratch}u) ||
       {name}_overlap(inputs[1],{mask_bytes}u,region->workspace,{raw_workspace}u) ||
       {name}_overlap(inputs[1],{mask_bytes}u,ctx,sizeof(*ctx)) ||
@@ -94,8 +109,8 @@ def render_source_interface(precision, name: str, raw_workspace: int):
         TensorType(shape, "f32", "raw-bit-pattern"),
         precision.request.nodes[0].type,
         (0, 1),
-        input_spec().policy,
-        input_spec(),
+        input_spec(score_domain).policy,
+        input_spec(score_domain),
     )
     upper = name.upper()
     declarations = f"""
@@ -104,13 +119,22 @@ def render_source_interface(precision, name: str, raw_workspace: int):
 typedef struct {{ {name}_context *region; uint8_t *workspace; }} {name}_source_context;
 /* Bind separate conversion scratch; both workspaces survive a timed-out call. */
 {name}_status {name}_source_bind({name}_source_context *, {name}_context *, void *, size_t);
-/* Dense source f32 scores and f32 result; recorded BF16 precision change inside. */
+/* Dense source {input_dtype} scores and {output_dtype} result; recorded BF16 precision change inside. */
 {name}_status {name}_source_run({name}_source_context *, const {input_type} *const *inputs,
-                               float *output, atlas_host_result *device_result);
+                               {output_type} *output, atlas_host_result *device_result);
 int {name}_source_dispatch(void *, const void *const *inputs, void *const *outputs);
 """
+    publication = (f"  __builtin_memcpy(out,ctx->workspace+{output_offset}u,{output_bytes}u);"
+                   if output_dtype == "bf16" else f"""
+  for (size_t i=0; i<{count}u; ++i) {{
+    uint32_t bits=((uint32_t)ctx->workspace[{output_offset}u+i*2u] |
+                   ((uint32_t)ctx->workspace[{output_offset}u+i*2u+1u]<<8))<<16;
+    __builtin_memcpy(out+i,&bits,4u);
+  }}
+""")
     source = (
-        (helpers if masked else render_f32_operand_c(conversion, name + "_encode_source"))
+        (helpers if masked else render_bf16_codes_c(input_spec(score_domain), count, name + "_encode_source")
+         if input_dtype == "bf16" else render_f32_operand_c(conversion, name + "_encode_source"))
         + f"""
 {name}_status {name}_source_bind({name}_source_context *ctx, {name}_context *region,
                                 void *workspace, size_t bytes) {{
@@ -127,33 +151,29 @@ int {name}_source_dispatch(void *, const void *const *inputs, void *const *outpu
   return {upper}_OK;
 }}
 {name}_status {name}_source_run({name}_source_context *ctx, const {input_type} *const *inputs,
-                               float *out, atlas_host_result *device) {{
+                               {output_type} *out, atlas_host_result *device) {{
   if (device) *device=ATLAS_HOST_INVALID;
   if (!ctx || !ctx->region || !ctx->region->host || !ctx->workspace || !inputs)
     return {upper}_INVALID;
   {name}_context *region=ctx->region;
   if (region->host->active) {{ if (device) *device=ATLAS_HOST_BUSY; return {upper}_DEVICE_ERROR; }}
-  if (!{name}_valid(inputs[0],{floats}u) || !{name}_valid(out,{floats}u) ||
-      {name}_overlap(inputs[0],{floats}u,out,{floats}u) ||
-      {name}_overlap(inputs[0],{floats}u,ctx->workspace,{scratch}u) ||
-      {name}_overlap(out,{floats}u,ctx->workspace,{scratch}u) ||
-      {name}_overlap(inputs[0],{floats}u,region->workspace,{raw_workspace}u) ||
-      {name}_overlap(out,{floats}u,region->workspace,{raw_workspace}u) ||
-      {name}_overlap(inputs[0],{floats}u,ctx,sizeof(*ctx)) ||
-      {name}_overlap(out,{floats}u,ctx,sizeof(*ctx)) ||
-      {name}_overlap(inputs[0],{floats}u,region,sizeof(*region)) ||
-      {name}_overlap(out,{floats}u,region,sizeof(*region)) ||
-      {name}_overlap(inputs[0],{floats}u,region->host,sizeof(*region->host)) ||
-      {name}_overlap(out,{floats}u,region->host,sizeof(*region->host))) return {upper}_INVALID;
+  if (!{name}_valid(inputs[0],{input_bytes}u) || !{name}_valid(out,{output_bytes}u) ||
+      {name}_overlap(inputs[0],{input_bytes}u,out,{output_bytes}u) ||
+      {name}_overlap(inputs[0],{input_bytes}u,ctx->workspace,{scratch}u) ||
+      {name}_overlap(out,{output_bytes}u,ctx->workspace,{scratch}u) ||
+      {name}_overlap(inputs[0],{input_bytes}u,region->workspace,{raw_workspace}u) ||
+      {name}_overlap(out,{output_bytes}u,region->workspace,{raw_workspace}u) ||
+      {name}_overlap(inputs[0],{input_bytes}u,ctx,sizeof(*ctx)) ||
+      {name}_overlap(out,{output_bytes}u,ctx,sizeof(*ctx)) ||
+      {name}_overlap(inputs[0],{input_bytes}u,region,sizeof(*region)) ||
+      {name}_overlap(out,{output_bytes}u,region,sizeof(*region)) ||
+      {name}_overlap(inputs[0],{input_bytes}u,region->host,sizeof(*region->host)) ||
+      {name}_overlap(out,{output_bytes}u,region->host,sizeof(*region->host))) return {upper}_INVALID;
 {mask_checks}  if ({conversion_call}) return {upper}_INPUT_DOMAIN;
   {name}_status status={name}_run(region,ctx->workspace{",ctx->workspace+" + str(encoded) + "u" if masked else ""},
                                 ctx->workspace+{output_offset}u,device);
   if (status!={upper}_OK) return status;
-  for (size_t i=0; i<{count}u; ++i) {{
-    uint32_t bits=((uint32_t)ctx->workspace[{output_offset}u+i*2u] |
-                   ((uint32_t)ctx->workspace[{output_offset}u+i*2u+1u]<<8))<<16;
-    __builtin_memcpy(out+i,&bits,4u);
-  }}
+{publication}
   return {upper}_OK;
 }}
 int {name}_source_dispatch(void *ctx, const void *const *inputs, void *const *outputs) {{
@@ -175,10 +195,16 @@ int {name}_source_dispatch(void *ctx, const void *const *inputs, void *const *ou
             else {}
         ),
         "workspace_bytes": scratch,
-        "input_dtype": "mixed" if guarded else "f32",
-        **({"input_dtypes": ["f32", "i1"], "mask_semantics": "true-excludes-score"} if guarded else {}),
-        "output_dtype": "f32",
+        "input_dtype": "mixed" if masked and input_dtype == "bf16" or guarded else input_dtype,
+        **({"input_dtypes": [input_dtype, "i1" if guarded else "f32"]}
+           if guarded or masked and input_dtype == "bf16" else {}),
+        **({"mask_semantics": "true-excludes-score"} if guarded else {}),
+        "output_dtype": output_dtype,
         "precision_plan": precision.record(),
+        **({"additive_mask": {"zero_keeps": True, "finite_exclusion_bits": finite_sentinel_bits,
+                              "scores": "finite absolute value at most 128" if score_domain == ROWSPAN80_DOMAIN else "finite absolute value at most 32",
+                              "rows": "nonempty"}}
+           if finite_sentinel_bits is not None else {}),
     }
     mask_note = (
         "The second input contains Boolean exclusion bytes: zero keeps a score and one masks it. "
@@ -191,12 +217,12 @@ int {name}_source_dispatch(void *ctx, const void *const *inputs, void *const *ou
 
 This package also contains the source-bound interface. After binding the raw
 region, call `{name}_source_bind` with separate
-`{upper}_SOURCE_WORKSPACE_BYTES` bytes. `{name}_source_run` accepts one dense f32
-score tensor through its input-pointer array and returns dense f32 probabilities.
+`{upper}_SOURCE_WORKSPACE_BYTES` bytes. `{name}_source_run` accepts one dense {input_dtype}
+score tensor through its input-pointer array and returns dense {output_dtype} probabilities.
 `{name}_source_dispatch` exposes the same call to Merlin's dispatch program.
-The input is rounded to BF16 RNE, then checked against the recorded score-code
+The input is {"rounded to BF16 RNE" if input_dtype == "f32" else "copied as unchanged BF16 codes"}, then checked against the recorded score-code
 domain. Values outside that domain are rejected rather than clipped to scores.
-The device uses the selected row-softmax policy; output BF16 is widened exactly.
+The device uses the selected row-softmax policy; output BF16 is {"widened exactly" if output_dtype == "f32" else "published unchanged"}.
 {mask_note}
 Keep both contexts and workspaces alive through completion, including timeouts.
 The output stays unchanged on failure. This precision change has no model-quality

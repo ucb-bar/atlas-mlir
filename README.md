@@ -21,19 +21,35 @@ The repository also ships a Python package (`atlas-mlir-native-support`) that
 plugs Atlas into Merlin's native compiler, and a small C runtime for the host
 side.
 
+Merlin's whole-model example (`examples/atlas/whole-model/unchanged_fx/README.md` in Merlin) uses the [`atlas_fp8` quantization adapter](adapter/README.md) with this native provider and lists the matching repositories, bundle regeneration, and commands.
+
 ## Build
 
 Use MLIR and LLVM from one installation (tested with LLVM/MLIR 23.0.0git,
-`a47bddccec30255619bb8c37fa59700e661d4e66`).
+`a47bddccec30255619bb8c37fa59700e661d4e66`). The build also needs CMake, Ninja
+(or `-G "Unix Makefiles"` in place of `-G Ninja`), and a C/C++ compiler.
 
 ```sh
-python -m pip install -e '.[test]'
+python -m pip install -e '.[test]' -r tools/requirements-virtual-evaluator.txt
 cmake -S . -B build -G Ninja \
   -DMLIR_DIR=/path/to/llvm-install/lib/cmake/mlir -DCMAKE_BUILD_TYPE=Release \
-  -DPython3_EXECUTABLE="$(command -v python)"
+  -DPython3_EXECUTABLE="$(command -v python)" \
+  -DATLAS_NPU_MODEL_ROOT=/path/to/npu-model
 cmake --build build --parallel 2
+mkdir -p out/work
+export TMPDIR="$PWD/out/work"
 ctest --test-dir build --output-on-failure
 ```
+
+`atlas-opt`, `atlas-emit`, and CTest need the build compiler's C++ runtime.
+Set `LD_LIBRARY_PATH=/path/to/compiler/lib:$LD_LIBRARY_PATH` when it differs
+from the system runtime; check with `build/bin/atlas-opt --version`.
+
+`ATLAS_NPU_MODEL_ROOT` must name a usable `npu_model` checkout (tested at
+`b97b2f5` with Python 3.14). Configure checks its assembler and RTL numerics
+imports using `Python3_EXECUTABLE`; CTest adds that path to `PYTHONPATH`.
+Install its dependencies before configuring. Optional execution tests still
+require their explicit environment settings.
 
 CTest runs the portable tests with no hardware. Tests that run the RTL need
 `ATLAS_RTL_ROOT`, `ATLAS_MODEL_ROOT`, `ATLAS_ASSEMBLER_ROOT`, `ATLAS_ARC_MODEL`,
@@ -54,6 +70,10 @@ export PYTHONPATH="$MERLIN_NATIVE_ROOT/src:$MERLIN_NATIVE_ROOT:$NPU_MODEL_ROOT${
 
 These are test dependencies; ordinary compilation does not consume the model
 or its reference results. Hardware and model-execution tests remain opt-in.
+
+The full native C export tests also need Clang with RISC-V target support, both
+on `PATH` and in `ATLAS_LLVM_BIN`. The native independence test uses
+`merlin-targetgen` beside the selected Python interpreter or on `PATH`.
 
 `ATLAS_ASSEMBLER_ROOT` selects the directory containing `atlas_asm.py`.
 The shared test helper runs canonical npu_model assembly in a Python 3.14
@@ -120,3 +140,7 @@ C/H pair, parameter capture, platform callbacks and Baremetal-IDE build boundary
 The [instruction memory guide](docs/instruction-memory.md) describes final size
 checks, long branches and measured reduction unrolling. These paths preserve the
 selected numerical policies; software/model checks do not qualify an FPGA build.
+
+The [already-quantized intake guide](docs/already-quantized-intake.md) records byte-preserving code transport and the paired BF16 readout factor domain.
+
+The [native options reference](docs/native-options.md) lists every Atlas code generation option, preset, and adjacent pattern with its default, limits, replay record, and refusal behavior.

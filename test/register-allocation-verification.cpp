@@ -62,12 +62,12 @@ struct Fixture {
     if (!valid)
       return false;
     auto append = [&](Value value) {
-      Type type = value.getType();
-      if (isa<VirtualBF16Type>(type))
+      auto kind = registerKindOf(value);
+      if (kind == RegisterKind::BF16)
         assignments.push_back({value, plan.tile(value)});
-      else if (isa<VirtualFP8Type>(type))
+      else if (kind == RegisterKind::FP8)
         assignments.push_back({value, plan.fp8(value)});
-      else if (type.isInteger(1) || type.isInteger(32))
+      else if (kind == RegisterKind::Scalar)
         assignments.push_back({value, plan.scalar(value)});
     };
     for (Block &block : function.getBody()) {
@@ -190,6 +190,27 @@ module {
     %p = "atlas.virtual_pack_fp8"(%tile) {scale_code = 127 : i32} : (!atlas.virtual_bf16) -> !atlas.virtual_fp8
     %y = "atlas.virtual_mxu_matmul"(%p, %p) {unit = 0 : i32} : (!atlas.virtual_fp8, !atlas.virtual_fp8) -> !atlas.virtual_bf16
     %s2 = "atlas.virtual_output_bf16"(%s1, %y) {index = 0 : i32} : (!atlas.virtual_state, !atlas.virtual_bf16) -> !atlas.virtual_state
+    return %s2 : !atlas.virtual_state
+  }
+})mlir";
+
+constexpr StringLiteral scalarLiterals = R"mlir(
+module {
+  func.func @scalar_literals(%input: i32) -> !atlas.virtual_state {
+    %s0 = "atlas.virtual_start"() : () -> !atlas.virtual_state
+    %inline = arith.constant 127 : i32
+    %mixed = arith.constant 16 : i32
+    %wide = arith.constant 2048 : i32
+    %shift = arith.constant 7 : i32
+    %threshold = arith.constant 32 : i32
+    %a = arith.addi %input, %inline : i32
+    %b = arith.addi %a, %mixed : i32
+    %c = arith.subi %b, %mixed : i32
+    %d = arith.addi %c, %wide : i32
+    %e = arith.shli %d, %shift : i32
+    %condition = arith.cmpi sgt, %e, %threshold : i32
+    %s1, %tile = "atlas.virtual_input_bf16"(%s0) {index = 0 : i32} : (!atlas.virtual_state) -> (!atlas.virtual_state, !atlas.virtual_bf16)
+    %s2 = "atlas.virtual_output_bf16"(%s1, %tile) {index = 0 : i32} : (!atlas.virtual_state, !atlas.virtual_bf16) -> !atlas.virtual_state
     return %s2 : !atlas.virtual_state
   }
 })mlir";
@@ -389,6 +410,36 @@ void testMixedTensorBanks(MLIRContext &context) {
                 {"outside tensor register bank", "tensor", "%"});
 }
 
+void testScalarLiteralPlacements(MLIRContext &context) {
+  Fixture fixture;
+  if (!fixture.initialize(context, scalarLiterals, "scalar literal fixture"))
+    return;
+  expectValid(fixture, "scalar literal baseline", fixture.assignments);
+  for (unsigned occurrence : {0u, 3u, 4u}) {
+    Value value = fixture.result("arith.constant", 0, occurrence);
+    check(isVirtualScalarImmediate(value) && !registerKindOf(value),
+          "immediate-only literal takes no register");
+    check(llvm::none_of(fixture.assignments, [&](const auto &entry) {
+            return entry.value == value;
+          }), "immediate-only literal absent from public placements");
+    auto candidate = fixture.assignments;
+    candidate.push_back({value, fixture.plan.fixed().firstScalarValue});
+    expectInvalid(fixture, "elided literal rejects fabricated placement", candidate,
+                  {"unsupported value type", "arith.constant"});
+  }
+  for (unsigned occurrence : {1u, 2u}) {
+    Value value = fixture.result("arith.constant", 0, occurrence);
+    check(registerKindOf(value) == RegisterKind::Scalar && !isVirtualScalarImmediate(value),
+          "mixed-use or nonencodable literal retains scalar placement");
+    check(fixture.plan.scalar(value) == regFor(fixture.assignments, value),
+          "mapped literal scalar accessor matches public placement");
+    auto candidate = fixture.assignments;
+    llvm::erase_if(candidate, [&](const auto &entry) { return entry.value == value; });
+    expectInvalid(fixture, "required literal placement cannot be omitted", candidate,
+                  {"missing register assignment"});
+  }
+}
+
 void testCFG(MLIRContext &context) {
   Fixture captured, unused, loop;
   if (!captured.initialize(context, liveThrough, "live-through fixture") ||
@@ -439,6 +490,7 @@ int main() {
   MLIRContext context(registry);
   testTensorAndCoverage(context);
   testScalars(context);
+  testScalarLiteralPlacements(context);
   testMixedTensorBanks(context);
   testCFG(context);
   llvm::outs() << checks << " checks, " << failures << " failures\n";

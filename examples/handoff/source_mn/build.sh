@@ -32,7 +32,7 @@ manifest_bytes = manifest_path.read_bytes()
 record = json.loads(manifest_bytes)
 required = {
     "atlas_source_mn_data.h", "row_major_k_window.h", "finite_float_boundary.h",
-    "atlas_host.h", "atlas_host.c", "atlas_ordered_k.h", "atlas_ordered_k.c",
+    "atlas_host_layout.h", "atlas_host.h", "atlas_host.c", "atlas_ordered_k.h", "atlas_ordered_k.c",
     "atlas_ordered_mn.h", "atlas_ordered_mn.c", "atlas_source_mn.h",
     "atlas_source_mn.c", "atlas_model_tile.h", "atlas_source_mn_memref.h",
     "atlas_source_mn_memref.c",

@@ -191,11 +191,56 @@ and refuses overlap with Atlas regions. It writes `host/platform-map.c`
 run `atlas-host-embed --soc-memmap MEMMAP --require-bitstream`, then
 `--host-elf ELF --check-only` after linking.
 
+## Shape-independent raw launches
+
+`atlas_host_load_raw(host, words, word_count)` loads a reset-entry stream with
+no tensor shape or graph wrapper. The program must end in its only ECALL, have
+no EBREAK and no DBG0 or DBG1 writes, and reach that ECALL on every path after
+all engine and DMA work completes. The loader checks the mailbox and trap
+restrictions only; it does not prove control flow, DMA reachability, or
+scheduling. Loading invalidates the previous program first, so a failed
+replacement cannot launch an old image.
+
+The loader replaces the final ECALL with `NOP; CSRRS x31, DBG1, x0; NOP;
+CSRRW x0, DBG0, x31; NOP; ECALL`, keeping every original PC and adding five
+words. The NOPs separate a preceding DELAY and the marker publication from
+ECALL, and x31 becomes scratch only after the kernel's work. Raw loading clears
+retained-image residency and adds one image load, `word_count + 5` IMEM words,
+and loader ticks to the host counters. A later `atlas_host_ensure_loaded`
+restores the legacy image even if its words equal the raw ones.
+
+After raw loading use the normal `atlas_host_start`, `atlas_host_poll`, and
+`atlas_host_wait`. Each start clears DBG0 and publishes a fresh nonzero
+invocation sequence in DBG1 before the release fence and START; only the
+device writes DBG0 while executing. Poll succeeds only when the expected
+sequence accompanies a halted ECALL, so a short invocation cannot be missed and
+a stale ECALL cannot complete a new launch. Sequences never wrap: after
+UINT32_MAX, start refuses until the runtime is reinitialized from quiescence.
+
+Raw buffer descriptors accept complete `uintptr_t` ranges, including
+0x100000000 on RV64, and reject wraparound. Device instructions are not
+relocated and DMA high halves are not inferred: the program must set its DMA
+base and keep each low-32-bit transfer in its window. The legacy wrappers keep
+their shape and address rules.
+
+Initialization requires quiescent hardware. A prelaunch cache synchronization
+failure issues no START. A timeout, post-launch cache synchronization error, or
+raw illegal/EBREAK halt keeps `host->active`, the descriptors, and device
+ownership, so load and start stay busy; a host STOP or scalar fault does not
+drain engines. Preserve descriptors and memory until success or externally
+established quiescence, then call `atlas_host_reset_completed` or reinitialize.
+Reset notification invalidates both image modes and keeps the invocation
+sequence. MMIO callbacks must perform ordered synchronous accesses; direct
+baremetal callbacks and the runtime's publication and acquisition points supply
+full fences. The runtime is single-caller, with no queue or allocator.
+
 ## Tests
 
 | Behaviour | Test |
 | --- | --- |
-| Runtime calls, stale ECALL, timeout, cache hooks | [`test/host-launch-test.c`](../test/host-launch-test.c) |
+| Raw shape/address admission, invocation marker, missed-running pulse, retained fault ownership | [`test/raw-host-test.c`](../test/raw-host-test.c) |
+| Legacy runtime calls, stale ECALL, timeout, cache hooks | [`test/host-launch-test.c`](../test/host-launch-test.c) |
+| Raw/resident transitions, counters, clock hooks, fault ownership, reset notification | [`test/host-runtime-merge-test.c`](../test/host-runtime-merge-test.c) |
 | Header and memmap checks | [`test/test_host_embed.py`](../test/test_host_embed.py), [`test/test_graph_platform.py`](../test/test_graph_platform.py) |
 | Capsule, LLVM object entry, mailbox pointers with two starts (RTL core) | [`test/test_boot_capsule.py`](../test/test_boot_capsule.py), [`test/test_elf_entry_reference.py`](../test/test_elf_entry_reference.py), [`test/test_mailbox_call_reference.py`](../test/test_mailbox_call_reference.py) |
 | Dump checkers | [`test/test_graph_mailbox_checker.py`](../test/test_graph_mailbox_checker.py), [`test/test_mailbox_dump_check.py`](../test/test_mailbox_dump_check.py), [`test/test_model_dump_check.py`](../test/test_model_dump_check.py) |

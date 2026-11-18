@@ -21,6 +21,43 @@ using namespace mlir;
 using namespace mlir::atlas;
 
 namespace {
+// One scalar arithmetic admission rule is shared by every virtual family.
+std::optional<LogicalResult> verifyScalarArithmetic(Operation &operation) {
+  if (auto constant = dyn_cast<arith::ConstantOp>(operation)) {
+    Type type = constant.getResult().getType();
+    if (!isa<IntegerAttr>(constant.getValue()) || (!type.isInteger(1) && !type.isInteger(32)))
+      return constant.emitOpError("virtual scalar constants require i1 or i32");
+    return success();
+  }
+  if (isa<arith::AddIOp, arith::SubIOp, arith::AndIOp, arith::OrIOp,
+          arith::XOrIOp, arith::ShLIOp, arith::ShRUIOp>(operation)) {
+    Type type = operation.getResult(0).getType();
+    bool logical = isa<arith::AndIOp, arith::OrIOp, arith::XOrIOp>(operation);
+    if (!type.isInteger(32) && !(logical && type.isInteger(1)))
+      return operation.emitOpError("virtual scalar arithmetic requires i32 (logical bitwise operations also admit i1)");
+    if (auto flags = operation.getAttrOfType<arith::IntegerOverflowFlagsAttr>("overflowFlags");
+        flags && flags.getValue() != arith::IntegerOverflowFlags::none)
+      return operation.emitOpError("virtual scalar arithmetic requires wrapping arithmetic");
+    if (isa<arith::ShLIOp, arith::ShRUIOp>(operation)) {
+      auto range = provenI32UnsignedRange(operation.getOperand(1), &operation);
+      if (!range || range->last >= 32)
+        return operation.emitOpError("virtual shift distance needs a proven unsigned range below32");
+    }
+    return success();
+  }
+  if (auto extension = dyn_cast<arith::ExtUIOp>(operation)) {
+    if (!extension.getIn().getType().isInteger(1) || !extension.getOut().getType().isInteger(32))
+      return extension.emitOpError("virtual extension requires i1 to i32");
+    return success();
+  }
+  if (auto cmp = dyn_cast<arith::CmpIOp>(operation)) {
+    if (!cmp.getLhs().getType().isInteger(32) || !cmp.getRhs().getType().isInteger(32))
+      return cmp.emitOpError("virtual scalar comparison requires i32 operands");
+    return success();
+  }
+  return std::nullopt;
+}
+
 // The DRAM bytes [first, last) a virtual DMA launch moves, and whether it
 // writes them. The launch's op verifier proves its address and size.
 struct DRAMEffect {
@@ -304,26 +341,10 @@ LogicalResult verifyVirtualBlock(Block &block, bool entry, bool cfg,
     }
     if (isa<VirtualVPUUnaryOp, VirtualVPUBinaryOp, VirtualVPUReduceOp,
             VirtualVPUSplatOp, VirtualXLUTransposeOp, VirtualPackFP8Op,
-            VirtualPackRoundTripBF16Op, VirtualScaleConstantOp>(operation))
+            VirtualPackRoundTripBF16Op, VirtualRawPackFP8Op, VirtualScaleConstantOp>(operation))
       continue;
-    if (auto constant = dyn_cast<arith::ConstantOp>(operation)) {
-      Type type = constant.getResult().getType();
-      if (!isa<IntegerAttr>(constant.getValue()) ||
-          (!type.isInteger(1) && !type.isInteger(32)))
-        return constant.emitOpError("virtual scalar constants require i1 or i32");
-      continue;
-    }
-    if (auto add = dyn_cast<arith::AddIOp>(operation)) {
-      if (!add.getResult().getType().isInteger(32))
-        return add.emitOpError("virtual scalar addition requires i32");
-      if (add.getOverflowFlags() != arith::IntegerOverflowFlags::none)
-        return add.emitOpError("virtual scalar addition requires wrapping arithmetic");
-      continue;
-    }
-    if (auto cmp = dyn_cast<arith::CmpIOp>(operation)) {
-      if (!cmp.getLhs().getType().isInteger(32) ||
-          !cmp.getRhs().getType().isInteger(32))
-        return cmp.emitOpError("virtual scalar comparison requires i32 operands");
+    if (auto scalar = verifyScalarArithmetic(operation)) {
+      if (failed(*scalar)) return failure();
       continue;
     }
     if (cfg) {
