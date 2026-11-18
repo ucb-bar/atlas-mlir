@@ -122,4 +122,38 @@ class CompilationCaptureTest(unittest.TestCase):
             self.assertTrue(files)
 
 
+class DeterministicRowPublicationTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        # Fails instead of skipping: this regression needs the real tools.
+        if not ((BIN/'atlas-opt').is_file() and shutil.which('cargo')):
+            raise AssertionError('select Atlas tools (ATLAS_OOT_BIN_DIR) and the offline Rust bridge (cargo)')
+        cls.temporary=tempfile.TemporaryDirectory(dir=os.environ.get('TMPDIR'))
+        cls.root=Path(cls.temporary.name)
+        cls.snapshot=build_snapshot(cls.root)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.temporary.cleanup()
+
+    def test_deterministic_row_publication_verifies_in_a_later_invocation(self):
+        # The build compiles with deterministic receipts; standalone verification runs later in the default scope.
+        with codegen_options(replace(current_codegen_options(), capture_postspill=False)):
+            from atlas_mlir_native import row_loop
+            from atlas_mlir_native.publication_options import publication_options
+            from atlas_mlir_native.softmax_c import prepare_c_package
+            from merlin.semantic_compiler.search import SearchLimits
+            from test_tiled_softmax import source_request
+
+            source=source_request((2,33));destination=self.root/'row-loop-deterministic'
+            with publication_options(deterministic_receipts=True):
+                row_loop.compile_row_loop(self.snapshot,source,target_source=ROOT,destination=destination,limits=SearchLimits())
+            receipt=json.loads((destination/'compilation-pipeline.json').read_text())
+            self.assertEqual(receipt['receipt_mode'],'deterministic-v1')
+            self.assertNotIn('elapsed_s',receipt)
+            row_loop.verify_row_loop(source,destination,target_source=ROOT)
+            _,files=prepare_c_package(destination/'source-request.json',destination,'probe_deterministic',target_source=ROOT)
+            self.assertTrue(files)
+
+
 if __name__=='__main__':unittest.main()
