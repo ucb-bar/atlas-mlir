@@ -2,6 +2,7 @@
 
 import json
 import os
+from pathlib import Path
 import subprocess
 import tempfile
 import unittest
@@ -38,6 +39,8 @@ class CountedWorkRoutingTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tools, \
                 patch.dict(os.environ, ATLAS_OOT_BIN_DIR=tools), \
                 codegen_options(options):
+            for name in ("atlas-opt", "atlas-emit"):
+                (Path(tools) / name).touch()
             with patch("atlas_mlir_native.binding.subprocess.run",
                        return_value=exhausted) as run:
                 with self.assertRaises(CountedWorkExhausted) as failure:
@@ -97,6 +100,8 @@ class CountedWorkRoutingTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tools, \
                 patch.dict(os.environ, ATLAS_OOT_BIN_DIR=tools), \
                 codegen_options(options):
+            for name in ("atlas-opt", "atlas-emit"):
+                (Path(tools) / name).touch()
             with patch("atlas_mlir_native.binding.subprocess.run",
                        return_value=exhausted) as run:
                 with self.assertRaises(CountedWorkExhausted) as failure:

@@ -173,7 +173,7 @@ foreach(test_file IN LISTS atlas_python_tests)
     COMMAND ${Python3_EXECUTABLE} -m ${runner}
     WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}/test)
   set_tests_properties(atlas-python-${module} PROPERTIES
-    ENVIRONMENT ATLAS_OOT_BIN_DIR=$<TARGET_FILE_DIR:atlas-opt>
+    ENVIRONMENT "ATLAS_OOT_BIN_DIR=$<TARGET_FILE_DIR:atlas-opt>;ATLAS_NPU_MODEL_ROOT=${ATLAS_NPU_MODEL_ROOT}"
     ENVIRONMENT_MODIFICATION
       "${atlas_python_paths}")
 endforeach()

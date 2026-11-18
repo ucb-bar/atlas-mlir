@@ -35,6 +35,13 @@ def dependency_record(name, *, required=True):
     if name in PINS:
         direct = json.loads(dist.read_text("direct_url.json") or "{}")
         revision = direct.get("vcs_info", {}).get("commit_id")
+        archive_url = ("https://github.com/reed-nicolas/merlin/archive/" + PINS["merlin"] + ".zip")
+        if name == "merlin" and direct.get("url") == archive_url:
+            archive_hash = direct.get("archive_info", {}).get("hashes", {}).get("sha256")
+            if not archive_hash:
+                raise toolchain.ToolchainError("Merlin archive installation lacks a content hash")
+            revision = PINS[name]
+            result["archive_sha256"] = archive_hash
         if direct.get("dir_info", {}).get("editable"):
             root = Path(unquote(urlparse(direct["url"]).path))
             revision = _git(root, "rev-parse", "HEAD")

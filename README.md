@@ -18,7 +18,8 @@ atlasc doctor --capture
 ```
 
 Merlin and model2MLIR come from exact Git revisions declared in `pyproject.toml`.
-Git is needed during installation. `atlasc build` needs Cargo to build Merlin's
+Merlin uses a source archive at its Git SHA to avoid recursively cloning its LLVM
+submodule. Git is needed for model2MLIR and `setup-capture`. `atlasc build` needs Cargo to build Merlin's
 native snapshot, or an existing snapshot supplied with `--snapshot DIR`.
 There is no local LLVM requirement for an installed wheel.
 

@@ -14,7 +14,7 @@ dependencies = [
   "numpy",
   "safetensors",
   "xdsl==0.68.0",
-  "merlin[semantic-search] @ git+https://github.com/reed-nicolas/merlin.git@650cc3400858515bd2722db2603bf35ee6a05f2f",
+  "merlin[semantic-search] @ https://github.com/reed-nicolas/merlin/archive/650cc3400858515bd2722db2603bf35ee6a05f2f.zip",
 ]
 
 [project.optional-dependencies]

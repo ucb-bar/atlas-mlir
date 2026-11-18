@@ -26,6 +26,8 @@ Merlin. The legacy direct importer remains only in `tile_demo.py`.
 The consolidation branch was not published when this integration was made.
 The selected deployment branches are the handoff's fallback. Git dependencies
 are pinned, not installed from the unrelated `merlin` distribution on PyPI.
+Merlin is installed from the source archive at its Git SHA, avoiding pip's
+recursive LLVM submodule clone; the archive content hash is recorded as well.
 `atlasc doctor` checks source identities and duplicate plugin registrations.
 Quantized capture also checks exporter and reference submodule revisions.
 

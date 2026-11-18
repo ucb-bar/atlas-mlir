@@ -22,6 +22,11 @@ jobs:
           repository: ucb-ee194-tapeout/npu_model
           ref: b97b2f5a97e432141c4ef8504bec396651d77a8f
           path: out/package-model
+      - uses: actions/checkout@v4
+        with:
+          repository: reed-nicolas/merlin
+          ref: 650cc3400858515bd2722db2603bf35ee6a05f2f
+          path: out/package-merlin
       - uses: actions/setup-python@v5
         with:
           python-version: '3.14'
@@ -48,7 +53,7 @@ jobs:
           "$MODEL_PYTHON" -m pip install --no-deps --editable 'git+https://github.com/ucb-ee194-tapeout/npu_model@b97b2f5a97e432141c4ef8504bec396651d77a8f#egg=npu-model'
           cmake -S . -B build -G Ninja -DMLIR_DIR="$CONDA_PREFIX/lib/cmake/mlir" -DPython3_EXECUTABLE="$MODEL_PYTHON" -DATLAS_NPU_MODEL_ROOT="$GITHUB_WORKSPACE/out/package-model"
           cmake --build build --parallel 2
-          ctest --test-dir build --output-on-failure --parallel 2 -E 'atlas-python-test_virtual_evaluator'
+          PYTHONPATH="$GITHUB_WORKSPACE/out/package-merlin" ctest --test-dir build --output-on-failure --parallel 2 -E 'atlas-python-test_virtual_evaluator'
       - uses: actions/upload-artifact@v4
         with:
           name: atlas-mlir-linux-x86_64
