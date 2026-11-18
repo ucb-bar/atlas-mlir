@@ -1,7 +1,6 @@
 """Compile guarded masked softmax and execute empty/nonempty rows on the model."""
 
 import dataclasses
-import importlib.metadata
 import json
 import os
 import shutil
@@ -143,8 +142,8 @@ class GuardedSoftmaxTest(unittest.TestCase):
         from tools.check_program_decode import decode_binary
         from tools.model_instructions import model_instruction
 
-        origin = json.loads(importlib.metadata.distribution("npu-model").read_text("direct_url.json"))
-        self.assertIn("337e9f249f938a1dff007ddf8a763e5cd4b3aa2b", origin.get("url", ""))
+        from test_spill_model_execution import assert_pinned_model
+        assert_pinned_model(self)
         plan = prepare_row_softmax(lower_semantic_softmax(self.source, allow_guarded=True).request)
         program_root = self.artifact / "segments/region_000"
         body_root = program_root / "body"

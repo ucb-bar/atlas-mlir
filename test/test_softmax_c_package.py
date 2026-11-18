@@ -2,7 +2,6 @@
 
 import ctypes
 import dataclasses
-import importlib.metadata
 import json
 import os
 import shutil
@@ -279,7 +278,7 @@ class SoftmaxCPackageTest(unittest.TestCase):
         from npu_model.logging import LoggerConfig
         from npu_model.simulation import Simulation
         from npu_model.software.program import InstantiableProgram
-        from test_spill_model_execution import MODEL_REVISION, model_instruction
+        from test_spill_model_execution import assert_pinned_model, model_instruction
         from tools.check_program_decode import decode_binary
 
         from merlin.semantic_compiler.tiled_softmax import assemble_row_softmax_outputs
@@ -287,10 +286,7 @@ class SoftmaxCPackageTest(unittest.TestCase):
         if hasattr(self, "authenticate_model_source"):
             self.authenticate_model_source()
         else:
-            origin = json.loads(importlib.metadata.distribution("npu-model").read_text("direct_url.json") or "{}")
-            self.assertTrue(
-                MODEL_REVISION in origin.get("url", "") or origin.get("vcs_info", {}).get("commit_id") == MODEL_REVISION
-            )
+            assert_pinned_model(self)
         compiler = shutil.which("cc")
         self.assertIsNotNone(compiler, "host C compiler required")
         torch.set_num_threads(1)

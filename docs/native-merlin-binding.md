@@ -305,7 +305,7 @@ the result to BF16. Small inputs can become signed zero.
 The attributed implementation is `tanh_lane.py`; `reference.py` checks the
 typed primitive and its numerical attributes. All 65,280 finite BF16 encodings
 match the TANH RTL table in pinned `npu_model`
-`337e9f249f938a1dff007ddf8a763e5cd4b3aa2b`. Nonfinite encodings are outside
+`b97b2f5a97e432141c4ef8504bec396651d77a8f`. Nonfinite encodings are outside
 the admitted domain. The compiler never imports this model table.
 
 A generated 144-byte native program passes two input panels on that model,
@@ -565,7 +565,7 @@ The public `WideGuardedSoftmaxTest` compiles a 32×1024 masked row group under
 the explicit diagnostic BF16 policy, including positive-zero outputs for
 fully masked rows. `SoftmaxCPackageTest` also covers multiple row groups and
 column tails, C/H export, repeated calls, error handling and final RV64 objects.
-Model checks use revision `337e9f249f938a1dff007ddf8a763e5cd4b3aa2b` and compare
+Model checks use revision `b97b2f5a97e432141c4ef8504bec396651d77a8f` and compare
 against independently ordered primitive arithmetic. These checks do not qualify
 full-model accuracy, RTL or FPGA execution.
 
