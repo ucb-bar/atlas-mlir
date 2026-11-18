@@ -53,6 +53,12 @@ if(NOT "${atlas_model_import_result}" STREQUAL "0")
 endif()
 set(atlas_model_python_path
   "PYTHONPATH=path_list_prepend:${ATLAS_NPU_MODEL_ROOT}")
+# Select the validated model so npu_model exactness tests run instead of skipping.
+set(atlas_python_environment
+  "ATLAS_OOT_BIN_DIR=$<TARGET_FILE_DIR:atlas-opt>"
+  ATLAS_RUN_NPU_MODEL=1
+  "IMPORT_MODEL_PYTHON=${Python3_EXECUTABLE}"
+  "IMPORT_MODEL_ROOT=${ATLAS_NPU_MODEL_ROOT}")
 # One test per Python test module, run from test/ as discovery would, with the
 # native binding package importable. Modules with test functions or pytest
 # fixtures use pytest; the rest are unittest suites.
@@ -76,7 +82,7 @@ foreach(test_file IN LISTS atlas_python_tests)
     COMMAND ${Python3_EXECUTABLE} -m ${runner}
     WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}/test)
   set_tests_properties(atlas-python-${module} PROPERTIES
-    ENVIRONMENT ATLAS_OOT_BIN_DIR=$<TARGET_FILE_DIR:atlas-opt>
+    ENVIRONMENT "${atlas_python_environment}"
     ENVIRONMENT_MODIFICATION
       "${atlas_python_paths}")
 endforeach()
