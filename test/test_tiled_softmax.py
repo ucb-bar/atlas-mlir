@@ -388,16 +388,15 @@ class TiledSoftmaxTest(unittest.TestCase):
                             self.assertTrue(at <= address and address + len(expected) <= end <= len(initial))
                             for index in range(int(fields["input_count"])):
                                 start = int(fields[f"input.{index}.address"], 0) - program.dram_base
-                                self.assertTrue(start + 2048 <= at or end <= start)
+                                self.assertTrue(start + execution["input_bytes"] <= at or end <= start)
                             window = (
                                 f"atlas.output_dram_base = {staging['address']} : i64, "
                                 f"atlas.output_dram_bytes = {{}} : i64"
                             )
                             virtual = (destination / "atlas-virtual.mlir").read_text()
                             self.assertIn(window.format(staging["bytes"]), virtual)
-                            shrunk = virtual.replace(
-                                window.format(staging["bytes"]), window.format(staging["bytes"] - 2048)
-                            )
+                            smaller = window.format(staging["bytes"] - execution["output_bytes"])
+                            shrunk = virtual.replace(window.format(staging["bytes"]), smaller)
                             refused = run("atlas-opt", shrunk, "--verify-atlas-virtual-stream")
                             self.assertIn("DMA store exceeds the declared output buffer", refused.stderr)
                             initial[at:end] = result[at:end]
