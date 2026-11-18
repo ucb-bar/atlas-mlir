@@ -68,18 +68,19 @@ def alternatives(adapter, source, choices):
         result.append(replace(consumer, id='float_input_layout_' + '_'.join(map(str, nodes)),
             nodes=nodes, implementation='source_float_input_layout',
             inputs=candidate.inputs, outputs=candidate.outputs,
-            cycles=CycleInterval.unknown('unchanged exact-float images with layout absorbed into input packing'),
+            cycles=CycleInterval.unknown('exact-float slices with source-indexed input transport'),
             metadata=(('kind', 'float_input_layout'),)))
     return tuple(result)
 
 
-def compile_group(group, snapshot, *, target_source, destination, limits):
+def compile_group(group, snapshot, *, target_source, destination, limits, cache_input=True):
     from .exact_float_application import compile_source
 
     group = prepare_source(group.source)
     destination = write_source_request(destination, group.source, indent=2)
     compile_source(snapshot, group.arithmetic, target_source=target_source,
-                   destination=destination / 'float', limits=limits)
+                   destination=destination / 'float', limits=limits,
+                   input_layout=(group.physical,group.logical),cache_input=cache_input)
 
 
 def export_group(group, compiled, name, *, target_source):
@@ -96,7 +97,9 @@ def export_group(group, compiled, name, *, target_source):
         input_layout=dict(source=group.physical.id, logical=group.logical.id,
             source_shape=list(group.physical.type.shape), logical_shape=list(group.logical.type.shape),
             read_map=group.logical.index_maps[0].record(),
-            transport='byte-preserving slices in original exact-float input packing'))
+            transport=('byte-preserving dense slices or proved repeated input cycles'
+                       if 'repeated_input' in result.description['float_schedule']
+                       else 'byte-preserving slices in original exact-float input packing')))
     return replace(result, inputs=inputs, description=description,
         programs=tuple(f'segments/{name}/float/segments/body_{index:03d}'
                        for index, _ in enumerate(description['float_schedule']['bodies'])))

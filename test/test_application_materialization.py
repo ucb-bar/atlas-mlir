@@ -60,7 +60,7 @@ def test_rebinding_refuses_other_source_program_and_damaged_materialization(tmp_
     canonical = canonical_request(original, source_identity_policy="provenance")
     with materialization_session(enabled=True):
         application.compile_source(None, canonical, target_source=ROOT, destination=tmp_path / "canonical", limits=None)
-        with pytest.raises(ValueError, match="differs"):
+        with pytest.raises(ValueError, match="differs|resource envelope"):
             bind_exact_float(request("bf16_to_f32", 3), canonical, tmp_path / "canonical", tmp_path / "wrong")
         path = tmp_path / "canonical/segments/body_000/program.bin"
         path.write_bytes(path.read_bytes() + b"damage")

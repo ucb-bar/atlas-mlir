@@ -13,20 +13,20 @@ from merlin.semantic_compiler.model import IndexMap, SemanticNode, pointwise_ide
 from test_exact_float_device import request, host_reference
 
 
-def fixture(op, layout, port=0):
-    shape=(33,35)
+def fixture(op, layout, port=0, shape=(33,35)):
+    rows,columns=shape
     original=request(op,int(np.prod(shape)))
     logical=replace(original,nodes=tuple(replace(n,type=replace(n.type,shape=shape),
         index_maps=() if n.effect=='input' else pointwise_identity_maps(2,len(n.inputs))) for n in original.nodes))
     operand=logical.nodes[port]
     if layout=='broadcast':
-        physical_shape,coefficients,offsets=(35,),((0,1),),(0,)
+        physical_shape,coefficients,offsets=(columns,),((0,1),),(0,)
     elif layout=='slice':
-        physical_shape,coefficients,offsets=(33,70),((1,0),(0,1)),(0,35)
+        physical_shape,coefficients,offsets=(rows,2*columns),((1,0),(0,1)),(0,columns)
     elif layout=='reverse':
-        physical_shape,coefficients,offsets=(33,70),((1,0),(0,-2)),(0,69)
+        physical_shape,coefficients,offsets=(rows,2*columns),((1,0),(0,-2)),(0,2*columns-1)
     elif layout=='transpose':
-        physical_shape,coefficients,offsets=(35,33),((0,1),(1,0)),(0,0)
+        physical_shape,coefficients,offsets=(columns,rows),((0,1),(1,0)),(0,0)
     else: raise ValueError(layout)
     physical=replace(operand,id='physical',type=replace(operand.type,shape=physical_shape))
     view=SemanticNode(operand.id,'gather',(physical.id,),operand.type,
@@ -76,16 +76,31 @@ def test_private_selection_and_refused_source_boundaries():
     ('f32_to_bf16','reverse',0),('f32_neg','transpose',0),
     ('bf16_to_f32','broadcast',0),('bf16_add','transpose',1),
 ])
-def test_c_rust_affine_slices_domain_and_atomic_output(tmp_path,op,layout,port):
-    logical,source=fixture(op,layout,port)
-    with codegen_options(CodegenOptions(io_memory_bytes=8192,exact_float_unroll=True)):
+@pytest.mark.parametrize('window,budget,fast', [(8192,1000000,False),(32768,2000000,True)])
+def test_c_rust_affine_slices_domain_and_atomic_output(tmp_path,op,layout,port,window,budget,fast):
+    run_c_rust_layout(tmp_path,op,layout,port,window,budget,fast,
+                      shape=(33,35),multiple=window==8192)
+
+
+def run_c_rust_layout(tmp_path,op,layout,port,window,budget,fast,*,shape,multiple,cache_input=True):
+    logical,source=fixture(op,layout,port,shape)
+    with codegen_options(CodegenOptions(io_memory_bytes=window,execution_instruction_limit=budget,
+            exact_float_unroll=True,exact_binary_lane_groups=fast,exact_binary_vector_preflight=fast,exact_binary_routes=fast)):
         group=folded.prepare_source(source)
-        schedule=application.prepare_plan(group.arithmetic)
-        assert len(schedule.launches)>1
+        input_layout=(group.physical,group.logical)
+        schedule=application.prepare_plan(group.arithmetic,
+            private_output=op in ('bf16_add','bf16_sub'),input_layout=input_layout if cache_input else None)
+        if multiple:
+            assert len(schedule.launches)>1
+        else:
+            assert len(schedule.launches)==1
         compiled=tmp_path/'compiled'
-        folded.compile_group(group,None,target_source=ROOT,destination=compiled,limits=None)
+        folded.compile_group(group,None,target_source=ROOT,destination=compiled,limits=None,cache_input=cache_input)
         exported=folded.export_group(group,compiled,'packed',target_source=ROOT)
-        plans=[device.prepare_plan(body) for body in schedule.bodies]
+        plans=[device.prepare_plan(body,private_output=schedule.plan.private_output,
+                                  input_layout=input_layout,cache_input=schedule.plan.repeated_input is not None)
+               for i,body in enumerate(schedule.bodies)]
+        memory_bytes=((max(p.workspace_bytes for p in plans)+4095)//4096+1)*4096
         programs=[compiled/f'float/segments/body_{i:03d}/program.bin' for i in range(len(plans))]
         assert exported.inputs[port]=='physical'
         assert all(p.stat().st_size<=131072 for p in programs)
@@ -94,7 +109,7 @@ def test_c_rust_affine_slices_domain_and_atomic_output(tmp_path,op,layout,port):
         (tmp_path/'shim.c').write_text('''#include "packed.h"
 #include <string.h>
 static atlas_host host; static packed_context region; static packed_source_context source;
-static unsigned char scratch[PACKED_WORKSPACE_BYTES],memory[12288];
+static unsigned char scratch[PACKED_WORKSPACE_BYTES],memory[@MEMORY_BYTES@];
 static uint32_t image[32768]; static size_t words; static unsigned starts,transfers;
 static void (*execute)(const uint32_t *,size_t,unsigned char *,size_t);
 static uint32_t rd(void *c,uintptr_t a){(void)c;return a==0x40004u?starts:5u;}
@@ -116,14 +131,15 @@ int invoke(const void *const *inputs,void *output,void (*run)(const uint32_t *,s
  if(packed_source_bind(&source,&region,0,0))return 7;
  void *outputs[]={output};return packed_source_dispatch(&source,inputs,outputs);
 }
-''')
+'''.replace('@MEMORY_BYTES@',str(memory_bytes)))
         subprocess.run(['cc','-std=c11','-O2','-Wall','-Wextra','-Werror','-Wno-misleading-indentation',
             '-shared','-fPIC','packed.c','runtime/atlas_host.c','shim.c','-o','packed.so'],
             cwd=tmp_path,check=True,capture_output=True)
         library=ct.CDLL(str(tmp_path/'packed.so'))
         callback=ct.CFUNCTYPE(None,ct.c_void_p,ct.c_size_t,ct.c_void_p,ct.c_size_t)
         library.invoke.argtypes=[ct.POINTER(ct.c_void_p),ct.c_void_p,callback]
-        calls,errors=[],[]
+        calls,errors,execution_stats=[],[],[]
+        valid_stats=[]
         expected_raw=[]
         trial=0
         def execute(image,words,memory_pointer,memory_size):
@@ -134,14 +150,19 @@ int invoke(const void *const *inputs,void *output,void (*run)(const uint32_t *,s
                 initial=ct.string_at(memory_pointer,memory_size)
                 start,count=call['input_offset_bytes'],call['input_bytes']
                 for j,raw in enumerate(expected_raw):
-                    at=j*plan.input_bytes
-                    assert initial[at:at+count]==raw[start:start+count]
-                    assert initial[at+count:at+plan.input_bytes]==bytes(plan.input_bytes-count)
+                    at=plan.input_addresses[j]-plan.io_memory_base
+                    payload=plan.input_payload_bytes[j]
+                    if plan.cached_tiles and j==plan.repeated_input.port:
+                        phase=(start//plan.width)%plan.repeated_input.period*plan.width
+                        assert initial[at:at+payload]==raw[phase:phase+payload]
+                    else:
+                        assert initial[at:at+count]==raw[start:start+count]
+                        assert initial[at+count:at+payload]==bytes(payload-count)
                 work=tmp_path/f'run-{trial}-{ordinal}';work.mkdir()
                 (work/'initial.bin').write_bytes(initial)
                 (work/'config.json').write_text(json.dumps(dict(dram_base=plan.io_memory_base,
                     dram_size=memory_size,pack_layout='register_rows',compute='cpu')))
-                subprocess.run([os.environ['ATLAS_RUST_NPU_MODEL'],str(programs[index]),
+                run=subprocess.run([os.environ['ATLAS_RUST_NPU_MODEL'],str(programs[index]),
                     '--config',str(work/'config.json'),'--load',f'{plan.io_memory_base}:{work/"initial.bin"}',
                     '--dump-state',str(work/'state')],check=True,capture_output=True)
                 actual=b''.join((work/'state'/f'dram_{a:016x}.bin').read_bytes()
@@ -150,6 +171,7 @@ int invoke(const void *const *inputs,void *output,void (*run)(const uint32_t *,s
                 assert actual[:output_at]==initial[:output_at]
                 assert actual[plan.workspace_bytes:]==initial[plan.workspace_bytes:]
                 ct.memmove(memory_pointer,actual,len(actual));calls.append(ordinal)
+                execution_stats.append(json.loads(run.stdout))
             except Exception as error: errors.append(error)
         hook=callback(execute)
         width=schedule.plan.width
@@ -158,7 +180,7 @@ int invoke(const void *const *inputs,void *output,void (*run)(const uint32_t *,s
         if width==4:
             codes=[word<<16 for word in codes]+[0x3f888000,0x3f898000,0x3f888001,1]
         values=np.resize(np.array(codes,dtype=f'<u{width}'),group.physical.type.shape)
-        if layout=='slice': values[:,:35]=0x7fc1 # unread NaNs must not reject the logical slice
+        if layout=='slice': values[:,:shape[1]]=0x7fc1 # unread NaNs must not reject the logical slice
         read=group.logical.index_maps[0]
         indices=[tuple(offset+sum(c*d for c,d in zip(row,index,strict=True))
             for row,offset in zip(read.coefficients,read.offsets,strict=True)) for index in np.ndindex(group.logical.type.shape)]
@@ -173,7 +195,7 @@ int invoke(const void *const *inputs,void *output,void (*run)(const uint32_t *,s
             buffers[port]=ct.create_string_buffer(values.tobytes())
             pointers=(ct.c_void_p*len(buffers))(*(ct.addressof(b) for b in buffers))
             output=ct.create_string_buffer(bytes([0xa5])*(len(expected)+32))
-            before=[b.raw for b in buffers];calls.clear();errors.clear()
+            before=[b.raw for b in buffers];calls.clear();errors.clear();execution_stats.clear()
             actual_status=library.invoke(pointers,ct.addressof(output)+16,hook)
             assert not errors,errors
             assert bool(actual_status)==bool(status)
@@ -184,6 +206,7 @@ int invoke(const void *const *inputs,void *output,void (*run)(const uint32_t *,s
             else:
                 assert actual_status==0 and len(calls)==len(schedule.launches)
                 assert output.raw[16:16+len(expected)]==expected
+                valid_stats=list(execution_stats)
             assert [b.raw for b in buffers]==before
             assert output.raw[:16]==bytes([0xa5])*16 and output.raw[16+len(expected):]==bytes([0xa5])*16+b'\0'
             saved=output.raw
@@ -192,3 +215,4 @@ int invoke(const void *const *inputs,void *output,void (*run)(const uint32_t *,s
         (compiled/'source-request.json').write_text(json.dumps(logical.record()))
         with pytest.raises(ValueError,match='differs from its source'):
             folded.export_group(group,compiled,'packed',target_source=ROOT)
+        return dict(schedule=schedule,plans=plans,statistics=valid_stats)

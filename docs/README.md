@@ -26,6 +26,7 @@ Start with the [repository README](../README.md) for the build, and the
 | [PACK scale domain](pack-scale-domain.md) | Raw PACK scale codes, their source evidence, and the guarded conversion. |
 | [Proof work measurement](proof-work-measurement.md) | Measuring verifier work in `atlas-opt` and `atlas-emit`. |
 | [Scratch output priority](scratch-output-priority.md) | Native scheduling through cache dependencies and complete-layer measurements. |
+| [Remaining model optimizations](model-traffic-priorities.md) | Prioritized traffic/dispatch work, ownership, and exact zero-aware admission results on TinyLlama and SmolVLA. |
 | [Panel readout](panel-readout.md) | Keeping completed MXU tiles on chip through scaling and epilogues. |
 | [Row dispatch budget](row-dispatch-budget.md) | Batching complete softmax rows under the selected execution budget. |
 | [Private staging](private-staging.md) | Keeping private BF16 intermediates and repeated immutable inputs in invocation-local VMEM. |

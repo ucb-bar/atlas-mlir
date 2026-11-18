@@ -297,15 +297,24 @@ def pack_resident_input(source, node_id, dense_bytes):
 
 
 def virtual_program(plan, *, size_limit=None):
+    """Lower the byte transfers of a checked source layout plan."""
+    return virtual_transfers(plan.segments, input_addresses=plan.input_addresses,
+        output_address=plan.output_address, output_bytes=plan.physical_bytes,
+        io_memory_base=plan.io_memory_base, size_limit=size_limit)
+
+
+def virtual_transfers(segments, *, input_addresses, output_address, output_bytes,
+                      io_memory_base, size_limit=None):
     """Build byte transport from typed virtual DMA, slots, XLU and counted CFG.
 
+    The caller supplies checked affine transfer segments and physical buffers.
     Allocation, instruction timing, DMA waits and all six source contracts are
-    produced by the common compiler. No physical location appears in this IR.
+    produced by the common compiler. Scratch locations remain virtual.
     """
     state, tile, spill = "!atlas.virtual_state", "!atlas.virtual_fp8", "!atlas.virtual_spill"
     signed = lambda n: n if n < 2**31 else n - 2**32
     budget = f"atlas.program_size_limit_bytes = {size_limit} : i64, " if size_limit is not None else ""
-    lines = ["module {", f" func.func @layout() -> {state} attributes {{{budget}atlas.input_dram_base = {plan.io_memory_base} : i64, atlas.output_dram_base = {plan.output_address} : i64, atlas.output_dram_bytes = {plan.physical_bytes} : i64}} {{",
+    lines = ["module {", f" func.func @layout() -> {state} attributes {{{budget}atlas.input_dram_base = {io_memory_base} : i64, atlas.output_dram_base = {output_address} : i64, atlas.output_dram_bytes = {output_bytes} : i64}} {{",
              f'  %s0 = "atlas.virtual_start"() : () -> {state}']
     current = "%s0"
     serial = 0
@@ -334,7 +343,7 @@ def virtual_program(plan, *, size_limit=None):
 
     # Slots are declared in the entry block and receive addresses from spilling.
     source_slot, output_slot, transpose_slot = slot(), slot(), slot()
-    ragged_rows = max((segment["output_row_bytes"] for segment in plan.segments
+    ragged_rows = max((segment["output_row_bytes"] for segment in segments
                        if segment["mode"] == "ragged_xlu"), default=0)
     slab_words = (8 * ragged_rows + 255) // 256 * 256
     slab_slot = slot("raw", slab_words) if ragged_rows else None
@@ -500,9 +509,9 @@ def virtual_program(plan, *, size_limit=None):
                 put_word(zero, word * 4, slab_slot, index if ragged_rows > 1 else None)
         repeat(ragged_rows, zero, zero, 8, 0, initialize)
 
-    for segment in plan.segments:
-        source_base = plan.input_addresses[segment["input"]] + segment["source_offset"]
-        destination_base = plan.output_address + segment["output_offset"]
+    for segment in segments:
+        source_base = input_addresses[segment["input"]] + segment["source_offset"]
+        destination_base = output_address + segment["output_offset"]
         if segment["mode"] == "scalar":
             # A dense output suffix repeats in a counted loop whenever both
             # pointers advance by DMA beats. Ragged rows may be grouped to

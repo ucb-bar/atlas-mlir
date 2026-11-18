@@ -105,7 +105,7 @@ class SoftmaxNarrowingRuntimeTest(unittest.TestCase):
                     execution = json.loads((compiled / 'body/execution_plan.json').read_text())
                     for index, inputs in enumerate(prepare_inputs(plan.tiling, scores.tobytes())):
                         payloads = dict(inputs)
-                        for item in execution['constant_inputs']:
+                        for item in json.loads((compiled / 'body/manifest.json').read_text()).get('constant_inputs', []):
                             payloads[item['node_id']] = (compiled / 'body' / item['path']).read_bytes()
                         leaves = [node.id for node in plan.tiling.regions[index].request.nodes
                                   if node.effect in ('input', 'constant')]
