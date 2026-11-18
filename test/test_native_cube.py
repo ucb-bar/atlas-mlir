@@ -3,7 +3,6 @@
 import dataclasses
 import gzip
 import hashlib
-import importlib.metadata
 import json
 import os
 import struct
@@ -52,8 +51,8 @@ class CubeReferenceTest(unittest.TestCase):
     def test_all_finite_codes_match_the_pinned_model_table(self):
         from npu_model.configs import rtl_math
 
-        origin = json.loads(importlib.metadata.distribution("npu-model").read_text("direct_url.json"))
-        self.assertIn("337e9f249f938a1dff007ddf8a763e5cd4b3aa2b", origin["url"])
+        from test_spill_model_execution import assert_pinned_model
+        assert_pinned_model(self)
         data = gzip.decompress((Path(rtl_math.__file__).with_name("data") / "cube.bin.gz").read_bytes())
         self.assertEqual(hashlib.sha256(data).hexdigest(),
                          "8c1b2ee7b0ff3607f0f8beeea65a102f8dc7c58982fab8090ff291016833625d")

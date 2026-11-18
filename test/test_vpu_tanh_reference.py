@@ -3,7 +3,6 @@
 import dataclasses
 import gzip
 import hashlib
-import importlib.metadata
 import json
 import os
 import struct
@@ -64,8 +63,8 @@ class TanhReferenceTest(unittest.TestCase):
     def test_all_finite_codes_match_the_selected_model_rtl_table(self):
         from npu_model.configs import rtl_math
 
-        origin = json.loads(importlib.metadata.distribution("npu-model").read_text("direct_url.json"))
-        self.assertIn("337e9f249f938a1dff007ddf8a763e5cd4b3aa2b", origin["url"])
+        from test_spill_model_execution import assert_pinned_model
+        assert_pinned_model(self)
         data = gzip.decompress((Path(rtl_math.__file__).with_name("data") / "tanh.bin.gz").read_bytes())
         self.assertEqual(hashlib.sha256(data).hexdigest(),
                          "b3aa936ac8b5591f3cf38ded8b7d383b9c6729a3ab304d0b53f029af55accbc6")
