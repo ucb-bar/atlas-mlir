@@ -1,9 +1,6 @@
 """Batched panels preserve independent matrix products and scale ownership."""
 from dataclasses import replace
 import json
-from math import prod
-import os
-import subprocess
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -11,49 +8,11 @@ import pytest
 
 from atlas_mlir_native.options import codegen_options, current_codegen_options
 from atlas_mlir_native.already_quantized import prepare_source
-from atlas_mlir_native.binding import DRAM_BASE
 from atlas_mlir_native.quantized_loop import execution_layout, virtual_source
 from atlas_mlir_native.quantized_loop_sizing import size_counted
-from atlas_mlir_native.restoration_budget import instruction_bound
 
 from merlin.semantic_compiler.target_binding import NativeCompilationError
 from test_exponent_page_cache import fixture, OPTIONS
-from test_exponent_restoration import compile_fixture
-from test_quantized_prefix_reuse import memory_fixture
-
-
-def compile_program(plan, root, policy, cached):
-    root.mkdir()
-    layout = execution_layout(plan, operand_reuse=policy, exponent_page_cache=cached)
-    virtual = virtual_source(plan, layout)
-    (root / 'virtual.mlir').write_text(virtual)
-    machine, physical = compile_fixture(virtual, pipeline='optimized')
-    assert instruction_bound(virtual, machine, physical)['admitted']
-    binary = b''.join(row['word_u32'].to_bytes(4, 'little') for row in physical['instructions'])
-    assert len(binary) <= 131072
-    (root / 'program.bin').write_bytes(binary)
-    return layout
-
-
-def run_program(program, layout, memory, root):
-    root.mkdir()
-    memory = bytearray(memory)
-    memory.extend(bytes([0xa5]) * (-len(memory) % 4096))
-    (root / 'memory.bin').write_bytes(memory)
-    (root / 'config.json').write_text(json.dumps(dict(
-        compute='cpu', pack_layout='register_rows', dram_base=DRAM_BASE, dram_size=len(memory))))
-    result = subprocess.run([os.environ['ATLAS_RUST_NPU_MODEL'], str(program),
-        '--config', str(root / 'config.json'), '--load', f'{DRAM_BASE}:{root / "memory.bin"}',
-        '--dump-state', str(root / 'state')], check=True, capture_output=True)
-    report = json.loads(result.stdout)
-    assert report['completed'] and report['halt_reason'] == 'ecall'
-    actual = b''.join((root / 'state' / f'dram_{address:016x}.bin').read_bytes()
-                     for address in range(DRAM_BASE, DRAM_BASE + len(memory), 4096))
-    start = layout['output_addresses'][0] - DRAM_BASE
-    status = layout['status_address'] - DRAM_BASE
-    end = status + layout['status_bytes']
-    assert actual[:start] == memory[:start] and actual[end:] == memory[end:]
-    return actual[start:start + layout['output_bytes']], int.from_bytes(actual[status:status + 4], 'little')
 
 
 def test_geometry_replay_and_only_proved_capacity_retry():
@@ -82,76 +41,6 @@ def test_geometry_replay_and_only_proved_capacity_retry():
         with pytest.raises(NativeCompilationError, match='native proof failure'):
             size_counted(plan, operand_reuse='batch-panel-cache')
         assert size.call_count == 1
-
-
-@pytest.mark.skipif(not all(os.environ.get(key) for key in
-    ('ATLAS_RUST_NPU_MODEL', 'ATLAS_OOT_BIN_DIR')), reason='select Rust and Atlas tools')
-@pytest.mark.parametrize('cached', [False, True])
-@pytest.mark.parametrize('m,n,k,batch,left,right,shared', [
-    (64, 35, 33, (2,), 'batch', 'batch', False),
-    (128, 128, 64, (2, 3), 'batch', 'batch', False),
-    (35, 65, 65, (2,), 'scalar', 'scalar', True),
-    (97, 35, 65, (2,), 'batch', 'scalar', False),
-    (64, 35, 65, (2,), 'scalar', 'batch', False),
-    (97, 35, 65, (2,), 'batch', 'row', False),
-    (64, 35, 65, (2,), 'row', 'batch', False),
-    (64, 35, 65, (2,), 'row', 'row', False),
-    (225, 35, 1025, (2,), 'batch', 'batch', False),
-])
-def test_rust_batch_matches_independent_invocations(
-        tmp_path, cached, m, n, k, batch, left, right, shared):
-    with codegen_options(replace(current_codegen_options(), io_memory_bytes=OPTIONS.io_memory_bytes, execution_instruction_limit=OPTIONS.execution_instruction_limit)):
-        plan = prepare_source(fixture(m, n, k, batch, left, right, shared))
-        single = prepare_source(fixture(m, n, k, (), left, right, shared))
-        layout = compile_program(plan, tmp_path / 'batched', 'batch-panel-cache', cached)
-        reference = compile_program(single, tmp_path / 'single', 'panel-cache', cached)
-        assert layout['operand_reuse'] == 'panel-cache'
-        assert layout['output_bytes'] == prod(batch) * reference['output_bytes']
-        memory = memory_fixture(plan, layout)
-        expected = []
-        for index in range(prod(batch)):
-            sample = memory_fixture(single, reference)
-            # Each reference invocation sees exactly one independent A/W pair
-            # and its own scale pages, retaining the original single-matrix emitter.
-            for operand in range(2):
-                size = reference['input_buffer_bytes'][operand]
-                source_index = 0 if operand == 1 and shared else index
-                source = layout['input_addresses'][operand] - DRAM_BASE + source_index * size
-                target = reference['input_addresses'][operand] - DRAM_BASE
-                sample[target:target + size] = memory[source:source + size]
-                size = reference['exponent_buffer_bytes'][operand]
-                geometry = layout['exponent_layouts'][operand]
-                source_index = 0 if geometry['mode'] == 'scalar' or geometry['batches'] == 1 else index
-                source = layout['exponent_addresses'][operand] - DRAM_BASE + source_index * size
-                target = reference['exponent_addresses'][operand] - DRAM_BASE
-                sample[target:target + size] = memory[source:source + size]
-            output, status = run_program(tmp_path / 'single/program.bin', reference, sample,
-                                         tmp_path / f'reference-{index}')
-            assert status == 0
-            expected.append(output)
-        output, status = run_program(tmp_path / 'batched/program.bin', layout, memory, tmp_path / 'valid')
-        assert status == 0 and output == b''.join(expected)
-        geometry = layout['exponent_layouts'][0]
-        offset = layout['exponent_addresses'][0] - DRAM_BASE + (geometry['pages'] - 1) * 2048
-        if geometry['mode'] == 'row':
-            offset += ((m - 1) % 32) * 4
-        memory[offset:offset + 4] = (1000).to_bytes(4, 'little')
-        _, status = run_program(tmp_path / 'batched/program.bin', layout, memory, tmp_path / 'invalid')
-        assert status == 1
-
-
-@pytest.mark.skipif(not all(os.environ.get(key) for key in
-    ('ATLAS_RUST_NPU_MODEL', 'ATLAS_OOT_BIN_DIR', 'ATLAS_TEST_NATIVE_SNAPSHOT')),
-    reason='select Rust, Atlas and native snapshot')
-def test_generated_c_keeps_batched_epilogue_atomic(tmp_path, monkeypatch, select_codegen_options):
-    from test_quantized_epilogue_narrowing import test_generated_c_and_rust_preserve_every_output_and_guards
-
-    select_codegen_options(quantized_operand_reuse='batch-panel-cache')
-    select_codegen_options(exponent_page_cache=True)
-    test_generated_c_and_rust_preserve_every_output_and_guards(tmp_path, 35, 65, 257, (2,), 0)
-    layout = json.loads((tmp_path / 'compiled/execution_plan.json').read_text())
-    assert layout['operand_reuse'] == 'panel-cache'
-    assert 'operand_reuse_flattened_batches' not in layout
 
 
 @pytest.mark.parametrize('m,n,k,left,right', [

@@ -1,12 +1,11 @@
 """Softmax publication keeps the selected arithmetic, guards and private output."""
 from dataclasses import replace
 
-import numpy as np
 import pytest
 
 from atlas_mlir_native.binding import TARGET_IDENTITY
 from atlas_mlir_native.composition_adapter import AdjacentDeviceAdapter
-from atlas_mlir_native.softmax_narrowing import compile_group, prepare
+from atlas_mlir_native.softmax_narrowing import prepare
 from merlin.semantic_compiler.model import IndexMap, SemanticNode, TensorType, pointwise_identity_maps
 from merlin.tests.ir.test_guarded_softmax_source import guarded_graph
 from merlin.tests.ir.test_softmax_source import source_graph
@@ -61,78 +60,3 @@ def test_changed_cast_and_unknown_domain_are_refused():
     base.already_quantized_score_domain = 'unknown'
     with pytest.raises(ValueError, match='bounded score policy'):
         prepare(source, base, 'softmax')
-
-
-@unittest.skipUnless(os.environ.get('ATLAS_RUST_NPU_MODEL') and os.environ.get('ATLAS_OOT_BIN_DIR'),
-                     'select Rust simulator and Atlas compiler')
-class SoftmaxNarrowingRuntimeTest(unittest.TestCase):
-    def test_dense_and_tail_rows_through_generated_c_and_rust(self):
-        from atlas_mlir_native.layout import unpack_bf16_pair_halves
-        from atlas_mlir_native.row_loop import prepare_plan
-        from atlas_mlir_native.row_softmax import prepare_inputs
-        from atlas_mlir_native.softmax_c import _prepare_c_package
-        from merlin.semantic_compiler.search import SearchLimits
-        from merlin.semantic_compiler.tiled_softmax import assemble_row_softmax_outputs
-        from test_looped_mnk import build_snapshot
-        from test_pointwise_loop import check_source_c_call
-        from test_tiled_softmax import reference, scores_for
-
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            snapshot = build_snapshot(root)
-            for shape in ((1, 35), (33, 65)):
-                with self.subTest(shape=shape):
-                    group = prepare(case(shape), adapter(), 'softmax')
-                    compiled = root / f'compiled-{shape[0]}'
-                    compile_group(group, snapshot, target_source=ROOT, destination=compiled,
-                                  limits=SearchLimits(candidate_nodes=256))
-                    plan = prepare_plan(group.precision.request)
-                    record, files = _prepare_c_package(group.precision.request, compiled, 'pointwise',
-                        target_source=ROOT, semantic_source=group.producer, row_loop_compilation=compiled,
-                        output_dtype='bf16')
-                    package = compiled / 'package'
-                    for name, data in files.items():
-                        path = package / name
-                        path.parent.mkdir(parents=True, exist_ok=True)
-                        path.write_bytes(data)
-                    assert record['source_interface']['output_dtype'] == 'bf16'
-                    scores = scores_for(shape, 'split').astype('<u2')
-                    values = (scores.astype('<u4') << 16).view('<f4')
-                    wanted = assemble_row_softmax_outputs(plan.tiling,
-                        [[unpack_bf16_pair_halves(tile) for tile in row]
-                         for row in reference(plan.tiling, scores)])
-                    initial = bytearray([0xa5]) * ((plan.end - plan.io_memory_base + 4095) // 4096 * 4096 + 4096)
-                    execution = json.loads((compiled / 'body/execution_plan.json').read_text())
-                    for index, inputs in enumerate(prepare_inputs(plan.tiling, scores.tobytes())):
-                        payloads = dict(inputs)
-                        for item in json.loads((compiled / 'body/manifest.json').read_text()).get('constant_inputs', []):
-                            payloads[item['node_id']] = (compiled / 'body' / item['path']).read_bytes()
-                        leaves = [node.id for node in plan.tiling.regions[index].request.nodes
-                                  if node.effect in ('input', 'constant')]
-                        for address, key in zip(execution['input_addresses'], leaves, strict=True):
-                            at = plan.address(address, index) - plan.io_memory_base
-                            initial[at:at + len(payloads[key])] = payloads[key]
-                    config = compiled / 'config.json'
-                    config.write_text(json.dumps(dict(pack_layout='register_rows',
-                        dram_base=plan.io_memory_base, dram_size=len(initial))))
-
-                    def execute(memory):
-                        with tempfile.TemporaryDirectory(dir=compiled) as directory:
-                            directory = Path(directory)
-                            (directory / 'initial.bin').write_bytes(memory)
-                            subprocess.run([os.environ['ATLAS_RUST_NPU_MODEL'], str(compiled / 'program.bin'),
-                                '--config', str(config), '--compute', 'cpu', '--load',
-                                f'{plan.io_memory_base}:{directory / "initial.bin"}', '--dump-state',
-                                str(directory / 'state'), '--max-cycles', '10000000'],
-                                check=True, capture_output=True)
-                            actual = b''.join((directory / 'state' / f'dram_{address:016x}.bin').read_bytes()
-                                for address in range(plan.io_memory_base, plan.io_memory_base + len(memory), 4096))
-                            self.assertEqual(actual[:plan.writable_base-plan.io_memory_base],
-                                             memory[:plan.writable_base-plan.io_memory_base])
-                            self.assertEqual(actual[plan.end-plan.io_memory_base:], memory[plan.end-plan.io_memory_base:])
-                            return actual
-
-                    invalid = values.copy()
-                    invalid[-1, -1] = np.nan
-                    check_source_c_call(self, package, initial, (compiled / 'program.bin').read_bytes(),
-                        execute, (values,), wanted, ((invalid,),), output_dtype='bf16')

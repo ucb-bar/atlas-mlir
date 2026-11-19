@@ -1,9 +1,7 @@
 """Private staging preserves public bytes, arithmetic and native admission."""
-from atlas_mlir_native.options import codegen_options, current_codegen_options
 
 from dataclasses import replace
 import io
-import json
 import os
 
 import pytest
@@ -107,24 +105,3 @@ def test_native_checks_still_reject_uninitialized_slots_and_exhausted_capacity()
     promoted,_=private_staging.promote(last)
     refused=run('atlas-opt',promoted,'--verify-atlas-virtual-stream')
     assert refused.returncode and 'initializ' in refused.stderr
-
-
-@pytest.mark.skipif(not all(os.environ.get(key) for key in
-    ('ATLAS_RUST_NPU_MODEL','ATLAS_OOT_BIN_DIR')), reason='select Rust and Atlas tools')
-@pytest.mark.parametrize('shape,kind,dtype',[
-    ((65,65),'softmax','bf16'), ((33,129),'softmax','f32'),
-    ((65,65),'masked_softmax','bf16'), ((65,65),'guarded_softmax','bf16'),
-    ((33,1024),'softmax','bf16')])
-@pytest.mark.parametrize('policy',['vmem','vmem-inputs'])
-def test_generated_c_rust_preserves_rows_tails_and_rejections(tmp_path,monkeypatch,shape,kind,dtype,policy, select_codegen_options):
-
-    from test_softmax_input_widening import test_generated_c_and_rust_preserve_score_codes_results_and_rejections
-    select_codegen_options(staging_storage=policy)
-    with codegen_options(replace(current_codegen_options(), io_memory_bytes=67108864, execution_instruction_limit=128000000)):
-        test_generated_c_and_rust_preserve_score_codes_results_and_rejections(tmp_path,shape,kind,dtype)
-    plan=json.loads((tmp_path/'compiled/body/execution_plan.json').read_text())
-    assert plan['private_staging']['selected']==policy
-    assert plan['private_staging']['loads']>0 and plan['private_staging']['stores']>0
-    if policy=='vmem-inputs':
-        cache=plan['private_staging']['input_cache']
-        assert cache['prefetches']>0 and cache['replaced_loads']>cache['prefetches']

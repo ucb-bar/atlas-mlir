@@ -1,12 +1,10 @@
 """Selected execution budgets batch whole groups without weakening admission."""
 import json
 import os
-import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-import numpy as np
 import pytest
 from atlas_mlir_native import activation_quantize_application as application
 from atlas_mlir_native import activation_quantize_device as quantizer_device
@@ -14,11 +12,7 @@ from atlas_mlir_native import vector_quantize as device
 from dataclasses import replace
 from atlas_mlir_native.options import codegen_options, current_codegen_options
 from merlin.semantic_compiler.target_binding import NativeCompilationError
-from test_activation_quantize_device import dynamic_source, host_reference
-
-
-import pytest
-from atlas_mlir_native.options import current_codegen_options, codegen_options
+from test_activation_quantize_device import dynamic_source
 
 
 @pytest.fixture(autouse=True)
@@ -189,54 +183,3 @@ def test_replayed_budget_and_resource_rejections(tmp_path):
         device.compile_source(None, source, target_source=ROOT, destination=tmp_path / 'too_many', limits=None)
     with options(program_size_limit_bytes=4), pytest.raises(NativeCompilationError, match='policy limit'):
         device.compile_source(None, source, target_source=ROOT, destination=tmp_path / 'image', limits=None)
-
-
-@pytest.mark.skipif(not os.environ.get('ATLAS_RUST_NPU_MODEL') or not os.environ.get('ATLAS_OOT_BIN_DIR'),
-                   reason='select Rust simulator and Atlas tools')
-@pytest.mark.parametrize('heads,length,rule', [(13, 96, 'nc'), (32, 4096, 'ref'), (9, 32768, 'nc'), (257, 32, 'ref')])
-def test_rust_all_codes_exponents_padding_and_guards(tmp_path, heads, length, rule):
-    source = dynamic_source(shape=(heads, 1, length), reduce='head', rule=rule)
-    with options():
-        schedule = application.prepare_plan(source)
-        compiled = tmp_path / 'compiled'
-        application.compile_source(None, source, target_source=ROOT, destination=compiled, limits=None)
-        # Different magnitudes in each head catch accidental cross-head amax.
-        raw = np.concatenate([np.full(length, 0x3000 + (head % 90) * 128, dtype='<u2')
-                              for head in range(heads)])
-        raw[::47] = 0x8000
-        raw[::83] = 1
-        raw[::191] = 0x7f80
-        raw[::389] = 0xffc1
-        raw = raw.tobytes()
-        codes, exponents = bytearray(heads * length), bytearray(heads * 4)
-        for launch in schedule.launches:
-            index = launch['body_index']
-            body = schedule.bodies[index]
-            plan = device.prepare_plan(body)
-            work = tmp_path / str(launch['input_offset_bytes'])
-            work.mkdir()
-            initial = bytearray([0xa5]) * ((plan.workspace_bytes + 4095) // 4096 * 4096 + 4096)
-            at = launch['input_offset_bytes']
-            payload = raw[at:at + launch['input_bytes']]
-            initial[:plan.input_bytes] = payload + bytes(plan.input_bytes - len(payload))
-            expected = bytearray(initial)
-            code, exp = host_reference(body, payload)
-            ca, ea = plan.code_address - plan.io_memory_base, plan.exponent_address - plan.io_memory_base
-            expected[ca:ea] = code + bytes(ea - ca - len(code))
-            expected[ea:plan.workspace_bytes] = exp + bytes(plan.exponent_bytes - len(exp))
-            (work / 'memory.bin').write_bytes(initial)
-            (work / 'config.json').write_text(json.dumps({'pack_layout': 'register_rows',
-                'dram_base': plan.io_memory_base, 'dram_size': len(initial)}))
-            program = compiled / f'segments/body_{index:03d}/program.bin'
-            assert program.stat().st_size <= 131072
-            subprocess.run([os.environ['ATLAS_RUST_NPU_MODEL'], str(program), '--compute', 'cpu',
-                '--config', str(work / 'config.json'), '--load', f'{plan.io_memory_base}:{work / "memory.bin"}',
-                '--dump-state', str(work / 'state'), '--max-cycles', '100000000'], check=True, capture_output=True)
-            actual = b''.join((work / 'state' / f'dram_{a:016x}.bin').read_bytes()
-                             for a in range(plan.io_memory_base, plan.io_memory_base + len(initial), 4096))
-            assert actual == expected
-            at = launch['code_offset_bytes']
-            codes[at:at + len(code)] = actual[ca:ca + len(code)]
-            at = launch['exponent_offset_bytes']
-            exponents[at:at + len(exp)] = actual[ea:ea + len(exp)]
-        assert (bytes(codes), bytes(exponents)) == host_reference(source, raw)

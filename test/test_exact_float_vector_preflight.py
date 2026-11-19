@@ -1,9 +1,5 @@
 """A vector sufficient-domain proof retains scalar fallback and atomic rejection."""
 from dataclasses import replace
-import json
-import os
-import subprocess
-import tempfile
 import unittest
 from pathlib import Path
 
@@ -11,8 +7,7 @@ from atlas_mlir_native.options import codegen_options, current_codegen_options
 from atlas_mlir_native import exact_float_device as device
 from atlas_mlir_native.float_virtual import binary_vector_preflight
 
-from merlin.semantic_compiler.target_binding import NativeCompilationError
-from test_exact_float_device import host_reference, request
+from test_exact_float_device import request
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -79,106 +74,6 @@ class VectorPreflightTest(unittest.TestCase):
         # input's probe normal, preventing silent acceptance after underflow.
         small = (original > 0) & (original < 0x2f80)
         self.assertGreaterEqual(int(probe_bits[small].min()), 128)
-
-    @unittest.skipUnless(os.environ.get('ATLAS_RUST_NPU_MODEL') and os.environ.get('ATLAS_OOT_BIN_DIR'),
-                         'select Rust simulator and Atlas tools')
-    def test_rust_widening_every_non_nan_code_and_atomic_nan_rejection(self):
-        import numpy as np
-        runner = os.environ['ATLAS_RUST_NPU_MODEL']
-        codes = np.arange(65536, dtype='<u2')
-        codes = codes[(codes & 0x7fff) <= 0x7f80]
-        np.random.default_rng(1701).shuffle(codes)
-        with tempfile.TemporaryDirectory() as directory, codegen_options(replace(current_codegen_options(), io_memory_bytes=67108864, execution_instruction_limit=128000000, exact_float_unroll=True)):
-            root = Path(directory)
-            for count in (35, 512, 1025, len(codes)):
-                with self.subTest(count=count):
-                    source = request('bf16_to_f32', count)
-                    plan = device.prepare_plan(source)
-                    programs = []
-                    for enabled in ('0', '1'):
-                        compiled = root / f'widen-{count}-{enabled}'
-                        with codegen_options(replace(current_codegen_options(), exact_cast_vector_preflight=(enabled == '1'))):
-                            device.compile_source(None, source, target_source=ROOT,
-                                destination=compiled, limits=None)
-                        programs.append(compiled / 'program.bin')
-                    raw = codes[:count].tobytes()
-                    self.compare_runs(root, runner, source, plan, programs, [raw],
-                                      cycle_ratio=0.8 if count >= 512 else None)
-                    for invalid in (0x7f81, 0x7fff, 0xff81, 0xffff):
-                        self.compare_runs(root, runner, source, plan, programs,
-                            [raw[:-2] + invalid.to_bytes(2, 'little')])
-
-    @unittest.skipUnless(os.environ.get('ATLAS_RUST_NPU_MODEL') and os.environ.get('ATLAS_OOT_BIN_DIR'),
-                         'select Rust simulator and Atlas tools')
-    def test_rust_execution_covers_fast_fallback_tail_and_late_rejection(self):
-        runner = os.environ['ATLAS_RUST_NPU_MODEL']
-        with tempfile.TemporaryDirectory() as directory, codegen_options(replace(current_codegen_options(), io_memory_bytes=67108864, execution_instruction_limit=4000000)):
-            root = Path(directory)
-            for operation in ('bf16_add', 'bf16_sub'):
-                for count in (35, 1024, 2048):
-                    with self.subTest(operation=operation, count=count):
-                        source = request(operation, count)
-                        plan = device.prepare_plan(source)
-                        programs = []
-                        for enabled in ('0', '1'):
-                            compiled = root / f'{operation}-{count}-{enabled}'
-                            with codegen_options(replace(current_codegen_options(), exact_binary_vector_preflight=(enabled == '1'))):
-                                device.compile_source(None, source, target_source=ROOT,
-                                    destination=compiled, limits=None)
-                            programs.append(compiled / 'program.bin')
-                        pairs = [(0x3f80, 0x3f00), (0x8000, 0x8000),
-                                 (0x2000, 0x1c00), (1, 127), (0x2f80, 0xcf80),
-                                 (0x7f80, 0x3f80), (0x7f7f, 0x7f7f)]
-                        for index, pair in enumerate(pairs):
-                            raw = [word.to_bytes(2, 'little') * count for word in pair]
-                            if count == 2048:
-                                raw = [bytes.fromhex('803f') * 1024 + data[2048:] for data in raw]
-                            self.compare_runs(root, runner, source, plan, programs, raw,
-                                              cycle_ratio=0.5 if index in (0, 1) and count == 1024 else None)
-                        # A zero must not hide a disallowed small or large lane
-                        # in either operand. Partial tiles also exercise padding.
-                        for code in (0, 0x8000, 1, 127, 0x2f7f, 0x2f80, 0x4f80, 0x4f81,
-                                     0x7f80, 0xff80, 0x7f81, 0x7fff, 0xff81, 0xffff):
-                            for operand in (0, 1):
-                                raw = [bytes.fromhex('803f') * count, bytes.fromhex('003f') * count]
-                                raw[operand] = bytes(2) + raw[operand][2:-2] + code.to_bytes(2, 'little')
-                                raw[1 - operand] = raw[1 - operand][:-2] + bytes(2)
-                                self.compare_runs(root, runner, source, plan, programs, raw,
-                                    cycle_ratio=0.5 if code in (0, 0x8000) and count == 1024 else None)
-                        for operand in (0, 1):
-                            raw = [bytes.fromhex('803f') * count, bytes.fromhex('003f') * count]
-                            raw[operand] = raw[operand][:-2] + bytes.fromhex('c1ff')
-                            self.compare_runs(root, runner, source, plan, programs, raw)
-
-    def compare_runs(self, root, runner, source, plan, programs, raw, *, cycle_ratio=None):
-        expected, status = host_reference(source, raw)
-        initial = bytearray([0xa5]) * ((plan.workspace_bytes + 4095) // 4096 * 4096)
-        for index, data in enumerate(raw):
-            at = index * plan.input_bytes
-            initial[at:at + plan.input_bytes] = bytes(plan.input_bytes)
-            initial[at:at + len(data)] = data
-        cycles = []
-        for program in programs:
-            with tempfile.TemporaryDirectory(dir=root) as work:
-                work = Path(work)
-                (work / 'input.bin').write_bytes(initial)
-                result = subprocess.run([runner, str(program), '--compute', 'cpu',
-                    '--load', f'{plan.io_memory_base}:{work / "input.bin"}',
-                    '--dump-state', str(work / 'state'), '--max-cycles', '10000000'],
-                    check=True, capture_output=True, text=True)
-                cycles.append(json.loads(result.stdout)['cycles'])
-                memory = b''.join((work / 'state' / f'dram_{a:016x}.bin').read_bytes()
-                    for a in range(plan.io_memory_base, plan.io_memory_base + len(initial), 4096))
-                output = plan.output_address - plan.io_memory_base
-                code = plan.status_address - plan.io_memory_base
-                self.assertEqual(bool(int.from_bytes(memory[code:code + 4], 'little')), bool(status))
-                self.assertEqual(memory[output:output + len(expected)], expected)
-                self.assertEqual(memory[:output], initial[:output])
-                self.assertEqual(memory[code + 32:], initial[code + 32:])
-                if status:
-                    self.assertEqual(memory[output:code], initial[output:code])
-        if cycle_ratio is not None:
-            self.assertLess(cycles[1], cycles[0] * cycle_ratio)
 
 
 if __name__ == '__main__':

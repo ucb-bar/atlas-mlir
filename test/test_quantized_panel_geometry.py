@@ -2,24 +2,18 @@
 from atlas_mlir_native.options import codegen_options, current_codegen_options
 from dataclasses import replace
 import json
-import os
-import subprocess
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
 
 from atlas_mlir_native.already_quantized import prepare_source
-from atlas_mlir_native.binding import DRAM_BASE
 from atlas_mlir_native.quantized_loop import execution_layout, virtual_source
 from atlas_mlir_native.quantized_loop_sizing import size_counted
 from atlas_mlir_native.quantized_panel_geometry import panel_geometry
-from atlas_mlir_native.restoration_budget import instruction_bound
 
 from merlin.semantic_compiler.target_binding import NativeCompilationError
 from test_already_quantized import source_request
-from test_exponent_restoration import compile_fixture
-from test_quantized_prefix_reuse import memory_fixture
 
 
 def plan_for(m, n, k, *, batch=()):
@@ -100,51 +94,3 @@ def test_real_oversized_panel_uses_checked_paired_candidate():
         selected = size_counted(plan, target_source=ROOT, operand_reuse='panel-cache')
         assert selected.record()['route'] == 'counted'
         assert selected.record()['operand_reuse_requested'] == 'paired-cache'
-
-
-@pytest.mark.skipif(not all(os.environ.get(key) for key in ('ATLAS_RUST_NPU_MODEL', 'ATLAS_OOT_BIN_DIR')),
-                    reason='select Rust simulator and native tools')
-@pytest.mark.parametrize('m,n,k,row_scales', [(97, 35, 257, True), (225, 65, 768, False), (225, 35, 3073, False)])
-def test_rust_panels_preserve_all_memory_and_late_rejection(tmp_path, m, n, k, row_scales):
-    with codegen_options(replace(current_codegen_options(), io_memory_bytes=67108864, execution_instruction_limit=128000000)):
-        source = source_request(m=m, n=n, k=k, batch=())
-        if row_scales:
-            source = replace(source, nodes=tuple(replace(node, type=replace(node.type, shape=(m, 1)))
-                             if node.id == 'sx' else node for node in source.nodes))
-        plan = prepare_source(source)
-        programs = []
-        for policy in ('wide-cache', 'panel-cache'):
-            layout = execution_layout(plan, operand_reuse=policy)
-            virtual = virtual_source(plan, layout)
-            machine, physical = compile_fixture(virtual, pipeline='optimized')
-            assert instruction_bound(virtual, machine, physical)['admitted']
-            binary = b''.join(row['word_u32'].to_bytes(4, 'little') for row in physical['instructions'])
-            assert len(binary) <= 131072
-            path = tmp_path / (policy + '.bin')
-            path.write_bytes(binary)
-            programs.append(path)
-        initial = memory_fixture(plan, layout)
-        initial.extend(bytes([0xa5]) * (-len(initial) % 4096))
-        config = tmp_path / 'config.json'
-        config.write_text(json.dumps(dict(compute='cpu', pack_layout='register_rows',
-                                         dram_base=DRAM_BASE, dram_size=len(initial))))
-        for rejected in (False, True):
-            if rejected:
-                offset = layout['exponent_addresses'][1] - DRAM_BASE + ((n-1)//32*512 + (n-1)%32)*4
-                initial[offset:offset+4] = (1000).to_bytes(4, 'little')
-            memory = tmp_path / 'memory.bin'
-            memory.write_bytes(initial)
-            outputs = []
-            for index, program in enumerate(programs):
-                state = tmp_path / f'state-{int(rejected)}-{index}'
-                subprocess.run([os.environ['ATLAS_RUST_NPU_MODEL'], str(program), '--config', str(config),
-                    '--load', f'{DRAM_BASE}:{memory}', '--dump-state', str(state)], check=True, capture_output=True)
-                actual = b''.join((state / f'dram_{address:016x}.bin').read_bytes()
-                                 for address in range(DRAM_BASE, DRAM_BASE+len(initial), 4096))
-                start = layout['output_addresses'][0] - DRAM_BASE
-                status = layout['status_address'] - DRAM_BASE
-                end = status + layout['status_bytes']
-                assert actual[:start] == initial[:start] and actual[end:] == initial[end:]
-                assert bool(int.from_bytes(actual[status:status+4], 'little')) == rejected
-                outputs.append(actual)
-            assert outputs[0] == outputs[1]

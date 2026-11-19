@@ -1,25 +1,16 @@
 """Invariant exponent pages retain guards, batch identity and exact results."""
-from collections import Counter
 from dataclasses import replace
-import json
-from math import prod
-import os
-import subprocess
 from types import SimpleNamespace
 
 import pytest
 
 from atlas_mlir_native.options import CodegenOptions, codegen_options, current_codegen_options
 from atlas_mlir_native.already_quantized import prepare_source
-from atlas_mlir_native.binding import DRAM_BASE
 from atlas_mlir_native.exponent_page_cache import enabled
 from atlas_mlir_native.quantized_loop import execution_layout, virtual_source
-from atlas_mlir_native.restoration_budget import instruction_bound
 
-from merlin.semantic_compiler.target_binding import NativeCompilationError
 from test_already_quantized import source_request
 from test_exponent_restoration import compile_fixture
-from test_quantized_prefix_reuse import memory_fixture
 
 
 OPTIONS = CodegenOptions(io_memory_bytes=67108864, execution_instruction_limit=128000000)

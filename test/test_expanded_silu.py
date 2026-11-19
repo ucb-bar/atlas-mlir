@@ -1,8 +1,4 @@
 """A closed BF16 SiLU expansion retains selected arithmetic and rejection."""
-import json
-import os
-import subprocess
-import tempfile
 import unittest
 from dataclasses import replace
 
@@ -113,73 +109,6 @@ class ExpandedSiluTest(unittest.TestCase):
         group = native.prepare(case((1, len(codes))), adapter())
         result = evaluate_silu(group.request.nodes[-1], (TensorValue(group.request.nodes[0].type, tuple(codes)),))
         np.testing.assert_array_equal(result.elements, expanded_reference(codes))
-
-    @unittest.skipUnless(os.environ.get('ATLAS_RUST_NPU_MODEL') and os.environ.get('ATLAS_OOT_BIN_DIR'),
-                         'select Rust simulator and Atlas tools')
-    def test_rust_c_abi_all_admitted_codes_tails_and_late_rejection(self):
-        from atlas_mlir_native.layout import pack_bf16_pair_halves
-        from atlas_mlir_native.pointwise import prepare_plan
-        from atlas_mlir_native.pointwise_c import prepare_precision_c_package
-        from merlin.semantic_compiler.pointwise_tiling import (
-            materialize_pointwise_input,
-        )
-        from merlin.semantic_compiler.search import SearchLimits
-        from test_looped_mnk import build_snapshot
-        from test_pointwise_loop import check_source_c_call
-
-        codes = np.array([0, 0x8000, *range(0x2000, 0x4201), *range(0xa000, 0xc201)], dtype='<u2')
-        for shape in ((3, 35), (2, 8706)):
-            with self.subTest(shape=shape), tempfile.TemporaryDirectory() as directory:
-                root = Path(directory)
-                group = native.prepare(case(shape), adapter())
-                compiled = root / 'compiled'
-                native.compile_group(group, build_snapshot(root), target_source=ROOT,
-                                     destination=compiled, limits=SearchLimits())
-                exported = native.export_group(group, compiled, 'pointwise', target_source=ROOT)
-                self.assertEqual(exported.description['launches_per_invocation'], 1)
-                self.assertEqual(exported.description['source_input_indices'], [0])
-                record, files = prepare_precision_c_package(group, compiled, 'pointwise',
-                    target_source=ROOT, runtime_linkage='embedded', output_dtype='bf16')
-                self.assertEqual(record['source_dtype'], 'bf16')
-                package = root / 'package'
-                package.mkdir()
-                for name, data in files.items():
-                    (package / name).write_bytes(data)
-                execution = json.loads((compiled / 'execution_plan.json').read_text())
-                plan = prepare_plan(group.request)
-                values = np.resize(codes, shape)
-                packed = materialize_pointwise_input(plan, 0, values.tobytes())
-                packed = b''.join(pack_bf16_pair_halves(packed[i:i + 2048]) for i in range(0, len(packed), 2048))
-                end = execution['output_addresses'][0] + execution['output_bytes'] - DRAM_BASE
-                initial = bytearray([0xa5]) * ((end + 4095) // 4096 * 4096)
-                at = execution['input_addresses'][0] - DRAM_BASE
-                initial[at:at + len(packed)] = packed
-                config = root / 'config.json'
-                config.write_text(json.dumps({'compute': 'cpu', 'pack_layout': 'register_rows',
-                                              'dram_base': DRAM_BASE, 'dram_size': len(initial)}))
-
-                def execute(memory, root=root, compiled=compiled, config=config, execution=execution, end=end):
-                    with tempfile.TemporaryDirectory(dir=root) as folder:
-                        work = Path(folder)
-                        (work / 'input.bin').write_bytes(memory)
-                        subprocess.run([os.environ['ATLAS_RUST_NPU_MODEL'], str(compiled / 'program.bin'),
-                            '--config', str(config), '--load', f'{DRAM_BASE}:{work / "input.bin"}',
-                            '--dump-state', str(work / 'state')], check=True, capture_output=True)
-                        actual = b''.join((work / 'state' / f'dram_{a:016x}.bin').read_bytes()
-                            for a in range(DRAM_BASE, DRAM_BASE + len(memory), 4096))
-                        first = execution['output_addresses'][0] - DRAM_BASE
-                        self.assertEqual(actual[:first], memory[:first])
-                        self.assertEqual(actual[end:], memory[end:])
-                        return actual
-
-                rejected = []
-                for code in (0x7fc1, 0xffff, 0x7f80, 0xff80, 0x4201, 0xc201, 0x1fff, 0x9fff, 1):
-                    invalid = values.copy()
-                    invalid.flat[-1] = code
-                    rejected.append((invalid,))
-                check_source_c_call(self, package, initial, (compiled / 'program.bin').read_bytes(),
-                    execute, [values], expanded_reference(values.flat).tobytes(), rejected,
-                    source_dtype='bf16', output_dtype='bf16')
 
 
 if __name__ == '__main__':

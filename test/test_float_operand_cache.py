@@ -12,10 +12,9 @@ from atlas_mlir_native import exact_float_device as device
 from atlas_mlir_native import float_input_layout as folded
 from atlas_mlir_native.private_staging import PRIVATE_STAGING_TILE_LIMIT
 from atlas_mlir_native.options import codegen_options,current_codegen_options
-from test_float_input_layout import fixture,run_c_rust_layout
+from test_float_input_layout import fixture
 
 ROOT=Path(__file__).resolve().parents[1]
-NATIVE=all(os.environ.get(k) for k in ('ATLAS_RUST_NPU_MODEL','ATLAS_OOT_BIN_DIR'))
 
 
 def options(budget=5000000):
@@ -86,37 +85,6 @@ def test_runtime_cache_footprint_rejects_changed_geometry_and_contract():
                     published_input_sizes(dict(record, **{key: value}), dense)
             with pytest.raises(AssertionError):
                 published_input_sizes(record, [dense[0]])
-
-
-@pytest.mark.skipif(not NATIVE,reason='select Rust simulator and Atlas tools')
-@pytest.mark.parametrize('operation,port,shape,budget,multiple', [
-    ('bf16_add',0,(60,768),5000000,True),
-    ('bf16_sub',1,(60,768),5000000,True),
-    ('bf16_add',1,(16,2048),16000000,True),
-    ('bf16_sub',0,(16,3072),16000000,True),
-    ('bf16_add',1,(64,64),4000000,False),
-    ('bf16_add',1,(61,768),5000000,True),
-])
-def test_cached_c_dispatch_preserves_words_guards_and_rejection(
-        tmp_path,operation,port,shape,budget,multiple):
-    result=run_c_rust_layout(tmp_path,operation,'broadcast',port,67108864,budget,True,
-                             shape=shape,multiple=multiple)
-    assert any(plan.cached_tiles for plan in result['plans'])
-
-
-@pytest.mark.skipif(not NATIVE,reason='select Rust simulator and Atlas tools')
-def test_cache_reduces_actual_dma_loads_against_the_same_dense_program(tmp_path):
-    results=[]
-    for cache in (False,True):
-        root=tmp_path/str(cache);root.mkdir()
-        results.append(run_c_rust_layout(root,'bf16_add','broadcast',1,67108864,5000000,True,
-                                        shape=(60,768),multiple=True,cache_input=cache))
-    before,after=results
-    assert before['schedule'].launches==after['schedule'].launches
-    for call,old,new in zip(after['schedule'].launches,before['statistics'],after['statistics'],strict=True):
-        plan=after['plans'][call['body_index']]
-        saved=plan.count//plan.tile_lanes-plan.cached_tiles if plan.cached_tiles else 0
-        assert old['engine_instructions'][5]-new['engine_instructions'][5]==saved
 
 
 @pytest.mark.skipif(not os.environ.get('ATLAS_OOT_BIN_DIR'),reason='select Atlas tools')

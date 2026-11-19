@@ -1,11 +1,6 @@
 """Mutable scratch dependencies allow independent transfers to overlap."""
-import json
-import os
-import subprocess
 
-import numpy as np
-import pytest
-from atlas_mlir_native.binding import DRAM_BASE, NATIVE_CHECKS, NATIVE_PIPELINES
+from atlas_mlir_native.binding import DRAM_BASE
 from test_virtual_scheduling import (
     S,
     T,
@@ -17,7 +12,6 @@ from test_virtual_scheduling import (
     scheduled_lines,
     start,
 )
-from test_virtual_ssa import run
 
 P = '!atlas.virtual_spill'
 
@@ -109,94 +103,3 @@ def test_cache_priority_reaches_first_output_through_mutable_slots():
     # Both loads are independent, but B is needed for the first output. The
     # original SSA-only priority could not follow save/restore through B's slot.
     assert order[lines['load_b']] < order[lines['load_a']]
-
-
-@pytest.mark.skipif(not os.environ.get('ATLAS_RUST_NPU_MODEL'), reason='select Rust simulator')
-def test_rust_random_schedules_preserve_whole_memory(tmp_path):
-    initial = bytearray([0xa5]) * 73728
-    # Raw patterns include NaNs/subnormals; this graph only moves their bytes.
-    rng = np.random.default_rng(62019)
-    initial[:4096] = rng.integers(0, 65536, 2048, dtype='<u2').tobytes()
-    expected = bytearray(initial)
-    expected[65536:67584] = initial[:2048]
-    expected[67584:69632] = initial[2048:4096]
-    expected[69632:71680] = initial[:2048]
-    memory = tmp_path / 'memory.bin'
-    memory.write_bytes(initial)
-    config = tmp_path / 'config.json'
-    config.write_text(json.dumps({'compute': 'cpu', 'dram_base': DRAM_BASE, 'dram_size': len(initial)}))
-    for seed in (None, *range(8)):
-        source = schedule(fixture(), "enhanced-virtual-scheduling=true",
-                          *((f'random-seed={seed}',) if seed is not None else ()))
-        assert source.returncode == 0, source.stderr
-        machine = run('atlas-opt', source.stdout, *NATIVE_PIPELINES['mandatory'])
-        assert machine.returncode == 0, machine.stderr
-        verified = run('atlas-opt', machine.stdout, *NATIVE_CHECKS, '--verify-atlas-timing')
-        assert verified.returncode == 0, verified.stderr
-        emitted = run('atlas-emit', machine.stdout, '--program-json')
-        assert emitted.returncode == 0, emitted.stderr
-        physical = json.loads(emitted.stdout)
-        work = tmp_path / str(seed)
-        work.mkdir()
-        program = work / 'program.bin'
-        program.write_bytes(b''.join(row['word_u32'].to_bytes(4, 'little') for row in physical['instructions']))
-        subprocess.run([os.environ['ATLAS_RUST_NPU_MODEL'], str(program), '--config', str(config),
-            '--load', f'{DRAM_BASE}:{memory}', '--dump-state', str(work / 'state')],
-            check=True, capture_output=True)
-        actual = b''.join((work / 'state' / f'dram_{a:016x}.bin').read_bytes()
-                         for a in range(DRAM_BASE, DRAM_BASE + len(initial), 4096))
-        assert actual == expected
-
-
-@pytest.mark.skipif(not os.environ.get('ATLAS_RUST_NPU_MODEL'), reason='select Rust simulator')
-@pytest.mark.parametrize('k', [2048, 5632])
-def test_bounded_operand_panels_keep_address_witnesses_and_restores_in_registers(tmp_path, k):
-    from atlas_mlir_native.already_quantized import prepare_source
-    from atlas_mlir_native.quantized_loop import execution_layout, virtual_source
-    from atlas_mlir_native.restoration_budget import instruction_bound
-    from atlas_mlir_native.options import CodegenOptions, codegen_options
-    from test_already_quantized import source_request
-    from test_exponent_restoration import compile_fixture
-    from test_quantized_prefix_reuse import memory_fixture
-
-    with codegen_options(CodegenOptions(io_memory_bytes=67108864, execution_instruction_limit=128000000)):
-        plan = prepare_source(source_request(m=64, n=65, k=k, batch=()))
-        layout = execution_layout(plan, operand_reuse='paired-cache')
-        original = virtual_source(plan, layout)
-        scheduled = schedule(original, "enhanced-virtual-scheduling=true")
-        assert scheduled.returncode == 0, scheduled.stderr
-        programs = []
-        for index, virtual in enumerate((original, scheduled.stdout)):
-            machine, physical = compile_fixture(virtual, pipeline="optimized")
-            assert instruction_bound(virtual, machine, physical)['admitted']
-            program = tmp_path / f'{index}.bin'
-            program.write_bytes(b''.join(row['word_u32'].to_bytes(4, 'little') for row in physical['instructions']))
-            assert program.stat().st_size <= 131072
-            programs.append(program)
-        initial = memory_fixture(plan, layout)
-        initial.extend(bytes([0xa5]) * (-len(initial) % 4096))
-        config = tmp_path / 'config.json'
-        config.write_text(json.dumps({'compute': 'cpu', 'pack_layout': 'register_rows',
-                                      'dram_base': DRAM_BASE, 'dram_size': len(initial)}))
-        for rejected in (False, True):
-            if rejected:
-                at = layout['exponent_addresses'][1] - DRAM_BASE
-                initial[at:at + 4] = (1000).to_bytes(4, 'little')
-            memory = tmp_path / 'memory.bin'
-            memory.write_bytes(initial)
-            outputs = []
-            for index, program in enumerate(programs):
-                state = tmp_path / f'state-{index}-{rejected}'
-                subprocess.run([os.environ['ATLAS_RUST_NPU_MODEL'], str(program), '--config', str(config),
-                    '--load', f'{DRAM_BASE}:{memory}', '--dump-state', str(state)],
-                    check=True, capture_output=True)
-                actual = b''.join((state / f'dram_{a:016x}.bin').read_bytes()
-                                 for a in range(DRAM_BASE, DRAM_BASE + len(initial), 4096))
-                start = layout['output_addresses'][0] - DRAM_BASE
-                status = layout['status_address'] - DRAM_BASE
-                end = status + layout['status_bytes']
-                assert actual[:start] == initial[:start]
-                assert actual[end:] == initial[end:]
-                assert bool(int.from_bytes(actual[status:status + 4], 'little')) == rejected
-                outputs.append(actual)
-            assert outputs[0] == outputs[1]

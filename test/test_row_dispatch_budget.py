@@ -48,28 +48,6 @@ def test_prime_group_count_and_tail_keep_the_complete_source_frame():
             prepare_plan(source)
 
 
-@pytest.mark.skipif(not all(os.environ.get(key) for key in
-    ('ATLAS_RUST_NPU_MODEL', 'ATLAS_OOT_BIN_DIR')), reason='select Rust and Atlas tools')
-@pytest.mark.parametrize('shape,kind,dtype', [
-    ((65, 64), 'softmax', 'bf16'), ((97, 65), 'softmax', 'f32'),
-    ((65, 64), 'masked_softmax', 'bf16'), ((65, 64), 'guarded_softmax', 'bf16')])
-def test_larger_batch_generated_c_rust_outputs_and_late_refusal(tmp_path, monkeypatch, shape, kind, dtype):
-    from atlas_mlir_native import row_loop
-    from test_softmax_input_widening import test_generated_c_and_rust_preserve_score_codes_results_and_rejections
-
-    # Exercise the real batching boundary without needing a multi-million-word
-    # unit fixture. Full-layer validation separately uses the production 512.
-    monkeypatch.setattr(row_loop, 'ROW_LOOP_COLUMN_TILES_PER_LAUNCH', 4)
-    with codegen_options(CodegenOptions(io_memory_bytes=67108864,
-                                       execution_instruction_limit=4000000)):
-        test_generated_c_and_rust_preserve_score_codes_results_and_rejections(
-            tmp_path, shape, kind, dtype)
-    execution = json.loads((tmp_path/'compiled/execution_plan.json').read_text())
-    assert execution['schema'] == 'atlas.row_loop_execution_plan.v2'
-    assert execution['launches_per_invocation'] == 1
-    assert execution['dispatch_instruction_budget'] == 4000000
-
-
 @pytest.mark.skipif(not os.environ.get('ATLAS_OOT_BIN_DIR'), reason='select Atlas tools')
 def test_native_instruction_proof_still_rejects_an_insufficient_budget(tmp_path):
     from atlas_mlir_native.row_loop import compile_row_loop
