@@ -15,19 +15,15 @@ from atlas_mlir_native.composition_adapter import AdjacentDeviceAdapter
 from merlin.semantic_compiler.model import SemanticNode, IndexMap, pointwise_identity_maps
 from test_pointwise_quantize import case as quantized_case
 from test_bf16_pointwise import request as pointwise_case
+from test_pointwise_narrowing import adapter as base_adapter
 
 ROOT = Path(__file__).resolve().parents[1]
 PATTERNS = ('pointwise_quantize', 'pointwise_input_layout')
 
 
 def adapter():
-    from atlas_mlir_native.application import AtlasApplicationAdapter
-    from atlas_mlir_native.already_quantized import POLICY
     from atlas_mlir_native.pointwise import BF16_POINTWISE_POLICY
-    from test_application_float_arithmetic import policy
-    selected = {**policy(), 'already_quantized': POLICY, 'bf16_pointwise': BF16_POINTWISE_POLICY,
-                'host_support': ['transpose','reshape','copy','gather']}
-    return AtlasApplicationAdapter(selected, original_source_sha256=selected['source_sha256'])
+    return base_adapter(bf16_pointwise=BF16_POINTWISE_POLICY, host_support=['transpose','reshape','copy','gather'])
 
 
 def case(shape=(33, 35), kind='broadcast', packed=False):

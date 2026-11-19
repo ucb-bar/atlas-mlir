@@ -47,16 +47,6 @@ def _json(value):
 def _publish_leaf(original, canonical, materialized, destination, *, private_output=False):
     plan = device.prepare_plan(original, private_output=private_output)
     checked = device.prepare_plan(canonical, private_output=private_output)
-    manifest = json.loads((materialized / "manifest.json").read_bytes())
-    verify_native_publication(materialized, manifest, engine="merlin_native",
-                              request_digest=canonical.digest(), target_identity=canonical.target_identity)
-    virtual = device.virtual_program(plan).encode()
-    if (virtual != device.virtual_program(checked).encode()
-            or virtual != (materialized / "atlas-virtual.mlir").read_bytes()
-            or json.loads((materialized / "source-request.json").read_bytes()) != canonical.record()
-            or json.loads((materialized / "float-plan.json").read_bytes()) != checked.record()
-            or json.loads((materialized / "execution_plan.json").read_bytes()) != checked.record()):
-        raise ValueError("canonical exact float materialization differs from source")
     # Reuse these checked target outputs; never rewrite opaque strings or copy
     # request-bound plans/manifests from another source boundary.
     _, files = _checked_machine_files(
@@ -105,21 +95,10 @@ def bind_exact_float(original, canonical, materialized, destination):
     if plan.launches != checked.launches or len(plan.bodies) != len(checked.bodies):
         raise ValueError("canonical exact float schedule differs from original source")
     records = {"source-request.json": original.record(), "float-schedule.json": plan.record()}
-    for filename, record in records.items():
-        (destination / filename).write_bytes(_json(record))
-    segments = []
-    for index, (body, canonical_body) in enumerate(zip(plan.bodies, checked.bodies, strict=True)):
-        relative = f"segments/body_{index:03d}"
-        detail = _publish_leaf(body, canonical_body, materialized / relative, destination / relative,
-                               private_output=private_output)
-        segments.append(dict(index=index, path=relative, request_digest=body.digest(),
-                             binary_sha256=detail["binary_sha256"],
-                             manifest_sha256=sha256((destination / relative / "manifest.json").read_bytes()).hexdigest()))
-    publication = dict(schema="atlas.exact_float_application.v1", artifact_kind="program_set", engine="merlin_native",
-                       compile_mode="diagnostic", qualification_scope="diagnostic_only", request_digest=original.digest(),
-                       target_identity=original.target_identity, segments=segments, launches_per_invocation=len(plan.launches),
-                       execution_requires="ordered_exact_float_slices_then_atomic_publication",
-                       stage_artifacts={name: sha256((destination / name).read_bytes()).hexdigest() for name in records})
+    leaf = lambda *paths: _publish_leaf(*paths, private_output=private_output)
+    publication = _publish_program_set(original, plan, checked, materialized, destination, records, leaf,
+                                       schema="atlas.exact_float_application.v1",
+                                       execution_requires="ordered_exact_float_slices_then_atomic_publication")
     (destination / "float-manifest.json").write_bytes(_json(publication))
     application._verify_publication(destination, publication, plan)
 

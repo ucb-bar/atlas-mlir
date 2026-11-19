@@ -5,11 +5,13 @@ producer's selected numerical policy, rounding and input guards, then applies
 its ordinary static raw PACK to the completed tile. Dynamic quantizers and
 shared BF16 results retain their separate implementations.
 """
-from dataclasses import dataclass, replace
-import json
-from pathlib import Path
+from dataclasses import dataclass
 
 from merlin.compile.semantic_regions import extract_semantic_region
+
+from .composition_adapter import (check_source_request, device_quantizers, fuse, kind_of, neighbor_pairs,
+                                  write_source_request)
+from .pointwise_narrowing import compile_request, export_precision
 
 
 @dataclass(frozen=True)
@@ -54,69 +56,26 @@ def prepare(source, adapter, kind):
 
 
 def alternatives(adapter, source, choices):
-    from merlin.xdsl_dialects.lowering.global_plan import CycleInterval
-
-    result, groups = list(choices), {}
-    adapter._pointwise_quantize_groups = groups
-    pure = [node for node in source.nodes if node.effect == 'pure']
-    quantizers = {min(row.nodes): row for row in choices
-                  if dict(row.metadata).get('kind') == 'activation_quantize_device'
-                  or dict(row.metadata).get('kind') == 'static_quantize'
-                  and adapter.activation_quantizer_route == 'device'}
-    for first in choices:
-        kind = dict(first.metadata).get('kind')
-        if (first.placement != 'accelerator'
-                or kind not in ('pointwise', 'pointwise_narrowing', 'pointwise_input_widening')):
-            continue
-        last = quantizers.get(max(first.nodes) + 1)
-        if last is None:
-            continue
-        nodes = (*first.nodes, *last.nodes)
-        try:
-            region = extract_semantic_region(source, tuple(pure[index].id for index in nodes))
-            group = prepare(region, adapter, kind)
-        except ValueError:
-            continue
-        ports = {port.buffer: port for row in (first, last) for port in (*row.inputs, *row.outputs)}
-        groups[region.digest()] = group
-        result.append(replace(first, id='pointwise_quantize_' + first.id, nodes=nodes,
-            implementation='source_pointwise_quantize', inputs=tuple(ports[key] for key in group.input_ids),
-            outputs=tuple(ports[key] for key in region.outputs),
-            cycles=CycleInterval.unknown('static PACK follows the unchanged BF16 pointwise result in VMEM'),
-            metadata=(('kind', 'pointwise_quantize'),)))
-    return tuple(result)
+    accepts = lambda row: kind_of(row) in ('pointwise', 'pointwise_narrowing', 'pointwise_input_widening')
+    return fuse(adapter, source, choices, '_pointwise_quantize_groups', 'pointwise_quantize',
+                neighbor_pairs(choices, device_quantizers(adapter, choices), accepts),
+                prepare=lambda region, rows: prepare(region, adapter, kind_of(rows[0])),
+                inputs=lambda group: group.input_ids,
+                cycles='static PACK follows the unchanged BF16 pointwise result in VMEM')
 
 
 def compile_group(group, snapshot, *, target_source, destination, limits):
-    from .pointwise import compile_pointwise, plan_abi
-
-    destination = Path(destination)
-    destination.mkdir(parents=True, exist_ok=False)
-    (destination / 'source-request.json').write_text(json.dumps(group.source.record(), sort_keys=True) + '\n')
-    request = group.precision.request
-    abi = plan_abi(request)
-    compile_pointwise(snapshot, request, fixed_inputs=abi['fixed_inputs'],
-        fixed_outputs=tuple(abi['fixed_outputs']), target_source=target_source,
-        destination=destination / 'pointwise', limits=limits, static_output_exponent=group.exponent)
+    destination = write_source_request(destination, group.source)
+    compile_request(snapshot, group.precision.request, target_source=target_source, destination=destination / 'pointwise',
+                    limits=limits, static_output_exponent=group.exponent)
 
 
 def export_group(group, compiled, name, *, target_source):
-    from merlin.compile.semantic_application import CompiledCRegion
-    from .c_runtime import RUNTIME_SHARED_FILES
-    from .pointwise_c import prepare_precision_c_package
-
-    compiled = Path(compiled)
-    if (compiled.is_symlink() or (compiled / 'source-request.json').is_symlink()
-            or json.loads((compiled / 'source-request.json').read_text()) != group.source.record()):
-        raise ValueError('quantized pointwise publication differs from its source')
-    record, files = prepare_precision_c_package(group.precision, compiled / 'pointwise', name,
-        target_source=Path(target_source), input_dtype=group.input_dtype, output_dtype='i8',
-        static_output_exponent=group.exponent)
-    record.update(kind='pointwise_quantize', input_node_ids=list(group.input_ids),
+    compiled = check_source_request(compiled, group.source, 'quantized pointwise publication differs from its source')
+    return export_precision(group.precision, compiled / 'pointwise', name, target_source=target_source,
+        input_dtype=group.input_dtype, output_dtype='i8', static_output_exponent=group.exponent,
+        inputs=group.input_ids, outputs=group.source.outputs, programs=('segments/' + name + '/pointwise',),
+        launches=1, kind='pointwise_quantize', input_node_ids=list(group.input_ids),
         output_node_ids=list(group.source.outputs), source_request_digest=group.source.digest(),
         quantization_proof='unchanged rounded BF16 result; ordinary static raw PACK; authored exponent',
-        context_type=name + '_context', source_context_type=name + '_source_context',
-        binding_function=name + '_bind', source_binding_function=name + '_source_bind',
-        launches_per_invocation=1, static_exponent=group.exponent)
-    return CompiledCRegion(name + '_source_dispatch', name + '.h', group.input_ids,
-        group.source.outputs, files, RUNTIME_SHARED_FILES, ('segments/' + name + '/pointwise',), record)
+        static_exponent=group.exponent)

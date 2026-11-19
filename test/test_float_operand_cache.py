@@ -1,4 +1,4 @@
-"""Repeated input transport is checked against source indexing and Rust execution."""
+"""Repeated input transport is checked against source indexing and native proofs."""
 from dataclasses import replace
 from hashlib import sha256
 import json

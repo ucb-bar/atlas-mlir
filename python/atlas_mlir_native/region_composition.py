@@ -206,8 +206,6 @@ def compose_regions(
     }
     if share_bodies:
         execution["share_bodies"] = True
-    if io_memory_base is not None:
-        execution["io_memory_base"] = io_memory_base
     (destination / "atlas-machine.mlir").write_text(machine)
     (destination / "program.bin").write_bytes(binary)
     for name, record in (("execution_plan.json", execution), ("physical-program.json", program)):

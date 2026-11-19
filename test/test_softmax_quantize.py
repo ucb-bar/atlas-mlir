@@ -1,11 +1,5 @@
 """Private static quantization preserves the selected softmax codes and guards."""
 from dataclasses import replace
-import json
-import os
-from pathlib import Path
-import subprocess
-import tempfile
-import unittest
 
 import numpy as np
 import pytest
@@ -17,7 +11,6 @@ from test_already_quantized import quantizer_source
 from test_pointwise_narrowing import adapter
 from test_softmax_narrowing import case as softmax_case
 
-ROOT = Path(__file__).resolve().parents[1]
 PATTERNS = ('softmax_narrowing', 'softmax_input_widening', 'softmax_quantize')
 
 

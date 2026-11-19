@@ -52,25 +52,10 @@ def prepare_source(source):
 
 
 def alternatives(adapter, source, choices):
-    result, groups = list(choices), {}
-    adapter._float_input_layout_groups = groups
-    for candidate in private_operand_layouts(source, choices):
-        consumer = candidate.consumer
-        if (consumer.placement != 'accelerator'
-                or dict(consumer.metadata).get('kind') != 'exact_float_device'):
-            continue
-        try:
-            group = prepare_source(candidate.region)
-        except ValueError:
-            continue
-        groups[group.source.digest()] = group
-        nodes = tuple(sorted((*candidate.producer.nodes, *consumer.nodes)))
-        result.append(replace(consumer, id='float_input_layout_' + '_'.join(map(str, nodes)),
-            nodes=nodes, implementation='source_float_input_layout',
-            inputs=candidate.inputs, outputs=candidate.outputs,
-            cycles=CycleInterval.unknown('exact-float slices with source-indexed input transport'),
-            metadata=(('kind', 'float_input_layout'),)))
-    return tuple(result)
+    return fold_operand_views(adapter, '_float_input_layout_groups', 'float_input_layout',
+        private_operand_layouts(source, choices), choices, accepts=lambda kind: kind == 'exact_float_device',
+        prepare=lambda region, _: prepare_source(region),
+        cycles='exact-float slices with source-indexed input transport')
 
 
 def compile_group(group, snapshot, *, target_source, destination, limits, cache_input=True):

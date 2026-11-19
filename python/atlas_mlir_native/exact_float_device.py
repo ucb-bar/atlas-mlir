@@ -46,7 +46,6 @@ PRIVATE_BINARY_FIXED_INSTRUCTIONS = 4096
 
 def max_leaf_elements(plan):
     """Scale the conservative slice policy; prove the actual image separately."""
-    from .limits import DEFAULT_FUNCTIONAL_INSTRUCTION_LIMIT, functional_instruction_limit
     budget = functional_instruction_limit()
     if plan.private_output:
         tiles = max(1, (budget - PRIVATE_BINARY_FIXED_INSTRUCTIONS)
@@ -162,7 +161,6 @@ def prepare_plan(source, *, io_memory_base=None, private_output=False, input_lay
     if type(private_output) is not bool or private_output and plan.op not in ('bf16_add', 'bf16_sub'):
         raise ValueError('private float publication currently requires an exact binary operation')
     if private_output:
-        from dataclasses import replace
         plan = replace(plan, private_output=True)
     if type(cache_input) is not bool:
         raise ValueError('input cache selection must be Boolean')
@@ -251,11 +249,7 @@ def machine_program(p):
 
 def compile_source(snapshot,region,*,target_source,destination,limits,io_memory_base=None,private_output=False,input_layout=None,cache_input=False):
     io_memory_base = selected_io_base() if io_memory_base is None else io_memory_base
-    import hashlib,json,os
-    from pathlib import Path
-    from atlas_mlir_native.options import current_codegen_options
-    from merlin.semantic_compiler.target_binding import verify_native_publication
-    from .binding import NATIVE_CHECKS,RTL_REVISION,_run
+    from .binding import _run
     p=prepare_plan(region,io_memory_base=io_memory_base,private_output=private_output,
                    input_layout=input_layout,cache_input=cache_input)
     maximum=max_leaf_elements(p)

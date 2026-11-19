@@ -25,13 +25,8 @@ Start with the [repository README](../README.md) for the build, and the
 | [Exact float device](exact-float-device.md) | Exact BF16/FP32 casts, negation, add, and subtract on the device. |
 | [PACK scale domain](pack-scale-domain.md) | Raw PACK scale codes, their source evidence, and the guarded conversion. |
 | [Proof work measurement](proof-work-measurement.md) | Measuring verifier work in `atlas-opt` and `atlas-emit`. |
-| [Scratch output priority](scratch-output-priority.md) | Native scheduling through cache dependencies and complete-layer measurements. |
-| [Remaining model optimizations](model-traffic-priorities.md) | Prioritized traffic/dispatch work, ownership, and exact zero-aware admission results on TinyLlama and SmolVLA. |
-| [Panel readout](panel-readout.md) | Keeping completed MXU tiles on chip through scaling and epilogues. |
-| [Row dispatch budget](row-dispatch-budget.md) | Batching complete softmax rows under the selected execution budget. |
-| [Private staging](private-staging.md) | Keeping private BF16 intermediates and repeated immutable inputs in invocation-local VMEM. |
-| [Quantizer input permutations](quantizer-input-permutation.md) | Folding private layouts into byte-preserving consumer packing. |
-| [Model compilation followups](model-compilation-followups.md) | Additional optimizations, prerequisite PRs, and feature switches. |
+| [Initialization proof slicing](initialization-proof-slicing.md) | How the output-initialization verifiers stay within their unchanged work limit. |
+| [Host preparation scope](whole-model-preparation-scope.md) | Limiting selected host float arithmetic to source-bound preparation. |
 | [Single-program profiling](single-program-profiling.md) | Connected graphs in one image, model execution and measurement scope. |
 | [Hardware status](hardware-status.md) | Per-instruction status, RTL/model differences, and how to rerun the RTL core tests. |
 | [`selected-variant-inventory.json`](selected-variant-inventory.json) | Machine-readable list of decoder modes; read by the build and tests. |

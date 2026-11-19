@@ -5,10 +5,11 @@ selected pointwise arithmetic, every input code and the resulting tile frame.
 Full source coverage preserves the old validation domain, including broadcasts.
 """
 from dataclasses import dataclass, replace
-import json
-from pathlib import Path
 
 from merlin.compile.operand_layouts import fold_private_full_read, private_operand_layouts
+
+from .composition_adapter import check_source_request, fold_operand_views, write_source_request
+from . import pointwise_quantize
 
 
 @dataclass(frozen=True)
@@ -22,7 +23,6 @@ class InputLayout:
 
 def prepare(source, adapter, kind):
     from .pointwise import prepare_source, plan_abi
-    from .pointwise_quantize import prepare as quantized
 
     pure = [node for node in source.nodes if node.effect == 'pure']
     views = [node for node in pure if node.op in ('gather', 'transpose')]
@@ -34,7 +34,7 @@ def prepare(source, adapter, kind):
         raise ValueError('pointwise input layout requires one arithmetic producer')
     consumer = fold_private_full_read(source, view.id, operations[0].id)
     if kind == 'pointwise_quantize':
-        group = quantized(consumer, adapter, 'pointwise')
+        group = pointwise_quantize.prepare(consumer, adapter, 'pointwise')
     else:
         group = prepare_source(consumer, bf16_policy=adapter.bf16_pointwise,
             exp_policy=adapter.source_exp_policy,
@@ -45,27 +45,10 @@ def prepare(source, adapter, kind):
 
 
 def alternatives(adapter, source, choices):
-    from merlin.xdsl_dialects.lowering.global_plan import CycleInterval
-
-    result, groups = list(choices), {}
-    adapter._pointwise_input_layout_groups = groups
-    for candidate in private_operand_layouts(source, choices):
-        consumer = candidate.consumer
-        kind = dict(consumer.metadata).get('kind')
-        if consumer.placement != 'accelerator' or kind not in ('pointwise', 'pointwise_quantize'):
-            continue
-        try:
-            group = prepare(candidate.region, adapter, kind)
-        except ValueError:
-            continue
-        groups[group.source.digest()] = group
-        nodes = tuple(sorted((*candidate.producer.nodes, *consumer.nodes)))
-        result.append(replace(consumer, id='pointwise_input_layout_' + '_'.join(map(str, nodes)),
-            nodes=nodes, implementation='source_pointwise_input_layout',
-            inputs=candidate.inputs, outputs=candidate.outputs,
-            cycles=CycleInterval.unknown('pointwise operand packing absorbs a private full affine read'),
-            metadata=(('kind', 'pointwise_input_layout'),)))
-    return tuple(result)
+    return fold_operand_views(adapter, '_pointwise_input_layout_groups', 'pointwise_input_layout',
+        private_operand_layouts(source, choices), choices, prepare=lambda region, kind: prepare(region, adapter, kind),
+        accepts=lambda kind: kind in ('pointwise', 'pointwise_quantize'),
+        cycles='pointwise operand packing absorbs a private full affine read')
 
 
 def _verify_source(group):
@@ -78,46 +61,29 @@ def _verify_source(group):
 
 
 def compile_group(group, snapshot, *, target_source, destination, limits):
-    from .pointwise import compile_pointwise, plan_abi
-    from .pointwise_quantize import compile_group as compile_quantized
+    from .pointwise_narrowing import compile_request
 
     _verify_source(group)
-    destination = Path(destination)
-    destination.mkdir(parents=True, exist_ok=False)
-    (destination/'source-request.json').write_text(json.dumps(group.source.record(), sort_keys=True)+'\n')
+    destination = write_source_request(destination, group.source)
     if group.kind == 'pointwise_quantize':
-        compile_quantized(group.group, snapshot, target_source=target_source,
-                          destination=destination/'consumer', limits=limits)
+        pointwise_quantize.compile_group(group.group, snapshot, target_source=target_source,
+                                         destination=destination / 'consumer', limits=limits)
     else:
-        request = group.group.request
-        abi = plan_abi(request)
-        compile_pointwise(snapshot, request, fixed_inputs=abi['fixed_inputs'],
-            fixed_outputs=tuple(abi['fixed_outputs']), target_source=target_source,
-            destination=destination/'consumer', limits=limits)
+        compile_request(snapshot, group.group.request, target_source=target_source,
+                        destination=destination / 'consumer', limits=limits)
 
 
 def export_group(group, compiled, name, *, target_source):
-    from merlin.compile.semantic_application import CompiledCRegion
-    from .c_runtime import RUNTIME_SHARED_FILES
-    from .pointwise_c import prepare_precision_c_package
-    from .pointwise_quantize import export_group as export_quantized
+    from .pointwise_narrowing import export_precision
 
     _verify_source(group)
-    compiled = Path(compiled)
-    if (compiled.is_symlink() or (compiled/'source-request.json').is_symlink()
-            or json.loads((compiled/'source-request.json').read_text()) != group.source.record()):
-        raise ValueError('pointwise input layout publication differs from its source')
+    compiled = check_source_request(compiled, group.source, 'pointwise input layout publication differs from its source')
     if group.kind == 'pointwise_quantize':
-        result = export_quantized(group.group, compiled/'consumer', name, target_source=target_source)
+        result = pointwise_quantize.export_group(group.group, compiled / 'consumer', name, target_source=target_source)
         programs = ('segments/' + name + '/consumer/pointwise',)
     else:
-        record, files = prepare_precision_c_package(group.group, compiled/'consumer', name,
-                                                    target_source=Path(target_source))
-        record.update(context_type=name+'_context', source_context_type=name+'_source_context',
-            binding_function=name+'_bind', source_binding_function=name+'_source_bind',
-            launches_per_invocation=record.get('streaming', {}).get('launch_count', 1))
-        result = CompiledCRegion(name+'_source_dispatch', name+'.h', tuple(record['input_node_ids']),
-            group.source.outputs, files, RUNTIME_SHARED_FILES, (), record)
+        result = export_precision(group.group, compiled / 'consumer', name, target_source=target_source,
+                                  outputs=group.source.outputs, programs=())
         programs = ('segments/' + name + '/consumer',)
     return replace(result, programs=programs, description=dict(result.description,
         kind='pointwise_input_layout', source_request_digest=group.source.digest(),

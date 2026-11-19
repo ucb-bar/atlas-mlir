@@ -35,10 +35,8 @@ private:
   bool scalar;
   llvm::DenseSet<Value> active;
 
-  // A shared stage may receive different addresses from a finite set of
-  // callers. Prove every edge, including both arms targeting the same block.
-  // Checking each range's alignment prevents an unaligned interior choice
-  // from disappearing behind aligned minimum/maximum endpoints.
+  // Prove every incoming edge of a shared stage, including both arms of one
+  // branch; per-range alignment keeps an unaligned choice from hiding inside.
   std::optional<I32AddressSpan> incomingRange(BlockArgument argument) {
     Block *block = argument.getOwner();
     unsigned position = argument.getArgNumber();

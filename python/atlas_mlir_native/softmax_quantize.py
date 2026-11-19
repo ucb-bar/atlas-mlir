@@ -4,11 +4,13 @@ Merlin extracts the dense region and its escaping values. Atlas proves the
 selected softmax arithmetic and uses its ordinary exact static PACK lowering.
 Dynamic scales and shared probability tensors retain the separate regions.
 """
-from dataclasses import dataclass, replace
-import json
-from pathlib import Path
+from dataclasses import dataclass
 
 from merlin.compile.semantic_regions import extract_semantic_region
+
+from .composition_adapter import (check_source_request, device_quantizers, fuse, kind_of, neighbor_pairs,
+                                  write_source_request)
+from .softmax_narrowing import export_softmax
 
 
 @dataclass(frozen=True)
@@ -44,81 +46,35 @@ def prepare(source, adapter, kind, *, input_dtype='f32'):
 
 
 def alternatives(adapter, source, choices):
-    from merlin.xdsl_dialects.lowering.global_plan import CycleInterval
-
-    result, groups = list(choices), {}
-    adapter._softmax_quantize_groups = groups
     pure = [node for node in source.nodes if node.effect == 'pure']
-    quantizers = {min(row.nodes): row for row in choices
-                  if dict(row.metadata).get('kind') == 'activation_quantize_device'
-                  or dict(row.metadata).get('kind') == 'static_quantize'
-                  and adapter.activation_quantizer_route == 'device'}
-    for first in choices:
-        flavor = dict(first.metadata).get('kind')
-        if first.placement != 'accelerator' or flavor not in ('softmax_narrowing', 'softmax_input_widening'):
-            continue
-        last = quantizers.get(max(first.nodes) + 1)
-        if last is None:
-            continue
-        previous = extract_semantic_region(source, tuple(pure[index].id for index in first.nodes))
+
+    def prepared(region, rows):
+        flavor = kind_of(rows[0])
+        previous = extract_semantic_region(source, tuple(pure[index].id for index in rows[0].nodes))
         prior = getattr(adapter, '_' + flavor + '_groups')[previous.digest()]
         if flavor == 'softmax_input_widening' and prior.output_dtype != 'bf16':
-            continue
-        nodes = (*first.nodes, *last.nodes)
-        try:
-            region = extract_semantic_region(source, tuple(pure[index].id for index in nodes))
-            group = prepare(region, adapter, prior.kind,
-                            input_dtype='bf16' if flavor == 'softmax_input_widening' else 'f32')
-        except ValueError:
-            continue
-        ports = {port.buffer: port for row in (first, last) for port in (*row.inputs, *row.outputs)}
-        inputs = tuple(node.id for node in region.nodes if node.effect in ('input', 'constant'))
-        groups[region.digest()] = group
-        result.append(replace(first, id='softmax_quantize_' + first.id, nodes=nodes,
-            implementation='source_softmax_quantize', inputs=tuple(ports[key] for key in inputs),
-            outputs=tuple(ports[key] for key in region.outputs),
-            cycles=CycleInterval.unknown('static PACK follows the unchanged BF16 softmax result in VMEM'),
-            metadata=(('kind', 'softmax_quantize'),)))
-    return tuple(result)
+            raise ValueError('quantized softmax needs a BF16 probability')
+        return prepare(region, adapter, prior.kind, input_dtype='bf16' if flavor == 'softmax_input_widening' else 'f32')
+    accepts = lambda row: kind_of(row) in ('softmax_narrowing', 'softmax_input_widening')
+    return fuse(adapter, source, choices, '_softmax_quantize_groups', 'softmax_quantize',
+                neighbor_pairs(choices, device_quantizers(adapter, choices), accepts), prepare=prepared,
+                cycles='static PACK follows the unchanged BF16 softmax result in VMEM')
 
 
 def compile_group(group, snapshot, *, target_source, destination, limits):
     from .row_loop import compile_row_loop
 
-    destination = Path(destination)
-    destination.mkdir(parents=True, exist_ok=False)
-    (destination / 'source-request.json').write_text(json.dumps(group.source.record(), sort_keys=True) + '\n')
+    destination = write_source_request(destination, group.source)
     compile_row_loop(snapshot, group.softmax.precision.request, target_source=target_source,
         destination=destination / 'row', limits=limits, static_output_exponent=group.exponent)
 
 
 def export_group(group, compiled, name, *, target_source):
-    from merlin.compile.semantic_application import CompiledCRegion
-
-    from .c_runtime import RUNTIME_SHARED_FILES
-    from .softmax_c import _prepare_c_package
-
-    compiled = Path(compiled)
-    if (compiled.is_symlink() or (compiled / 'source-request.json').is_symlink()
-            or json.loads((compiled / 'source-request.json').read_text()) != group.source.record()):
-        raise ValueError('quantized softmax publication differs from its source')
+    compiled = check_source_request(compiled, group.source, 'quantized softmax publication differs from its source')
     softmax = group.softmax
-    record, files = _prepare_c_package(softmax.precision.request, compiled / 'row', name,
-        target_source=Path(target_source), runtime_linkage='separate',
-        semantic_source=softmax.producer, row_loop_compilation=compiled / 'row',
-        allow_masked=softmax.kind != 'softmax', allow_guarded=softmax.kind == 'guarded_softmax',
-        finite_sentinel_bits=softmax.finite_sentinel_bits, score_domain=softmax.score_domain,
-        input_dtype=group.input_dtype, output_dtype='i8', static_output_exponent=group.exponent)
-    region = softmax.precision.source_region
-    scores = softmax.input_id if group.input_dtype == 'bf16' else region.scores
-    inputs = (scores, region.mask) if softmax.kind != 'softmax' else (scores,)
-    description = dict(kind='softmax_quantize', context_type=name + '_context',
-        source_context_type=name + '_source_context', binding_function=name + '_bind',
-        source_binding_function=name + '_source_bind', workspace_bytes=record['workspace_bytes'],
-        source_workspace_bytes=record['source_interface']['workspace_bytes'],
-        precision_plan=softmax.precision.record(), native_export=record,
-        source_request_digest=group.source.digest(), launches_per_invocation=record['launches_per_invocation'],
+    return export_softmax(softmax, compiled / 'row', name, target_source=target_source,
+        scores=softmax.input_id if group.input_dtype == 'bf16' else None, input_dtype=group.input_dtype,
+        output_dtype='i8', static_output_exponent=group.exponent, outputs=group.source.outputs,
+        programs=('segments/' + name + '/row',), kind='softmax_quantize', source_request_digest=group.source.digest(),
         static_exponent=group.exponent,
         quantization_proof='unchanged rounded BF16 probability; ordinary static raw PACK; authored exponent')
-    return CompiledCRegion(name + '_source_dispatch', name + '.h', inputs,
-        group.source.outputs, files, RUNTIME_SHARED_FILES, ('segments/' + name + '/row',), description)

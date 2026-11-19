@@ -1,4 +1,5 @@
 #include "Atlas/AtlasProgramComposition.h"
+#include "Atlas/AtlasOps.h"
 #include "Atlas/AtlasTarget.h"
 #include "Atlas/AtlasTypes.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
@@ -30,12 +31,9 @@ bool usedOnlyAsDMAAddress(Value value) {
     for (OpOperand &use : current.getUses()) {
       Operation *op = use.getOwner();
       unsigned position = use.getOperandNumber();
-      StringRef name = op->getName().getStringRef();
-      if (name == "atlas.virtual_dma_load_fp8" || name == "atlas.virtual_dma_load_bf16") {
-        if (position != 1) return false;
-        addressUse = true;
-      } else if (name == "atlas.virtual_dma_store_fp8" || name == "atlas.virtual_dma_store_bf16") {
-        if (position != 2) return false;
+      bool load = isa<atlas::VirtualDMALoadFP8Op, atlas::VirtualDMALoadBF16Op>(op);
+      if (load || isa<atlas::VirtualDMAStoreFP8Op, atlas::VirtualDMAStoreBF16Op>(op)) {
+        if (position != (load ? 1u : 2u)) return false;
         addressUse = true;
       } else if (auto add = dyn_cast<arith::AddIOp>(op)) {
         work.push_back(add.getResult());
@@ -70,9 +68,8 @@ SmallVector<arith::ConstantOp> addressParameters(func::FuncOp function) {
 }
 
 // A counted dispatcher visits the authored entries in order. Equivalent stage
-// bodies share one CFG; addresses that differ become entry block arguments.
-// This is code sharing only. It does not infer buffer aliases, change layouts,
-// or remove the independently checked allocation/memory/timing obligations.
+// bodies share one CFG; differing addresses become entry block arguments. This
+// shares code only: no aliasing, layout, or verification obligation changes.
 bool shareProgramBodies(ArrayRef<func::FuncOp> functions, func::FuncOp joined) {
   SmallVector<OwningOpRef<func::FuncOp>> normalized;
   SmallVector<SmallVector<arith::ConstantOp>> parameters;
@@ -139,11 +136,10 @@ bool shareProgramBodies(ArrayRef<func::FuncOp> functions, func::FuncOp joined) {
     for (Block &original : function.getBody()) {
       Block *cloned = mapping.lookup(&original);
       for (Operation &op : llvm::make_early_inc_range(*cloned)) {
-        StringRef name = op.getName().getStringRef();
-        if (name == "atlas.virtual_start") {
+        if (isa<atlas::VirtualStartOp>(op)) {
           op.getResult(0).replaceAllUsesWith(incoming);
           op.erase();
-        } else if (name == "atlas.virtual_slot") {
+        } else if (isa<atlas::VirtualSlotOp>(op)) {
           op.moveBefore(entry, entry->end());
         } else if (auto ret = dyn_cast<func::ReturnOp>(op)) {
           builder.setInsertionPoint(ret);
@@ -154,12 +150,10 @@ bool shareProgramBodies(ArrayRef<func::FuncOp> functions, func::FuncOp joined) {
     }
   }
   builder.setInsertionPointToStart(entry);
-  OperationState start(loc, "atlas.virtual_start");
-  start.addTypes(state);
-  Operation *begun = builder.create(start);
+  Value begun = atlas::VirtualStartOp::create(builder, loc, state);
   builder.setInsertionPointToEnd(entry);
   Value zero = arith::ConstantIntOp::create(builder, loc, 0, 32);
-  cf::BranchOp::create(builder, loc, dispatch, ValueRange{begun->getResult(0), zero});
+  cf::BranchOp::create(builder, loc, dispatch, ValueRange{begun, zero});
 
   builder.setInsertionPointToEnd(dispatch);
   Value count = arith::ConstantIntOp::create(builder, loc, functions.size(), 32);
@@ -273,10 +267,8 @@ struct ComposeAtlasProgramPass
         function.emitError("composition requires a bounded output DRAM range");
         return signalPassFailure();
       }
-      // This optional extent describes a member's input frame, which may be
-      // another member's output. It is not an invocation-wide immutable input
-      // interval. Explicit DMA operands retain the actual read effects and
-      // their independent address/initialization proofs after composition.
+      // A member's input frame may be another member's output, so this is not an
+      // invocation-wide immutable interval; DMA operands keep their own proofs.
       if (auto raw = function->getAttr("atlas.input_dram_bytes")) {
         auto extent = dyn_cast<IntegerAttr>(raw);
         if (!isI64(extent) || extent.getInt() <= 0 ||

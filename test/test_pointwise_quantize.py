@@ -1,11 +1,5 @@
 """Fused pointwise static PACK retains source rounding, tails and ABI guards."""
 from dataclasses import replace
-import json
-import os
-from pathlib import Path
-import subprocess
-import tempfile
-import unittest
 
 import numpy as np
 import pytest
@@ -19,7 +13,6 @@ from test_pointwise_narrowing import adapter as base_adapter, case as narrowed_c
 from test_bf16_pointwise import request as bf16_case
 from test_pointwise_boundary_casts import case as unary_case, independent_unary
 
-ROOT = Path(__file__).resolve().parents[1]
 PATTERNS = ('pointwise_narrowing', 'pointwise_input_widening', 'pointwise_quantize')
 
 
