@@ -4,6 +4,7 @@ import dataclasses
 import importlib.metadata
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -25,7 +26,23 @@ from test_spill_resources import (
 )
 from test_virtual_spilling import ROOT, compile_program, pressure
 
-MODEL_REVISION = '337e9f249f938a1dff007ddf8a763e5cd4b3aa2b'
+MODEL_REVISION = 'b97b2f5a97e432141c4ef8504bec396651d77a8f'
+
+
+def assert_pinned_model(test):
+    """Require npu_model at MODEL_REVISION: a pinned install or the clean checkout at IMPORT_MODEL_ROOT."""
+    import npu_model
+    try:
+        origin = json.loads(importlib.metadata.distribution('npu-model').read_text('direct_url.json') or '{}')
+    except importlib.metadata.PackageNotFoundError:
+        origin = {}
+    if MODEL_REVISION in origin.get('url', '') or origin.get('vcs_info', {}).get('commit_id') == MODEL_REVISION:
+        return
+    root = Path(os.environ['IMPORT_MODEL_ROOT']).resolve()
+    head = subprocess.run(['git', '-C', str(root), 'rev-parse', 'HEAD'], capture_output=True, text=True, check=True)
+    test.assertEqual(head.stdout.strip(), MODEL_REVISION, 'install the documented npu_model revision')
+    subprocess.run(['git', '-C', str(root), 'diff', '--quiet', 'HEAD', '--', '.'], check=True)
+    test.assertEqual(Path(npu_model.__file__).resolve().parents[1], root)
 
 
 from tools.model_instructions import model_instruction
@@ -43,9 +60,7 @@ class SpillModelExecutionTest(unittest.TestCase):
 
         from tools.check_program_decode import decode_binary
 
-        origin = json.loads(importlib.metadata.distribution('npu-model').read_text('direct_url.json') or '{}')
-        self.assertTrue(MODEL_REVISION in origin.get('url', '') or
-                        origin.get('vcs_info', {}).get('commit_id') == MODEL_REVISION)
+        assert_pinned_model(self)
         inventory = json.loads((ROOT / 'docs/selected-variant-inventory.json').read_text())
         torch.set_num_threads(1)
         with tempfile.TemporaryDirectory(prefix='atlas-mxu-spill-model-') as directory:
@@ -107,10 +122,7 @@ class SpillModelExecutionTest(unittest.TestCase):
         finally:
             sys.path.pop(0)
 
-        origin = json.loads(importlib.metadata.distribution('npu-model').read_text('direct_url.json') or '{}')
-        self.assertTrue(MODEL_REVISION in origin.get('url', '') or
-                        origin.get('vcs_info', {}).get('commit_id') == MODEL_REVISION,
-                        'install the documented npu_model revision')
+        assert_pinned_model(self)
         inventory = json.loads((ROOT / 'docs/selected-variant-inventory.json').read_text())
         cases = [('bf16', pressure(), 32), ('block-loop', block_pressure(True), 16),
                  ('scalar', scalar_pressure(), 2), ('scalar-loop', scalar_pressure(True), 2),

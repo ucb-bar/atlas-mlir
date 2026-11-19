@@ -1,7 +1,6 @@
 """Native tile selection inside compact whole-contraction M/N/K loops."""
 
 import dataclasses
-import importlib.metadata
 import json
 import os
 import struct
@@ -404,7 +403,8 @@ class LoopedMNKTest(unittest.TestCase):
         ):
             with self.assertRaises(NativeCompilationError) as error:
                 AtlasNativeBinding.plan_boundary_abi(source)
-            self.assertEqual(error.exception.status, "search_timeout")
+            self.assertEqual(error.exception.status, "resource_limit")
+            self.assertIn("buffer_solver_rlimit_per_query", error.exception.reason)
 
     def test_source_bound_contraction_preserves_windows_and_orients_weights(self):
         import numpy as np
@@ -509,13 +509,10 @@ class LoopedMNKTest(unittest.TestCase):
         from npu_model.logging import LoggerConfig
         from npu_model.simulation import Simulation
         from npu_model.software.program import InstantiableProgram
-        from test_spill_model_execution import MODEL_REVISION, model_instruction
+        from test_spill_model_execution import assert_pinned_model, model_instruction
         from tools.check_program_decode import decode_binary
 
-        origin = json.loads(importlib.metadata.distribution("npu-model").read_text("direct_url.json") or "{}")
-        self.assertTrue(
-            MODEL_REVISION in origin.get("url", "") or origin.get("vcs_info", {}).get("commit_id") == MODEL_REVISION
-        )
+        assert_pinned_model(self)
         inventory = json.loads((ROOT / "docs/selected-variant-inventory.json").read_text())
         torch.set_num_threads(1)
         cases = [(shape, None) for shape in SHAPES] + [((1, 7, 65), panel) for panel in ("ties", "cancellation")]

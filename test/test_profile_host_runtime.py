@@ -21,13 +21,14 @@ class State:
         )
 
 
-def package():
+def package(extra_headers=None):
+    from atlas_mlir_native.c_runtime import runtime_headers
     from merlin.compile.c_sources import c_source_pair
 
     binary = struct.pack("<2I", 123, 456)
     text = c_source_pair(
         "image",
-        public_headers={"atlas_host.h": (ROOT / "runtime/atlas_host.h").read_text()},
+        public_headers={**runtime_headers(ROOT / "runtime"), **(extra_headers or {})},
         private_headers={},
         sources={
             "data.c": """
@@ -53,11 +54,30 @@ def package():
 
 
 class HostRuntimeProfileTest(unittest.TestCase):
+    def test_extra_public_header_does_not_change_the_selected_runtime(self):
+        record, files, binary = package({"extra.h": "#define EXTRA_PUBLIC_VALUE 7\n"})
+        with tempfile.TemporaryDirectory(prefix="host-extra-header-") as path:
+            HostRuntimeProfile(Path(path) / "valid", record, files, binary, ROOT)
+
+    def test_rehashed_layout_change_rejects_a_different_selected_runtime(self):
+        record, files, binary = package()
+        files["image.h"] = files["image.h"].replace(
+            b"#define ATLAS_IMEM_BASE 0x20000", b"#define ATLAS_IMEM_BASE 0x30000"
+        )
+        record["files"]["image.h"] = hashlib.sha256(files["image.h"]).hexdigest()
+        with tempfile.TemporaryDirectory(prefix="host-layout-") as path:
+            with self.assertRaisesRegex(ValueError, "selected runtime headers differ"):
+                HostRuntimeProfile(Path(path) / "different-layout", record, files, binary, ROOT)
+
     def test_cold_load_reuse_actual_csr_completion_and_invalid_results(self):
         record, files, binary = package()
         with tempfile.TemporaryDirectory(prefix="host-clock-") as path:
             root = Path(path)
             host = HostRuntimeProfile(root / "valid", record, files, binary, ROOT)
+            self.assertEqual(
+                host.provenance["runtime_files"]["atlas_host_layout.h"],
+                hashlib.sha256((ROOT / "runtime/atlas_host_layout.h").read_bytes()).hexdigest(),
+            )
             for index in range(3):
                 state = State()
                 host.begin(state)

@@ -1,0 +1,247 @@
+"""Bounded operand panels for ordered MXU1 contractions.
+
+Each K panel loads activation rows once, then each weight column once for those rows; BF16 partial sums stay in
+the output buffer between panels. Final tiles stay on chip through restoration, and the host checks one sticky
+status before exposing any result.
+"""
+from math import prod
+
+from .exponent_restoration import Emitter, STATE, BF16, SLOT
+
+FP8 = '!atlas.virtual_fp8'
+WEIGHT = '!atlas.virtual_mxu_weight<1>'
+ACC = '!atlas.virtual_mxu_acc<1>'
+# Two activation rows and one weight column use 192 KiB, leaving 48 KiB of the 240 KiB frame;
+# native allocation and image proofs still decide whether the candidate fits.
+PANEL_K_TILES = 64
+MIN_K_TILES = 32
+MAX_K_TILES = 192
+# Each inline readout adds a guarded factor loop; bound its replication independently of cache geometry.
+MAX_INLINE_READOUT_ROWS = 4
+MAX_INLINE_READOUT_PRODUCTS = 512
+
+
+def inline_readout_admitted(m_tiles, k):
+    """Bound static body growth before the final native resource proofs."""
+    return (0 < m_tiles <= MAX_INLINE_READOUT_ROWS
+            and m_tiles * ((k + 31) // 32) <= MAX_INLINE_READOUT_PRODUCTS)
+
+
+def admitted(plan, *, m_tiles=2, min_k_tiles=MIN_K_TILES, allow_batches=False):
+    mc, nc, kc = ((v+31)//32 for v in (plan.m, plan.n, plan.k))
+    # Geometry only: paired panels keep their K threshold; panel_geometry ranks wider panels by traffic.
+    return (type(m_tiles) is int and m_tiles in (2, 4, 8, 16, 32)
+            and (allow_batches or prod(plan.batch_shape) == 1)
+            and mc >= m_tiles and mc % m_tiles == 0 and nc >= 2
+            and min_k_tiles <= kc <= MAX_K_TILES)
+
+
+def virtual_source(plan, layout, restoration, *, geometry=None, allow_batches=False):
+    """Emit typed slots/operations; native allocation and timing remain mandatory."""
+    m_tiles, k_tiles = (2, PANEL_K_TILES) if geometry is None else geometry
+    if not admitted(plan, m_tiles=m_tiles, min_k_tiles=MIN_K_TILES if geometry is None else 1,
+                    allow_batches=allow_batches):
+        raise ValueError('operand panels require admitted batches, divisible M tiles and bounded K')
+    if type(k_tiles) is not int or not 1 <= k_tiles <= PANEL_K_TILES:
+        raise ValueError('K panels require between 1 and 64 tiles')
+    if (m_tiles + 1) * k_tiles > 192:
+        raise ValueError('operand panels exceed the selected 192 KiB reservation')
+    mc, nc, kc = ((v+31)//32 for v in (plan.m, plan.n, plan.k))
+    a, w = layout['input_addresses'][:2]
+    output = layout['output_addresses'][0]
+    pages = restoration.pages()
+    inline_readout = inline_readout_admitted(m_tiles, plan.k)
+    if prod(plan.batch_shape) > 1 and (not inline_readout or kc > k_tiles):
+        raise ValueError('batched panels require a complete cached K reduction and inline readout')
+    e = Emitter('panel')
+    e.lines = ['module {', f'  func.func @looped_matmul() -> {STATE} attributes {{'
+        f'atlas.retain_bf16_accumulators, atlas.input_dram_base = {a} : i64, '
+        f'atlas.output_dram_base = {output} : i64, '
+        f'atlas.output_dram_bytes = {layout["output_bytes"]+layout["status_bytes"]} : i64}} {{',
+        f'    %start = "atlas.virtual_start"() : () -> {STATE}']
+    for kind, rows in (('a', m_tiles), ('w', 1)):
+        for row in range(rows):
+            for tile in range(min(k_tiles,kc)):
+                e.emit(f'%panel_{kind}_{row}_{tile} = "atlas.virtual_slot"() '
+                    f'{{kind = "fp8", words = 256 : i32, slot_word = -1 : i32, purpose = "scratch"}} : () -> {SLOT}')
+    e.lines.extend(restoration.entry())
+
+    def offset(base, amount):
+        return e.binary('addi',base,e.const(amount)) if amount else base
+
+    def branch(label, names, types):
+        e.emit(f'cf.br ^{label}(' + ', '.join('%'+name for name in names) + ' : ' + ', '.join(types) + ')')
+
+    def block(label, names, types):
+        e.lines.append(f'  ^{label}(' + ', '.join('%'+name+': '+dtype for name,dtype in zip(names,types,strict=True)) + '):')
+        e.state = names[0]
+
+    def load(address, dtype):
+        return e.effect('dma_load_'+('fp8' if dtype==FP8 else 'bf16'),
+                        [address,e.const(1024 if dtype==FP8 else 2048)],['i32','i32'],dtype)
+
+    def save(slot, value, dtype):
+        e.effect('save',[slot,value],[SLOT,dtype])
+
+    def restore(slot, dtype):
+        return e.effect('restore',[slot],[SLOT],dtype)
+
+    def product(left, right, partial):
+        weight = e.effect('mxu_load_weight',[right],[FP8],WEIGHT,' {unit = 1 : i32}')
+        if partial is None:
+            value = e.effect('mxu_reset',[left,weight],[FP8,WEIGHT],ACC)
+        else:
+            seed = e.effect('mxu_load_acc_bf16',[partial],[BF16],ACC,' {unit = 1 : i32}')
+            value = e.effect('mxu_accumulate',[left,weight,seed],[FP8,WEIGHT,ACC],ACC)
+        return e.effect('mxu_readout_bf16',[value],[ACC],BF16)
+
+    def store(value, address):
+        e.effect('dma_store_bf16',[value,address,e.const(2048)],[BF16,'i32','i32'])
+
+    batches = prod(plan.batch_shape)
+    shared_weight = len(plan.source.node(plan.operand_ids[1]).type.shape) == 2
+    batch_strides = dict(batch_a=mc*kc*1024, batch_y=mc*nc*2048,
+                         batch_w=0 if shared_weight else nc*kc*1024,
+                         batch_lpage=pages[0][2], batch_rpage=pages[1][2])
+
+    def origin(name, address):
+        # Rematerialize the aligned offset at each use so one batch index, not five pointers, stays live.
+        result = e.const(address)
+        stride = batch_strides[name] if batches > 1 else 0
+        assert stride % 32 == 0
+        for bit in range(5, stride.bit_length()):
+            if stride & (1 << bit):
+                term = e.binary('shli', 'panel_batch', e.const(bit))
+                result = e.binary('addi', result, term)
+        return result
+
+    if batches > 1:
+        batch_types = [STATE, 'i32']
+        branch('panel_batch_header', ['restore_start', e.const(0)], batch_types)
+        block('panel_batch_header', ['panel_bs', 'panel_batch'], batch_types)
+        more = e.cmp('ult', 'panel_batch', e.const(batches))
+        e.emit(f'cf.cond_br %{more}, ^panel_batch_body(%panel_bs : {STATE}), ^done(%panel_bs : {STATE})')
+        block('panel_batch_body', ['panel_body_s'], [STATE])
+        page_origins = (origin('batch_lpage', pages[0][0]), origin('batch_rpage', pages[1][0]))
+        prefetch, e.state = restoration.batch_entry(e.state, page_origins)
+        e.lines.extend(prefetch)
+        initial = [e.const(0), origin('batch_a', a), origin('batch_y', output)]
+        if pages[0][1]:
+            initial.append(origin('batch_lpage', pages[0][0]))
+        pair_start, pair_end = e.state, 'panel_batch_next'
+    else:
+        initial = [e.const(v) for v in (0,a,output,pages[0][0])]
+        pair_start, pair_end = 'restore_start', 'done'
+    # Rematerialize invariant scale-page pointers at use; loop-carried phis would consume scalar registers.
+    carry_left_page = batches == 1 or bool(pages[0][1])
+    pair_names = ['pair_s', 'pair', 'pair_a', 'pair_y']
+    if carry_left_page:
+        pair_names.append('pair_lpage')
+    pair_types = [STATE] + ['i32'] * (len(pair_names) - 1)
+    branch('pair_header',[pair_start,*initial],pair_types)
+    block('pair_header',pair_names,pair_types)
+    more = e.cmp('ult','pair',e.const(mc//m_tiles))
+    e.emit(f'cf.cond_br %{more}, ^pair_body(%pair_s : {STATE}), ^{pair_end}(%pair_s : {STATE})')
+    block('pair_body',['pair_body_s'],[STATE])
+
+    # The panel count is capped and each N traversal is counted, so code grows with bounded K, not columns.
+    for phase, first in enumerate(range(0,kc,k_tiles)):
+        count = min(k_tiles,kc-first)
+        for row in range(m_tiles):
+            for tile in range(count):
+                address = offset('pair_a',(row*kc+first+tile)*1024)
+                save(f'panel_a_{row}_{tile}',load(address,FP8),FP8)
+        names = [f'p{phase}_s',f'p{phase}_n',f'p{phase}_w',f'p{phase}_y']
+        types = [STATE,'i32','i32','i32']
+        initial = [e.state, e.const(0)]
+        weight_base = origin('batch_w', w+first*1024)
+        initial.extend((weight_base, 'pair_y'))
+        carry_right_page = inline_readout and (batches == 1 or bool(pages[1][1]))
+        if carry_right_page:
+            names.append(f'p{phase}_rpage')
+            types.append('i32')
+            initial.append(origin('batch_rpage', pages[1][0]))
+        branch(f'p{phase}_header',initial,types)
+        block(f'p{phase}_header',names,types)
+        more = e.cmp('ult',names[1],e.const(nc))
+        e.emit(f'cf.cond_br %{more}, ^p{phase}_body(%{e.state} : {STATE}), ^p{phase}_done(%{e.state} : {STATE})')
+        block(f'p{phase}_body',[f'p{phase}_body_s'],[STATE])
+        for tile in range(count):
+            save(f'panel_w_0_{tile}',load(offset(names[2],tile*1024),FP8),FP8)
+        for row in range(m_tiles):
+            address = offset(names[3],row*nc*2048)
+            partial = load(address,BF16) if first else None
+            for tile in range(count):
+                left = restore(f'panel_a_{row}_{tile}',FP8)
+                right = restore(f'panel_w_0_{tile}',FP8)
+                partial = product(left,right,partial)
+            if first + count < kc or not inline_readout:
+                store(partial,address)
+            else:
+                logical_row = offset(e.binary('shli', 'pair', e.const(m_tiles.bit_length()-1)), row)
+                left_page = (offset('pair_lpage', row*pages[0][1]) if pages[0][1] else
+                             origin('batch_lpage', pages[0][0]))
+                right_page = names[4] if pages[1][1] else origin('batch_rpage', pages[1][0])
+                # Restore after the last ordered K term and publish once; earlier K panels keep rounded
+                # partials in the output buffer.
+                stored = e.name('readout_done')
+                e.lines.extend(restoration.tile(
+                    input_state=e.state, output_state=stored, result=partial,
+                    output_address=address, exponent_addresses=(left_page, right_page),
+                    row_tile=logical_row, column_tile=names[1], output_bytes=e.const(2048),
+                    prefix=f'panel_readout_{row}'))
+                e.state = stored
+        next_values = [e.state,offset(names[1],1),offset(names[2],kc*1024),offset(names[3],2048)]
+        if carry_right_page:
+            next_values.append(offset(names[4],pages[1][1]))
+        branch(f'p{phase}_header',next_values,types)
+        block(f'p{phase}_done',[f'p{phase}_done_s'],[STATE])
+
+    if inline_readout:
+        branch('pair_next', [e.state], [STATE])
+    else:
+        # Run the restoration/epilogue hook once after the full reduction: m/n keep scalar-fallback tail checks,
+        # and a fused product consumes restored values, never a partial K result.
+        rm_types = [STATE,'i32','i32','i32']
+        branch('restore_m_header',[e.state,e.const(0),'pair_y','pair_lpage'],rm_types)
+        block('restore_m_header',['rm_s','rm','rm_y','restore_lpage'],rm_types)
+        more = e.cmp('ult','rm',e.const(m_tiles))
+        e.emit(f'cf.cond_br %{more}, ^restore_m_body(%rm_s : {STATE}), ^pair_next(%rm_s : {STATE})')
+        block('restore_m_body',['rm_body_s'],[STATE])
+        pair_m = e.binary('shli','pair',e.const(m_tiles.bit_length()-1))
+        e.emit(f'%m = arith.addi %{pair_m}, %rm : i32')
+        rn_types = [STATE,'i32','i32','i32']
+        initial = [e.state, e.const(0), 'rm_y']
+        initial.append(origin('batch_rpage', pages[1][0]))
+        branch('restore_n_header', initial, rn_types)
+        block('restore_n_header',['rn_s','n','ytile','restore_rpage'],rn_types)
+        more = e.cmp('ult','n',e.const(nc))
+        e.emit(f'cf.cond_br %{more}, ^restore_n_body(%rn_s : {STATE}), ^restore_m_next(%rn_s : {STATE})')
+        block('restore_n_body',['rn_body_s'],[STATE])
+        value = load('ytile',BF16)
+        branch('store',[e.state,value],[STATE,BF16])
+        block('store',['ss','result'],[STATE,BF16])
+        e.emit('%out_bytes = arith.constant 2048 : i32')
+        exponent_addresses = [name if page[1] else origin(batch_name, page[0])
+                              for name,batch_name,page in zip(('restore_lpage','restore_rpage'),
+                                  ('batch_lpage','batch_rpage'),pages,strict=True)]
+        e.lines.extend(restoration.tile(output_address='ytile',exponent_addresses=exponent_addresses))
+        e.state = 'stored'
+        branch('restore_n_header',[e.state,offset('n',1),offset('ytile',2048),
+                                   offset('restore_rpage',pages[1][1])],rn_types)
+        block('restore_m_next',['rm_next_s'],[STATE])
+        branch('restore_m_header',[e.state,offset('rm',1),offset('rm_y',nc*2048),
+                                   offset('restore_lpage',pages[0][1])],rm_types)
+    block('pair_next',['pair_next_s'],[STATE])
+    next_pair = [e.state, offset('pair',1), offset('pair_a',m_tiles*kc*1024),
+                 offset('pair_y',m_tiles*nc*2048)]
+    if carry_left_page:
+        next_pair.append(offset('pair_lpage',m_tiles*pages[0][1]))
+    branch('pair_header', next_pair, pair_types)
+    if batches > 1:
+        block('panel_batch_next', ['panel_next_s'], [STATE])
+        branch('panel_batch_header', [e.state, offset('panel_batch', 1)], batch_types)
+    block('done',['final'],[STATE])
+    e.lines.extend(restoration.finish('final'))
+    e.lines += ['  }','}']
+    return '\n'.join(e.lines)+'\n'

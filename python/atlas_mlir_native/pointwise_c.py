@@ -13,7 +13,6 @@ from merlin.compile.c_pointwise import render_pointwise_c
 from merlin.semantic_compiler.target_binding import verify_native_publication
 
 from .binding import (
-    DRAM_BASE,
     NATIVE_CHECKS,
     NATIVE_PIPELINES,
     RTL_REVISION,
@@ -21,9 +20,11 @@ from .binding import (
     _run,
     check_io_memory_manifest,
     dram_slots,
+    io_memory_base,
 )
+from .memory_windows import dma_span_in_window
 from .pointwise import (
-    prepare_plan,
+    prepare_execution_plan,
     prepare_source,
     selected_body_descriptor,
     virtual_program,
@@ -40,11 +41,28 @@ def prepare_c_package(
     runtime_linkage="separate",
     allow_math=False,
     bf16_policy=None,
+    rne_add_policy=None,
+    exp_policy=None,
 ):
-    precision = prepare_source(source, allow_math=allow_math, bf16_policy=bf16_policy)
+    precision = prepare_source(source, allow_math=allow_math, bf16_policy=bf16_policy,
+                               rne_add_policy=rne_add_policy, exp_policy=exp_policy)
+    return prepare_precision_c_package(precision, compiled, name, target_source=target_source,
+                                       runtime_linkage=runtime_linkage)
+
+
+def prepare_precision_c_package(precision, compiled, name, *, target_source, runtime_linkage="separate",
+                                output_dtype=None, input_dtype=None, static_output_exponent=None):
+    """Replay a precision-owned target and render its explicit source operands."""
+    from .row_output_quantize import record as quantization_record
+    quantization = quantization_record(static_output_exponent)
+    if quantization and output_dtype != 'i8':
+        raise ValueError('packed pointwise output requires an i8 public result')
+    source = precision.source
     request = precision.request
     arity = len(request.nodes) - 1
-    plan = prepare_plan(request)
+    full_plan, plan, streaming = prepare_execution_plan(request)
+    if quantization and streaming:
+        raise ValueError('packed pointwise output requires a single resident frame')
     manifest = json.loads((compiled / "manifest.json").read_text())
     check_io_memory_manifest(manifest)
     verify_native_publication(
@@ -85,12 +103,15 @@ def prepare_c_package(
     for address, size in zip([*addresses, output], sizes, strict=True):
         if (
             type(address) is not int
-            or address < DRAM_BASE
-            or (address - DRAM_BASE) % TILE_BYTES
-            or address + size > DRAM_BASE + dram_slots() * TILE_BYTES
+            or address % TILE_BYTES
+            or address < io_memory_base()
+            or address + size > io_memory_base() + dram_slots() * TILE_BYTES
+            or not dma_span_in_window(address, size)
         ):
-            raise ValueError("pointwise byte address is unaligned or outside the selected window")
+            raise ValueError("pointwise byte address is unaligned or outside the selected memory window")
         ranges.append((address, address + size))
+    if max(b for a, b in ranges) - min(a for a, b in ranges) > dram_slots() * TILE_BYTES:
+        raise ValueError("pointwise buffers exceed the selected memory window")
     if any(a < d and c < b for i, (a, b) in enumerate(ranges) for c, d in ranges[i + 1 :]):
         raise ValueError("pointwise input/output ranges overlap")
     expected = {
@@ -100,11 +121,13 @@ def prepare_c_package(
         "input_buffer_bytes": list(plan.input_packed_bytes),
         "output_addresses": [output],
         "output_bytes": plan.packed_bytes,
-        "output_physical_layouts": ["mn_tiles_bf16_pair_halves"],
+        "output_physical_layouts": ["mn_tiles_fp8_in_bf16_slots" if quantization else "mn_tiles_bf16_pair_halves"],
+        **quantization,
         "tiling": plan.record(),
+        **({"streaming": streaming, "source_tiling": full_plan.record()} if streaming else {}),
     }
     if execution != expected or (compiled / "atlas-virtual.mlir").read_text() != virtual_program(
-        plan, addresses, output, descriptor
+        plan, addresses, output, descriptor, static_output_exponent=static_output_exponent
     ):
         raise ValueError("pointwise program or ABI differs from source replay")
     binary = (compiled / "program.bin").read_bytes()
@@ -121,7 +144,7 @@ def prepare_c_package(
     tools = Path(os.environ.get("ATLAS_OOT_BIN_DIR", target_source / "build/bin"))
     machine = _run(
         [str(tools / "atlas-opt"), *NATIVE_PIPELINES[pipeline], "-"],
-        input_text=virtual_program(plan, addresses, output, descriptor),
+        input_text=virtual_program(plan, addresses, output, descriptor, static_output_exponent=static_output_exponent),
     )
     _run(
         [str(tools / "atlas-opt"), *NATIVE_CHECKS, "--verify-atlas-timing", "-"],
@@ -130,12 +153,25 @@ def prepare_c_package(
     replayed = json.loads(_run([str(tools / "atlas-emit"), "--program-json", "-"], input_text=machine))
     if binary != b"".join(row["word_u32"].to_bytes(4, "little") for row in replayed["instructions"]):
         raise ValueError("pointwise encoded program differs from source lowering")
+    from types import SimpleNamespace
+
+    from .limits import functional_instruction_limit
+    from .restoration_budget import instruction_bound
+    saved_bound = json.loads((compiled / "pointwise-instruction-bound.json").read_text())
+    cap = functional_instruction_limit(SimpleNamespace(functional_instruction_limit=saved_bound["max_instructions"]))
+    bound = instruction_bound(virtual_program(plan, addresses, output, descriptor, static_output_exponent=static_output_exponent), machine, replayed, max_instructions=cap)
+    if not bound["admitted"] or saved_bound != bound:
+        raise ValueError("pointwise instruction bound differs or exceeds default")
     elements = [prod(node.type.shape) for node in request.nodes]
-    source_dtype = source.nodes[-1].type.dtype
+    if input_dtype is not None and input_dtype != 'bf16':
+        raise ValueError('private input transport requires original BF16 codes')
+    source_dtype = source.nodes[-1].type.dtype if input_dtype is None else input_dtype
+    if input_dtype is not None and output_dtype is None:
+        output_dtype = source.nodes[-1].type.dtype
     encode = render_bf16_codes_c if source_dtype == "bf16" else render_f32_array_c
     source_inputs = tuple(node.id for node in source.nodes if node.effect in {"input", "constant"})
     helpers = (
-        render_pointwise_c(plan, name)
+        render_pointwise_c(full_plan, name, output_element_bytes=1 if quantization else None)
         + "\n"
         + "\n".join(
             encode(spec, count, name + f"_encode_{i}")
@@ -149,15 +185,19 @@ def prepare_c_package(
         name,
         target_source=target_source,
         runtime_linkage=runtime_linkage,
-        packed_sizes=sizes,
+        packed_sizes=(*full_plan.input_packed_bytes, full_plan.packed_bytes),
+        streaming=streaming,
         tile_bytes=plan.tile_bytes,
         helpers=helpers,
         source_dtype=source_dtype,
+        output_dtype=output_dtype,
+        static_output_exponent=static_output_exponent,
         source_input_indices=tuple(source_inputs.index(key) for key in precision.record()["inputs"]),
     )
     return {
         **io_record,
         "precision_plan": precision.record(),
+        **({"streaming": streaming} if streaming else {}),
         "input_node_ids": list(source_inputs),
         "output_node_ids": list(source.outputs),
         "native_manifest_sha256": hashlib.sha256((compiled / "manifest.json").read_bytes()).hexdigest(),

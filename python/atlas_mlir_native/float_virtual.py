@@ -1,0 +1,440 @@
+"""Exact float routes using counted tile and lane loops in common virtual IR."""
+from .options import current_codegen_options
+from .scalar_ssa import ScalarBuilder
+
+S='!atlas.virtual_state'
+T='!atlas.virtual_bf16'
+P='!atlas.virtual_spill'
+
+class Builder(ScalarBuilder):
+    def __init__(self,lines):
+        super().__init__(lines); self.state='%start'; self.lane_constants=None
+    def constant(self,number):
+        if self.lane_constants is None:
+            return super().constant(number)
+        number &= 0xffffffff
+        if number not in self.lane_constants:
+            self.lane_constants[number]=super().constant(number)
+        return self.lane_constants[number]
+    def names(self,count):
+        result=[f'%scalar{self.serial+i}' for i in range(count)]; self.serial+=count; return result
+    def slot(self,name):
+        self.lines.append(f'    %{name} = "atlas.virtual_slot"() {{kind = "bf16", words = 512 : i32, slot_word = -1 : i32, purpose = "scratch"}} : () -> {P}')
+    def save(self,slot,value):
+        self.state=self.value(f'"atlas.virtual_save"({self.state},%{slot},{value}) : ({S},{P},{T}) -> {S}')
+    def restore(self,slot):
+        state,tile=self.names(2)
+        self.lines.append(f'    {state}, {tile} = "atlas.virtual_restore"({self.state},%{slot}) : ({S},{P}) -> ({S},{T})')
+        self.state=state; return tile
+    def load(self,slot,index,width):
+        state,value=self.names(2)
+        lane_offset = 0
+        if isinstance(index, tuple):
+            index, lane_offset = index
+        operand='' if isinstance(index,int) else f',{index}'
+        type_='' if isinstance(index,int) else ',i32'
+        offset=(index if isinstance(index,int) else lane_offset)*width
+        self.lines.append(f'    {state}, {value} = "atlas.virtual_slot_load"({self.state},%{slot}{operand}) {{kind = "{"lhu" if width==2 else "lw"}", byte_offset = {offset} : i32}} : ({S},{P}{type_}) -> ({S},i32)')
+        self.state=state; return value
+    def store(self,slot,index,value,width):
+        operand='' if isinstance(index,int) else f',{index}'
+        type_='' if isinstance(index,int) else ',i32'
+        offset=index*width if isinstance(index,int) else 0
+        self.state=self.value(f'"atlas.virtual_slot_store"({self.state},%{slot},{value}{operand}) {{kind = "{"sh" if width==2 else "sw"}", byte_offset = {offset} : i32}} : ({S},{P},i32{type_}) -> {S}')
+    def unary_lanes(self,count,accumulators,body):
+        """Use immediate slot offsets within one bounded unary tile.
+
+        Constants are shared only within this straight-line block. The outer
+        counted DMA loop and the complete preflight/publication barrier stay
+        intact; scalar live ranges cannot cross a CFG boundary here.
+        """
+        assert self.lane_constants is None
+        self.lane_constants={}
+        try:
+            for index in range(count):
+                accumulators=body(index,accumulators)
+            return accumulators
+        finally:
+            self.lane_constants=None
+    def checked_lane_groups(self, label, count, accumulators, body):
+        """Share address calculation and constants across four adjacent lanes."""
+        factor = 4
+        if count % factor:
+            return self.loop(label, count, accumulators, body)
+
+        def group(index, values):
+            base = self.binary('shl', index, self.constant(2))
+            assert self.lane_constants is None
+            self.lane_constants = {}
+            try:
+                for lane in range(factor):
+                    values = body((base, lane), values)
+                return values
+            finally:
+                self.lane_constants = None
+
+        return self.loop(label, count // factor, accumulators, group)
+
+    def unary_word_pairs(self, operation, count):
+        """Read adjacent BF16 encodings once without interpreting their bits."""
+        assert operation in ('bf16_to_f32', 'bf16_neg') and count % 2 == 0
+
+        def pair(index, unused):
+            word = self.load('left', index, 4)
+            if operation == 'bf16_neg':
+                self.store('result', index,
+                    self.binary('xor', word, self.constant(0x80008000)), 4)
+            else:
+                self.store('result', 2 * index,
+                    self.binary('shl', word, self.constant(16)), 4)
+                self.store('result', 2 * index + 1,
+                    self.binary('and', word, self.constant(0xffff0000)), 4)
+            return []
+
+        self.unary_lanes(count // 2, [], pair)
+
+    def splat(self,bits): return self.value(f'"atlas.virtual_vpu_splat"() {{bits = {bits} : i32}} : () -> {T}')
+    def vector_binary(self,kind,a,b): return self.value(f'"atlas.virtual_vpu_binary"({a},{b}) {{kind = "{kind}"}} : ({T},{T}) -> {T}')
+    def dma_load(self,address,bytes_):
+        state,tile=self.names(2);size=self.constant(bytes_)
+        self.lines.append(f'    {state}, {tile} = "atlas.virtual_dma_load_bf16"({self.state},{address},{size}) : ({S},i32,i32) -> ({S},{T})')
+        self.state=state; return tile
+    def dma_store(self,address,tile,bytes_):
+        size=self.constant(bytes_)
+        self.state=self.value(f'"atlas.virtual_dma_store_bf16"({self.state},{tile},{address},{size}) : ({S},{T},i32,i32) -> {S}')
+    def inputs(self,p,index):
+        a=self.load('left',index,p.width)
+        d=self.load('right',index,p.width) if len(p.operands)>1 else a
+        if p.op=='bf16_sub': d=self.binary('xor',d,self.constant(32768))
+        return a,d
+    def loop(self,label,count,accumulators,body):
+        """Emit a guarded counted loop, carrying state and named scalar values."""
+        initial=self.constant(0); names=[f'%{label}_acc{i}' for i in range(len(accumulators))]
+        types=','.join([S,'i32']+['i32']*len(names))
+        self.lines.append(f'    cf.br ^{label}({",".join([self.state,initial,*accumulators])} : {types})')
+        args=','.join([f'%{label}_state: {S}',f'%{label}_index: i32']+[f'{n}: i32' for n in names])
+        self.lines.append(f'  ^{label}({args}):');self.state=f'%{label}_state'
+        more=self.value(f'arith.cmpi ult, %{label}_index, {self.constant(count)} : i32')
+        endnames=[f'%{label}_out{i}' for i in range(len(names))]
+        endtypes=','.join([S]+['i32']*len(names))
+        self.lines.append(f'    cf.cond_br {more}, ^{label}_body({self.state} : {S}), ^{label}_done({",".join([self.state,*names])} : {endtypes})')
+        self.lines.append(f'  ^{label}_body(%{label}_token: {S}):');self.state=f'%{label}_token'
+        values=body(f'%{label}_index',names)
+        next_=self.binary('add',f'%{label}_index',self.constant(1))
+        self.lines.append(f'    cf.br ^{label}({",".join([self.state,next_,*values])} : {types})')
+        args=','.join([f'%{label}_end: {S}']+[f'{n}: i32' for n in endnames])
+        self.lines.append(f'  ^{label}_done({args}):');self.state=f'%{label}_end'
+        return endnames
+
+
+def qualified_vector(b,p):
+    """Reuse the existing qualified residual DAG, including its constants."""
+    from dataclasses import replace
+    from .qualified_rne_add import prepare_source,prepare_plan
+    source=p.source
+    inputs=source.nodes[:-1]
+    if len(inputs)==1:
+        inputs=(*inputs,replace(inputs[0],id=inputs[0].id+'_rhs'))
+    node=replace(source.nodes[-1],op='bf16_add',inputs=tuple(n.id for n in inputs),attrs=(("numeric_semantics","ieee754-bf16-add-rne-v1"),))
+    source=replace(source,nodes=(*inputs,node),input_storages=tuple((n.id,'external') for n in inputs))
+    body=prepare_plan(prepare_source(source).request).body_request()
+    values={body.nodes[0].id:b.restore('left')}
+    right=b.restore('right')
+    if p.op=='bf16_sub':right=b.vector_binary('mul',right,b.splat(0xbf80))
+    values[body.nodes[1].id]=right
+    constants={c.node_id:int.from_bytes(bytes.fromhex(c.data_hex)[:2],'little') for c in body.constants}
+    for node in body.nodes:
+        if node.effect=='input':continue
+        if node.effect=='constant':values[node.id]=b.splat(constants[node.id]);continue
+        args=[values[k] for k in node.inputs]
+        if len(args)==2:
+            kind={'mul_bf16_zero':'mul','add_bf16_rne':'add','sub_bf16_rne':'sub','max_bf16':'max'}[node.op]
+            values[node.id]=b.vector_binary(kind,*args)
+        else:
+            kind={'tanh_bf16':'tanh','recip_bf16_bounded':'recip'}[node.op]
+            values[node.id]=b.value(f'"atlas.virtual_vpu_unary"({args[0]}) {{kind = "{kind}"}} : ({T}) -> {T}')
+    return values[body.outputs[0]]
+
+
+def binary_lane_groups():
+    return current_codegen_options().exact_binary_lane_groups
+
+def binary_vector_preflight():
+    return current_codegen_options().exact_binary_vector_preflight
+
+def cast_vector_preflight():
+    return current_codegen_options().exact_cast_vector_preflight
+
+def cast_vector_refusal(b):
+    """Ordered-bit absolute maximum exceeds infinity exactly for a NaN.
+
+    Only the admission test uses VPU arithmetic. Widening still shifts the
+    original bits, preserving subnormals, signed zeros and infinities exactly.
+    """
+    value = b.restore('left')
+    maximum = b.vector_binary('max', value, b.vector_binary('mul', value, b.splat(0xbf80)))
+    for axis in ('col', 'row'):
+        maximum = b.value(f'"atlas.virtual_vpu_reduce"({maximum}) {{kind = "{axis}_max"}} : ({T}) -> {T}')
+    b.save('pairs', maximum)
+    return b.compare('ult', b.constant(0x7f80), b.load('pairs', 0, 2))
+
+
+def binary_vector_refusal(b):
+    """Prove signed zero or magnitude in [2^-32, 2^32] using vector extrema.
+
+    Ordered-bit extrema reject NaNs and out-of-range magnitudes. The ordinary
+    nonzero case needs only min/max. If the minimum is zero, a bounded probe
+    distinguishes other zeros from small nonzero lanes without a scalar scan.
+    This only selects a route; arithmetic still reads the original operands.
+    """
+    negative_one = b.splat(0xbf80)
+    absolute = []
+    for slot in ('left', 'right'):
+        value = b.restore(slot)
+        absolute.append(b.vector_binary('max', value, b.vector_binary('mul', value, negative_one)))
+    extrema = []
+    for kind in ('min', 'max'):
+        value = b.vector_binary(kind, *absolute)
+        for axis in ('col', 'row'):
+            value = b.value(f'"atlas.virtual_vpu_reduce"({value}) {{kind = "{axis}_{kind}"}} : ({T}) -> {T}')
+        b.save('pairs', value)
+        extrema.append(b.load('pairs', 0, 2))
+    minimum, maximum = extrema
+    upper_bad = b.compare('ult', b.constant(0x4f80), maximum)
+    outside = b.binary('or', b.compare('ult', minimum, b.constant(0x2f80)), upper_bad)
+    has_zero = b.value(f'arith.cmpi eq, {minimum}, {b.constant(0)} : i32')
+    b.lines.append(f'    cf.cond_br {has_zero}, ^zero_domain({b.state} : {S}), '
+                   f'^vector_domain_done({b.state},{outside} : {S},i32)')
+    b.lines.append(f'  ^zero_domain(%zero_domain_state: {S}):')
+    b.state = '%zero_domain_state'
+
+    # For finite a >= 0, t = min(a, 2^-32) * 2^32 lies in [0, 1].
+    # t*(1-t) is zero exactly at t=0 or t=1. Any nonzero BF16 a below
+    # 2^-32 produces t >= 2^-101, so the probe cannot underflow to zero.
+    # The nearest t below one is 255/256: subtraction cannot round to zero
+    # either. NaNs and infinities are rejected by the original upper bound.
+    probes = []
+    lower, inverse, one = b.splat(0x2f80), b.splat(0x4f80), b.splat(0x3f80)
+    for slot in ('left', 'right'):
+        value = b.restore(slot)
+        magnitude = b.vector_binary('max', value, b.vector_binary('mul', value, negative_one))
+        scaled = b.vector_binary('mul', b.vector_binary('min', magnitude, lower), inverse)
+        probes.append(b.vector_binary('mul', scaled, b.vector_binary('sub', one, scaled)))
+    probe = b.vector_binary('max', *probes)
+    for axis in ('col', 'row'):
+        probe = b.value(f'"atlas.virtual_vpu_reduce"({probe}) {{kind = "{axis}_max"}} : ({T}) -> {T}')
+    b.save('pairs', probe)
+    outside = b.binary('or', upper_bad, b.compare('ne', b.load('pairs', 0, 2), b.constant(0)))
+    b.lines.append(f'    cf.br ^vector_domain_done({b.state},{outside} : {S},i32)')
+    b.lines.append(f'  ^vector_domain_done(%vector_domain_state: {S},%vector_domain_bad: i32):')
+    b.state = '%vector_domain_state'
+    return '%vector_domain_bad'
+
+
+def binary_qualified_refusal(b, left, right):
+    """The qualified vector domain implies valid input arithmetic."""
+    c, op, cmp = b.constant, b.binary, b.compare
+    bad = c(0)
+    for value in (left, right):
+        magnitude = op('and', value, c(32767))
+        outside = op('or', op('and', cmp('ult', magnitude, c(0x2f80)),
+                             cmp('ne', magnitude, c(0))),
+                     cmp('ult', c(0x4f80), magnitude))
+        bad = op('or', bad, outside)
+    return bad
+
+
+def binary_slow_flags(b, left, right):
+    """After qualified refusal, classify pair admission and invalid inputs.
+
+    The right operand already has its sign flipped for subtraction. Keep
+    input validity separate from route admission: rejecting a fast route must
+    still permit the exact scalar implementation.
+    """
+    c, op, cmp = b.constant, b.binary, b.compare
+    magnitudes = [op('and', value, c(32767)) for value in (left, right)]
+    pair, invalid = c(0), c(0)
+    for magnitude in magnitudes:
+        nonzero = cmp('ne', magnitude, c(0))
+        exceptional = op('or', op('and', cmp('ult', magnitude, c(128)), nonzero),
+                         cmp('ule', c(32640), magnitude))
+        pair = op('or', pair, exceptional)
+        invalid = op('or', invalid, cmp('ult', c(32640), magnitude))
+    both_negative_zero = cmp('eq', op('or', op('xor', left, c(32768)),
+                                     op('xor', right, c(32768))), c(0))
+    pair = op('or', pair, both_negative_zero)
+    both_inf = op('and', cmp('eq', magnitudes[0], c(32640)),
+                  cmp('eq', magnitudes[1], c(32640)))
+    opposite = op('shr', op('xor', left, right), c(15))
+    invalid = op('or', invalid, op('and', both_inf, opposite))
+    return op('or', c(1), op('or', op('shl', pair, c(1)),
+                                 op('shl', invalid, c(2))))
+
+
+def virtual_program(p):
+    from .exact_float_device import _valid,_compute
+    # Preserve qualified compact images unless expansion is explicitly selected.
+    expand_unary=current_codegen_options().exact_float_unroll
+    group_binary=binary_lane_groups()
+    vector_preflight=binary_vector_preflight()
+    vector_cast=cast_vector_preflight() and p.op == 'bf16_to_f32'
+    lines=['module {',f'  func.func @exact_float() -> {S} attributes {{atlas.input_dram_base = {p.io_memory_base} : i64, atlas.input_dram_bytes = {p.output_address-p.io_memory_base} : i64, atlas.output_dram_base = {p.output_address} : i64, atlas.output_dram_bytes = {p.output_bytes+32} : i64}} {{',f'    %start = "atlas.virtual_start"() : () -> {S}']
+    b=Builder(lines);c=b.constant;op=b.binary;cmp=b.compare
+    lanes=p.tile_lanes;tiles=p.input_bytes//(lanes*p.width)
+    binary=p.op in ('bf16_add','bf16_sub')
+    private = p.private_output
+    # Binary route caching is selected independently of the lowering pipeline.
+    binary_routes=binary and (group_binary or vector_preflight or current_codegen_options().exact_binary_routes)
+    # One word per tile retains route admission across the complete input
+    # preflight. Arithmetic starts only after every tile passed validation.
+    if binary_routes and not private and tiles > 512:
+        raise ValueError('exact binary route table exceeds one 2048-byte slot')
+    slots=(('left','result','pairs','status') if expand_unary and not binary
+           else ('left','right','result','pairs','status')) + (('routes',) if binary_routes and not private else ())
+    for slot in slots:b.slot(slot)
+    zero=b.splat(0)
+    for slot in slots:b.save(slot,zero)
+    if p.cached_tiles:
+        from .float_operand_cache import initialize_cache, restore_cached_input
+        initialize_cache(b,p)
+    flag=c(0)
+    phases = ('private',) if private else ('check','compute') if not p.op.endswith('_neg') else ('compute',)
+    for phase in phases:
+        right_index=[n.id for n in p.operands].index(p.node.inputs[-1])
+        pointers=[c(p.input_addresses[0]),c(p.input_addresses[right_index]),c(p.output_address)]
+        def tile_body(tile,values):
+            bad,ap,bp,out=values[:4]
+            # A one-tile binary preflight leaves both immutable inputs in VMEM.
+            if p.cached_tiles:
+                for slot,index,address in (('left',0,ap),('right',right_index,bp)):
+                    if index == p.repeated_input.port:
+                        restore_cached_input(b,p,slot,values[4])
+                    else:
+                        b.save(slot,b.dma_load(address,lanes*p.width))
+            elif not (binary_routes and tiles == 1 and phase == 'compute'):
+                a=b.dma_load(ap,lanes*p.width);b.save('left',a)
+                if binary or not expand_unary:
+                    b.save('right',b.dma_load(bp,lanes*p.width) if len(p.operands)>1 else a)
+            if phase in ('check', 'private'):
+                if binary_routes:
+                    if vector_preflight:
+                        outside = binary_vector_refusal(b)
+                        admitted = b.value(f'arith.cmpi eq, {outside}, {c(0)} : i32')
+                        lines.append(f'    cf.cond_br {admitted}, ^binary_checked({b.state},{c(0)} : {S},i32), ^scalar_qualified_check({b.state} : {S})')
+                        lines.append(f'  ^scalar_qualified_check(%scalar_check_state: {S}):')
+                        b.state = '%scalar_check_state'
+                    lane_loop=b.checked_lane_groups if group_binary else b.loop
+                    def qualified_lane(index,acc):
+                        a,d=b.inputs(p,index)
+                        return [op('or',acc[0],binary_qualified_refusal(b,a,d))]
+                    qbad,=lane_loop('qualified_lane',lanes,[c(0)],qualified_lane)
+                    admitted=b.value(f'arith.cmpi eq, {qbad}, {c(0)} : i32')
+                    lines.append(f'    cf.cond_br {admitted}, ^binary_checked({b.state},{c(0)} : {S},i32), ^binary_check_slow({b.state} : {S})')
+                    lines.append(f'  ^binary_check_slow(%binary_slow_state: {S}):');b.state='%binary_slow_state'
+                    def slow_lane(index,acc):
+                        a,d=b.inputs(p,index)
+                        return [op('or',acc[0],binary_slow_flags(b,a,d))]
+                    flags,=lane_loop('preflight_lane',lanes,[c(0)],slow_lane)
+                    lines.append(f'    cf.br ^binary_checked({b.state},{flags} : {S},i32)')
+                    lines.append(f'  ^binary_checked(%binary_checked_state: {S},%binary_flags: i32):')
+                    b.state='%binary_checked_state';flags='%binary_flags'
+                    if not private:
+                        b.store('routes',tile,flags,4)
+                    bad=op('or',bad,op('shr',flags,c(2)))
+                def validate(index,acc):
+                    a,d=b.inputs(p,index)
+                    return [op('or',acc[0],_valid(b,p,a,d))]
+                if vector_cast:
+                    bad=op('or',bad,cast_vector_refusal(b))
+                elif not binary_routes:
+                    bad,=(b.loop('preflight_lane',lanes,[bad],validate) if binary or not expand_unary
+                          else b.unary_lanes(lanes,[bad],validate))
+            if phase != 'check':
+                if private:
+                    # Application output remains private until the status has
+                    # been checked. Validate this tile, consume it while still
+                    # resident, and skip publication after any invalid input.
+                    valid = b.value(f'arith.cmpi eq, {bad}, {c(0)} : i32')
+                    lines.append(f'    cf.cond_br {valid}, ^private_compute({b.state} : {S}), ^private_complete({b.state} : {S})')
+                    lines.append(f'  ^private_compute(%private_compute_state: {S}):')
+                    b.state = '%private_compute_state'
+                if binary:
+                    if binary_routes:
+                        if not private:
+                            flags=b.load('routes',tile,4)
+                        qbad,rbad=op('and',flags,c(1)),op('and',flags,c(2))
+                    else:
+                        def classify(index,acc):
+                            a,d=b.inputs(p,index);qbad,rbad=acc
+                            for value in (a,d):
+                                magnitude=op('and',value,c(32767))
+                                nonzero=cmp('ne',magnitude,c(0))
+                                outside=op('or',op('and',cmp('ult',magnitude,c(0x2f80)),nonzero),cmp('ult',c(0x4f80),magnitude))
+                                qbad=op('or',qbad,outside)
+                                exceptional=op('or',op('and',cmp('ult',magnitude,c(128)),nonzero),cmp('ule',c(32640),magnitude))
+                                rbad=op('or',rbad,exceptional)
+                            both_negative_zero=cmp('eq',op('or',op('xor',a,c(32768)),op('xor',d,c(32768))),c(0))
+                            return [qbad,op('or',rbad,both_negative_zero)]
+                        qbad,rbad=(b.checked_lane_groups if group_binary else b.loop)('classify_lane',lanes,[c(0),c(0)],classify)
+                    qualified=b.value(f'arith.cmpi eq, {qbad}, {c(0)} : i32')
+                    lines.append(f'    cf.cond_br {qualified}, ^qualified({b.state} : {S}), ^pair_test({b.state} : {S})')
+                    lines.append(f'  ^qualified(%qualified_state: {S}):');b.state='%qualified_state'
+                    b.save('result',qualified_vector(b,p));lines.append(f'    cf.br ^publish({b.state} : {S})')
+                    lines.append(f'  ^pair_test(%pair_test_state: {S}):');b.state='%pair_test_state'
+                    pair_ok=b.value(f'arith.cmpi eq, {rbad}, {c(0)} : i32')
+                    lines.append(f'    cf.cond_br {pair_ok}, ^pair_begin({b.state} : {S}), ^scalar({b.state} : {S})')
+                    lines.append(f'  ^pair_begin(%pair_begin_state: {S}):');b.state='%pair_begin_state'
+                    def pair_group(group,acc):
+                        base=op('shl',group,c(5));b.save('pairs',b.splat(0))
+                        def gather(index,unused):
+                            a,d=b.inputs(p,op('add',base,index));pair_index=op('shl',index,c(4))
+                            b.store('pairs',pair_index,a,2);b.store('pairs',op('add',pair_index,c(1)),d,2)
+                            return []
+                        b.loop('pair_gather',32,[],gather)
+                        data=b.restore('pairs');sums=b.value(f'"atlas.virtual_vpu_reduce"({data}) {{kind = "row_sum"}} : ({T}) -> {T}');b.save('pairs',sums)
+                        def scatter(index,sticky):
+                            logical=op('add',base,index);a,d=b.inputs(p,logical)
+                            result=b.load('pairs',op('shl',index,c(4)),2);b.store('result',logical,result,2)
+                            magnitude=op('and',result,c(32767));zero=cmp('eq',magnitude,c(0))
+                            exceptional=op('or',op('and',cmp('ult',magnitude,c(128)),cmp('ne',magnitude,c(0))),cmp('ule',c(32640),magnitude))
+                            am=op('and',a,c(32767));dm=op('and',d,c(32767))
+                            exact_zero=op('and',cmp('eq',am,dm),op('or',op('shr',op('xor',a,d),c(15)),cmp('eq',am,c(0))))
+                            invalid_zero=op('and',zero,op('xor',exact_zero,c(1)))
+                            return [op('or',sticky[0],op('or',exceptional,invalid_zero))]
+                        return b.loop('pair_scatter',32,acc,scatter)
+                    postbad,=b.loop('pair_group',lanes//32,[c(0)],pair_group)
+                    accepted=b.value(f'arith.cmpi eq, {postbad}, {c(0)} : i32')
+                    lines.append(f'    cf.cond_br {accepted}, ^publish({b.state} : {S}), ^scalar({b.state} : {S})')
+                    lines.append(f'  ^scalar(%scalar_state: {S}):');b.state='%scalar_state'
+                def calculate(index,unused):
+                    a,d=b.inputs(p,index);b.store('result',index,_compute(b,p,a,d),p.output_width)
+                    return []
+                if expand_unary and p.op in ('bf16_to_f32', 'bf16_neg'):
+                    b.unary_word_pairs(p.op, lanes)
+                elif binary or not expand_unary:
+                    b.loop('scalar_lane',lanes,[],calculate)
+                else:
+                    b.unary_lanes(lanes,[],calculate)
+                if binary:
+                    lines.append(f'    cf.br ^publish({b.state} : {S})')
+                    lines.append(f'  ^publish(%publish_state: {S}):');b.state='%publish_state'
+                b.dma_store(out,b.restore('result'),lanes*p.output_width)
+                if private:
+                    lines.append(f'    cf.br ^private_complete({b.state} : {S})')
+                    lines.append(f'  ^private_complete(%private_complete_state: {S}):')
+                    b.state = '%private_complete_state'
+            advanced=[bad,op('add',ap,c(lanes*p.width)),op('add',bp,c(lanes*p.width)),op('add',out,c(lanes*p.output_width))]
+            if p.cached_tiles:
+                next_cache=op('add',values[4],c(1))
+                advanced.append(b.select(next_cache,c(0),cmp('ult',next_cache,c(p.cached_tiles))))
+            return advanced
+        flag,*_=b.loop(phase+'_tile',tiles,[flag,*pointers,*([c(0)] if p.cached_tiles else [])],tile_body)
+        if phase=='check':
+            accepted=b.value(f'arith.cmpi eq, {flag}, {c(0)} : i32')
+            lines.append(f'    cf.cond_br {accepted}, ^accepted({b.state} : {S}), ^done({b.state},{flag} : {S},i32)')
+            lines.append(f'  ^accepted(%accepted_state: {S}):');b.state='%accepted_state'
+    lines.append(f'    cf.br ^done({b.state},{flag} : {S},i32)')
+    lines.append(f'  ^done(%done_state: {S},%status_code: i32):');b.state='%done_state'
+    b.store('status',c(0),'%status_code',4);b.dma_store(c(p.status_address),b.restore('status'),32)
+    lines.extend((f'    return {b.state} : {S}','  }','}'))
+    return '\n'.join(lines)+'\n'

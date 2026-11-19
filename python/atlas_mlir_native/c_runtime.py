@@ -19,7 +19,22 @@ def program_array(symbol: str, binary: bytes) -> str:
     )
 
 
-def runtime_members(header: str, source: str, linkage: str):
+HOST_RUNTIME_HEADERS = ("atlas_host_layout.h", "atlas_host.h")
+RUNTIME_SHARED_FILES = tuple("runtime/" + name for name in (*HOST_RUNTIME_HEADERS, "atlas_host.c"))
+
+
+def runtime_headers(runtime):
+    """Read the public host ABI in the dependency order required by C packaging."""
+    headers = {}
+    for name in HOST_RUNTIME_HEADERS:
+        path = runtime / name
+        if path.is_symlink() or not path.is_file() or not path.resolve().is_relative_to(runtime.resolve()):
+            raise ValueError(f"selected Atlas runtime header is absent or unsafe: {name}")
+        headers[name] = path.read_text()
+    return headers
+
+
+def runtime_members(headers: dict[str, str], source: str, linkage: str):
     """Keep standalone exports unchanged; separate exports share identical files.
 
     Region headers still contain the guarded public declarations. The application
@@ -33,7 +48,7 @@ def runtime_members(header: str, source: str, linkage: str):
     return (
         {},
         {
-            "runtime/atlas_host.h": header.encode(),
+            **{"runtime/" + name: text.encode() for name, text in headers.items()},
             "runtime/atlas_host.c": source.encode(),
         },
         {"runtime_linkage": "separate", "runtime_source": "runtime/atlas_host.c"},

@@ -3,7 +3,6 @@
 import ctypes
 import dataclasses
 import hashlib
-import importlib.metadata
 import json
 import os
 import shutil
@@ -40,25 +39,28 @@ def check_source_c_call(
     elif source_dtype != "f32":
         raise ValueError("unsupported source test dtype")
     (package / "client.c").write_text(client_source)
-    subprocess.run(
-        [
-            shutil.which("cc"),
-            "-std=c11",
-            "-O2",
-            "-Wall",
-            "-Wextra",
-            "-Werror",
-            "-shared",
-            "-fPIC",
-            "pointwise.c",
-            "client.c",
-            "-o",
-            "client.so",
-        ],
-        cwd=package,
-        check=True,
-        capture_output=True,
-    )
+    try:
+        subprocess.run(
+            [
+                shutil.which("cc"),
+                "-std=c11",
+                "-O2",
+                "-Wall",
+                "-Wextra",
+                "-Werror",
+                "-shared",
+                "-fPIC",
+                "pointwise.c",
+                "client.c",
+                "-o",
+                "client.so",
+            ],
+            cwd=package,
+            check=True,
+            capture_output=True,
+        )
+    except subprocess.CalledProcessError as error:
+        raise RuntimeError(error.stderr.decode()) from error
     client = ctypes.CDLL(str(package / "client.so"))
     rd_type = ctypes.CFUNCTYPE(ctypes.c_uint32, ctypes.c_void_p, ctypes.c_size_t)
     wr_type = ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_uint32)
@@ -187,7 +189,7 @@ class PointwiseLoopTest(unittest.TestCase):
         self._check_pointwise_cases(bf16_sources=False, affine_cast=True)
 
     def test_large_io_window_executes_in_one_launch_per_invocation(self):
-        from merlin.semantic_compiler.codegen import CodegenOptions, codegen_options
+        from atlas_mlir_native.options import CodegenOptions, codegen_options
 
         with codegen_options(CodegenOptions(io_memory_bytes=1048576)):
             self._check_pointwise_cases(bf16_sources=False, large=True)
@@ -224,14 +226,12 @@ class PointwiseLoopTest(unittest.TestCase):
         from npu_model.logging import LoggerConfig
         from npu_model.simulation import Simulation
         from npu_model.software.program import InstantiableProgram
-        from test_spill_model_execution import MODEL_REVISION, model_instruction
+        from test_spill_model_execution import model_instruction
+        from test_mxu1_cap448 import authenticate_model
 
         from tools.check_program_decode import decode_binary
 
-        origin = json.loads(importlib.metadata.distribution("npu-model").read_text("direct_url.json") or "{}")
-        self.assertTrue(
-            MODEL_REVISION in origin.get("url", "") or origin.get("vcs_info", {}).get("commit_id") == MODEL_REVISION
-        )
+        self.assertTrue(authenticate_model(Path(os.environ["NPU_MODEL_ROOT"])))
         torch.set_num_threads(1)
         spec = input_spec()
         spec.encode(np.array([0.0, -0.0, 2.0**-63, -(2.0**63)], dtype=np.float32))

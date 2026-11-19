@@ -6,7 +6,7 @@ from math import prod
 
 from merlin.compile.c_sources import c_source_pair
 
-from .c_runtime import program_array, runtime_members
+from .c_runtime import program_array, runtime_headers, runtime_members
 
 
 def render_tile_io_package(
@@ -21,18 +21,29 @@ def render_tile_io_package(
     tile_bytes,
     helpers,
     source_dtype="f32",
+    output_dtype=None,
     source_input_indices=None,
+    streaming=None,
+    input_guard=None,
+    completion_check="",
+    static_output_exponent=None,
 ):
+    from .row_output_quantize import record as quantization_record
+    quantization = quantization_record(static_output_exponent)
+    packed = bool(quantization)
+    if packed and (output_dtype != 'i8' or streaming):
+        raise ValueError('packed tile output requires i8 and a single resident frame')
+    output_dtype = source_dtype if output_dtype is None else output_dtype
     addresses = execution["input_addresses"]
     output = execution["output_addresses"][0]
-    htext = (target_source / "runtime/atlas_host.h").read_text()
+    public = runtime_headers(target_source / "runtime")
     ctext = (target_source / "runtime/atlas_host.c").read_text()
-    members, files, runtime = runtime_members(htext, ctext, runtime_linkage)
+    members, files, runtime = runtime_members(public, ctext, runtime_linkage)
     sizes = tuple(packed_sizes)
     t = tile_bytes
     arity = len(sizes) - 1
     indices = tuple(range(arity)) if source_input_indices is None else tuple(source_input_indices)
-    if (source_dtype not in {"f32", "bf16"} or len(indices) != arity
+    if (source_dtype not in {"f32", "bf16"} or output_dtype not in ({"i8"} if packed else {"f32", "bf16"}) or len(indices) != arity
             or any(type(index) is not int or index < 0 for index in indices)
             or set(indices) != set(range(len(set(indices))))):
         raise ValueError("tile I/O source dtype or input mapping differs")
@@ -41,8 +52,11 @@ def render_tile_io_package(
             raise ValueError("shared tile I/O source has inconsistent shapes or types")
     source_width = 4 if source_dtype == "f32" else 2
     source_type = "float" if source_dtype == "f32" else "uint8_t"
+    output_width = 1 if packed else (4 if output_dtype == "f32" else 2)
+    output_type = "float" if output_dtype == "f32" else "uint8_t"
     if t != 2048 or len(sizes) != len(request.nodes) or any(size <= 0 or size % t for size in sizes):
         raise ValueError("tile I/O C pair layout differs from the selected target")
+    device_sizes = tuple([streaming["block_tiles"] * t] * len(sizes)) if streaming else sizes
     raw_workspace = sum(sizes) + t
     elements = [prod(node.type.shape) for node in request.nodes]
     source_workspace = 2 * sum(elements)
@@ -54,15 +68,18 @@ def render_tile_io_package(
     )
     buffers = ",".join(
         f"{{{addr}u,{size}u,ATLAS_HOST_DEVICE_{mode}}}"
-        for addr, size, mode in zip([*addresses, output], sizes, (*("READ",) * arity, "WRITE"), strict=True)
+        for addr, size, mode in zip([*addresses, output], device_sizes, (*("READ",) * arity, "WRITE"), strict=True)
     )
+    exponent_parameter = ',int32_t *exponent' if packed else ''
+    exponent_argument = ',outputs[1]' if packed else ''
+    exponent_size = f"\n#define {upper}_SOURCE_OUTPUT_1_BYTES 4u" if packed else ''
     declarations = f"""
 #define {upper}_WORKSPACE_BYTES {raw_workspace}u
 #define {upper}_SOURCE_WORKSPACE_BYTES {source_workspace}u
 #define {upper}_SOURCE_INPUT_COUNT {len(input_elements)}u
-#define {upper}_SOURCE_OUTPUT_COUNT 1u
+#define {upper}_SOURCE_OUTPUT_COUNT {2 if packed else 1}u
 {source_sizes}
-#define {upper}_SOURCE_OUTPUT_0_BYTES {elements[-1] * source_width}u
+#define {upper}_SOURCE_OUTPUT_0_BYTES {elements[-1] * output_width}u{exponent_size}
 typedef enum {{ {upper}_OK=0,{upper}_INVALID,{upper}_INPUT_DOMAIN,{upper}_MEMORY_ERROR,{upper}_DEVICE_ERROR }} {name}_status;
 typedef struct {{ atlas_host *host; atlas_tile_memory_io io; uint8_t *workspace; size_t max_polls;
                   atlas_host_buffer buffers[{arity + 1}]; }} {name}_context;
@@ -70,9 +87,9 @@ typedef struct {{ {name}_context *region; uint8_t *workspace; }} {name}_source_c
 /* Preserve contexts and both workspaces through completion or recovery. */
 {name}_status {name}_bind({name}_context *,atlas_host *,atlas_tile_memory_io,void *,size_t,size_t);
 {name}_status {name}_source_bind({name}_source_context *,{name}_context *,void *,size_t);
-/* Dense source {source_dtype} operands/results in their recorded logical shapes and order. */
+/* Dense source {source_dtype} operands and {output_dtype} result in their recorded logical shapes and order. */
 /* BF16 source values use little-endian code bytes, with no float reinterpretation. */
-{name}_status {name}_source_run({name}_source_context *,const {source_type} *const *,{source_type} *,atlas_host_result *);
+{name}_status {name}_source_run({name}_source_context *,const {source_type} *const *,{output_type} *{exponent_parameter},atlas_host_result *);
 int {name}_source_dispatch(void *,const void *const *,void *const *);
 """
     checks = []
@@ -80,13 +97,25 @@ int {name}_source_dispatch(void *,const void *const *,void *const *);
         index = indices[i]
         checks += [
             f"!{name}_valid(inputs[{index}],{size * source_width}u)",
-            f"{name}_overlap(inputs[{index}],{size * source_width}u,out,{elements[-1] * source_width}u)",
+            f"{name}_overlap(inputs[{index}],{size * source_width}u,out,{elements[-1] * output_width}u)",
             f"{name}_overlap(inputs[{index}],{size * source_width}u,ctx->workspace,{source_workspace}u)",
             f"{name}_overlap(inputs[{index}],{size * source_width}u,region->workspace,{raw_workspace}u)",
             f"{name}_overlap(inputs[{index}],{size * source_width}u,ctx,sizeof(*ctx))",
             f"{name}_overlap(inputs[{index}],{size * source_width}u,region,sizeof(*region))",
             f"{name}_overlap(inputs[{index}],{size * source_width}u,region->host,sizeof(*region->host))",
         ]
+    if packed:
+        checks += [f"!{name}_valid(exponent,4u)"]
+        # Validate the second public output against every protected host range
+        # before encoding inputs or invoking device callbacks.
+        protected = [('out', f'{elements[-1] * output_width}u'),
+                     ('ctx', 'sizeof(*ctx)'), ('region', 'sizeof(*region)'),
+                     ('region->host', 'sizeof(*region->host)'),
+                     ('ctx->workspace', f'{source_workspace}u'),
+                     ('region->workspace', f'{raw_workspace}u')]
+        protected += [(f'inputs[{index}]', f'{count * source_width}u')
+                      for index, count in enumerate(input_elements)]
+        checks += [f"{name}_overlap(exponent,4u,{pointer},{size})" for pointer, size in protected]
     converted = "; ".join(f"uint8_t *operand_{i}=ctx->workspace+{sum(elements[:i]) * 2}u" for i in range(arity))
     encoding = " || ".join(f"{name}_encode_{i}(inputs[{indices[i]}],operand_{i})" for i in range(arity))
     packing = " ".join(f"{name}_pack_{i}(region->workspace+{sum(sizes[:i])}u,operand_{i});" for i in range(arity))
@@ -96,11 +125,50 @@ int {name}_source_dispatch(void *,const void *const *,void *const *);
         f"    if (region->io.write(region->io.context,{address}u+at,physical,{t}u)) return {upper}_MEMORY_ERROR;\n  }}"
         for i, address in enumerate(addresses)
     )
+    loop_begin, loop_end = "", ""
+    reading = f"""  for (size_t at=0;at<{sizes[-1]}u;at+={t}u) {{
+    if (region->io.read(region->io.context,{output}u+at,physical,{t}u)) return {upper}_MEMORY_ERROR;
+    {name}_pair(region->workspace+{sum(sizes[:-1])}u+at,physical,0);
+  }}"""
+    fp8_pair = ''
+    if packed:
+        fp8_pair = f"""static void {name}_fp8_pair(uint8_t *out,const uint8_t *in) {{
+  for (size_t r=0;r<32u;++r) for (size_t c=0;c<32u;++c)
+    out[r*32u+c]=in[(c/16u)*512u+r*16u+c%16u];
+}}
+"""
+        reading = f"""  for (size_t at=0;at<{sizes[-1]}u;at+={t}u) {{
+    if (region->io.read(region->io.context,{output}u+at,physical,1024u)) return {upper}_MEMORY_ERROR;
+    {name}_fp8_pair(region->workspace+{sum(sizes[:-1])}u+at/2u,physical);
+  }}"""
+    if streaming:
+        block, total, columns = (streaming[key] for key in ("block_tiles", "total_tiles", "output_column_tiles"))
+        if (type(block) is not int or block < 1 or type(total) is not int or total % block
+                or total * t != sizes[-1] or len(streaming["input_tile_strides"]) != arity):
+            raise ValueError("tile I/O streaming geometry differs")
+        loop_begin = f"  for (size_t first=0;first<{total}u;first+={block}u) {{"
+        loop_end = "  }"
+        pieces = []
+        for i, address in enumerate(addresses):
+            row, column = streaming["input_tile_strides"][i]
+            pieces.append(f"""  for (size_t tile=0;tile<{block}u;++tile) {{
+    size_t index=first+tile;
+    size_t source_tile=(index/{columns}u)*{row}u+(index%{columns}u)*{column}u;
+    {name}_pair(physical,region->workspace+{sum(sizes[:i])}u+source_tile*{t}u,1);
+    if (region->io.write(region->io.context,{address}u+tile*{t}u,physical,{t}u)) return {upper}_MEMORY_ERROR;
+  }}""")
+        writing = "\n".join(pieces)
+        reading = f"""  for (size_t tile=0;tile<{block}u;++tile) {{
+    if (region->io.read(region->io.context,{output}u+tile*{t}u,physical,{t}u)) return {upper}_MEMORY_ERROR;
+    {name}_pair(region->workspace+{sum(sizes[:-1])}u+(first+tile)*{t}u,physical,0);
+  }}"""
     typed_inputs = ",".join(f"inputs[{i}]" for i in range(len(set(indices))))
     decode = (f"for (size_t i=0;i<{elements[-1]}u;++i) {{ "
               "uint32_t bits=((uint32_t)result[2*i]|((uint32_t)result[2*i+1]<<8))<<16; "
-              "__builtin_memcpy(out+i,&bits,4u); }" if source_dtype == "f32"
-              else f"__builtin_memcpy(out,result,{elements[-1] * 2}u);")
+              "__builtin_memcpy(out+i,&bits,4u); }" if output_dtype == "f32"
+              else f"__builtin_memcpy(out,result,{elements[-1] * output_width}u);")
+    if packed:
+        decode += f" uint32_t exponent_bits={static_output_exponent & 0xffffffff}u; __builtin_memcpy(exponent,&exponent_bits,4u);"
     implementation = f"""
 {program_array(name + "_words", binary)}
 static int {name}_valid(const void *p,size_t n) {{ return p && n && (uintptr_t)p<=UINTPTR_MAX-n; }}
@@ -113,7 +181,7 @@ static void {name}_pair(uint8_t *out,const uint8_t *in,int pack) {{
     __builtin_memcpy(out+(pack?physical:logical),in+(pack?logical:physical),2u);
   }}
 }}
-{name}_status {name}_bind({name}_context *ctx,atlas_host *host,atlas_tile_memory_io io,void *scratch,size_t bytes,size_t polls) {{
+{fp8_pair}{name}_status {name}_bind({name}_context *ctx,atlas_host *host,atlas_tile_memory_io io,void *scratch,size_t bytes,size_t polls) {{
   if (!ctx || !host || !host->mmio.read32 || !host->mmio.write32 || host->active || !io.write || !io.read || !polls || bytes<{raw_workspace}u ||
       !{name}_valid(scratch,{raw_workspace}u) || {name}_overlap(scratch,{raw_workspace}u,ctx,sizeof(*ctx)) ||
       {name}_overlap(scratch,{raw_workspace}u,host,sizeof(*host)) || {name}_overlap(ctx,sizeof(*ctx),host,sizeof(*host))) return {upper}_INVALID;
@@ -129,32 +197,32 @@ static void {name}_pair(uint8_t *out,const uint8_t *in,int pack) {{
       {name}_overlap(ctx,sizeof(*ctx),region->workspace,{raw_workspace}u)) return {upper}_INVALID;
   *ctx=({name}_source_context){{region,scratch}}; return {upper}_OK;
 }}
-{name}_status {name}_source_run({name}_source_context *ctx,const {source_type} *const *inputs,{source_type} *out,atlas_host_result *device) {{
+{name}_status {name}_source_run({name}_source_context *ctx,const {source_type} *const *inputs,{output_type} *out{exponent_parameter},atlas_host_result *device) {{
   if (device) *device=ATLAS_HOST_INVALID;
   if (!ctx || !ctx->region || !ctx->region->host || !ctx->workspace || !inputs ||
       !ctx->region->workspace || !ctx->region->io.write || !ctx->region->io.read || !ctx->region->max_polls) return {upper}_INVALID;
   {name}_context *region=ctx->region;
   if (region->host->active) {{ if(device) *device=ATLAS_HOST_BUSY; return {upper}_DEVICE_ERROR; }}
-  if (!{name}_valid(out,{elements[-1] * source_width}u) || {name}_overlap(out,{elements[-1] * source_width}u,ctx,sizeof(*ctx)) ||
-      {name}_overlap(out,{elements[-1] * source_width}u,region,sizeof(*region)) ||
-      {name}_overlap(out,{elements[-1] * source_width}u,region->host,sizeof(*region->host)) ||
-      {name}_overlap(out,{elements[-1] * source_width}u,ctx->workspace,{source_workspace}u) ||
-      {name}_overlap(out,{elements[-1] * source_width}u,region->workspace,{raw_workspace}u) ||
+  if (!{name}_valid(out,{elements[-1] * output_width}u) || {name}_overlap(out,{elements[-1] * output_width}u,ctx,sizeof(*ctx)) ||
+      {name}_overlap(out,{elements[-1] * output_width}u,region,sizeof(*region)) ||
+      {name}_overlap(out,{elements[-1] * output_width}u,region->host,sizeof(*region->host)) ||
+      {name}_overlap(out,{elements[-1] * output_width}u,ctx->workspace,{source_workspace}u) ||
+      {name}_overlap(out,{elements[-1] * output_width}u,region->workspace,{raw_workspace}u) ||
       {" || ".join(checks)}) return {upper}_INVALID;
   {converted}; uint8_t *result=ctx->workspace+{sum(elements[:-1]) * 2}u;
   if ({encoding}) return {upper}_INPUT_DOMAIN;
-  {packing}
+  {f"if ({input_guard}) return {upper}_INPUT_DOMAIN;" + chr(10) + "  " if input_guard else ""}{packing}
   uint8_t *physical=region->workspace+{sum(sizes)}u;
   atlas_host_result status=atlas_host_ensure_loaded(region->host,{name}_words,{len(binary) // 4}u);
   if (device) *device=status; if (status!=ATLAS_HOST_OK) return {upper}_DEVICE_ERROR;
+{loop_begin}
 {writing}
   status=atlas_host_start(region->host,region->buffers,{arity + 1}u);
   if (status==ATLAS_HOST_OK) status=atlas_host_wait(region->host,region->max_polls);
   if (device) *device=status; if (status!=ATLAS_HOST_OK) return {upper}_DEVICE_ERROR;
-  for (size_t at=0;at<{sizes[-1]}u;at+={t}u) {{
-    if (region->io.read(region->io.context,{output}u+at,physical,{t}u)) return {upper}_MEMORY_ERROR;
-    {name}_pair(region->workspace+{sum(sizes[:-1])}u+at,physical,0);
-  }}
+{reading}
+{loop_end}
+{completion_check}
   {name}_assemble(result,region->workspace+{sum(sizes[:-1])}u);
   {decode}
   return {upper}_OK;
@@ -162,12 +230,12 @@ static void {name}_pair(uint8_t *out,const uint8_t *in,int pack) {{
 int {name}_source_dispatch(void *context,const void *const *inputs,void *const *outputs) {{
   if (!inputs || !outputs) return {upper}_INVALID;
   const {source_type} *typed[]={{{typed_inputs}}};
-  return {name}_source_run(context,typed,outputs[0],0);
+  return {name}_source_run(context,typed,outputs[0]{exponent_argument},0);
 }}
 """
     rendered = c_source_pair(
         name,
-        public_headers={"atlas_host.h": htext},
+        public_headers=public,
         private_headers={},
         sources={**members, "tile_io.c": helpers + implementation},
         declarations=declarations,
@@ -179,5 +247,7 @@ int {name}_source_dispatch(void *context,const void *const *inputs,void *const *
         "source_workspace_bytes": source_workspace,
         **({"source_dtype": source_dtype, "source_input_indices": list(indices)}
            if source_dtype != "f32" or indices != tuple(range(arity)) else {}),
+        **({"output_dtype": output_dtype} if output_dtype != source_dtype else {}),
+        **quantization,
         **runtime,
     }, files

@@ -1,7 +1,6 @@
 """Execute counted DMA/MXU loops on the explicitly selected npu_model."""
 
 import dataclasses
-import importlib.metadata
 import json
 import os
 import tempfile
@@ -9,7 +8,7 @@ import unittest
 from pathlib import Path
 
 from test_bounded_dma_addresses import loop_inputs, loop_source
-from test_spill_model_execution import MODEL_REVISION, model_instruction
+from test_spill_model_execution import assert_pinned_model, model_instruction
 from test_virtual_spilling import ROOT, compile_program
 
 
@@ -25,9 +24,7 @@ class KLoopModelExecutionTest(unittest.TestCase):
         from npu_model.software.program import InstantiableProgram
         from tools.check_program_decode import decode_binary
 
-        origin = json.loads(importlib.metadata.distribution('npu-model').read_text('direct_url.json') or '{}')
-        self.assertTrue(MODEL_REVISION in origin.get('url', '') or
-                        origin.get('vcs_info', {}).get('commit_id') == MODEL_REVISION)
+        assert_pinned_model(self)
         inventory = json.loads((ROOT / 'docs/selected-variant-inventory.json').read_text())
         torch.set_num_threads(1)
         with tempfile.TemporaryDirectory(prefix='atlas-k-loop-') as directory:

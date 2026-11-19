@@ -243,12 +243,12 @@ as atomic and is not a numerical or timing simulator. The existing Python
 virtual evaluator consumes pre-spill IR; it is not a production fallback.
 
 The optional model test uses Python 3.14, Torch, and `npu_model` revision
-`337e9f249f938a1dff007ddf8a763e5cd4b3aa2b`. With a Python environment that already
+`b97b2f5a97e432141c4ef8504bec396651d77a8f`. With a Python environment that already
 has the model's dependencies, install this test-only package separately:
 
 ```sh
 uv pip install --python /path/to/python3.14 --no-deps --target out/model-deps \
-  https://github.com/ucb-ee194-tapeout/npu_model/archive/337e9f249f938a1dff007ddf8a763e5cd4b3aa2b.zip
+  https://github.com/ucb-ee194-tapeout/npu_model/archive/b97b2f5a97e432141c4ef8504bec396651d77a8f.zip
 ATLAS_RUN_NPU_MODEL=1 ATLAS_OOT_BIN_DIR=build/bin \
   PYTHONPATH=out/model-deps:.:test /path/to/python3.14 -m unittest -v \
   test_spill_model_execution

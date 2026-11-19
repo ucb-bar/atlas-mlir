@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from .binding import io_memory_base as selected_io_base
+
 import hashlib
 import json
 from pathlib import Path
@@ -12,7 +14,6 @@ from merlin.semantic_compiler.model import KernelRequest
 from merlin.semantic_compiler.target_binding import verify_native_publication
 
 from .binding import (
-    DRAM_BASE,
     RTL_REVISION,
     TILE_BYTES,
     AtlasNativeBinding,
@@ -20,11 +21,12 @@ from .binding import (
     dram_slots,
 )
 from .layout import pack_bf16_pair_halves
-from .row_softmax import prepare_row_softmax
+from .row_softmax import prepare_row_softmax, SOFTMAX_DOMAIN, ROWSPAN80_MAX_COLUMNS, row_span_limit, score_domain as request_score_domain
 
 
 def prepare_c_package(
-    source_path: Path, compiled: Path, name: str, *, target_source: Path, runtime_linkage: str = "embedded"
+    source_path: Path, compiled: Path, name: str, *, target_source: Path, runtime_linkage: str = "embedded",
+    score_domain=SOFTMAX_DOMAIN
 ):
     """Bind compiled-0, compiled-1, ... to their regenerated source row groups.
 
@@ -34,7 +36,8 @@ def prepare_c_package(
     it does not confer numerical or full-system qualification.
     """
     source = KernelRequest.from_record(json.loads(source_path.read_text()))
-    return _prepare_c_package(source, compiled, name, target_source=target_source, runtime_linkage=runtime_linkage)
+    return _prepare_c_package(source, compiled, name, target_source=target_source, runtime_linkage=runtime_linkage,
+                              score_domain=score_domain)
 
 
 def _prepare_c_package(
@@ -50,16 +53,33 @@ def _prepare_c_package(
     row_loop_compilation: Path | None = None,
     allow_masked=False,
     allow_guarded=False,
+    finite_sentinel_bits=None,
+    score_domain=SOFTMAX_DOMAIN,
+    input_dtype="f32",
+    output_dtype="f32",
+    static_output_exponent=None,
 ):
+    from .row_output_quantize import validate_exponent
+
+    validate_exponent(static_output_exponent)
+    packed = static_output_exponent is not None
     staged_precision = precision
     if semantic_source is not None:
         if precision is not None:
             raise ValueError("select staged or semantic softmax source binding, not both")
         from .softmax_precision import lower_semantic_softmax
 
-        precision = lower_semantic_softmax(semantic_source, allow_masked=allow_masked, allow_guarded=allow_guarded)
+        precision = lower_semantic_softmax(semantic_source, allow_masked=allow_masked, allow_guarded=allow_guarded,
+                                           score_domain=score_domain)
         if precision.request.digest() != source.digest():
             raise ValueError("semantic softmax differs from its checked native source")
+    if finite_sentinel_bits is not None and precision is None:
+        raise ValueError("finite additive sentinel requires a bound semantic source interface")
+    if input_dtype not in {"f32", "bf16"} or input_dtype == "bf16" and precision is None:
+        raise ValueError("softmax score transport requires a supported bound source interface")
+    if (output_dtype not in {"f32", "bf16", "i8"} or output_dtype != "f32" and precision is None
+            or (output_dtype == "i8") != packed):
+        raise ValueError("softmax result publication requires a supported bound source interface")
     if compiled.is_symlink() or not compiled.is_dir():
         raise ValueError("softmax compilation must be a real directory")
 
@@ -81,6 +101,10 @@ def _prepare_c_package(
         return hashlib.sha256(payload).hexdigest()
 
     plan = prepare_row_softmax(source)
+    if request_score_domain(source) != score_domain:
+        raise ValueError("selected C score domain differs from the checked softmax source")
+    span = row_span_limit(score_domain)
+    relative = span is not None
     if row_compilations is None and row_loop_compilation is None and (compiled / "manifest.json").is_file():
         if json.loads(member(compiled, "manifest.json")).get("schema") == "atlas.row_loop_compilation.v1":
             row_loop_compilation = compiled
@@ -90,7 +114,10 @@ def _prepare_c_package(
 
         if row_compilations is not None or not row_loop_compilation.resolve().is_relative_to(compiled.resolve()):
             raise ValueError("select one contained row-loop compilation or separate row programs")
-        row_loop, loop_manifest = verify_row_loop(source, row_loop_compilation, target_source=target_source)
+        row_loop, loop_manifest = verify_row_loop(source, row_loop_compilation, target_source=target_source,
+            static_output_exponent=static_output_exponent)
+    if packed and row_loop is None:
+        raise ValueError("packed softmax publication requires a checked row loop")
     if row_compilations is not None and (
         len(row_compilations) != len(plan.regions)
         or len(set(row_compilations)) != len(row_compilations)
@@ -99,18 +126,17 @@ def _prepare_c_package(
         raise ValueError("softmax needs exactly one distinct compilation per row group")
     runtime = target_source / "runtime"
     inventory = member(target_source, "docs/selected-variant-inventory.json")
-    htext, ctext = (
-        member(runtime, "atlas_host.h").decode(),
-        member(runtime, "atlas_host.c").decode(),
-    )
-    from .c_runtime import program_array, runtime_members
+    ctext = member(runtime, "atlas_host.c").decode()
+    from .c_runtime import program_array, runtime_headers, runtime_members
 
-    host_members, runtime_files, runtime_record = runtime_members(htext, ctext, runtime_linkage)
+    public = runtime_headers(runtime)
+    host_members, runtime_files, runtime_record = runtime_members(public, ctext, runtime_linkage)
     m, n = plan.shape
     columns, groups = plan.column_tiles, len(plan.regions)
     input_tiles = columns * (2 if plan.masked else 1)
     mask_parameter = ", const uint8_t *keep" if plan.masked else ""
-    output_bytes = m * n * 2
+    input_bytes = m * n * 2
+    output_bytes = m * n * (1 if packed else 2)
     workspace = output_bytes + 2 * TILE_BYTES
     embedded, initializers, images, files = [], [], [], {}
     publications = []
@@ -165,9 +191,9 @@ def _prepare_c_package(
         sources = [node.id for node in region.request.nodes if node.effect in {"input", "constant"}]
         abi = AtlasNativeBinding.plan_boundary_abi(region.request)
         # The native allocator uses tile slots; the host ABI uses byte addresses.
-        bindings = {key: DRAM_BASE + slot * TILE_BYTES for key, slot in abi["fixed_inputs"].items()}
+        bindings = {key: selected_io_base() + slot * TILE_BYTES for key, slot in abi["fixed_inputs"].items()}
         addresses = [bindings[key] for key in sources]
-        outputs = [DRAM_BASE + slot * TILE_BYTES for slot in abi["fixed_outputs"]]
+        outputs = [selected_io_base() + slot * TILE_BYTES for slot in abi["fixed_outputs"]]
         if (
             execution.get("schema") != "atlas.native_tile_execution_plan.v8"
             or execution.get("dtype") != "bf16"
@@ -180,7 +206,7 @@ def _prepare_c_package(
         ):
             raise ValueError("softmax physical boundary differs from the checked source ABI")
         if any(
-            address < DRAM_BASE or address + TILE_BYTES > DRAM_BASE + dram_slots() * TILE_BYTES
+            address < selected_io_base() or address + TILE_BYTES > selected_io_base() + dram_slots() * TILE_BYTES
             for address in addresses + outputs
         ):
             raise ValueError("softmax boundary exceeds the selected diagnostic window")
@@ -190,20 +216,20 @@ def _prepare_c_package(
         if is_staged_bf16(region.request):
             _, staged_slots, _, _ = staged_memory_plan(region.request)
             expected_staging = {
-                "address": DRAM_BASE + len(sources) * TILE_BYTES,
+                "address": selected_io_base() + len(sources) * TILE_BYTES,
                 "bytes": (max(staged_slots.values()) + 1 - len(sources)) * TILE_BYTES,
             }
             if staging != expected_staging:
                 raise ValueError("softmax staging workspace differs from its checked allocation")
         elif staging is not None:
             raise ValueError("unexpected softmax staging workspace")
-        arena_bytes = max(arena_bytes, max(addresses + outputs) + TILE_BYTES - DRAM_BASE)
+        arena_bytes = max(arena_bytes, max(addresses + outputs) + TILE_BYTES - selected_io_base())
         if staging is not None:
-            arena_bytes = max(arena_bytes, staging["address"] + staging["bytes"] - DRAM_BASE)
+            arena_bytes = max(arena_bytes, staging["address"] + staging["bytes"] - selected_io_base())
         if row_loop is not None:
             addresses = [row_loop.address(address, 0) for address in addresses]
             outputs = [row_loop.address(address, 0) for address in outputs]
-            arena_bytes = row_loop.end - DRAM_BASE
+            arena_bytes = row_loop.end - selected_io_base()
         constants = manifest.get("constant_inputs", [])
         expected_constants = []
         for ordinal, constant in enumerate(region.request.constants):
@@ -243,7 +269,7 @@ def _prepare_c_package(
         device_buffers = [(address, TILE_BYTES, "READ") for address in addresses]
         if row_loop is not None:
             device_buffers = [
-                (DRAM_BASE, row_loop.groups * row_loop.readonly_bytes, "READ"),
+                (selected_io_base(), row_loop.groups * row_loop.readonly_bytes, "READ"),
                 (row_loop.writable_base, row_loop.groups * row_loop.writable_bytes, "READ_WRITE"),
             ]
         elif staging is not None:
@@ -292,18 +318,20 @@ def _prepare_c_package(
         )
         publications.append((root, manifest, manifest_bytes, region.request.digest()))
     program_count = len(selected_rows)
-    row_start = "image->start_row" if row_loop is None else "group*32u"
+    batched_loop = row_loop is not None and row_loop.launches > 1
+    row_start = ("image->start_row" if row_loop is None else
+                 "(start_group+group)*32u" if batched_loop else "group*32u")
     input_offset = "0u" if row_loop is None else f"group*{row_loop.readonly_bytes}u"
     output_offset = "0u" if row_loop is None else f"group*{row_loop.writable_bytes}u"
     mask_check, mask_write, keep_helper = "", "", ""
     if plan.masked:
         mask_check = f"""
-  if (!{name}_valid(keep,{output_bytes}u) ||
-      {name}_overlap(keep,{output_bytes}u,in,{output_bytes}u) ||
-      {name}_overlap(keep,{output_bytes}u,out,{output_bytes}u) ||
-      {name}_overlap(keep,{output_bytes}u,ctx,sizeof(*ctx)) ||
-      {name}_overlap(keep,{output_bytes}u,ctx->host,sizeof(*ctx->host)) ||
-      {name}_overlap(keep,{output_bytes}u,ctx->workspace,{workspace}u)) return {name.upper()}_INVALID;
+  if (!{name}_valid(keep,{input_bytes}u) ||
+      {name}_overlap(keep,{input_bytes}u,in,{input_bytes}u) ||
+      {name}_overlap(keep,{input_bytes}u,out,{output_bytes}u) ||
+      {name}_overlap(keep,{input_bytes}u,ctx,sizeof(*ctx)) ||
+      {name}_overlap(keep,{input_bytes}u,ctx->host,sizeof(*ctx->host)) ||
+      {name}_overlap(keep,{input_bytes}u,ctx->workspace,{workspace}u)) return {name.upper()}_INVALID;
   for (size_t row=0;row<{m}u;++row) {{
     unsigned any=0;
     for (size_t col=0;col<{n}u;++col) {{
@@ -337,6 +365,15 @@ static void {name}_pack_keep_tile(uint8_t *out,const uint8_t *in,size_t start,si
         return {name.upper()}_MEMORY_ERROR;
 """
     upper = name.upper()
+    row_domain_helper, row_domain_check = "", ""
+    if relative:
+        from merlin.compile.c_softmax_mask import render_bf16_row_span_preflight
+
+        row_domain_helper = render_bf16_row_span_preflight(
+            m, n, name, maximum_lower_bound=-32, maximum_upper_bound=48, maximum_span=span,
+            masked=plan.masked, empty_rows_zero=plan.empty_rows_zero,
+        )
+        row_domain_check = f"  if ({name}_row_span(in,{ 'keep' if plan.masked else '0'})) return {upper}_INPUT_DOMAIN;\n"
     load_code = f"""
     atlas_host_result result=atlas_host_ensure_loaded(ctx->host,image->words,image->count);
     if (device) *device=result;
@@ -358,21 +395,38 @@ static void {name}_pack_keep_tile(uint8_t *out,const uint8_t *in,size_t start,si
       {name}_scatter_row_tile(ctx->workspace,logical,{row_start},col);
     }}
 """
+    if packed:
+        read_code = f"""
+    for (size_t col=0; col < {columns}u; ++col) {{
+      if (ctx->io.read(ctx->io.context,image->outputs[col]+{output_offset},physical,1024u))
+        return {upper}_MEMORY_ERROR;
+      /* Raw PACK preserves the two column halves of the BF16 tile. */
+      for (size_t row=0; row<32u; ++row) for (size_t c=0; c<32u; ++c)
+        logical[row*32u+c]=physical[(c/16u)*512u+row*16u+c%16u];
+      {name}_scatter_row_tile(ctx->workspace,logical,{row_start},col);
+    }}
+"""
     before_rows, after_rows = "", ""
+    row_groups = groups
     if row_loop is not None:
         before_rows = f"  {{ const {name}_image *image=&{name}_images[0];{load_code}  }}\n"
+        if batched_loop:
+            row_groups = row_loop.groups_per_launch
+            before_rows += f"  for (size_t start_group=0; start_group < {groups}u; start_group+={row_groups}u) {{\n"
         after_rows = f"""
   {{ const {name}_image *image=&{name}_images[0];{launch_code}  }}
-  for (size_t group=0; group < {groups}u; ++group) {{
+  for (size_t group=0; group < {row_groups}u; ++group) {{
     const {name}_image *image=&{name}_images[0];{read_code}
   }}
 """
+        if batched_loop:
+            after_rows += "  }\n"
     declarations = f"""
 #define {upper}_ROWS {m}u
 #define {upper}_COLUMNS {n}u
 #define {upper}_BYTES {output_bytes}u
 #define {upper}_WORKSPACE_BYTES {workspace}u
-#define {upper}_DEVICE_ARENA_BASE {DRAM_BASE}u
+#define {upper}_DEVICE_ARENA_BASE {selected_io_base()}u
 #define {upper}_DEVICE_ARENA_BYTES {arena_bytes}u
 #define {upper}_PROGRAM_COUNT {program_count}u
 typedef enum {{ {upper}_OK=0, {upper}_INVALID, {upper}_INPUT_DOMAIN,
@@ -387,15 +441,16 @@ typedef struct {{
  * The platform serializes calls sharing one Atlas host. No heap allocation. */
 {name}_status {name}_bind({name}_context *, atlas_host *, atlas_tile_memory_io,
                          void *workspace, size_t bytes, size_t max_polls);
-/* Dense row-major BF16 little-endian input/output. All rows share the selected
+/* Dense row-major BF16 little-endian input and {"FP8 codes" if packed else "BF16 output"}. All rows share the selected
  * per-row normalization across columns. Output is unchanged on any error. */
 {name}_status {name}_run({name}_context *, const uint8_t *scores_bf16_le{mask_parameter},
-                        uint8_t *probabilities_bf16_le, atlas_host_result *);
+                        uint8_t *probabilities, atlas_host_result *);
 int {name}_dispatch(void *, const void *const *inputs, void *const *outputs);
 const uint32_t *{name}_program(size_t index, size_t *word_count);
 """
     implementation = (
         "\n".join(embedded)
+        + row_domain_helper
         + f"""
 _Static_assert(SIZE_MAX >= {workspace}ULL, "softmax workspace exceeds host size_t");
 typedef struct {{
@@ -438,22 +493,22 @@ static int {name}_overlap(const void *a, size_t an, const void *b, size_t bn) {{
   if (!ctx || !ctx->host || !ctx->workspace || !ctx->io.write || !ctx->io.read || !ctx->max_polls)
     return {upper}_INVALID;
   if (ctx->host->active) {{ if (device) *device=ATLAS_HOST_BUSY; return {upper}_DEVICE_ERROR; }}
-  if (!{name}_valid(in,{output_bytes}u) || !{name}_valid(out,{output_bytes}u) ||
-      {name}_overlap(in,{output_bytes}u,out,{output_bytes}u) ||
-      {name}_overlap(in,{output_bytes}u,ctx,sizeof(*ctx)) ||
+  if (!{name}_valid(in,{input_bytes}u) || !{name}_valid(out,{output_bytes}u) ||
+      {name}_overlap(in,{input_bytes}u,out,{output_bytes}u) ||
+      {name}_overlap(in,{input_bytes}u,ctx,sizeof(*ctx)) ||
       {name}_overlap(out,{output_bytes}u,ctx,sizeof(*ctx)) ||
-      {name}_overlap(in,{output_bytes}u,ctx->host,sizeof(*ctx->host)) ||
+      {name}_overlap(in,{input_bytes}u,ctx->host,sizeof(*ctx->host)) ||
       {name}_overlap(out,{output_bytes}u,ctx->host,sizeof(*ctx->host)) ||
-      {name}_overlap(in,{output_bytes}u,ctx->workspace,{workspace}u) ||
+      {name}_overlap(in,{input_bytes}u,ctx->workspace,{workspace}u) ||
       {name}_overlap(out,{output_bytes}u,ctx->workspace,{workspace}u)) return {upper}_INVALID;
-  for (size_t at=0; at < {output_bytes}u; at+=2) {{
+  for (size_t at=0; at < {input_bytes}u; at+=2) {{
     unsigned code=(unsigned)in[at] | ((unsigned)in[at+1]<<8), mag=code&32767u;
     unsigned exponent=(code>>7)&255u;
-    if (mag>0x4200u || (mag && (exponent<8u || exponent>132u))) return {upper}_INPUT_DOMAIN;
+    if (mag>{'0x4300u' if relative else '0x4200u'} || (mag && (exponent<8u || exponent>{'134u' if relative else '132u'}))) return {upper}_INPUT_DOMAIN;
   }}
-{mask_check}  uint8_t *logical=ctx->workspace+{output_bytes}u, *physical=logical+{TILE_BYTES}u;
+{mask_check}{row_domain_check}  uint8_t *logical=ctx->workspace+{output_bytes}u, *physical=logical+{TILE_BYTES}u;
 {before_rows}
-  for (size_t group=0; group < {groups}u; ++group) {{
+  for (size_t group=0; group < {row_groups}u; ++group) {{
     const {name}_image *image=&{name}_images[{"group" if row_loop is None else "0"}];
 {load_code if row_loop is None else ""}
     for (size_t col=0; col < {columns}u; ++col) {{
@@ -485,7 +540,8 @@ int {name}_dispatch(void *ctx, const void *const *inputs, void *const *outputs) 
         from .softmax_c_source import render_source_interface
 
         more_declarations, more_source, source_interface, extra_readme = render_source_interface(
-            precision, name, workspace
+            precision, name, workspace, finite_sentinel_bits=finite_sentinel_bits, score_domain=score_domain,
+            input_dtype=input_dtype, output_dtype=output_dtype, static_output_exponent=static_output_exponent,
         )
         declarations += more_declarations
         implementation += more_source
@@ -494,11 +550,11 @@ int {name}_dispatch(void *ctx, const void *const *inputs, void *const *outputs) 
             filename: payload.encode()
             for filename, payload in c_source_pair(
                 name,
-                public_headers={"atlas_host.h": htext},
+                public_headers=public,
                 private_headers={},
                 sources={
                     **host_members,
-                    "row_packing.c": render_row_softmax_c(plan, name) + keep_helper,
+                    "row_packing.c": render_row_softmax_c(plan, name, output_element_bytes=1 if packed else None) + keep_helper,
                 },
                 declarations=declarations,
                 implementation=implementation,
@@ -507,6 +563,9 @@ int {name}_dispatch(void *ctx, const void *const *inputs, void *const *outputs) 
     )
     files.update(runtime_files)
     launch_description = (
+        "Complete row groups run in synchronous bounded batches, reusing the checked frame after readback. "
+        "All results remain private until every batch succeeds."
+        if batched_loop else
         "All row groups run in one device loop and one launch, after initializing their inputs and constants."
         if row_loop is not None
         else "Each row group initializes inputs and constants, launches, waits and reads back."
@@ -525,8 +584,8 @@ ABI. The application supplies device-memory read/write callbacks, startup,
 linker script and final host build; use the application's float ABI (lp64d for
 the current Shuttle bring-up).
 
-Input scores must be signed zero or normal BF16 with magnitude at most 32 and
-exponent code at least 8. The call checks this domain before writing device
+Input scores must be signed zero or normal BF16 with magnitude at most {128 if relative else 32} and
+exponent code at least 8. {"At most 1024 columns are admitted. Kept row maxima must be in [-32,48], with exact row span at most " + str(span) + ". " if relative else ""}The call checks this domain before writing device
 memory. This selected policy uses Atlas exponential/reciprocal approximations
 and tile-wise rounding; it does not promise original-model softmax accuracy.
 
@@ -548,7 +607,8 @@ Standalone-core evidence does not qualify an integrated SoC or FPGA bitstream.
         if member(root, "manifest.json") != original:
             raise ValueError("softmax compilation changed during C export")
     if row_loop_compilation is not None:
-        _, final_loop_manifest = verify_row_loop(source, row_loop_compilation, target_source=target_source)
+        _, final_loop_manifest = verify_row_loop(source, row_loop_compilation, target_source=target_source,
+            static_output_exponent=static_output_exponent)
         if final_loop_manifest != loop_manifest:
             raise ValueError("row-loop compilation changed during C export")
     return {
@@ -558,17 +618,23 @@ Standalone-core evidence does not qualify an integrated SoC or FPGA bitstream.
         "engine": "merlin_native",
         "request_digest": source.digest(),
         "target_identity": source.target_identity,
+        **({"score_domain": score_domain,
+            "input_preflight": {"all_scores": "signed-zero-or-normal-exp-at-least8-abs-at-most128",
+                                "maximum_columns": ROWSPAN80_MAX_COLUMNS,
+                                "kept_row_maximum": [-32, 48], "exact_kept_row_span_at_most": span,
+                                "before_device_io": True}} if relative else {}),
         "tiling": plan.record(),
         "images": images,
-        **({"row_loop": row_loop.record(), "launches_per_invocation": 1} if row_loop is not None else {}),
+        **({"row_loop": row_loop.record(), "launches_per_invocation": row_loop.launches,
+            **({"groups_per_launch": row_loop.groups_per_launch} if batched_loop else {})} if row_loop is not None else {}),
         "workspace_bytes": workspace,
-        "device_arena_base": DRAM_BASE,
+        "device_arena_base": selected_io_base(),
         "device_arena_bytes": arena_bytes,
         "entry_function": name + "_run",
         "dispatch_function": name + "_dispatch",
         "dispatch_completion": "synchronous",
         "source_members": {
-            "atlas_host.h": digest(htext.encode()),
+            **{filename: digest(text.encode()) for filename, text in public.items()},
             "atlas_host.c": digest(ctext.encode()),
         },
         "startup_included": False,

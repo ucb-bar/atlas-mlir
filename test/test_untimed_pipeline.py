@@ -153,9 +153,10 @@ class UntimedPipelineTest(unittest.TestCase):
         timed = checked(self, program(DMA_SETUP + [WAIT, PUBLISH, HALT]), "--insert-atlas-delays", "--verify-atlas-timing")
         checked(self, timed, "--convert-atlas-to-llvm-calls", "--finalize-atlas-llvm-calls")
 
-    def test_dma_completion_cannot_escape_into_an_unchecked_successor(self) -> None:
+    def test_dma_completion_is_checked_in_the_successor(self) -> None:
         redirect = [("branch", 'kind = "beq", lhs = 0 : i32, rhs = 0 : i32, offset_bytes = 4 : i32'), nop()]
-        self.rejected(program(DMA_SETUP + redirect + [WAIT, HALT]), "--verify-atlas-timing", diagnostic="DMA completion before a block boundary")
+        checked(self, program(DMA_SETUP + redirect + [WAIT, HALT]), "--verify-atlas-timing")
+        self.rejected(program(DMA_SETUP + redirect + [HALT]), "--verify-atlas-timing", diagnostic="halts while DMA")
         checked(self, program(DMA_SETUP + [WAIT] + redirect + [HALT]), "--insert-atlas-delays", "--verify-atlas-timing")
 
     def test_manual_multiple_channels_remain_legal(self) -> None:

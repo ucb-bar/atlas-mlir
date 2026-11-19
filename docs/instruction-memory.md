@@ -36,6 +36,18 @@ Compilation accepts `--reduction-unroll auto|1|2|4|8`. Without a matching measur
 profile, `auto` uses factor 1 and records that decision. An explicit factor is
 useful for diagnosis; it can fail allocation or another backend check.
 
+## Resident activation panels
+
+`--looped-operand-reuse resident-a` keeps each M row group's activation tiles in FP8 registers across the N loop of an admitted ordered FP8 contraction. It currently requires `--native-pipeline mandatory`; its limits, records, and refusals are in [native options](native-options.md).
+
+```sh
+merlin-targetgen native-compile --looped-operand-reuse resident-a --native-pipeline mandatory --engine merlin_native --support atlas \
+  --snapshot "$SNAPSHOT" --request "$REQUEST" --abi auto \
+  --target-source "$ATLAS_ROOT" --mode diagnostic --out out/resident-compilation
+```
+
+The portable numerical regression is `test_resident_looped_mnk`. With compiler tools and the pinned npu_model checkout configured, set `ATLAS_RUN_NPU_MODEL=1` and `NPU_MODEL_ROOT` to the selected model checkout, then run the module from `test/`. It checks independent ordered arithmetic for two K panels, cancellation, external BF16 seeds, final-only ReLU, padded output lanes, unchanged operands, and surrounding DRAM guards.
+
 ## Measure variants
 
 Use the existing native snapshot and a typed whole-contraction request, for

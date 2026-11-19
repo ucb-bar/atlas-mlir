@@ -32,7 +32,8 @@ class AtlasCompileTest(unittest.TestCase):
         result = run("atlas-opt", PROGRAMS[0].read_text(), "--atlas-compile", "--dump-pass-pipeline")
         self.assertEqual(result.returncode, 0, result.stderr)
         pipeline = result.stderr[result.stderr.index("builtin.module("):]
-        self.assertEqual(re.findall(r"^\s+([a-z0-9-]+)", pipeline, re.M), PASSES)
+        self.assertEqual(re.findall(r"^\s+([a-z0-9-]+)", pipeline, re.M),
+                         PASSES[:-3] + ["finalize-atlas-mandatory-compilation"])
 
     def test_compiles_like_the_passes_it_names(self) -> None:
         for program in PROGRAMS:
