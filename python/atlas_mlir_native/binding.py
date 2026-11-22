@@ -2890,7 +2890,14 @@ class AtlasNativeBinding:
     def application_adapter(policy, *, original_source_sha256):
         from .application import AtlasApplicationAdapter
 
-        return AtlasApplicationAdapter(policy, original_source_sha256=original_source_sha256)
+        base = AtlasApplicationAdapter(policy, original_source_sha256=original_source_sha256)
+        from atlas_mlir_native.options import current_codegen_options
+        selected = current_codegen_options().adjacent_patterns.strip()
+        if not selected:
+            return base
+        from .composition_adapter import AdjacentDeviceAdapter
+
+        return AdjacentDeviceAdapter(base, patterns=tuple(name.strip() for name in selected.split(",")))
 
     @staticmethod
     def plan_boundary_abi(request: KernelRequest) -> dict:

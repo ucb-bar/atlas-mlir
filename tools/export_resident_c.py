@@ -24,8 +24,12 @@ def prepare(compiled, compile_inputs, policy_path, name, *, target_source):
     )
     from atlas_mlir_native.resident_graph import memory_plan
 
+    from atlas_mlir_native.c_runtime import runtime_headers
     from merlin.compile.c_sources import c_source_pair
-    from merlin.frontends.compile_inputs import load_compile_inputs, load_lifted_argument_bytes
+    from merlin.frontends.compile_inputs import (
+        load_compile_inputs,
+        load_lifted_argument_bytes,
+    )
     from merlin.semantic_compiler.model import KernelRequest
     from merlin.semantic_compiler.target_binding import verify_native_publication
 
@@ -208,9 +212,7 @@ extern const atlas_host_buffer {name}_device_buffers[{upper}_DEVICE_BUFFER_COUNT
     )
     rendered = c_source_pair(
         name,
-        public_headers={
-            "atlas_host.h": (target_source / "runtime/atlas_host.h").read_text()
-        },
+        public_headers=runtime_headers(target_source / "runtime"),
         private_headers={},
         sources={"image.c": "\n".join(definitions)},
         declarations=declarations,
