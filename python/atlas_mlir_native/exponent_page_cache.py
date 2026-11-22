@@ -83,7 +83,7 @@ class ExponentPageCache:
         return tuple(index for index, scope in enumerate(self.scopes) if scope != 'tile')
 
     def prefetch(self, scope, addresses, *, input_state, output_state, prefix):
-        from .exponent_restoration import Emitter, BF16, SLOT, STATE
+        from .exponent_restoration import Emitter, BF16, SLOT, STATE, EXPONENT_PAGE_PAYLOAD_BYTES
 
         e = Emitter(prefix)
         e.state = input_state
@@ -92,7 +92,7 @@ class ExponentPageCache:
                 continue
             if isinstance(address, int):
                 address = e.const(address)
-            page = e.effect('dma_load_bf16', [address, e.const(2048)], ['i32', 'i32'], BF16)
+            page = e.effect('dma_load_bf16', [address, e.const(EXPONENT_PAGE_PAYLOAD_BYTES)], ['i32', 'i32'], BF16)
             e.effect('save', ['restore_' + which, page], [SLOT, BF16])
         e.emit(f'cf.br ^{prefix}_ready(%{e.state} : {STATE})')
         e.lines.append(f'  ^{prefix}_ready(%{output_state}: {STATE}):')
