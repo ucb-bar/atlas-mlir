@@ -1,4 +1,5 @@
 #include "Atlas/AtlasTiming.h"
+#include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/StringSwitch.h"
 #include <algorithm>
 #include <cctype>
@@ -1003,13 +1004,15 @@ namespace {
 // Adds an edge, or raises the distance of an existing edge between the nodes.
 struct EdgeSet {
   DepGraph &g;
-  std::map<std::pair<int, int>, int> index;
+  // Only keyed lookup is needed here. Edge traversal follows g.edges, so hash
+  // bucket order cannot affect dependencies or the scheduler's tie order.
+  llvm::DenseMap<std::pair<int, int>, int> index{};
 
   void add(int from, int to, int distance, EdgeKind kind,
            const std::string &reason) {
-    auto it = index.find({from, to});
-    if (it == index.end()) {
-      index[{from, to}] = static_cast<int>(g.edges.size());
+    auto [it, inserted] = index.try_emplace(
+        std::make_pair(from, to), static_cast<int>(g.edges.size()));
+    if (inserted) {
       g.edges.push_back({from, to, distance, kind, reason});
     } else if (distance > g.edges[it->second].distance) {
       g.edges[it->second] = {from, to, distance, kind, reason};
@@ -1031,7 +1034,7 @@ DepGraph mlir::atlas::timing::buildGraph(const std::vector<Instr> &instrs,
     applyScalar(in, regs);
   }
 
-  EdgeSet edges{g, {}};
+  EdgeSet edges{g};
   for (int b = 0; b < n; b++)
     for (int a = 0; a < b; a++) {
       if (work && failed(work->charge())) return g;
