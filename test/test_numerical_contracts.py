@@ -383,6 +383,33 @@ def test_source_f32_arithmetic_claims_its_host_family_and_refuses_other_semantic
         generate(replace(source, nodes=(*inputs, replace(node, attrs=(("numeric_semantics", "other-v1"),)))))
 
 
+def test_one_graph_combines_host_f32_arithmetic_and_both_casts():
+    from atlas_mlir_native.application import AtlasApplicationAdapter
+    from atlas_mlir_native.generated_policy import adapter_for_claims
+
+    narrow, wide = TensorType((2, 3), "bf16", "raw-bit-pattern"), TensorType((2, 3), "f32", "raw-bit-pattern")
+    maps = pointwise_identity_maps(2, 1), pointwise_identity_maps(2, 2)
+
+    def node(key, op, inputs, type_, semantics):
+        return SemanticNode(key, op, inputs, type_, attrs=(("numeric_semantics", semantics),),
+                            index_maps=maps[len(inputs) - 1])
+
+    inputs = (SemanticNode("x", "input", (), narrow, effect="input"), SemanticNode("y", "input", (), wide, effect="input"))
+    nodes = (*inputs, node("w", "bf16_to_f32", ("x",), wide, "bf16-to-f32-exact-v1"),
+             node("p", "f32_mul", ("w", "y"), wide, "ieee754-f32-mul-rne-v1"),
+             node("q", "f32_div", ("p", "y"), wide, "ieee754-f32-div-rne-v1"),
+             node("out", "f32_to_bf16", ("q",), narrow, "f32-to-bf16-rne-v1"))
+    source = KernelRequest(nodes, ("out",), ("external",), tuple((item.id, "external") for item in inputs),
+                           "declared-target")
+    policy = generate(source)
+    claims = tuple((row["node"], row["family"]) for row in policy["selected_families"])
+    assert dict(claims) == {"w": "atlas.exact-bf16-to-f32", "p": "atlas.host-f32-mul", "q": "atlas.host-f32-div",
+                            "out": "atlas.exact-f32-to-bf16"}
+    adapter = adapter_for_claims(AtlasApplicationAdapter, source, claims, source_sha256="a" * 64, policy_json="{}")
+    assert adapter.host_float_arithmetic == ("f32_div", "f32_mul")
+    assert adapter.host_float_casts == ("bf16_to_f32", "f32_to_bf16")
+
+
 @pytest.mark.parametrize("op,semantics,src,dst", [("bf16_to_f32", "bf16-to-f32-exact-v1", "bf16", "f32"),
                                                   ("f32_to_bf16", "f32-to-bf16-rne-v1", "f32", "bf16")])
 def test_source_casts_claim_their_exact_family_with_a_host_alternate(op, semantics, src, dst):
