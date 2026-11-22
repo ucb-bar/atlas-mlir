@@ -44,6 +44,15 @@ with measurements. Historical performance numbers are context, not this branch's
 - Built Rust simulator revision `0186e3781284f4a9ec9d148ac99ec24e05aaf0b8` and added
   issued DMA beat/byte counters on its local `perf/compiler-metrics` branch.
   Fifteen CPU regression tests and Clippy pass; the CUDA test remains optional.
+- Added explicit Rust `pack_layout="register_rows"` for this compiler's pinned
+  RTL. The Rust port's default `tile_rows` targets a newer Python model layout;
+  using it for raw quantizer PACK changes outputs. Rust commit `a231973` preserves
+  that default and adds the selected layout, including read/write timing. All
+  recorded RTL vector traces now run, including four previously excluded PACK
+  and UNPACK cases (16 CPU tests pass). The application harness selects and
+  checks `register_rows` explicitly. The panel comparison and independent MLP
+  intermediate checks pass again with this setting; panel cycles and traffic
+  are unchanged. New panel artifacts: `out/efficiency/official-panel-register-128-128-768`.
 - Built Atlas with the LLVM installation's matching C/C++ compiler. The baseline
   CMake needed LLVM's space-separated definitions split before `add_definitions`.
   The initial system-compiler build crashed during builtin MLIR initialization
@@ -156,3 +165,6 @@ all outputs and rejection/publication behavior. Retain unsuccessful experiments
 and report regressions. Simulator measurements describe this model and configuration;
 they do not establish board performance. Current focus is reducing actual work
 under the existing constraints, with larger software budgets treated separately.
+For this compiler, select `pack_layout="register_rows"` in Rust bundles. Arithmetic
+mode `numerics="rtl"` alone does not select register layout. The current selected
+Rust binary SHA256 is `1d141164229004be150bd89c436b5edd15453089ef369edf1506201af29f890a`.

@@ -120,7 +120,8 @@ def execute(physical, memory, base, destination):
     (destination / 'input.bin').write_bytes(memory)
     bundle = dict(schema_version=1,
                   words=[row['word_u32'] for row in physical['instructions']],
-                  config=dict(numerics='rtl', dram_base=base, dram_size=len(memory)),
+                  config=dict(numerics='rtl', pack_layout='register_rows',
+                              dram_base=base, dram_size=len(memory)),
                   memory_regions=[dict(address=base, file='input.bin')])
     program = destination / 'program.json'
     program.write_text(json.dumps(bundle)+'\n')
@@ -132,6 +133,7 @@ def execute(physical, memory, base, destination):
     assert result.returncode == 0, result.stderr + result.stdout
     stats = json.loads(result.stdout)
     assert stats['completed'], stats
+    assert stats['pack_layout'] == 'register_rows', stats
     (destination / 'stats.json').write_text(json.dumps(stats, indent=2) + '\n')
     first = base - base % 4096
     pages = []
