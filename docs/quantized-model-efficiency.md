@@ -428,8 +428,31 @@ The prefix/generated-C suite passes 20 cases; the broader counted, resident,
 panel, interleaving and work-bound suite passes 42 tests and 42 subtests (six
 optional Python-model integrations are separately gated).
 
+Generated contraction C now uploads and initializes only each exponent page's
+128-byte payload, retaining its existing 2,048-byte stride and allocation.
+Resident exponents remain untouched; other operand uploads and permission spans
+are unchanged. Quantizer C downloads only the logical exponent words, including
+short final bodies, while retaining device DMA alignment. All required transfers
+still complete before public output is copied.
+
+The captured linear fixture's host uploads fall **8,192 → 4,352 bytes (46.875%)**.
+The 33-launch version's host downloads fall **4,100 → 3,204 bytes**; the two-launch
+version already downloads 3,204 bytes. Its **43,238 device cycles**, 4,352 DMA read
+bytes, 3,232 DMA write bytes and exact public output remain unchanged. Host time
+is not measured: multiple exponent pages now use multiple smaller callbacks.
+Artifacts: `out/efficiency/captured-linear-host-padding-final`, with matched input,
+output and simulator/compiler provenance.
+
+The transport/residency/epilogue suite passes **40 tests and 32 subtests** (two
+optional integrations gated), and the quantizer batching/application suite passes
+**29 tests and 32 subtests** (one optional integration gated). Four additional
+generated-C executions cover both pipelines, multi-page BF16 and batched f32 QK
+outputs against independently calculated dot products, poisoned host/device page
+padding, protected memory, unchanged inputs, and atomic refusal of a bad final
+exponent. A last-upload failure also prevents launch, download and publication.
+
 Next: extend the handoff proof to useful larger physical layouts before changing
-application selection. Reduce padded host transfers, preserve exceptional scan
+application selection. Evaluate short-row output transfers, preserve exceptional scan
 granularity while reducing quantizer reads, and examine residency and compiler
 register pressure. Investigate the panel scheduling tradeoffs before broadening
 scalar-literal reuse across control-flow boundaries.

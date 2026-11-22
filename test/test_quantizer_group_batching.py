@@ -116,6 +116,9 @@ def test_exported_application_keeps_group_exponents_special_values_and_tails(tmp
     exponents = ctypes.create_string_buffer(bytes([0x7a])*(len(expected_exponents)+64))
     application.invoke([argument], [codes, exponents])
     assert len(application.stats) == launches
+    # Device DMA padding is private; the host reads only public code/exponent
+    # bytes, including the last body with a non-beat-sized exponent result.
+    assert application.download_bytes == len(expected_codes) + len(expected_exponents)
     assert argument.raw[:len(raw)] == raw
     for actual, expected in ((codes, expected_codes), (exponents, expected_exponents)):
         assert actual.raw[:len(expected)] == expected

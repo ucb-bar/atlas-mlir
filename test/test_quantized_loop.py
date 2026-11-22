@@ -115,7 +115,11 @@ static uint32_t read32(void *c,uintptr_t a){(void)c;++calls;return a==0x40004u?s
 static void write32(void *c,uintptr_t a,uint32_t v){(void)c;++calls;if(a==0x40018u&&v==1u)++starts;}
 static int put(void *c,uintptr_t a,const uint8_t *v,size_t n){
  (void)c;++calls;++puts;const uintptr_t addresses[]={@ADDRESSES@};const size_t sizes[]={@SIZES@};
- for(unsigned i=0;i<4u;++i)if(a==addresses[i]&&n==sizes[i])return memcmp(v,expected[i],n)!=0;return 1;
+ if(mode==3 && puts==@WRITES@u)return 1;
+ for(unsigned i=0;i<2u;++i)if(a==addresses[i]&&n==sizes[i])return memcmp(v,expected[i],n)!=0;
+ for(unsigned i=2;i<4u;++i)if(a>=addresses[i]&&a-addresses[i]<sizes[i]&&
+     (a-addresses[i])%2048u==0u&&n==128u)return memcmp(v,expected[i]+a-addresses[i],n)!=0;
+ return 1;
 }
 static int get(void *c,uintptr_t a,uint8_t *v,size_t n){
  (void)c;++calls;++gets;if(mode==2)return 1;
@@ -124,16 +128,27 @@ static int get(void *c,uintptr_t a,uint8_t *v,size_t n){
 }
 unsigned callback_count(void){return calls;}unsigned start_count(void){return starts;}
 unsigned write_count(void){return puts;}unsigned read_count(void){return gets;}
+int padding_untouched(void){
+ const size_t offsets[]={@EXPOFFSETS@},sizes[]={@EXPSIZES@};
+ for(unsigned i=0;i<2u;++i)for(size_t page=0;page<sizes[i];page+=2048u)
+   for(size_t byte=128u;byte<2048u;++byte)if(raw[offsets[i]+page+byte]!=0xa5u)return 0;
+ return 1;
+}
 int invoke(const void *a,const void *sx,const void *w,const void *sw,void *out,
  const uint8_t *pa,const uint8_t *pw,const uint8_t *pea,const uint8_t *pew,const uint8_t *res,int fail){
  calls=starts=puts=gets=0;expected[0]=pa;expected[1]=pw;expected[2]=pea;expected[3]=pew;result=res;mode=fail;
+ memset(raw,0xa5,sizeof(raw));
  if(atlas_host_init(&host,(atlas_host_map){0x20000u,0x40000u,131072u},(atlas_host_mmio){read32,write32,0},(atlas_host_memory){1,0,0}))return -1;
  if(probe_bind(&region,&host,(atlas_tile_memory_io){put,get,0},raw,sizeof(raw),20u))return -2;
  if(probe_source_bind(&source,&region,converted,sizeof(converted)))return -3;
  const void *inputs[]={a,sx,w,sw};void *outputs[]={out};return probe_source_dispatch(&source,inputs,outputs);
 }
 '''
+                writes=2+sum(geometry['pages'] for geometry in execution['exponent_layouts'])
                 for key,value in {'ADDRESSES':','.join(str(v)+'u' for v in inputs),'SIZES':','.join(str(v)+'u' for v in sizes),
+                    'WRITES':str(writes),
+                    'EXPOFFSETS':','.join(str(sum(execution['input_buffer_bytes'])+sum(execution['exponent_buffer_bytes'][:i]))+'u' for i in range(2)),
+                    'EXPSIZES':','.join(str(size)+'u' for size in execution['exponent_buffer_bytes']),
                     'STATUS':str(execution['status_address'])+'u','OUT':str(execution['output_addresses'][0])+'u',
                     'OUTBYTES':str(execution['output_bytes'])+'u'}.items():text=text.replace('@'+key+'@',value)
                 (dest/'shim.c').write_text(text)
@@ -170,10 +185,13 @@ int invoke(const void *a,const void *sx,const void *w,const void *sw,void *out,
                     return lib.invoke(*(v.ctypes.data for v in (a,sx,w,sw,target,pa,pw,pea,pew,device_words)),mode)
                 frozen=[v.tobytes() for v in (a,w,sx,sw)]
                 self.assertEqual(invoke(),0);np.testing.assert_array_equal(output,expected)
-                self.assertEqual((lib.start_count(),lib.write_count(),lib.read_count()),(1,4,2))
+                self.assertEqual(lib.padding_untouched(),1)
+                self.assertEqual((lib.start_count(),lib.write_count(),lib.read_count()),(1,writes,2))
                 self.assertEqual(invoke(1),2);self.assertTrue(np.all(output.view(np.uint8)==0xa5))
-                self.assertEqual((lib.start_count(),lib.write_count(),lib.read_count()),(1,4,1))
+                self.assertEqual((lib.start_count(),lib.write_count(),lib.read_count()),(1,writes,1))
                 self.assertEqual(invoke(2),3);self.assertTrue(np.all(output.view(np.uint8)==0xa5))
+                self.assertEqual(invoke(3),3);self.assertTrue(np.all(output.view(np.uint8)==0xa5))
+                self.assertEqual((lib.start_count(),lib.write_count(),lib.read_count()),(0,writes,0))
                 self.assertEqual(invoke(target=a),1);self.assertEqual(lib.callback_count(),0)
                 self.assertEqual(frozen,[v.tobytes() for v in (a,w,sx,sw)])
                 original=int(a.flat[-1]);a.flat[-1]=0x7f

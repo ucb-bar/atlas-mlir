@@ -238,9 +238,9 @@ static __attribute__((unused)) int atlas_quantize_dispatch(const atlas_quantize_
   atlas_host_result result=atlas_host_start(region->host,buffers,3u);
   if (result==ATLAS_HOST_OK) result=atlas_host_wait(region->host,region->max_polls);
   if (result!=ATLAS_HOST_OK) return 4;
-  for (size_t i=1;i<3u;++i)
-    if (region->io.read(region->io.context,buffers[i].address,
-                        region->workspace+(buffers[i].address-plan->input_address),buffers[i].size_bytes)) return 3;
+  for (size_t i=0;i<2u;++i)
+    if (region->io.read(region->io.context,plan->input_address+plan->output_offset[i],
+                        region->workspace+plan->output_offset[i],plan->output_bytes[i])) return 3;
   for (size_t i=0;i<2u;++i) __builtin_memcpy(outputs[i],region->workspace+plan->output_offset[i],plan->output_bytes[i]);
   return 0;
 }

@@ -11,6 +11,7 @@ from merlin.compiler.semantic.target_binding import verify_native_publication
 
 from .already_quantized import prepare_source
 from .binding import TARGET_IDENTITY
+from .exponent_restoration import EXPONENT_PAGE_PAYLOAD_BYTES
 from .quantized_loop import execution_layout
 from .quantized_loop_sizing import selected_route
 from .shared_dispatch_c import guarded
@@ -85,7 +86,8 @@ static __attribute__((unused)) int atlas_matmul_dispatch(const atlas_matmul_plan
   if (p->extra && p->extra(inputs[p->extra_input],ctx->workspace)) return 2;
   atlas_host_result status=atlas_host_ensure_loaded(region->host,p->words,p->word_count);
   if (status!=ATLAS_HOST_OK) return 4;
-  __builtin_memset(w,0,p->pack_bytes);
+  if (!p->streamed) for (size_t i=0;i<2u;++i)
+    if (!p->reads[i].resident) __builtin_memset(w+p->reads[i].offset,0,p->reads[i].bytes);
   if (!(p->resident>>p->ia&1u))
     for (size_t batch=0;batch<p->batches;++batch) for (size_t mt=0;mt<mc;++mt) for (size_t kt=0;kt<kc;++kt) {
       size_t tile=((batch*mc+mt)*kc+kt)*1024u; uint8_t *t=p->streamed?w:w+tile;
@@ -108,11 +110,11 @@ static __attribute__((unused)) int atlas_matmul_dispatch(const atlas_matmul_plan
     size_t pages=x->mode==1u?x->batches*x->tiles:x->mode==2u?x->pages:0u;
     for (size_t page=0;page<pages;++page) {
       uint8_t *t=p->streamed?w:w+x->offset+page*2048u;
-      if (p->streamed) __builtin_memset(w,0,2048u);
+      __builtin_memset(t,0,@EXPONENT_PAGE_PAYLOAD_BYTES@u);
       if (x->mode==2u) __builtin_memcpy(t,source+page*4u,4u);
       else for (size_t row=page%x->tiles*32u;row<page%x->tiles*32u+32u && row<x->rows;++row)
         __builtin_memcpy(t+(row%32u)*4u,source+(page/x->tiles*x->rows+row)*4u,4u);
-      if (p->streamed && io->write(io->context,p->reads[2u+e].address+page*2048u,w,2048u)) return 3;
+      if (p->streamed && io->write(io->context,p->reads[2u+e].address+page*2048u,w,@EXPONENT_PAGE_PAYLOAD_BYTES@u)) return 3;
     }
   }
   if (p->extra) {
@@ -128,7 +130,12 @@ static __attribute__((unused)) int atlas_matmul_dispatch(const atlas_matmul_plan
   atlas_host_buffer buffers[7];
   for (size_t i=0;i<p->read_count;++i) {
     const atlas_transfer *t=&p->reads[i];
-    if (!p->streamed && !t->resident && io->write(io->context,t->address,w+t->offset,t->bytes)) return 3;
+    if (!p->streamed && !t->resident) {
+      if (i==2u || i==3u) {
+        for (size_t page=0;page<t->bytes;page+=2048u)
+          if (io->write(io->context,t->address+page,w+t->offset+page,@EXPONENT_PAGE_PAYLOAD_BYTES@u)) return 3;
+      } else if (io->write(io->context,t->address,w+t->offset,t->bytes)) return 3;
+    }
     buffers[i]=(atlas_host_buffer){t->address,t->bytes,ATLAS_HOST_DEVICE_READ};
   }
   buffers[p->read_count]=(atlas_host_buffer){p->output_address,p->device_output_bytes,ATLAS_HOST_DEVICE_WRITE};
@@ -153,7 +160,7 @@ static __attribute__((unused)) int atlas_matmul_dispatch(const atlas_matmul_plan
     }
   __builtin_memcpy(out,ctx->workspace,p->output_bytes); return 0;
 }
-""")
+""".replace('@EXPONENT_PAGE_PAYLOAD_BYTES@',str(EXPONENT_PAGE_PAYLOAD_BYTES)))
 
 
 def _resident_dispatch_helpers():
@@ -444,6 +451,7 @@ int {name}_source_bind_index({name}_source_context *ctx,{name}_context *region,v
     files.update(runtime_files)
     record=dict(kind="already_quantized",schema="atlas.already_quantized_c_package.v1",package_name=name,
         execution_route='checked_counted_image',launches_per_invocation=1,restoration_placement='device',
+        exponent_page_upload_bytes=EXPONENT_PAGE_PAYLOAD_BYTES,
         context_type=name+"_context",source_context_type=name+"_source_context",binding_function=name+"_bind",
         source_binding_function=name+"_source_bind",workspace_bytes=raw,source_workspace_bytes=converted,
         readout_scale_domain="device admitted signed exponent sums in [-133,127]; finite normal BF16 or positive zero",

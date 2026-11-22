@@ -218,7 +218,8 @@ class QuantizedResidentTest(unittest.TestCase):
                     at = plan.physical_operand_ids.index(node_id) if operand else plan.exponent_ids.index(node_id)
                     address = layout['input_addresses' if operand else 'exponent_addresses'][at]
                     value = {'a': 0x38, 'w': 0x40, 'sx': 17, 'sw': 19}[node_id]
-                    expected.append(f' if(a=={address}u && n=={spans[node_id]["bytes"]}u) {{'
+                    transfer_bytes = spans[node_id]['bytes'] if operand else 128
+                    expected.append(f' if(a=={address}u && n=={transfer_bytes}u) {{'
                                     f'for(size_t i=0;i<n;++i)if(v[i]!=(i?0u:{value}u))return 1;return 0;}}')
                 shim = '''#include "probe.h"
 #include <string.h>

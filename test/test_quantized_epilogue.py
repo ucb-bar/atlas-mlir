@@ -167,7 +167,12 @@ static uint32_t read32(void *c,uintptr_t a) { (void)c; ++calls; return a==0x4000
 static void write32(void *c,uintptr_t a,uint32_t v) { (void)c; ++calls; if(a==0x40018u&&v==1u) ++starts; }
 static int put(void *c,uintptr_t a,const uint8_t *v,size_t n) {
   (void)c; ++calls; ++puts; const uintptr_t addresses[]={@ADDRESSES@}; const size_t sizes[]={@SIZES@};
-  for(unsigned i=0;i<5u;++i) { if(a==addresses[i]&&n==sizes[i]) return memcmp(v,expected[i],n)!=0; }
+  for(unsigned i=0;i<5u;++i) {
+    if(i==2u||i==3u) {
+      if(a>=addresses[i]&&a-addresses[i]<sizes[i]&&(a-addresses[i])%2048u==0u&&n==128u)
+        return memcmp(v,expected[i]+a-addresses[i],n)!=0;
+    } else if(a==addresses[i]&&n==sizes[i]) return memcmp(v,expected[i],n)!=0;
+  }
   return 1;
 }
 static int get(void *c,uintptr_t a,uint8_t *v,size_t n) {
@@ -225,9 +230,10 @@ int invoke(const void *a,const void *sx,const void *w,const void *sw,const void 
                     return lib.invoke(*(value.ctypes.data for value in (a, sx, w, sw, other, target, pa, pw, pea, pew, px, device)), mode)
                 frozen = [value.tobytes() for value in (a, sx, w, sw, other)]
                 self.assertEqual(invoke(), 0); np.testing.assert_array_equal(output, expected)
-                self.assertEqual((lib.start_count(), lib.write_count(), lib.read_count()), (1, 5, 2))
+                writes = 3 + sum(geometry['pages'] for geometry in layout['exponent_layouts'])
+                self.assertEqual((lib.start_count(), lib.write_count(), lib.read_count()), (1, writes, 2))
                 self.assertEqual(invoke(1), 2); self.assertTrue(np.all(output.view(np.uint8) == 0xa5))
-                self.assertEqual((lib.start_count(), lib.write_count(), lib.read_count()), (1, 5, 1))
+                self.assertEqual((lib.start_count(), lib.write_count(), lib.read_count()), (1, writes, 1))
                 self.assertEqual(invoke(target=other), 1); self.assertEqual(lib.callback_count(), 0)
                 saved = other.flat[-1]; other.flat[-1] = 0x7f80 if dtype == 'bf16' else np.nan
                 self.assertEqual(invoke(), 2); self.assertEqual(lib.callback_count(), 0)
