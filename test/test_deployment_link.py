@@ -290,6 +290,38 @@ int run(int x) { volatile char b[64]; b[0] = (char)x; return table[x & 1](b[0]) 
                 with self.assertRaisesRegex(Refusal, expected):
                     d.generated_stack(objects, readelf)
 
+    def test_resident_regions_load_their_image_by_direct_call_so_the_bound_accepts_them(self):
+        """The resident runtime's call shape: a region binds and loads its image, then dispatches with the status.
+
+        The image load reaches the host transport through an indirect call. Passed as a callback, the region's
+        load is address-taken, so that indirect call may reach it and the bound refuses a cycle; called directly,
+        the bound accepts it.
+        """
+        from atlas_mlir_native.quantized_loop_c import _resident_dispatch_helpers
+        helpers = _resident_dispatch_helpers()
+        self.assertIn('void *const *outputs,atlas_host_result loaded) {', helpers)
+        self.assertNotIn('(*load)', helpers)
+        common = ('typedef int (*transport)(int);\n'
+                  '__attribute__((noinline)) int host_write(int x) { volatile char b[16]; b[0] = (char)x; return b[0]; }\n'
+                  '__attribute__((noinline)) int host_read(int x) { volatile char b[8]; b[0] = (char)x; return b[0]; }\n'
+                  'static transport const host_io[] = {host_write, host_read};\n'
+                  '__attribute__((noinline)) int host_load(int x) { volatile char b[16]; b[0] = (char)x; '
+                  'return host_io[x & 1](b[0]); }\n'
+                  '__attribute__((noinline)) int region_resident_image_bind(int x) { return host_load(x) + 1; }\n'
+                  '__attribute__((noinline)) int region_resident_load(int x) { return region_resident_image_bind(x); }\n')
+        direct = common + ('__attribute__((noipa)) int dispatch(int x, int loaded) { volatile char b[32]; '
+                           'b[0] = (char)x; return b[0] + loaded; }\n'
+                           'int region(int x) { return dispatch(x, region_resident_load(x)); }\n')
+        callback = common + ('__attribute__((noipa)) int dispatch(int x, int (*load)(int)) { volatile char b[32]; '
+                             'b[0] = (char)x; return b[0] + load(x); }\n'
+                             'int region(int x) { return dispatch(x, region_resident_load); }\n')
+        objects, readelf = self.objects(direct)
+        usage = d.generated_stack(objects, readelf)
+        self.assertEqual(usage['generated_worst_path'][:2], ['region', 'region_resident_load'])
+        objects, readelf = self.objects(callback)
+        with self.assertRaisesRegex(Refusal, 'call cycle through .*region_resident_load'):
+            d.generated_stack(objects, readelf)
+
     def compile_files(self, *sources, directory=None):
         import shutil
         compiler, readelf = shutil.which('riscv64-unknown-elf-gcc'), shutil.which('riscv64-unknown-elf-readelf')
@@ -656,6 +688,101 @@ class StartupTests(unittest.TestCase):
             log.write_text('Manually-specified variables were not used by the project:\n PLATFORM')
             with self.assertRaisesRegex(Refusal, 'unused platform'):
                 d._configure_check(log)
+
+
+class ResidentElfRecordTests(unittest.TestCase):
+    """The link check of a resident deployment on a real linked RISC-V ELF: arena bytes, image set, and core errata."""
+    HOST, WINDOW, RESIDENT = 0x80000000, 0x80010000, 0x80011000
+    CLOCK = 100000000
+
+    def setUp(self):
+        import hashlib
+        import shutil
+        self.compiler = shutil.which('riscv64-unknown-elf-gcc')
+        self.assertTrue(self.compiler and shutil.which('riscv64-unknown-elf-objdump'),
+                        'RISC-V GCC and objdump are required')
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.sha = lambda data: hashlib.sha256(data).hexdigest()
+        self.image = (0x73).to_bytes(4, 'little')  # the counted image linked as a symbol
+        self.template = (0x40001057).to_bytes(4, 'little')  # a resident image's template, bound at run time
+        self.arena = bytes(range(1, 33)) + bytes(32)
+
+    def link(self, bind_body='nop', arena=None, resident_flags=4):
+        """Link the host, one counted image in the window, and the arena; the resident bind runs bind_body."""
+        image = 'atlas_image_' + self.sha(self.image)
+        arena = self.arena if arena is None else arena
+        words = lambda data: ', '.join(f'0x{byte:02x}' for byte in data)
+        (self.root / 'case.S').write_text(
+            '.globl _start, __wrap_main, uart_init, main, trap_vector, region_000_resident_image_bind\n'
+            '.text\n_start:\nj __wrap_main\n__wrap_main:\ncall uart_init\ncall main\nj __wrap_main\n'
+            'uart_init:\nret\nmain:\ncall region_000_resident_image_bind\nret\n'
+            f'region_000_resident_image_bind:\n{bind_body}\nret\ntrap_vector:\nj trap_vector\n'
+            f'.section .rodata\nregion_000_resident_image_template:\n.byte {words(self.template)}\n'
+            '.data\n.globl sys_clk_freq\n.type sys_clk_freq, @object\n.size sys_clk_freq, 8\n'
+            f'sys_clk_freq:\n.quad {self.CLOCK}\n'
+            f'.section .window,"aw",@progbits\n.space 64\n.globl {image}\n.type {image}, @object\n'
+            f'.size {image}, 4\n{image}:\n.byte {words(self.image)}\n'
+            f'.section .atlas_resident,"a",@progbits\n.byte {words(arena)}\n')
+        (self.root / 'chip.ld').write_text(
+            f'MEMORY {{ HOST (rwx) : ORIGIN = {self.HOST}, LENGTH = 0x10000\n'
+            f'WINDOW (rw) : ORIGIN = {self.WINDOW}, LENGTH = 0x1000\n'
+            f'RESIDENT (r) : ORIGIN = {self.RESIDENT}, LENGTH = {len(self.arena)} }}\n'
+            f'PHDRS {{ host PT_LOAD; window PT_LOAD; resident PT_LOAD FLAGS({resident_flags}); }}\nENTRY(_start)\n'
+            'SECTIONS {\n'
+            '.text : { *(.text*) } >HOST :host\n.rodata : { *(.rodata*) } >HOST :host\n'
+            '.data : { *(.data*) } >HOST :host\n__heap_start = ALIGN(16);\n__heap_end = __heap_start + 256;\n'
+            '__stack_start = __heap_end;\n__stack_end = __stack_start + 1024;\n__sp = __stack_end;\n'
+            '.window : { KEEP(*(.window)) } >WINDOW :window\n'
+            '.atlas_resident : { KEEP(*(.atlas_resident)) } >RESIDENT :resident\n}\n')
+        elf = self.root / 'chip.elf'
+        subprocess.run([self.compiler, '-march=rv64gcv', '-mabi=lp64d', '-nostdlib', '-T', 'chip.ld',
+                        '-o', elf.name, 'case.S'], cwd=self.root, check=True, capture_output=True)
+        return elf
+
+    def deployment(self, resident_images=1):
+        loads = [dict(name='parameter_a', address=self.RESIDENT, bytes=32, sha256=self.sha(self.arena[:32]))]
+        images = [dict(sha256=self.sha(self.image), upload_convention='counted_ensure_loaded')]
+        images += [dict(sha256=self.sha(self.template), upload_convention='resident_template_bind')] * resident_images
+        return dict(host_allocation=dict(address=self.HOST, usable_bytes=0x10000),
+                    window=dict(address=self.WINDOW, bytes=0x1000), window_required_bytes=64,
+                    provider=dict(images=images), parameters=None,
+                    resident=dict(address=self.RESIDENT, bytes=len(self.arena), loads=loads))
+
+    def record(self, elf, deployment):
+        return d._elf_record(elf, deployment, dict(clock_hz=self.CLOCK, receiver_baud=115200))
+
+    def test_a_resident_elf_links_its_arena_read_only_and_its_counted_images_as_symbols(self):
+        record = self.record(self.link(), self.deployment())
+        self.assertEqual(record['resident_loads'], 1)
+        self.assertEqual(list(record['instruction_images']), [self.sha(self.image)])
+        self.assertTrue(record['startup_qualification']['core_errata_clear'])
+        self.assertEqual(next(row['flags'] for row in record['loads'] if row['address'] == self.RESIDENT), 4)
+
+    def test_a_changed_resident_byte_or_a_writable_arena_is_refused(self):
+        changed = bytearray(self.arena)
+        changed[5] ^= 1
+        with self.assertRaisesRegex(Refusal, 'linked resident load differs from its packed asset: parameter_a'):
+            self.record(self.link(arena=bytes(changed)), self.deployment())
+        with self.assertRaisesRegex(Refusal, 'read-only parameters and resident arena'):
+            self.record(self.link(resident_flags=6), self.deployment())
+
+    def test_only_resident_images_are_exempt_from_the_linked_image_set(self):
+        deployment = self.deployment()
+        deployment['provider']['images'].append(dict(sha256=self.sha(b'unlinked'), upload_convention='counted_ensure_loaded'))
+        with self.assertRaisesRegex(Refusal, 'linked instruction images differ from the deployment image set'):
+            self.record(self.link(), deployment)
+
+    def test_resident_host_code_gets_the_core_errata_scan(self):
+        """A resident image is device code in read-only data; the host code that binds it is scanned like all code."""
+        for body, issue in (('vfmv.f.s fa4,v8', 'vfmv.f.s at 0x[0-9a-f]+ in region_000_resident_image_bind.*PR 22'),
+                            ('fence.i', 'fence.i at 0x[0-9a-f]+ in region_000_resident_image_bind.*issue 19')):
+            with self.subTest(body=body), self.assertRaisesRegex(Refusal, issue):
+                self.record(self.link(bind_body=body), self.deployment())
+        # The template word matches vfmv.f.s, but it is never host code, so the scan does not decode it.
+        self.assertEqual(self.template, (0x40001057).to_bytes(4, 'little'))
+        self.record(self.link(), self.deployment())
 
 
 class StepLinkTests(unittest.TestCase):

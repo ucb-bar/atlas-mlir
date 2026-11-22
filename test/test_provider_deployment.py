@@ -120,6 +120,48 @@ def test_board_ddr_window_ends_ddr_after_a_host_at_its_base(tmp_path):
         assert AtlasApplicationAdapter.deployment_requirements(regions(), tmp_path) is None
 
 
+def test_resident_board_stages_in_a_capacity_prefix_and_reads_resident_operands_in_place(tmp_path):
+    from atlas_mlir_native.soc import SOC
+    ddr = SOC.memory_region("ddr")
+    base, staging = ddr.base + 28672, 1 << 20
+    plan = counted(base)
+    arena = ddr.end - 4096
+    plan.update(input_addresses=[base, arena], exponent_addresses=[base + 4096, arena + 2048],
+                resident_bindings=[dict(address=arena, bytes=1024), dict(address=arena + 2048, bytes=2048)])
+    publish(tmp_path, plan)
+    options = dict(io_memory_base=base, io_memory_bytes=staging, io_memory_capacity_base=base,
+                   io_memory_capacity_bytes=ddr.end - base)
+    with codegen_options(CodegenOptions(application_residency=True, **options)):
+        result = AtlasApplicationAdapter.deployment_requirements(regions(), tmp_path)
+    assert result["window"] == dict(address=base, bytes=staging) and result["resident_section"] == ".atlas_resident"
+    assert all(row["address"] < base + staging for row in result["reservations"])
+    assert len(result["reservations"]) == 4  # one input, one exponent, the output, and the status
+    assert [row["upload_convention"] for row in result["images"]] == ["resident_template_bind"]
+    # Without residency the same split is not a board geometry, and resident operands stay refused elsewhere.
+    with codegen_options(CodegenOptions(**options)):
+        assert AtlasApplicationAdapter.deployment_requirements(regions(), tmp_path) is None
+    with codegen_options(CodegenOptions(application_residency=True, **dict(options, io_memory_bytes=ddr.end - base))):
+        assert "resident_section" in AtlasApplicationAdapter.deployment_requirements(regions(), tmp_path)
+    with pytest.raises(NativeCompilationError, match="does not support resident bindings"):
+        requirements(tmp_path)
+
+
+def test_a_resident_deployment_refused_by_its_source_replay_is_a_compile_refusal(monkeypatch):
+    from atlas_mlir_native import resident_deployment
+
+    calls = []
+
+    def replay(*args, source_request_digest):
+        calls.append((args, source_request_digest))
+        raise ValueError("resident context differs from its source")
+
+    monkeypatch.setattr(resident_deployment, "checked_resident_deployment", replay)
+    with pytest.raises(NativeCompilationError, match="resident deployment: resident context differs") as refused:
+        AtlasApplicationAdapter.admit_resident_deployment("regions", "sources", "root", "target",
+                                                         source_request_digest="digest")
+    assert refused.value.status == "unsupported_semantics"
+    assert calls == [(("regions", "sources", "root", "target"), "digest")]
+
 def test_provider_declines_unsupported_geometry(tmp_path):
     with codegen_options(CodegenOptions(io_memory_base=BASE, io_memory_bytes=786432)):
         assert AtlasApplicationAdapter.deployment_requirements(regions(), tmp_path) is None

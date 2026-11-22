@@ -87,6 +87,12 @@ def prepare_binding(context):
         if len(path.read_bytes()) != row['bytes'] or digest(path) != row['sha256']:
             raise Refusal('compiled immutable parameter bytes changed')
         payloads[row['path']] = path.read_bytes()
+    # The resident arena is the compiler's published image of its resident loads, linked as one read-only load.
+    for row in [deployment['resident']] if deployment.get('resident') else []:
+        path = _member(application, row['path'])
+        if len(path.read_bytes()) != row['bytes'] or digest(path) != row['sha256']:
+            raise Refusal('compiled resident arena bytes changed')
+        payloads[row['path']] = path.read_bytes()
     # The compile published the deploy's clock; the kit records only that one.
     if deployment['provider'].get('sys_clk_freq_hz') != context['settings']['clock_hz']:
         raise Refusal('compiled host clock differs from the deploy clock')

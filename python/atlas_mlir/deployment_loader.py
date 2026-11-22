@@ -21,9 +21,13 @@ def describe(elf, deployment, record):
     declaration = dict(identity=soc.IDENTITY, sha256=soc.DECLARATION_SHA256, kit_member='bench/soc.json')
     host, window = deployment['host_allocation'], deployment['window']
     reserved = host['bytes']
+    # A resident deployment's window ends where its resident arena starts, and the arena ends within the DDR.
+    arena = deployment.get('resident')
+    window_end = arena['address'] if arena else end
     if (host['address'] != base or not 0 < reserved < ddr.capacity_bytes
             or reserved % HOST_ALIGNMENT or not 0 < host['usable_bytes'] <= reserved
-            or window != dict(address=base + reserved, bytes=end - base - reserved)
+            or window != dict(address=base + reserved, bytes=window_end - base - reserved)
+            or (arena and arena['address'] + arena['bytes'] > end)
             or record['entry'] != base):
         raise Refusal('loader memory plan differs from measured host placement')
     if record['host_reservations']['__stack_end'] > base + host['usable_bytes']:
@@ -86,6 +90,19 @@ def describe(elf, deployment, record):
         parts, sha = chunks(offset, weights['address'], weights['bytes'])
         if sha != weights['sha256']:
             raise Refusal('loader linked weights differ from bound parameters')
+        # A resident deployment's arena is its own read-only load at the end of the DDR, loaded once with the ELF.
+        resident = deployment.get('resident')
+        if resident:
+            arena = [r for r in loads if r['flags'] == 4 and r['address'] == resident['address']
+                     and r['file_bytes'] == resident['bytes']]
+            if len(arena) != 1:
+                raise Refusal('loader resident arena lacks one read-only ELF backing')
+            resident_chunks, resident_sha = chunks(arena[0]['file_offset'], resident['address'], resident['bytes'])
+            if resident_sha != resident['sha256']:
+                raise Refusal('loader linked resident arena differs from the deployment')
+            resident = dict(path='chip.elf', file_offset=arena[0]['file_offset'], address=resident['address'],
+                            bytes=resident['bytes'], sha256=resident_sha, loads=resident['loads'],
+                            chunks=resident_chunks)
         stream.seek(0)
         digest = hashlib.sha256()
         while data := stream.read(CHUNK_BYTES):
@@ -100,12 +117,13 @@ def describe(elf, deployment, record):
                 host=host, host_symbols=record['host_reservations'], window=window,
                 allocations=deployment['allocations'], sections=record['allocated_sections'],
                 instruction_images=record['instruction_images'], loads=loads,
-                parameters=weights)
+                parameters=weights, **({'resident': deployment['resident']} if resident else {}))
     manifest = dict(schema='atlas.loader_manifest.v1', soc=declaration,
                     image=dict(path='chip.elf', bytes=file_bytes, sha256=record['sha256']),
                     entry=base, chunk_bytes=CHUNK_BYTES, segments=segments,
                     weights=dict(path='chip.elf', file_offset=offset, address=weights['address'],
                                  bytes=weights['bytes'], sha256=sha, chunks=parts),
+                    **({'resident': resident} if resident else {}),
                     completion='verify every chunk at its destination and zero all tails before entry',
                     resume=('key verified chunks by address, length, and chunk sha256 on one board session; '
                             'any write over a chunk\'s range forgets it'),

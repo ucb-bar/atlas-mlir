@@ -99,3 +99,30 @@ class LoaderTests(unittest.TestCase):
         self.path.write_bytes(self.path.read_bytes()[:70])
         with self.assertRaisesRegex(Refusal, 'load table is truncated'):
             describe(self.path, self.deployment, self.record)
+
+    def test_a_resident_window_ends_at_the_arena_and_the_arena_is_listed(self):
+        arena_bytes, weights_end = 4096, 512 + self.weight_bytes
+        arena = self.ddr.end - arena_bytes
+        raw = bytearray(self.path.read_bytes()) + b'R' * arena_bytes
+        struct.pack_into('<H', raw, 56, 4)
+        loads = [*self.loads, dict(address=arena, file_bytes=arena_bytes, memory_bytes=arena_bytes, flags=4)]
+        for i, (load, offset) in enumerate(zip(loads, [320, 336, 512, weights_end])):
+            struct.pack_into('<II6Q', raw, 64 + 56 * i, 1, load['flags'], offset, load['address'],
+                             load['address'], load['file_bytes'], load['memory_bytes'], 1)
+        raw[320:340] = bytes(20)
+        self.path.write_bytes(raw)
+        self.record.update(sha256=hashlib.sha256(raw).hexdigest(), loads=loads)
+        self.deployment.update(window=dict(address=self.window, bytes=arena - self.window),
+                               resident=dict(address=arena, bytes=arena_bytes, loads=[],
+                                             sha256=hashlib.sha256(b'R' * arena_bytes).hexdigest()))
+        plan, manifest = describe(self.path, self.deployment, self.record)
+        self.assertEqual(plan['resident'], self.deployment['resident'])
+        self.assertEqual((manifest['resident']['file_offset'], manifest['resident']['address']), (weights_end, arena))
+        self.assertEqual([c['bytes'] for c in manifest['resident']['chunks']], [arena_bytes])
+        self.deployment['window']['bytes'] = self.ddr.end - self.window
+        with self.assertRaisesRegex(Refusal, 'measured host placement'):
+            describe(self.path, self.deployment, self.record)
+        self.deployment['window']['bytes'] = arena - self.window
+        self.deployment['resident']['sha256'] = '0' * 64
+        with self.assertRaisesRegex(Refusal, 'resident arena differs'):
+            describe(self.path, self.deployment, self.record)

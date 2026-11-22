@@ -17,6 +17,8 @@ from .soc import SOC
 WINDOW_SECTION = ".atlas_window"
 # A board DDR program loads the immutable parameters, which end the window data, read-only in their own load.
 PARAMETER_SECTION = ".atlas_parameters"
+# A resident board deployment loads its resident arena, at the end of the DDR, read-only in its own load.
+RESIDENT_SECTION = ".atlas_resident"
 WINDOW_ADDRESS = SOC.memory_region("atlas_data").base
 WINDOW_BYTES = SOC.memory_region("atlas_data").capacity_bytes
 IMEM_BYTES = SOC.memory_region("atlas_imem").capacity_bytes
@@ -38,8 +40,11 @@ def deployment_requirements(regions, native_root, *, soc=None):
     geometry = (options.io_memory_base, options.io_memory_bytes,
                 options.io_memory_capacity_base, options.io_memory_capacity_bytes)
     # The on-chip window, or the end of the board's DDR after a host that starts at the DDR base. A window that
-    # starts at the base is the measuring compile, whose host follows the placed data.
-    board = geometry[:2] == geometry[2:] and ddr.base <= geometry[0] and geometry[0] + geometry[1] == ddr.end
+    # starts at the base is the measuring compile, whose host follows the placed data. A resident board compile
+    # stages in a prefix of that capacity, and its resident arena takes the rest.
+    resident = bool(options.application_residency)
+    board = (geometry[0] == geometry[2] and ddr.base <= geometry[2] and geometry[2] + geometry[3] == ddr.end
+             and (geometry[1] == geometry[3] or resident and geometry[1] < geometry[3]))
     if not board and geometry != (window.base, window.capacity_bytes) * 2:
         return None
     base, size = validate_io_window()
@@ -147,8 +152,12 @@ def deployment_requirements(regions, native_root, *, soc=None):
                     refuse("quantized deployment requires checked_counted_image route", "resource_limit"
                            if route in {"checked_counted_row_blocks", "bounded_k32_tile_dispatch"}
                            else "unsupported_semantics")
+                # Resident operands are read in place from the resident arena, which Merlin loads and places.
+                resident_spans = set()
                 if plan.get("resident_bindings"):
-                    refuse("on-chip deployment does not support resident bindings")
+                    if not (board and resident):
+                        refuse("on-chip deployment does not support resident bindings")
+                    resident_spans = {(row["address"], row["bytes"]) for row in plan["resident_bindings"]}
                 input_sizes = plan["input_payload_bytes"] if schema in {
                     "atlas.layout_device.v1", "atlas.exact_float.v1"} else plan["input_buffer_bytes"]
                 buffers = [
@@ -161,7 +170,8 @@ def deployment_requirements(regions, native_root, *, soc=None):
                     if len(addresses) != len(counts):
                         refuse("provider execution buffer lengths differ")
                     for i, (address, count) in enumerate(zip(addresses, counts, strict=True)):
-                        reserve(f"{relative}/{role}_{i}", address, count, role, call_lifetime)
+                        if (address, count) not in resident_spans:
+                            reserve(f"{relative}/{role}_{i}", address, count, role, call_lifetime)
                 if counted:
                     reserve(relative + "/status", plan["status_address"], plan["status_bytes"], "status", call_lifetime)
             elif (schema == "atlas.native_tile_execution_plan.v8"
@@ -213,7 +223,10 @@ def deployment_requirements(regions, native_root, *, soc=None):
                 refuse("provider image differs from physical program or exceeds IMEM capacity")
             images.append(dict(path=relative + "/program.bin", sha256=sha256(binary).hexdigest(),
                                bytes=len(binary), imem_offset_bytes=0, capacity_bytes=imem.capacity_bytes,
-                               upload_convention="counted_ensure_loaded"))
+                               # A resident image is bound to its resident addresses at run time from the
+                               # region's checked template, so no linked image symbol carries it.
+                               upload_convention="resident_template_bind" if plan.get("resident_bindings")
+                               else "counted_ensure_loaded"))
         merged = []
         for address, end, name, role in sorted(tile_buffers):
             if merged and address < merged[-1][1]:
@@ -336,6 +349,7 @@ def deployment_requirements(regions, native_root, *, soc=None):
     return dict(schema="merlin.provider_deployment.v1", window=dict(address=base, bytes=size),
                 window_section=WINDOW_SECTION, image_section=IMAGE_SECTION,
                 **({"parameter_section": PARAMETER_SECTION} if board else {}),
+                **({"resident_section": RESIDENT_SECTION} if board and resident else {}),
                 platform_owned_requirements=["CHIP", "PLATFORM", "RVV_TYPE", "PENGUIN26_EXIT_TOHOST",
                     "PENGUIN26_UART_BAUDRATE", "CMAKE_TOOLCHAIN_FILE", "CMAKE_PROJECT_INCLUDE",
                     "PLATFORM_ROOT", "PLATFORM_MAP"],

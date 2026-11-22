@@ -221,6 +221,10 @@ def build(source: Path | None = None, *, out: Path, precision_policy: Path,
                 raise ValueError("board I/O budget exceeds the declared DDR")
             geometry = ["--io-memory-base", str(ddr.end - size), "--io-memory-bytes", str(size),
                         "--io-memory-capacity-base", str(ddr.end - size), "--io-memory-capacity-bytes", str(size)]
+            # The declared board keeps immutable device operands resident; the compiler puts their arena at the end
+            # of this one region and stages in the rest, so both deploy compiles place them at the same addresses.
+            from atlas_mlir_native.options import SOPHIALAKE
+            application_residency = application_residency or SOPHIALAKE.residency
         if snapshot is None:
             snapshot = out / "snapshot"
             run("native-build", ["native-build", "--engine", "merlin_native", "--support", "atlas",

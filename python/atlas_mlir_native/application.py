@@ -452,6 +452,17 @@ class AtlasApplicationAdapter:
         return deployment_requirements(regions, native_root)
 
     @staticmethod
+    def admit_resident_deployment(regions, source_regions, native_root, target_source, *, source_request_digest):
+        """Admit a resident board deployment only when every resident context replays from its source."""
+        from .resident_deployment import checked_resident_deployment
+
+        try:
+            return checked_resident_deployment(regions, source_regions, native_root, target_source,
+                                               source_request_digest=source_request_digest)
+        except ValueError as error:
+            raise NativeCompilationError("unsupported_semantics", "resident deployment: " + str(error)) from error
+
+    @staticmethod
     def deployment_region_package(region, compiled, name, target_source, paging):
         from .already_quantized import prepare_c_package
 

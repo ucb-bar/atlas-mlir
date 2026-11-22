@@ -177,10 +177,13 @@ def _device_span(bundle):
     """The device window's address and the bytes of it up to the last byte any declared buffer uses."""
     deployment = json.loads((bundle / 'manifest.json').read_text())['deployment']
     window = deployment['window']
+    # The device also reads a resident arena in place; it starts where the window ends.
+    arena = deployment.get('resident')
     rows = [*deployment['allocations'], *deployment['inputs'], *deployment.get('state_inputs', []), *deployment['outputs'],
-            *deployment['provider'].get('reservations', []), *filter(None, [deployment.get('parameters')])]
+            *deployment['provider'].get('reservations', []), *filter(None, [deployment.get('parameters'), arena])]
     span = -(-(max(row['address'] + row['bytes'] for row in rows) - window['address']) // PAGE) * PAGE
-    if window['address'] % PAGE or not 0 < span <= window['bytes']:
+    if (window['address'] % PAGE or not 0 < span <= -(-(window['bytes'] + (arena['bytes'] if arena else 0)) // PAGE) * PAGE
+            or (arena and arena['address'] != window['address'] + window['bytes'])):
         raise TransportError('device window is not page aligned inside board DDR')
     return window['address'], span
 

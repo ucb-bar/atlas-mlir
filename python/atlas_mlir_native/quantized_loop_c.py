@@ -163,10 +163,11 @@ def _resident_dispatch_helpers():
     text = text.replace('atlas_matmul_', 'atlas_resident_matmul_')
     text = text.replace('atlas_exponent_pack', 'atlas_resident_exponent_pack').replace('atlas_transfer', 'atlas_resident_transfer')
     text = text.replace('{region,scratch};', '{region,scratch,0};')
+    # Each region binds and loads its own image by a direct call before dispatch, and passes the status, so the
+    # generated call graph has no function pointer that a static stack bound would have to follow.
     text = text.replace('void *const *outputs) {\n',
-        'void *const *outputs,atlas_host_result (*load)(atlas_host *,uint8_t *,uint32_t),uint32_t binding) {\n')
-    text = text.replace('atlas_host_ensure_loaded(region->host,p->words,p->word_count)',
-                        'load(region->host,ctx->workspace,binding)')
+        'void *const *outputs,atlas_host_result loaded) {\n')
+    text = text.replace('atlas_host_ensure_loaded(region->host,p->words,p->word_count)', 'loaded')
     return guarded('resident_matmul_dispatch', text)
 
 
@@ -205,7 +206,9 @@ def _resident_dispatch(state):
   if (!ctx || ctx->binding>={name}_resident_count) return 1;
   atlas_resident_matmul_plan plan={name}_plan;
   {overrides}
-  return atlas_resident_matmul_dispatch(&plan,context,inputs,outputs,{name}_resident_load,ctx->binding);"""
+  if (!ctx->region || !ctx->region->host || !ctx->workspace) return 1;
+  return atlas_resident_matmul_dispatch(&plan,context,inputs,outputs,
+    {name}_resident_load(ctx->region->host,ctx->workspace,ctx->binding));"""
 
 
 def _resident_runtime_receipt(state):

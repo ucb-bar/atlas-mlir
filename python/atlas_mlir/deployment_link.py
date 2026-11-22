@@ -472,7 +472,8 @@ def measure_host(context, arguments):
 
     The measuring compile starts the device window at the declared DDR base, with the host after its data. Its sizing
     link gives the host's code, data, heap, and stack; the bound compile starts the window at the next 4 KiB boundary
-    after that host and ends it at the end of DDR, and the bound objects must still fit that host.
+    after that host and gives it the rest of the DDR (a resident arena, when selected, takes the end of it), and the
+    bound objects must still fit that host.
     """
     from atlas_mlir_native.soc import SOC
     ddr = SOC.memory_region('ddr')
@@ -798,6 +799,9 @@ def _elf_record(path, deployment, settings):
     window = deployment['window']
     bounds = [(host['address'], host['address'] + host['usable_bytes']),
               (window['address'], window['address'] + window['bytes'])]
+    resident = deployment.get('resident')
+    if resident:
+        bounds.append((resident['address'], resident['address'] + resident['bytes']))
     if entry != bounds[0][0]:
         raise Refusal('ELF entry differs from bound host origin')
     loads, offsets = [], []
@@ -815,9 +819,20 @@ def _elf_record(path, deployment, settings):
     # Read-only parameters end the window data in a third load, with the instruction images after them.
     parameters = read_only_parameters(deployment)
     starts = {start for start, _ in bounds} | ({parameters['address']} if parameters else set())
-    if len(loads) != len(starts) or {row['address'] for row in loads} != starts or (parameters and next(
-            row['flags'] for row in loads if row['address'] == parameters['address']) != 4):
-        raise Refusal('ELF must retain exactly one host and one window backing, and read-only parameters if declared')
+    read_only = [row['address'] for row in (parameters, resident) if row]
+    if len(loads) != len(starts) or {row['address'] for row in loads} != starts or any(next(
+            row['flags'] for row in loads if row['address'] == address) != 4 for address in read_only):
+        raise Refusal('ELF must retain exactly one host and one window backing, '
+                      'and read-only parameters and resident arena if declared')
+    if resident:
+        # Every resident load is linked byte-equal to the packed asset the compiler published for it.
+        index = next(i for i, row in enumerate(loads) if row['address'] == resident['address'])
+        if loads[index]['file_bytes'] != resident['bytes']:
+            raise Refusal('resident arena load differs from the deployment arena')
+        for row in resident['loads']:
+            start = offsets[index] + row['address'] - resident['address']
+            if hashlib.sha256(raw[start:start + row['bytes']]).hexdigest() != row['sha256']:
+                raise Refusal('linked resident load differs from its packed asset: ' + row['name'])
     for section in measurement['sections']:
         if section['size'] and not any(
                 row['address'] <= section['address']
@@ -867,7 +882,8 @@ def _elf_record(path, deployment, settings):
         if hashlib.sha256(raw[start:start + size]).hexdigest() != name[12:]:
             raise Refusal('linked instruction image differs from its compiled program')
         images[name[12:]] = dict(address=value, bytes=size)
-    if set(images) != {row['sha256'] for row in deployment['provider']['images']}:
+    if set(images) != {row['sha256'] for row in deployment['provider']['images']
+                       if row.get('upload_convention') != 'resident_template_bind'}:
         raise Refusal('linked instruction images differ from the deployment image set')
     from .chiprunner.composed_sim import cleared_spans
     try:
@@ -886,6 +902,7 @@ def _elf_record(path, deployment, settings):
                 host_reservations={name: symbols[name][0] for name in (
                     '__heap_start', '__heap_end', '__stack_start', '__stack_end', '__sp')},
                 host_bytes=next(row['memory_bytes'] for row in loads if row['address'] == bounds[0][0]),
+                **({'resident_loads': len(resident['loads'])} if resident else {}),
                 instruction_images=dict(sorted(images.items())),
                 window_zero=[dict(address=address, bytes=size) for address, size in zero])
 

@@ -69,6 +69,13 @@ class DeploymentTest(unittest.TestCase):
             for name in ("native-compile", "native-verify"):
                 self.assertEqual("--application-buffer-views" in commands[name], views, (options, name))
 
+    def test_the_declared_board_selects_residency_and_onchip_and_bench_builds_do_not(self):
+        for options, resident in ((("--application-deployment", "board"), True),
+                                  (("--application-deployment", "onchip"), False), ((), False)):
+            commands = self.build_commands(*options)
+            for name in ("native-compile", "native-verify"):
+                self.assertEqual("--application-residency" in commands[name], resident, (options, name))
+
     def test_a_measured_host_reaches_the_onchip_compile_and_verify_only(self):
         commands = self.build_commands("--application-deployment", "onchip", "--measured-host-bytes", "113552")
         for name in ("native-compile", "native-verify"):

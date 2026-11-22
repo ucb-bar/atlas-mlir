@@ -213,6 +213,23 @@ class ProtocolTests(unittest.TestCase):
             deployment_run.execute(self.out, simulate=True, inputs=['x.npz'])
 
 
+class DeviceSpanTests(unittest.TestCase):
+    def span(self, **deployment):
+        with tempfile.TemporaryDirectory() as root:
+            rows = dict(allocations=[dict(address=0x80002000, bytes=64)], inputs=[], outputs=[], provider={})
+            (Path(root) / 'manifest.json').write_text(json.dumps(dict(deployment=dict(rows, **deployment))))
+            return ddr_sim._device_span(Path(root))
+
+    def test_a_resident_span_covers_the_arena_that_starts_where_the_window_ends(self):
+        window = dict(address=0x80002000, bytes=0x10000)
+        self.assertEqual(self.span(window=window), (0x80002000, 0x1000))
+        self.assertEqual(self.span(window=window, resident=dict(address=0x80012000, bytes=0x800)), (0x80002000, 0x11000))
+        with self.assertRaisesRegex(TransportError, 'not page aligned'):
+            self.span(window=window, resident=dict(address=0x80013000, bytes=0x800))
+        with self.assertRaisesRegex(TransportError, 'not page aligned'):
+            self.span(window=window, allocations=[dict(address=0x80012000, bytes=64)])
+
+
 class FlakyBoard(ddr_sim.SimulatedBoard):
     """The simulated board with a link that drops on one write or flips a byte of one chunk."""
     fail_write = corrupt = None
