@@ -12,6 +12,7 @@ from atlas_mlir_native import quantized_loop, quantized_loop_c
 from atlas_mlir_native.already_quantized import prepare_source
 from atlas_mlir_native.binding import DRAM_BASE
 from atlas_mlir_native.options import CodegenOptions, codegen_options
+from atlas_mlir_native.source_translation import contraction_numerics_attribute
 from merlin.compiler.semantic.model import (
     IndexMap,
     SemanticNode,
@@ -36,7 +37,9 @@ def fixture(operand='w', m=3, n=35, k=33, batch=(2,), batched_rhs=False, narrowe
     if narrowed:
         result = source.nodes[-1]
         result = replace(result, type=replace(result.type, dtype='f32'),
-            attrs=tuple((key, 'float32' if key == 'output_dtype' else value) for key, value in result.attrs))
+            attrs=tuple((key, 'float32' if key == 'output_dtype' else
+                contraction_numerics_attribute(result.op, 'float32') if key == 'numerical.contraction'
+                else value) for key, value in result.attrs))
         cast = SemanticNode('narrowed', 'f32_to_bf16', (result.id,), replace(result.type, dtype='bf16'),
             (('numeric_semantics', 'f32-to-bf16-rne-v1'),),
             index_maps=pointwise_identity_maps(len(result.type.shape), 1))

@@ -11,6 +11,7 @@ import numpy as np
 from atlas_mlir_native.already_quantized import POLICY, pack_operand, prepare_source, restore_bf16, _restore_bf16_c
 from atlas_mlir_native.binding import TARGET_IDENTITY
 from atlas_mlir_native.static_quantize import pack_bf16, emit_c
+from atlas_mlir_native.source_translation import contraction_numerics_attribute
 from merlin.compiler.semantic.model import KernelRequest, SemanticNode, TensorType
 
 
@@ -20,7 +21,8 @@ def source_request(m=3,n=35,k=65,batch=(2,)):
     nodes=(inp('a',(*batch,m,k),'i8'),inp('sx',(),'i32'),inp('w',(n,k),'i8'),inp('sw',(n,1),'i32'))
     attrs=tuple(sorted(dict(semantic_kind='prequantized_contraction',code_dtype='uint8',exponent_dtype='int32',
         weight_format='atlas_e4m3',dequantization='e4m3(code)*2^exponent',rhs_transposed='true',
-        output_rescale='2^(lhs_exp+rhs_exp)',bias_order='after_output_cast',output_dtype='bfloat16').items()))
+        output_rescale='2^(lhs_exp+rhs_exp)',bias_order='after_output_cast',output_dtype='bfloat16',
+        **{'numerical.contraction': contraction_numerics_attribute('atlas.qlinear', 'bfloat16')}).items()))
     y=SemanticNode('y','atlas.qlinear',tuple(node.id for node in nodes),TensorType((*batch,m,n),'bf16','raw-bit-pattern'),attrs)
     return KernelRequest((*nodes,y),('y',),('external',),tuple((node.id,'external') for node in nodes),TARGET_IDENTITY,'diagnostic')
 
@@ -33,6 +35,15 @@ def quantizer_source(dtype='bf16',fixed=-7,count=65536):
     codes=SemanticNode('codes','atlas.quantize_act.codes',('x',),TensorType((count,),'i8','raw-bit-pattern'),attrs)
     exponent=SemanticNode('exponent','atlas.quantize_act.exponent',('x',),TensorType((),'i32','raw-bit-pattern'),attrs)
     return KernelRequest((x,codes,exponent),('codes','exponent'),('external','external'),(('x','external'),),TARGET_IDENTITY,'diagnostic')
+
+
+def _policy():
+    """Explicit diagnostic policy for authored application fixtures."""
+    from atlas_mlir_native.application_precision import CONTRACTION_POLICY
+    from atlas_mlir_native.row_softmax import SOFTMAX_POLICY
+    return dict(schema='atlas.diagnostic_application_precision.v1', source_sha256='0'*64,
+        target_identity=TARGET_IDENTITY, contraction=CONTRACTION_POLICY, row_softmax=SOFTMAX_POLICY,
+        host_support=['transpose','reshape','copy'], already_quantized=POLICY)
 
 
 class AlreadyQuantizedTest(unittest.TestCase):
@@ -423,7 +434,9 @@ int restore(uint32_t word,int32_t lhs,int32_t rhs,uint32_t *out) {
             if node.id=='w':node=replace(node,type=TensorType((2,3,3,32),'i8','raw-bit-pattern'))
             if node.id in ('sx','sw'):node=replace(node,type=TensorType((2,3,1,1),'i32','raw-bit-pattern'))
             if node.id=='y':node=replace(node,op='atlas.qk_matmul',type=replace(node.type,dtype='f32'),
-                attrs=tuple((key,'float32' if key=='output_dtype' else value) for key,value in node.attrs))
+                attrs=tuple((key,'float32' if key=='output_dtype' else
+                    contraction_numerics_attribute('atlas.qk_matmul','float32')
+                    if key=='numerical.contraction' else value) for key,value in node.attrs))
             head_nodes.append(node)
         head=replace(head,nodes=tuple(head_nodes))
         for source in (shared,head):

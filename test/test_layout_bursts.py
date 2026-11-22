@@ -5,7 +5,7 @@ import pytest
 
 from atlas_mlir_native.layout_device import prepare_source, virtual_program
 from atlas_mlir_native.restoration_budget import instruction_bound
-from merlin.semantic_compiler.model import IndexMap
+from merlin.compiler.semantic.model import IndexMap
 from test_exponent_restoration import compile_fixture
 from test_layout_device import reference, request
 

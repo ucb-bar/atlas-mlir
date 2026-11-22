@@ -24,8 +24,8 @@ from test_exponent_page_cache import fixture
 ])
 def test_host_prefixes_keep_padding_and_late_refusal_atomic(tmp_path,pipeline,shape):
     from atlas_mlir_native.application import AtlasApplicationAdapter
-    from merlin.compile.semantic_application import compile_semantic_application, verify_semantic_application
-    from merlin.semantic_compiler.search import SearchLimits
+    from merlin.compiler.build.regions import compile_semantic_application, verify_semantic_application
+    from merlin.compiler.semantic.search.exploration import SearchLimits
     from rust_model import Application
     from test_already_quantized import _policy
     from test_looped_mnk import ROOT, build_snapshot

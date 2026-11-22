@@ -51,7 +51,7 @@ def test_row_cache_requires_dominating_initialization(monkeypatch):
 @pytest.mark.skipif(not os.environ.get('ATLAS_OOT_BIN_DIR'), reason='select Atlas tools')
 def test_row_cache_survives_native_rebinding_and_c_export(tmp_path):
     from unittest import TestCase
-    from merlin.semantic_compiler.materialization import canonical_request
+    from merlin.compiler.build.materialization import canonical_request
     from test_quantized_operand_reuse import export_recorded_policy
 
     source = fixture(3,35,65,(),'row','row',True)

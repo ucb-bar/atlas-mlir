@@ -10,8 +10,8 @@ import pytest
 from atlas_mlir_native.binding import DRAM_BASE
 from atlas_mlir_native.options import codegen_options, current_codegen_options
 from atlas_mlir_native.resident_graph import compile_resident, compose_fragments, plan_abi
-from merlin.semantic_compiler.search import SearchLimits
-from merlin.semantic_compiler.target_binding import NativeCompilationError
+from merlin.compiler.semantic.search.exploration import SearchLimits
+from merlin.compiler.semantic.target_binding import NativeCompilationError
 from test_looped_mnk import ROOT, build_snapshot, source_request
 from test_resident_graph import connected_request
 
@@ -42,7 +42,7 @@ def test_only_stages_without_mxu_can_inherit_the_retention_hint():
                     reason='select Rust simulator and Atlas tools')
 @pytest.mark.parametrize('pipeline', ['mandatory', 'optimized'])
 def test_connected_mlp_one_image_matches_independent_intermediates(tmp_path, pipeline):
-    from merlin.semantic_compiler.reference import TensorValue
+    from merlin.compiler.semantic.reference import TensorValue
     from tools.profile_resident_model import physical_bytes, reference_values
     from rust_model import execute
 

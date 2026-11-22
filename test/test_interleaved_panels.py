@@ -13,7 +13,7 @@ from atlas_mlir_native.options import codegen_options, current_codegen_options
 from atlas_mlir_native.quantized_loop import execution_layout, virtual_source
 from atlas_mlir_native.quantized_loop_sizing import size_counted
 from atlas_mlir_native.restoration_budget import instruction_bound
-from merlin.semantic_compiler.target_binding import NativeCompilationError
+from merlin.compiler.semantic.target_binding import NativeCompilationError
 from test_already_quantized import source_request
 from test_exponent_page_cache import fixture
 from test_exponent_restoration import compile_fixture
@@ -76,7 +76,7 @@ def test_only_proved_capacity_refusals_retry_the_original_panel_order():
 @pytest.mark.skipif(not os.environ.get('ATLAS_OOT_BIN_DIR'), reason='select Atlas tools')
 def test_native_rebinding_and_c_export_preserve_the_selected_order(tmp_path):
     from unittest import TestCase
-    from merlin.semantic_compiler.materialization import canonical_request
+    from merlin.compiler.build.materialization import canonical_request
     from test_quantized_operand_reuse import export_recorded_policy
 
     source = source_request(m=33, n=35, k=65, batch=())

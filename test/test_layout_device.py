@@ -228,7 +228,7 @@ class LayoutDeviceRecognitionTest(unittest.TestCase):
                 self.assertTrue(adapter._supports_device_source(source, source.nodes[-1], "layout_device"))
                 proof.assert_called_once()
             with patch("atlas_mlir_native.layout_device.prove_plan", side_effect=AssertionError("unexpected preflight")):
-                for name in ("xlu", "dense_dma"):
+                for name in ("xlu", "dense_dma", "small_scalar_reshape"):
                     existing = cases()[name]
                     self.assertTrue(adapter._supports_device_source(existing, existing.nodes[-1], "layout_device"))
                 # Byte-granular scalar transport stays on the checked host layout, including convolution gathers:
@@ -237,7 +237,7 @@ class LayoutDeviceRecognitionTest(unittest.TestCase):
                     mapping=IndexMap(4, ((1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 2, 0), (0, 0, 0, 2)), (0, 0, 0, 0)))
                 window = request("gather", ((1, 1, 9, 9),), (1, 1, 5, 3, 5, 3),
                     mapping=IndexMap(6, ((1, 0, 0, 0, 0, 0), (0, 1, 0, 0, 0, 0), (0, 0, 1, 2, 0, 0), (0, 0, 0, 0, 1, 2)), (0, 0, 0, 0)))
-                for existing in (cases()["small_scalar_reshape"], cases()["ragged_scalar_transpose"], shortcut, window):
+                for existing in (cases()["ragged_scalar_transpose"], shortcut, window):
                     self.assertEqual({s["mode"] for s in prepare_source(existing).segments}, {"scalar"})
                     self.assertFalse(adapter._supports_device_source(existing, existing.nodes[-1], "layout_device"))
 

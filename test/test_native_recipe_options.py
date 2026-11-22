@@ -131,16 +131,6 @@ def test_adjacent_patterns_requires_a_string(value):
 
 
 def invocation(command, application):
-    if command == "native-profile":
-        return [
-            command, "--support", "synthetic", "--snapshot", "snapshot", "--request", "request",
-            "--target-source", "target", "--runner-command", "runner.json", "--out", "output",
-        ]
-    if command == "native-probe-model-regions":
-        return [
-            command, "--engine", "merlin_native", "--support", "synthetic", "--snapshot", "snapshot",
-            "--compile-inputs", "inputs", "--abi", "abi.json", "--target-source", "target", "--out", "output",
-        ]
     flags = [
         command, "--engine", "merlin_native", "--support", "synthetic", "--snapshot", "snapshot",
         "--mode", "diagnostic", "--out", "output",
@@ -186,79 +176,3 @@ def test_cli_rejects_invalid_recipe_enums(parser, name):
     with pytest.raises(SystemExit) as failure:
         parser.parse_args([*invocation("native-compile", False), "--" + name.replace("_", "-"), "unknown"])
     assert failure.value.code == 2
-
-
-@pytest.mark.parametrize("command", ["native-profile", "native-probe-model-regions"])
-def test_diagnostic_cli_recipe_defaults(parser, command):
-    assert options_from_args(parser.parse_args(invocation(command, False))) == CodegenOptions()
-
-
-@pytest.mark.parametrize("command", ["native-profile", "native-probe-model-regions"])
-@pytest.mark.parametrize(("name", "value"), RECIPE_VARIANTS)
-def test_diagnostic_cli_recipe_choices(parser, command, name, value):
-    flags = ["--" + name.replace("_", "-")]
-    if type(value) is not bool:
-        flags.append(value)
-    selected = options_from_args(parser.parse_args([*invocation(command, False), *flags]))
-    assert selected == replace(CodegenOptions(), **{name: value})
-
-
-def test_profile_preserves_recipe_for_source_key_and_all_variants(parser, tmp_path, monkeypatch):
-    import json
-
-    from merlin.targetgen import cli, native_profile
-
-    selected = {name: value for name, value in RECIPE_VARIANTS}
-    flags = []
-    for name, value in selected.items():
-        flags.append("--" + name.replace("_", "-"))
-        if type(value) is not bool:
-            flags.append(value)
-    runner = tmp_path / "runner.json"
-    runner.write_text('["unused-runner"]')
-    args = parser.parse_args([
-        *invocation("native-profile", False), *flags,
-        "--runner-command", str(runner), "--out", str(tmp_path / "profile"),
-        "--program-size-limit-bytes", "8192", "--io-memory-bytes", "1048576",
-        "--execution-instruction-limit", "9000000", "--exact-float-unroll",
-    ])
-    expected = options_from_args(args)
-    original = current_codegen_options()
-    target_profile = SimpleNamespace(target_identity="synthetic", digest=lambda: "profile")
-    snapshot = SimpleNamespace(profile=target_profile)
-    monkeypatch.setattr(native_profile, "open_native_snapshot", lambda _: snapshot)
-    observed = []
-
-    def record_options(stage):
-        observed.append((stage, current_codegen_options()))
-
-    def load_request(*_args, **_kwargs):
-        record_options("source")
-        return SimpleNamespace(record=lambda: {}), "request", None, None
-
-    def tuning_key(*_args):
-        record_options("key")
-        return {"recipe": current_codegen_options().identity_record()}
-
-    binding = SimpleNamespace(
-        profile=lambda: target_profile, tuning_key=tuning_key,
-        plan_boundary_abi=lambda _: {"fixed_inputs": {}, "fixed_outputs": []},
-    )
-    monkeypatch.setattr(native_profile, "load_native_target_binding", lambda _: binding)
-    monkeypatch.setattr(cli, "_load_selected_native_request", load_request)
-
-    def compile_variant(_args):
-        record_options("variant")
-        raise RuntimeError("variant declined")
-
-    monkeypatch.setattr(cli, "_native_compile_report_with_options", compile_variant)
-    report = native_profile.run_profile(args)
-    assert report["failed"] == 4
-    assert observed == [
-        ("source", expected), ("key", expected),
-        *[("variant", replace(expected, reduction_unroll=str(factor))) for factor in (1, 2, 4, 8)],
-    ]
-    assert json.loads((tmp_path / "profile/profile.json").read_text())["key"] == {
-        "recipe": expected.identity_record(),
-    }
-    assert current_codegen_options() is original

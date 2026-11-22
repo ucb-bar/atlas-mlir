@@ -140,6 +140,48 @@ def qualified_functional(physical, layout, memory):
     return actual, stats
 
 
+def memory_fixture(plan, layout, *, rng=None, codes=(0, 0x20, 0xa0, 0x28, 0xa8)):
+    """Finite signed operands, nonuniform exponents and protected surroundings."""
+    end = layout['status_address'] - DRAM_BASE + layout['status_bytes']
+    memory = bytearray([0xa5]) * (end + 4096)
+    rng = np.random.default_rng(1873) if rng is None else rng
+    for key, address, size in zip(plan.operand_ids, layout['input_addresses'], layout['input_buffer_bytes']):
+        payload = packed(rng.choice(np.array(codes, dtype=np.uint8), size=plan.source.node(key).type.shape)).tobytes()
+        assert len(payload) == size
+        memory[address-DRAM_BASE:address-DRAM_BASE+size] = payload
+    for geometry, address in zip(layout['exponent_layouts'], layout['exponent_addresses']):
+        page = np.zeros(geometry['bytes']//4, dtype='<i4').reshape(-1, 512)
+        if geometry['mode'] == 'row':
+            for batch in range(geometry['batches']):
+                for row in range(geometry['rows']):
+                    page[batch*geometry['tiles']+row//32, row%32] = (row//32+batch)%3-1
+        else:
+            page[:, 0] = np.arange(len(page))%3-1
+        memory[address-DRAM_BASE:address-DRAM_BASE+geometry['bytes']] = page.tobytes()
+    return memory
+
+
+def export_recorded_policy(test, source, canonical, root, name, **selected):
+    """Compile under the selected options, refuse rebinding under ordered reuse, then rebind and export C."""
+    from atlas_mlir_native import quantized_loop, quantized_loop_c
+    from atlas_mlir_native.selection_materialization import SelectionCapture, bind_counted
+    from merlin.compiler.semantic.search.exploration import SearchLimits
+    from test_looped_mnk import build_snapshot
+    capture = SelectionCapture(build_snapshot(root/'snapshot'))
+    chosen = replace(current_codegen_options(), **selected)
+    with codegen_options(chosen):
+        quantized_loop.compile_source(capture, canonical, target_source=ROOT, destination=root/'compiled', limits=SearchLimits())
+    with codegen_options(replace(current_codegen_options(), quantized_operand_reuse='ordered')), \
+            test.assertRaisesRegex(ValueError, 'sizing context changed'):
+        bind_counted(source, canonical, root/'compiled', root/'different-options', capture, target_source=ROOT)
+    with codegen_options(chosen):
+        bind_counted(source, canonical, root/'compiled', root/'bound', capture, target_source=ROOT)
+        record, files = quantized_loop_c.prepare_c_package(source, root/'bound', name, target_source=ROOT)
+    test.assertEqual(record['output_node_ids'], list(source.outputs))
+    test.assertTrue(files)
+    test.assertEqual((root/'bound/atlas-virtual.mlir').read_bytes(), (root/'compiled/atlas-virtual.mlir').read_bytes())
+
+
 class QuantizedOperandReuseTest(unittest.TestCase):
     def test_quantized_cache_does_not_select_or_change_mxu0(self):
         from atlas_mlir_native.looped_tiling import _virtual

@@ -9,10 +9,10 @@ import pytest
 from atlas_mlir_native.application import AtlasApplicationAdapter
 from atlas_mlir_native.binding import DRAM_BASE, TARGET_IDENTITY
 from atlas_mlir_native.options import codegen_options, current_codegen_options
-from merlin.compile.semantic_application import compile_semantic_application, verify_semantic_application
-from merlin.semantic_compiler.codegen import CodegenOptions as MerlinOptions, codegen_options as merlin_options
-from merlin.semantic_compiler.model import IndexMap, KernelRequest, SemanticNode, TensorType, pointwise_identity_maps
-from merlin.semantic_compiler.search import SearchLimits
+from merlin.compiler.build.regions import compile_semantic_application, verify_semantic_application
+from merlin.compiler.semantic.codegen import CodegenOptions as MerlinOptions, codegen_options as merlin_options
+from merlin.compiler.semantic.model import IndexMap, KernelRequest, SemanticNode, TensorType, pointwise_identity_maps
+from merlin.compiler.semantic.search.exploration import SearchLimits
 from test_already_quantized import _policy
 from test_looped_mnk import ROOT, build_snapshot
 

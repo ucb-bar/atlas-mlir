@@ -15,6 +15,7 @@ import numpy as np
 from atlas_mlir_native import quantized_loop_c as native
 from atlas_mlir_native.already_quantized import restore_bf16
 from atlas_mlir_native.quantized_loop import execution_layout
+from atlas_mlir_native.source_translation import contraction_numerics_attribute
 from merlin.compiler.semantic.model import TensorType
 
 from test_already_quantized import source_request
@@ -25,7 +26,9 @@ shared=replace(shared,nodes=tuple(replace(node,type=TensorType((2,35,1),'i32','r
 head=source_request(m=3,n=35,k=65,batch=(2,3))
 head=replace(head,nodes=tuple(replace(node,type=TensorType((2,3,35,65),'i8','raw-bit-pattern')) if node.id=='w' else
     replace(node,type=TensorType((2,3,1,1),'i32','raw-bit-pattern')) if node.id in ('sx','sw') else
-    replace(node,op='atlas.qk_matmul',type=replace(node.type,dtype='f32'),attrs=tuple((key,'float32' if key=='output_dtype' else value) for key,value in node.attrs)) if node.id=='y' else node for node in head.nodes))
+    replace(node,op='atlas.qk_matmul',type=replace(node.type,dtype='f32'),attrs=tuple((key,
+        'float32' if key=='output_dtype' else contraction_numerics_attribute('atlas.qk_matmul', 'float32')
+        if key=='numerical.contraction' else value) for key,value in node.attrs)) if node.id=='y' else node for node in head.nodes))
 
 def packed(value):
     batches=int(np.prod(value.shape[:-2]));rows,k=value.shape[-2:];mc,kc=(rows+31)//32,(k+31)//32

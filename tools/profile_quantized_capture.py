@@ -32,10 +32,10 @@ def main():
     from atlas_mlir_native.application import AtlasApplicationAdapter
     from atlas_mlir_native.binding import DRAM_BASE
     from atlas_mlir_native.options import codegen_options, current_codegen_options
-    from merlin.compile.semantic_application import compile_semantic_application, verify_semantic_application
-    from merlin.frontends.compile_inputs import load_compile_inputs, load_lifted_argument_bytes
-    from merlin.semantic_compiler.linalg_bridge import translate_linalg_text
-    from merlin.semantic_compiler.search import SearchLimits
+    from merlin.compiler.build.regions import compile_semantic_application, verify_semantic_application
+    from merlin.compiler.frontend.inputs import load_compile_inputs, load_lifted_argument_bytes
+    from merlin.compiler.semantic.linalg.linalg_bridge import translate_linalg_text
+    from merlin.compiler.semantic.search.exploration import SearchLimits
     from tools.profile_quantized_panels import revision
     from test_looped_mnk import build_snapshot
     from rust_model import Application

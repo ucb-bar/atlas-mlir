@@ -9,7 +9,7 @@ import pytest
 
 from atlas_mlir_native.activation_quantize_application import prepare_plan
 from atlas_mlir_native.options import codegen_options, current_codegen_options
-from merlin.semantic_compiler.target_binding import NativeCompilationError
+from merlin.compiler.semantic.target_binding import NativeCompilationError
 from atlas_mlir_native.work_budget import CountedWorkExhausted
 from test_activation_quantize_device import dynamic_source, host_reference
 
@@ -80,8 +80,8 @@ def test_real_instruction_bound_reuses_an_admitted_batch():
 def test_exported_application_keeps_group_exponents_special_values_and_tails(tmp_path, pipeline, rule, shape, launches):
     from atlas_mlir_native.application import AtlasApplicationAdapter
     from atlas_mlir_native.binding import DRAM_BASE
-    from merlin.compile.semantic_application import compile_semantic_application, verify_semantic_application
-    from merlin.semantic_compiler.search import SearchLimits
+    from merlin.compiler.build.regions import compile_semantic_application, verify_semantic_application
+    from merlin.compiler.semantic.search.exploration import SearchLimits
     from test_already_quantized import _policy
     from test_looped_mnk import ROOT, build_snapshot
     from rust_model import Application
@@ -127,7 +127,7 @@ def test_exported_application_keeps_group_exponents_special_values_and_tails(tmp
     saved = json.loads((artifact / 'segments/region_000/quantizer-schedule.json').read_text())
     assert saved['dynamic_group_batching'] is True and saved['functional_instruction_limit'] == 1000000
     from atlas_mlir_native.activation_quantize_application import prepare_c_package
-    from merlin.semantic_compiler.model import KernelRequest
+    from merlin.compiler.semantic.model import KernelRequest
     region = KernelRequest.from_record(json.loads(
         (artifact / 'segments/region_000/source-request.json').read_text()))
     with codegen_options(replace(current_codegen_options(), io_memory_bytes=1048576,

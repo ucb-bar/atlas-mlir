@@ -19,6 +19,7 @@ from atlas_mlir_native.binding import DRAM_BASE
 from atlas_mlir_native.quantized_epilogue import alternatives, prepare_source
 from atlas_mlir_native import quantized_loop_c as native_c
 from atlas_mlir_native.quantized_loop import execution_layout
+from atlas_mlir_native.source_translation import contraction_numerics_attribute
 from merlin.compiler.semantic.model import SemanticNode, pointwise_identity_maps
 from merlin.compiler.partition.global_plan import BufferRepresentation, CycleInterval, RegionAlternative, ValueRepresentation
 from test_already_quantized import source_request
@@ -32,7 +33,9 @@ def case(dtype='bf16', operand=0, *, escape=False, m=3, n=35, k=65, batch=(2,)):
     if dtype == 'f32':
         original = contraction.nodes[-1]
         result = replace(original, type=replace(original.type, dtype='f32'),
-            attrs=tuple((key, 'float32' if key == 'output_dtype' else value) for key, value in original.attrs))
+            attrs=tuple((key, 'float32' if key == 'output_dtype' else
+                contraction_numerics_attribute(original.op, 'float32') if key == 'numerical.contraction'
+                else value) for key, value in original.attrs))
         contraction = replace(contraction, nodes=(*contraction.nodes[:-1], result))
     result = contraction.nodes[-1]
     other = SemanticNode('other', 'input', (), result.type, effect='input')

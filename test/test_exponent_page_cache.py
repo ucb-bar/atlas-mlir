@@ -15,6 +15,7 @@ from atlas_mlir_native.binding import DRAM_BASE
 from atlas_mlir_native.exponent_page_cache import enabled
 from atlas_mlir_native.quantized_loop import execution_layout, virtual_source
 from atlas_mlir_native.restoration_budget import instruction_bound
+from atlas_mlir_native.source_translation import contraction_numerics_attribute
 
 from merlin.compiler.semantic.target_binding import NativeCompilationError
 from test_already_quantized import source_request
@@ -38,7 +39,9 @@ def fixture(m, n, k, batch, left, right, shared):
         output = nodes[-1]
         nodes = (*nodes[:-1], replace(
             output, op='atlas.qk_matmul', type=replace(output.type, dtype='f32'),
-            attrs=tuple((key, 'float32' if key == 'output_dtype' else value)
+            attrs=tuple((key, 'float32' if key == 'output_dtype' else
+                         contraction_numerics_attribute('atlas.qk_matmul', 'float32')
+                         if key == 'numerical.contraction' else value)
                         for key, value in output.attrs)))
     return replace(source, nodes=nodes)
 
