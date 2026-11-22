@@ -15,7 +15,7 @@ TARGET_IDENTITY = (
     "atlas-rtl-0079c0541111197741a231c002e3843fa6f545b2:"
     "movement-mxu01-vpu-pack-tile-v21"
 )
-REQUEST_DIGEST = "6b1a223ec9eff1204ae49567e88833f318fbf9e5df24a9f8b9f44974553b7f5b"
+REQUEST_DIGEST = "3509ff4cf10ea561ad74a01dfa53cf0c9476a95293e4a9a7c2b231e76750a846"
 
 
 def _digest(path: Path) -> str:
@@ -34,7 +34,7 @@ def _panel(case: str) -> tuple[tuple[bytes, ...], bytes]:
                             for row in range(32) for column in range(32))
     # Q and K are 1, so every probability is exactly 1/32. The value
     # projection is 1 or 1/2 by feature. Both MLP weights are identity
-    # matrices, and the positive ReLU leaves each feature unchanged.
+    # matrices, so each output preserves the projected feature.
     logical = tuple(0x3F80 if case == "uniform" or feature % 2 == 0 else 0x3F00
                     for _row in range(32) for feature in range(32))
     physical = tuple(logical[row * 32 + column + half * 16]
@@ -84,7 +84,7 @@ def main() -> None:
             or plan.get("output_bytes") != 2048
             or plan.get("output_physical_layouts") != ["bf16_pair_halves"] * 2
             or plan.get("output_numerical_policies") != [
-                "bf16-sign-clamp-v1", "mxu0-e4m3-ordered-bf16-finite-v1"
+                "mxu0-e4m3-ordered-bf16-finite-v1", "mxu0-e4m3-ordered-bf16-finite-v1"
             ]
             or plan.get("transpose_source_nodes") != [
                 {"result": "value_transposed", "source": "value_fp8"}
