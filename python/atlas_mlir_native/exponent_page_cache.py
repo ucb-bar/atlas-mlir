@@ -28,6 +28,20 @@ def record(plan, *, selected=None):
     return dict(exponent_page_cache=True, exponent_page_cache_scopes=scopes)
 
 
+def panel_record(plan, layout):
+    """Bound row-page reuse to the explicitly selected inline panel traversal."""
+    from .exponent_restoration import exponent_geometry
+    from .quantized_panel_reuse import inline_readout_admitted
+
+    rows = layout.get('operand_reuse_panel_m_tiles', 0)
+    if (not recorded_enabled(layout) or layout.get('operand_reuse_panel_order') != 'k-major'
+            or not inline_readout_admitted(rows, plan.k)):
+        return {}
+    roles = [role for role, geometry in zip(('lhs', 'rhs'), exponent_geometry(plan), strict=True)
+             if geometry['mode'] == 'row']
+    return dict(exponent_panel_cache_roles=roles) if roles else {}
+
+
 class ExponentPageCache:
     """Describe immutable page lifetimes without changing factor admission."""
 
@@ -37,6 +51,14 @@ class ExponentPageCache:
                ('exponent_page_cache', 'exponent_page_cache_scopes')):
             raise ValueError('exponent page cache scope differs from its source')
         self.scopes = tuple(expected.get('exponent_page_cache_scopes', ('tile', 'tile')))
+        # Absence retains previously published panel schedules. New publications
+        # record the additional lifetimes explicitly, independently of defaults.
+        panel = panel_record(plan, layout)
+        if ('exponent_panel_cache_roles' in layout
+                and ('exponent_panel_cache_roles' not in panel
+                     or layout['exponent_panel_cache_roles'] != panel['exponent_panel_cache_roles'])):
+            raise ValueError('exponent panel cache roles differ from the selected traversal')
+        self.panel_roles = tuple(layout.get('exponent_panel_cache_roles', ()))
 
     @property
     def resident(self):

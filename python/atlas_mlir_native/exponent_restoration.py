@@ -445,12 +445,13 @@ class Restoration:
         return self.page_cache.prefetch('batch', exponent_addresses, input_state=input_state,
             output_state=output_state, prefix='restore_cache_batch'), output_state
 
-    def tile(self, **kwargs):
+    def tile(self, *, additional_resident_exponents=(), **kwargs):
+        resident = (*self.page_cache.resident, *additional_resident_exponents)
         if self.vector:
             return _vector_tile(self.plan, self.layout, scalar_fallback=self.scalar_fallback,
-                                resident_exponents=self.page_cache.resident, **kwargs)
+                                resident_exponents=resident, **kwargs)
         return _tile(self.plan, self.layout, logical_rows=self.logical_rows,
-                     resident_exponents=self.page_cache.resident, **kwargs)
+                     resident_exponents=resident, **kwargs)
 
     def finish(self, state):
         e = Emitter('restore_finish')

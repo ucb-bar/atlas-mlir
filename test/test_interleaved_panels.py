@@ -133,6 +133,6 @@ def test_rust_outputs_guards_and_late_rejection_match_original_panels(tmp_path, 
                 reports.append(stats)
             assert outputs[0] == outputs[1]
             # The optional measurement build exposes actual issued beat counts.
-            for counter in ('dram_read_bytes', 'dram_write_bytes'):
-                if counter in reports[0]:
-                    assert reports[0][counter] == reports[1][counter]
+            if 'dram_read_bytes' in reports[0]:
+                assert reports[1]['dram_read_bytes'] <= reports[0]['dram_read_bytes']
+                assert reports[0]['dram_write_bytes'] == reports[1]['dram_write_bytes']

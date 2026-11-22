@@ -59,6 +59,9 @@ def virtual_source(plan, layout, restoration, *, geometry=None, allow_batches=Fa
     output = layout['output_addresses'][0]
     pages = restoration.pages()
     inline_readout = inline_readout_admitted(m_tiles, plan.k)
+    cached_roles = restoration.page_cache.panel_roles
+    if cached_roles and (not interleave_rows or not inline_readout):
+        raise ValueError('exponent panel caching requires inline interleaved readouts')
     if prod(plan.batch_shape) > 1 and (not inline_readout or kc > k_tiles):
         raise ValueError('batched panels require a complete cached K reduction and inline readout')
     e = Emitter('panel')
@@ -72,6 +75,10 @@ def virtual_source(plan, layout, restoration, *, geometry=None, allow_batches=Fa
             for tile in range(min(k_tiles,kc)):
                 e.emit(f'%panel_{kind}_{row}_{tile} = "atlas.virtual_slot"() '
                     f'{{kind = "fp8", words = 256 : i32, slot_word = -1 : i32, purpose = "scratch"}} : () -> {SLOT}')
+    if 'lhs' in cached_roles:
+        for row in range(m_tiles):
+            e.emit(f'%panel_exp_{row} = "atlas.virtual_slot"() '
+                   f'{{kind = "bf16", words = 512 : i32, slot_word = -1 : i32, purpose = "scratch"}} : () -> {SLOT}')
     e.lines.extend(restoration.entry())
 
     def offset(base, amount):
@@ -156,6 +163,10 @@ def virtual_source(plan, layout, restoration, *, geometry=None, allow_batches=Fa
     e.emit(f'cf.cond_br %{more}, ^pair_body(%pair_s : {STATE}), ^{pair_end}(%pair_s : {STATE})')
     block('pair_body',['pair_body_s'],[STATE])
 
+    if 'lhs' in cached_roles:
+        for row in range(m_tiles):
+            save(f'panel_exp_{row}', load(offset('pair_lpage', row*2048), BF16), BF16)
+
     # The panel count is statically capped. Each N traversal is counted, so
     # generated code grows with bounded K, never with the number of columns.
     for phase, first in enumerate(range(0,kc,k_tiles)):
@@ -179,6 +190,8 @@ def virtual_source(plan, layout, restoration, *, geometry=None, allow_batches=Fa
         more = e.cmp('ult',names[1],e.const(nc))
         e.emit(f'cf.cond_br %{more}, ^p{phase}_body(%{e.state} : {STATE}), ^p{phase}_done(%{e.state} : {STATE})')
         block(f'p{phase}_body',[f'p{phase}_body_s'],[STATE])
+        if 'rhs' in cached_roles and first + count == kc:
+            save('restore_rhs', load(names[4], BF16), BF16)
         partials = []
         if interleave_rows:
             partials = [load(offset(names[3], row*nc*2048), BF16) if first else None
@@ -215,11 +228,15 @@ def virtual_source(plan, layout, restoration, *, geometry=None, allow_batches=Fa
                 # Restore only after the last ordered K term. Keep this tile
                 # on chip through scaling/epilogue and publish it once; earlier
                 # K panels still use the output buffer for rounded partials.
+                if 'lhs' in cached_roles:
+                    save('restore_lhs', restore(f'panel_exp_{row}', BF16), BF16)
                 stored = e.name('readout_done')
                 e.lines.extend(restoration.tile(
                     input_state=e.state, output_state=stored, result=partial,
                     output_address=address, exponent_addresses=(left_page, right_page),
                     row_tile=logical_row, column_tile=names[1], output_bytes=e.const(2048),
+                    additional_resident_exponents=tuple(index for index, role in enumerate(('lhs', 'rhs'))
+                                                       if role in cached_roles),
                     prefix=f'panel_readout_{row}'))
                 e.state = stored
         next_values = [e.state,offset(names[1],1),offset(names[2],kc*1024),offset(names[3],2048)]
