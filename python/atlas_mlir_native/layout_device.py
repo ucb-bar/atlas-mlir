@@ -99,7 +99,10 @@ def _segment(index, shape, source_strides, output_strides, source_offset, output
         ss.pop()
         ds.pop()
     if block % 32 == 0 and source_offset % 32 == output_offset % 32 == 0 and all(s % 32 == 0 for s in (*ss, *ds)):
-        chunk = gcd(block, 4096)
+        # DMA lengths need beat alignment, not power-of-two divisibility.
+        # Bound the emitted body to 4 KiB while keeping the largest complete
+        # run: gcd(block, 4096) turns a 265-beat copy into 265 tiny transfers.
+        chunk = next(size for size in range(min(block, 4096), 0, -32) if block % size == 0)
         if chunk < block:
             shape.append(block // chunk)
             ss.append(chunk)

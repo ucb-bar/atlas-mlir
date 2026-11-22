@@ -80,6 +80,11 @@ with measurements. Historical performance numbers are context, not this branch's
   Both pipelines match independent reference values for all stored intermediates
   and both outputs on two input panels. This is a diagnostic graph, not a
   TorchAO model or a model-quality measurement.
+- Removed an unnecessary power-of-two restriction from contiguous layout DMA
+  chunk selection. In optimized copies, 192 bytes takes 502 versus 1,031 cycles;
+  320 bytes takes 689 versus 1,703; and 8,480 bytes takes 13,482 versus 77,137.
+  Bytes moved and the single device launch are unchanged. The layout suite
+  passes 48 tests and 74 subtests, including nontrivial affine outer dimensions.
 - Remaining integration work: complete-layer measurements, residency interaction,
   and more useful overlap in the optimized schedule. No complete-layer or board
   speedup is claimed from the kernel experiments below.
