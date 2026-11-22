@@ -2887,6 +2887,32 @@ class AtlasNativeBinding:
     """Selected RTL facts live here; Merlin owns the search algorithms."""
 
     @staticmethod
+    def application_source_translators(policy):
+        # Importing target source semantics grants no implementation authority.
+        from .generated_export_policy import source_translators
+
+        return source_translators()
+
+    @staticmethod
+    def application_adapter_for_prepared_source(
+        policy, *, original_source_sha256, source, staged, compile_inputs,
+    ):
+        from .generated_export_policy import SCHEMA, adapter_for_prepared_source
+
+        if isinstance(policy, dict) and policy.get("schema") == SCHEMA:
+            from .options import current_codegen_options
+
+            if current_codegen_options().adjacent_patterns.strip():
+                raise NativeCompilationError(
+                    "unsupported_semantics", "generated family cover requires its selected region plan"
+                )
+            return adapter_for_prepared_source(
+                policy, source=source, staged=staged,
+                original_source_sha256=original_source_sha256,
+            )
+        return AtlasNativeBinding.application_adapter(policy, original_source_sha256=original_source_sha256)
+
+    @staticmethod
     def application_adapter(policy, *, original_source_sha256):
         from .application import AtlasApplicationAdapter
 
