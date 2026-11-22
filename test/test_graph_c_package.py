@@ -172,7 +172,10 @@ class GraphCPackageTest(unittest.TestCase):
     def test_model_entry_embeds_parameters_and_accepts_only_runtime_inputs(self):
         import numpy as np
 
-        from merlin.compiler.frontend.inputs import load_compile_inputs, load_lifted_argument_bytes
+        from merlin.compiler.frontend.inputs import (
+            load_compile_inputs,
+            load_lifted_argument_bytes,
+        )
         from merlin.compiler.quantization.contraction.values import FloatBoundarySpec
 
         stage = Path(os.environ["ATLAS_GRAPH_COMPILE_INPUTS"])
@@ -367,7 +370,11 @@ int main(void) {{
         from merlin.compiler.lower.c.dispatch import DispatchCall, emit_program_c
         from merlin.runtime.program import build_program
         from merlin.compiler.schedule.storage.arena import ArenaRequirements
-        from merlin.compiler.partition.dispatch_program import Buffer, DispatchProgram, Node
+        from merlin.compiler.partition.dispatch_program import (
+            Buffer,
+            DispatchProgram,
+            Node,
+        )
         from merlin.compiler.partition.global_plan_emission import dispatch_digest
 
         compiler = shutil.which("cc")

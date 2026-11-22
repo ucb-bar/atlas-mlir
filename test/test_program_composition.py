@@ -140,7 +140,9 @@ class ProgramCompositionTest(unittest.TestCase):
         from tools.check_program_decode import decode_binary
         from tools.model_instructions import model_instruction
 
-        from merlin.compiler.transforms.contraction_mnk import materialize_looped_mnk_inputs
+        from merlin.compiler.transforms.contraction_mnk import (
+            materialize_looped_mnk_inputs,
+        )
 
         torch.set_num_threads(1)
         inventory = json.loads((ROOT / "docs/selected-variant-inventory.json").read_text())

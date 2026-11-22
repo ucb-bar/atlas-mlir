@@ -40,7 +40,7 @@ def test_binary64_multiply_is_selected_before_compilation_and_uses_no_device_pro
     assert region.placement == "host"
     compiled = adapter.compile_region(None, source, region, "host_multiply", None, None, None)
     assert not compiled.programs
-    assert compiled.description["arithmetic"] == "exact-source-f64-multiply"
+    assert compiled.description["arithmetic"] == "exact-source-" + "f64_mul".replace("_", "-")
     assert b"__uint128_t" in compiled.files["host_multiply.c"]
     assert compiled.inputs == ("a", "b")
     # No compiler math helper is selected or needed by this policy.

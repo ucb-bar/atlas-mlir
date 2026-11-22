@@ -14,9 +14,14 @@ from atlas_mlir_native.binding import (
     check_io_memory_manifest,
     dram_slots,
 )
-from atlas_mlir_native.pointwise import plan_abi, prepare_plan, prepare_source
+from atlas_mlir_native.pointwise import plan_abi, prepare_execution_plan, prepare_plan, prepare_source
 from atlas_mlir_native.options import CodegenOptions, codegen_options
-from merlin.compiler.semantic.model import KernelRequest, SemanticNode, TensorType, pointwise_identity_maps
+from merlin.compiler.semantic.model import (
+    KernelRequest,
+    SemanticNode,
+    TensorType,
+    pointwise_identity_maps,
+)
 from merlin.compiler.semantic.target_binding import NativeCompilationError
 
 
@@ -35,8 +40,10 @@ def test_larger_io_window_is_explicit_and_only_changes_the_external_bank():
     baseline = AtlasNativeBinding.profile()
     assert dram_slots() == DRAM_SLOTS
     request = prepare_source(source()).request
-    with pytest.raises(NativeCompilationError, match="memory window"):
-        plan_abi(request)
+    _, device, streaming = prepare_execution_plan(request)
+    assert streaming is not None and streaming["launch_count"] > 1
+    assert sum((*device.input_packed_bytes, device.packed_bytes)) <= DRAM_SLOTS * TILE_BYTES
+    plan_abi(request)
     with codegen_options(CodegenOptions(io_memory_bytes=1048576)):
         expanded = AtlasNativeBinding.profile()
         assert dram_slots() == 512 and expanded.digest() != baseline.digest()
@@ -44,6 +51,8 @@ def test_larger_io_window_is_explicit_and_only_changes_the_external_bank():
         assert expanded.descriptors == baseline.descriptors
         assert expanded.banks[1:] == baseline.banks[1:]
         assert expanded.banks[0].capacity == 512
+        _, _, streaming = prepare_execution_plan(request)
+        assert streaming is None
         abi, plan = plan_abi(request), prepare_plan(request)
         slots = [*abi["fixed_inputs"].values(), *abi["fixed_outputs"]]
         ranges = [(DRAM_BASE + slot * TILE_BYTES, DRAM_BASE + slot * TILE_BYTES + size)
@@ -81,7 +90,7 @@ def test_cli_requires_matching_window_for_compilation_and_verification(tmp_path)
     (tmp_path / "request.json").write_text(json.dumps(request.record()))
     with codegen_options(CodegenOptions(io_memory_bytes=1048576)):
         snapshot = build_snapshot(tmp_path)
-    common = [sys.executable, "-m", "merlin.targetgen.cli"]
+    common = [sys.executable, "-m", "merlin.development.targetgen.cli"]
     inputs = ["--engine", "merlin_native", "--support", "atlas", "--snapshot", str(snapshot.root),
               "--request", str(tmp_path / "request.json"), "--mode", "diagnostic"]
     artifact, status = tmp_path / "compiled", tmp_path / "verification.json"
@@ -98,3 +107,42 @@ def test_cli_requires_matching_window_for_compilation_and_verification(tmp_path)
     assert rejected.returncode == 2 and "snapshot differs" in status.read_text()
     verified = subprocess.run([*verify_cmd, "--io-memory-bytes", "1048576"], capture_output=True, text=True)
     assert verified.returncode == 0, verified.stdout + verified.stderr
+
+
+@pytest.mark.parametrize("base,size,capacity_base,capacity", [
+    (0x90000001, 262144, None, None),
+    (0x20000, 262144, None, None),
+    (0x40000, 262144, None, None),
+    (0xBFFFF800, 4096, 0x80000000, 1 << 30),
+    (0x80000000, 64 << 20, 0x80000000, (64 << 20) - 2048),
+    (0x200C0000, 1 << 20, None, None),
+])
+def test_complete_window_refuses_invalid_placement(base, size, capacity_base, capacity):
+    from atlas_mlir_native.binding import validate_io_window
+    with codegen_options(CodegenOptions(io_memory_base=base, io_memory_bytes=size,
+            io_memory_capacity_base=capacity_base, io_memory_capacity_bytes=capacity)):
+        with pytest.raises(NativeCompilationError):
+            validate_io_window()
+
+
+@pytest.mark.parametrize("base,size", [(0x200C0000, 768 << 10), (0x80000000, 64 << 20)])
+def test_window_context_controls_adjacent_and_leaf_plans(base, size):
+    from atlas_mlir_native.binding import validate_io_window
+    from atlas_mlir_native.region_composition import allocate_adjacent_arena
+    from atlas_mlir_native.scalar_broadcast import prepare_source as broadcast
+    with codegen_options(CodegenOptions(io_memory_base=base, io_memory_bytes=size)):
+        assert validate_io_window() == (base, size)
+        addresses, used = allocate_adjacent_arena({'x': 2048, 'y': 2048}, ('x', 'y'))
+        assert addresses == {'x': base, 'y': base + 2048}
+        assert used == 4096
+        check_io_memory_manifest({'io_memory_bytes': size, 'io_memory_base': base})
+        with pytest.raises(ValueError):
+            check_io_memory_manifest({'io_memory_bytes': size})
+
+
+def test_row_explicit_base_cannot_escape_declared_capacity():
+    from atlas_mlir_native.row_loop import prepare_plan as row_plan
+    with codegen_options(CodegenOptions(io_memory_base=0xA0000000, io_memory_bytes=64 << 20,
+            io_memory_capacity_base=0xA0000000, io_memory_capacity_bytes=64 << 20)):
+        with pytest.raises(NativeCompilationError, match='capacity'):
+            row_plan(None, io_memory_base=DRAM_BASE)

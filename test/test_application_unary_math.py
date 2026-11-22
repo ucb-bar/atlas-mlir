@@ -6,6 +6,7 @@ import pytest
 import test_application_float_arithmetic as fixtures
 from atlas_mlir_native.application import AtlasApplicationAdapter
 
+from merlin.runtime import host_math_supplier as host_math
 from merlin.compiler.lower.c.unary_math import OPERATIONS
 from merlin.compiler.semantic.target_binding import NativeCompilationError
 from atlas_test_fixtures.unary_math_c import policy as math_policy
@@ -25,7 +26,9 @@ def test_selected_cpu_math_preserves_library_and_effect_requirements(operation):
     assert alternative.placement == "host"
     result = adapter.compile_region(None, source, alternative, "unary", None, None, None)
     assert result.programs == ()
-    assert result.description["host_linkage"]["symbols"] == [OPERATIONS[operation][1]]
+    # The fixed host-math interface: the environment check and the selected function's merlin_host_ symbol.
+    assert result.description["host_linkage"]["symbols"] == sorted(
+        ["merlin_host_check_fp_env", host_math.symbol(OPERATIONS[operation][1])])
     assert result.description["framework_equivalence"] == "not_established"
     assert result.description["host_abi"] == "lp64d"
     with pytest.raises(NativeCompilationError, match="no compiled application route"):

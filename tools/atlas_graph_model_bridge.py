@@ -51,9 +51,14 @@ def _render_bytes(name: str, payload: bytes) -> list[str]:
 
 def prepare(source_path: Path, bridge_root: Path, compiled: Path) -> tuple[dict, dict[str, str]]:
     from merlin.frontends.linalg_mlir import parse_mlir_text
-    from merlin.semantic_compiler.precision_codegen import finite_f32_codebook, render_finite_f32_codebook_c
+    from merlin.semantic_compiler.precision_codegen import (
+        finite_f32_codebook,
+        render_finite_f32_codebook_c,
+    )
     from merlin.semantic_compiler.target_binding import verify_native_publication
-    from merlin.targetgen.contract.model_host_bridge import diagnostic_whole_graph_host_bridge
+    from merlin.targetgen.contract.model_host_bridge import (
+        diagnostic_whole_graph_host_bridge,
+    )
     from xdsl.dialects import func
 
     if bridge_root.is_symlink() or compiled.is_symlink():
@@ -334,8 +339,9 @@ def prepare_c_package(record: dict, generated: dict[str, str], compiled: Path,
     from merlin.compile.c_sources import c_source_pair
 
     runtime = Path(__file__).resolve().parents[1] / "runtime"
-    public = {member: _member(runtime, member).decode()
-              for member in ("atlas_host.h", "atlas_model_tile.h")}
+    from atlas_mlir_native.c_runtime import runtime_headers
+
+    public = {**runtime_headers(runtime), "atlas_model_tile.h": _member(runtime, "atlas_model_tile.h").decode()}
     private = {
         "finite_float_boundary.h": (Path(merlin_dir()) / "runtime/c/finite_float_boundary.h").read_text(),
         "atlas_graph_memref.h": _member(runtime, "atlas_graph_memref.h").decode(),
@@ -419,7 +425,10 @@ int {name}_dispatch(void *context, const void *const *inputs, void *const *outpu
     if compile_inputs is not None:
         import numpy as np
         from merlin.compile.c_parameters import freeze_c_arguments
-        from merlin.frontends.compile_inputs import load_compile_inputs, load_lifted_argument_bytes
+        from merlin.frontends.compile_inputs import (
+            load_compile_inputs,
+            load_lifted_argument_bytes,
+        )
 
         frozen = freeze_c_arguments(
             compile_inputs, name=name, source_sha256=record["source_sha256"])

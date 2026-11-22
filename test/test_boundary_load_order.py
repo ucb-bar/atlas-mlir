@@ -21,7 +21,12 @@ def shared_normalization():
         _row_reduce_maps,
     )
 
-    from merlin.compiler.semantic.model import KernelRequest, SemanticNode, TensorType, pointwise_identity_maps
+    from merlin.compiler.semantic.model import (
+        KernelRequest,
+        SemanticNode,
+        TensorType,
+        pointwise_identity_maps,
+    )
 
     tensor = TensorType((32, 32), "bf16", "raw-bit-pattern")
     attrs = {**BF16_BINARY_ATTRS, **BF16_ROW_REDUCTION_ATTRS, **BF16_UNARY_ATTRS}

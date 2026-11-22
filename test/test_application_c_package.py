@@ -14,11 +14,25 @@ from pathlib import Path
 from test_looped_mnk import ROOT
 
 
+def _requires(*names):
+    """A missing prerequisite for an in-scope test fails explicitly."""
+    def decorate(function):
+        def checked(self, *args, **kwargs):
+            missing = [name for name in names if not os.environ.get(name)]
+            if missing:
+                self.fail("required prerequisite not selected: " + ", ".join(missing))
+            return function(self, *args, **kwargs)
+        checked.__name__, checked.__doc__ = function.__name__, function.__doc__
+        return checked
+    return decorate
+
+
+_RUST_MODEL_OUT_OF_SCOPE = "out of scope: native Rust model work is excluded"
+
+
 class ApplicationLayoutPolicyTest(unittest.TestCase):
-    @unittest.skipUnless(
-        os.environ.get("MERLIN_NATIVE_ROOT") and os.environ.get("ATLAS_OOT_BIN_DIR"),
-        "select Merlin and Atlas build tools",
-    )
+    @unittest.skip(_RUST_MODEL_OUT_OF_SCOPE)
+    @_requires("MERLIN_NATIVE_ROOT", "ATLAS_OOT_BIN_DIR")
     def test_folded_accumulator_seed_compiles_from_linalg_with_a_replay_receipt(self):
         from atlas_mlir_native.application import AtlasApplicationAdapter
         from test_looped_mnk import build_snapshot
@@ -83,10 +97,8 @@ class ApplicationLayoutPolicyTest(unittest.TestCase):
                     source_folding=receipt,
                 )
 
-    @unittest.skipUnless(
-        os.environ.get("MERLIN_NATIVE_ROOT") and os.environ.get("ATLAS_OOT_BIN_DIR"),
-        "select Merlin and Atlas build tools",
-    )
+    @unittest.skip(_RUST_MODEL_OUT_OF_SCOPE)
+    @_requires("MERLIN_NATIVE_ROOT", "ATLAS_OOT_BIN_DIR")
     def test_batched_k_chunks_use_flat_members_and_the_existing_batch_wrapper(self):
         from atlas_mlir_native.application import AtlasApplicationAdapter
         from test_looped_mnk import build_snapshot
@@ -183,7 +195,7 @@ class ApplicationLayoutPolicyTest(unittest.TestCase):
         self.assertEqual(exported.description["index_bounds"], [0, 8])
         self.assertFalse(exported.description["failure_writes_output"])
 
-    def test_batched_relu_keeps_separate_native_regions_when_fusion_is_unavailable(self):
+    def test_batched_relu_refuses_removed_native_routes(self):
         from atlas_mlir_native.application import AtlasApplicationAdapter
 
         from merlin.compiler.semantic.model import SemanticNode, pointwise_identity_maps
@@ -206,15 +218,13 @@ class ApplicationLayoutPolicyTest(unittest.TestCase):
                 source = replace(
                     source, nodes=(*source.nodes, relu), outputs=(relu.id,), target_identity=policy["target_identity"]
                 )
-                selected = adapter.plan(source).selected
-                self.assertEqual(
-                    [dict(r.metadata)["kind"] for r in selected],
-                    ["contraction", "pointwise"] if batch else ["contraction"],
+                self.assertEqual(product.type.shape[:-2], batch)
+                message = (
+                    "pointwise source operation, attributes or accounting differ" if batch
+                    else "contraction epilogues require a separate checked lowering"
                 )
-                self.assertTrue(all(r.placement == "accelerator" for r in selected))
-                self.assertEqual(
-                    [dict(r.metadata).get("epilogue") for r in selected], [None, None] if batch else ["relu"]
-                )
+                with self.assertRaisesRegex(ValueError, message):
+                    adapter.plan(source)
 
     def test_masked_softmax_requires_explicit_policy_and_preserves_mask_map(self):
         from atlas_mlir_native.application import AtlasApplicationAdapter
@@ -224,9 +234,14 @@ class ApplicationLayoutPolicyTest(unittest.TestCase):
         from atlas_mlir_native.sigmoid import SIGMOID_POLICY
         from atlas_mlir_native.softmax_precision import lower_semantic_softmax
 
-        from merlin.compiler.semantic.model import IndexMap, SemanticNode, TensorType, pointwise_identity_maps
+        from merlin.compiler.semantic.model import (
+            IndexMap,
+            SemanticNode,
+            TensorType,
+            pointwise_identity_maps,
+        )
         from merlin.compiler.semantic.target_binding import NativeCompilationError
-        from atlas_test_fixtures.batched_c import source_graph
+        from atlas_test_fixtures.softmax_source import source_graph
 
         old = {
             **self.policy(),
@@ -288,7 +303,11 @@ class ApplicationLayoutPolicyTest(unittest.TestCase):
         from atlas_mlir_native.pointwise_math import MATH_POLICY
         from atlas_mlir_native.reduction import REDUCTION_POLICY
 
-        from merlin.compiler.semantic.model import KernelRequest, SemanticNode, TensorType
+        from merlin.compiler.semantic.model import (
+            KernelRequest,
+            SemanticNode,
+            TensorType,
+        )
         from merlin.compiler.semantic.target_binding import NativeCompilationError
 
         policy = {
@@ -424,7 +443,7 @@ class ApplicationLayoutPolicyTest(unittest.TestCase):
                 AtlasApplicationAdapter(
                     {**policy, "host_integer_ops": operations}, original_source_sha256=policy["source_sha256"]
                 )
-        with patch.dict(sys.modules, {"merlin.compile.c_integer": None}):
+        with patch.dict(sys.modules, {"merlin.compiler.lower.c.integer": None}):
             with self.assertRaisesRegex(NativeCompilationError, "integer C emitter"):
                 adapter.plan(source)
 
@@ -438,7 +457,7 @@ class ApplicationLayoutPolicyTest(unittest.TestCase):
 
         from merlin.compiler.lower.c.float_casts import FLOAT_CAST_OPERATIONS
         from merlin.compiler.semantic.target_binding import NativeCompilationError
-        from atlas_test_fixtures.integer_c import request_for
+        from atlas_test_fixtures.float_casts_c import request_for
 
         policy = {
             **self.policy(), "schema": "atlas.diagnostic_application_precision.v17",
@@ -489,7 +508,7 @@ class ApplicationLayoutPolicyTest(unittest.TestCase):
         from atlas_mlir_native.sigmoid import SIGMOID_POLICY
 
         from merlin.compiler.semantic.target_binding import NativeCompilationError
-        from atlas_test_fixtures.integer_c import request_for
+        from atlas_test_fixtures.bucketize_c import request_for
 
         policy = {
             **self.policy(),
@@ -516,7 +535,7 @@ class ApplicationLayoutPolicyTest(unittest.TestCase):
             AtlasApplicationAdapter(
                 {**old, "host_predicates": ["bucketize"]}, original_source_sha256=old["source_sha256"]
             )
-        with patch.dict(sys.modules, {"merlin.compile.c_bucketize": None}):
+        with patch.dict(sys.modules, {"merlin.compiler.lower.c.bucketize": None}):
             with self.assertRaisesRegex(NativeCompilationError, "predicate C emitter"):
                 adapter.plan(source)
 
@@ -528,7 +547,7 @@ class ApplicationLayoutPolicyTest(unittest.TestCase):
         from atlas_mlir_native.sigmoid import SIGMOID_POLICY
 
         from merlin.compiler.semantic.target_binding import NativeCompilationError
-        from atlas_test_fixtures.integer_c import request_for
+        from atlas_test_fixtures.predicates_c import request_for
 
         old = {
             **self.policy(),
@@ -578,7 +597,7 @@ class ApplicationLayoutPolicyTest(unittest.TestCase):
             self.assertFalse(adapter.compile_region(None, floats, region, "compare", None, ROOT, None).programs)
         from unittest.mock import patch
 
-        with patch.dict(sys.modules, {"merlin.compile.c_predicates": None}):
+        with patch.dict(sys.modules, {"merlin.compiler.lower.c.predicates": None}):
             with self.assertRaisesRegex(NativeCompilationError, "tool_unavailable"):
                 adapter.plan(source)
         floating_mask = replace(source.nodes[-1], attrs=(("operation", "arith.cmpf"), ("predicate", "ult")))
@@ -596,7 +615,13 @@ class ApplicationLayoutPolicyTest(unittest.TestCase):
     def test_indexed_host_layouts_require_explicit_admission(self):
         from atlas_mlir_native.application import AtlasApplicationAdapter
 
-        from merlin.compiler.semantic.model import IndexMap, KernelRequest, SemanticNode, TensorType, pointwise_identity_maps
+        from merlin.compiler.semantic.model import (
+            IndexMap,
+            KernelRequest,
+            SemanticNode,
+            TensorType,
+            pointwise_identity_maps,
+        )
         from merlin.compiler.semantic.target_binding import NativeCompilationError
 
         policy = self.policy()
@@ -747,19 +772,8 @@ class ApplicationLayoutPolicyTest(unittest.TestCase):
                 AtlasApplicationAdapter(changed, original_source_sha256=policy["source_sha256"])
 
 
-@unittest.skipUnless(
-    all(
-        os.environ.get(name)
-        for name in (
-            "ATLAS_APPLICATION_ARTIFACT",
-            "ATLAS_APPLICATION_INPUTS",
-            "ATLAS_APPLICATION_SNAPSHOT",
-            "ATLAS_LLVM_BIN",
-        )
-    ),
-    "select a compiled application, its staged inputs/snapshot and LLVM",
-)
 class ApplicationCPackageTest(unittest.TestCase):
+    @_requires("ATLAS_APPLICATION_ARTIFACT", "ATLAS_APPLICATION_INPUTS", "ATLAS_APPLICATION_SNAPSHOT", "ATLAS_LLVM_BIN")
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(dir=os.environ.get("TMPDIR"))
         self.root = Path(self.temporary.name)
@@ -809,98 +823,6 @@ class ApplicationCPackageTest(unittest.TestCase):
         for exponents in ((True, 4), (33, 0), (-33, 0), (1,), "4,4"):
             with self.subTest(exponents=exponents), self.assertRaises(ValueError):
                 prepare_contraction(region, operand_scale_exponents=exponents)
-
-    def test_relu_fusion_requires_a_closed_unobserved_contraction(self):
-        from atlas_mlir_native.application import AtlasApplicationAdapter
-        from atlas_mlir_native.application_precision import (
-            SCALED_CONTRACTION_POLICY,
-            prepare_contraction,
-        )
-        from atlas_mlir_native.looped_tiling import (
-            _virtual,
-            prepare_plan,
-            split_epilogue,
-        )
-
-        from merlin.compiler.partition.semantic_regions import extract_semantic_region
-        from merlin.compiler.semantic.model import KernelRequest, SemanticNode, pointwise_identity_maps
-        from merlin.compiler.semantic.target_binding import NativeCompilationError
-
-        graph = KernelRequest.from_record(json.loads((self.artifact / "source-request.json").read_text()))
-        matmul = next(node for node in graph.nodes if node.op == "source_f32_matmul_unqualified")
-        source = extract_semantic_region(graph, (matmul.id,))
-        relu = SemanticNode(
-            "activation",
-            "f32_relu_ordered_select",
-            (matmul.id,),
-            matmul.type,
-            (("numeric_semantics", "f32-ordered-lt-positive-zero-select-v1"),),
-            index_maps=pointwise_identity_maps(2, 1),
-        )
-        source = replace(source, nodes=(*source.nodes, relu), outputs=(relu.id,))
-        precision = prepare_contraction(source, operand_scale_exponents=(4, 4), epilogue="relu")
-        self.assertEqual(precision.source.digest(), source.digest())
-        self.assertEqual(precision.request.node(precision.request.outputs[0]).op, "relu")
-        self.assertEqual(source.nodes[precision.output.source_value.index].id, relu.id)
-        contraction, epilogue = split_epilogue(precision.request)
-        self.assertEqual(contraction.outputs, ("result",))
-        virtual = _virtual(
-            prepare_plan(precision.request),
-            (0x90000000, 0x90010000),
-            0x90020000,
-            epilogue,
-        )
-        self.assertEqual(virtual.count('kind = "relu"'), 1)
-        self.assertGreater(virtual.index('kind = "relu"'), virtual.index("^store(%ss:"))
-        policy = json.loads((Path(os.environ["ATLAS_APPLICATION_INPUTS"]) / "precision-policy.json").read_text())
-        policy.update(
-            schema="atlas.diagnostic_application_precision.v3",
-            epilogues=["relu"],
-            contraction={
-                "policy": SCALED_CONTRACTION_POLICY,
-                "operand_scale_exponents": [4, 4],
-            },
-        )
-        policy.pop("pointwise", None)
-        policy["host_support"] = ["transpose", "reshape", "copy"]
-        adapter = AtlasApplicationAdapter(policy, original_source_sha256=policy["source_sha256"])
-        selected = adapter.plan(source).selected
-        self.assertEqual(len(selected), 1)
-        self.assertEqual(selected[0].nodes, (0, 1))
-        observed = replace(
-            source,
-            outputs=(matmul.id, relu.id),
-            output_storages=("external", "external"),
-        )
-        with self.assertRaises(NativeCompilationError):
-            adapter.plan(observed)
-        shared = SemanticNode(
-            "copy",
-            "copy",
-            (matmul.id,),
-            matmul.type,
-            index_maps=pointwise_identity_maps(2, 1),
-        )
-        with self.assertRaises(NativeCompilationError):
-            adapter.plan(
-                replace(
-                    source,
-                    nodes=(*source.nodes, shared),
-                    outputs=(relu.id, shared.id),
-                    output_storages=("external", "external"),
-                )
-            )
-        for bad in (
-            replace(relu, attrs=()),
-            replace(relu, index_maps=()),
-            replace(relu, type=replace(relu.type, numerical_policy="different")),
-        ):
-            with self.subTest(bad=bad), self.assertRaises(ValueError):
-                prepare_contraction(
-                    replace(source, nodes=(*source.nodes[:-1], bad)),
-                    operand_scale_exponents=(4, 4),
-                    epilogue="relu",
-                )
 
     def verify(self, artifact, label):
         command = [

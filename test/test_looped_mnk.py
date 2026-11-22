@@ -16,16 +16,20 @@ from test_virtual_ssa import ROOT
 SHAPES = ((64, 64, 64), (64, 96, 32), (31, 33, 32), (33, 65, 31), (1, 7, 65), (7, 33, 1))
 
 
-def source_request(m, n, k, *, relu=False):
+def source_request(m, n, k):
     from atlas_mlir_native.binding import (
-        BF16_RELU_ATTRS,
         MXU0_INPUT_DOMAIN,
         MXU0_POLICY,
         TARGET_IDENTITY,
         _mxu0_maps,
     )
 
-    from merlin.compiler.semantic.model import KernelRequest, SemanticNode, TensorType, pointwise_identity_maps
+    from merlin.compiler.semantic.model import (
+        KernelRequest,
+        SemanticNode,
+        TensorType,
+        pointwise_identity_maps,
+    )
 
     request = KernelRequest(
         (
@@ -53,17 +57,6 @@ def source_request(m, n, k, *, relu=False):
         TARGET_IDENTITY,
         lowering_policy="diagnostic",
     )
-    if relu:
-        result = request.nodes[-1]
-        activation = SemanticNode(
-            "activated",
-            "relu",
-            (result.id,),
-            TensorType(result.type.shape, "bf16", "raw-bit-pattern"),
-            BF16_RELU_ATTRS,
-            index_maps=pointwise_identity_maps(2, 1),
-        )
-        request = dataclasses.replace(request, nodes=(*request.nodes, activation), outputs=(activation.id,))
     return request
 
 
@@ -75,7 +68,9 @@ def case_data(shape):
     """
     from atlas_mlir_native.looped_tiling import prepare_plan
 
-    from merlin.compiler.transforms.contraction_mnk import materialize_looped_mnk_inputs
+    from merlin.compiler.transforms.contraction_mnk import (
+        materialize_looped_mnk_inputs,
+    )
 
     m, n, k = shape
     request = source_request(m, n, k)
@@ -105,14 +100,17 @@ def case_data(shape):
     return request, plan, materialize_looped_mnk_inputs(plan, {"a": a, "w": w}), bytes(expected)
 
 
-def seeded_source_request(shape, relu=False):
+def seeded_source_request(shape):
     from atlas_mlir_native.binding import (
-        BF16_RELU_ATTRS,
         MXU0_SEED_ATTRS,
         _mxu0_accumulate_maps,
     )
 
-    from merlin.compiler.semantic.model import SemanticNode, TensorType, pointwise_identity_maps
+    from merlin.compiler.semantic.model import (
+        SemanticNode,
+        TensorType,
+        pointwise_identity_maps,
+    )
 
     base = source_request(*shape)
     a, w, result = base.nodes
@@ -123,20 +121,10 @@ def seeded_source_request(shape, relu=False):
     request = dataclasses.replace(
         base, nodes=(a, w, seed, result), input_storages=(*base.input_storages, (seed.id, "external"))
     )
-    if relu:
-        activation = SemanticNode(
-            "activated",
-            "relu",
-            (result.id,),
-            TensorType(result.type.shape, "bf16", "raw-bit-pattern"),
-            BF16_RELU_ATTRS,
-            index_maps=pointwise_identity_maps(2, 1),
-        )
-        request = dataclasses.replace(request, nodes=(*request.nodes, activation), outputs=(activation.id,))
     return request
 
 
-def seeded_case_data(shape, shift=0, relu=False):
+def seeded_case_data(shape, shift=0):
     """Dense source bytes and an independent per-step BF16 rounding reference."""
     from rtl.make_ordered_tile_fixture import _bf16, _fp8, _round_bf16
 
@@ -151,13 +139,11 @@ def seeded_case_data(shape, shift=0, relu=False):
             seed.extend(code.to_bytes(2, "little"))
             for i in range(k):
                 code = _round_bf16(_bf16(code) + _fp8(a[r * k + i]) * _fp8(w[c * k + i]))
-            if relu and code & 0x8000:
-                code = 0
             expected.extend(code.to_bytes(2, "little"))
     return a, w, bytes(seed), bytes(expected)
 
 
-def chunked_case_data(shape, shift=0, relu=False):
+def chunked_case_data(shape, shift=0):
     """A negative, non-FP8 partial must survive until the final positive term."""
     from rtl.make_ordered_tile_fixture import _bf16, _fp8, _round_bf16
 
@@ -178,8 +164,6 @@ def chunked_case_data(shape, shift=0, relu=False):
             value = 0
             for i in range(k):
                 value = _round_bf16(_bf16(value) + _fp8(a[row * k + i]) * _fp8(w[column * k + i]))
-            if relu and value & 0x8000:
-                value = 0
             expected.extend(value.to_bytes(2, "little"))
     return bytes(a), bytes(w), bytes(expected)
 
@@ -189,7 +173,9 @@ def rounding_case_data(panel):
     from atlas_mlir_native.looped_tiling import prepare_plan
     from rtl.make_ordered_tile_fixture import _bf16, _fp8, _round_bf16
 
-    from merlin.compiler.transforms.contraction_mnk import materialize_looped_mnk_inputs
+    from merlin.compiler.transforms.contraction_mnk import (
+        materialize_looped_mnk_inputs,
+    )
 
     request = source_request(1, 7, 65)
     plan = prepare_plan(request)
@@ -213,7 +199,10 @@ def rounding_case_data(panel):
 def build_snapshot(destination):
     from atlas_mlir_native.binding import AtlasNativeBinding
 
-    from merlin.compiler.semantic.target_binding import build_native_snapshot, packaged_egg_bridge_path
+    from merlin.compiler.semantic.target_binding import (
+        build_native_snapshot,
+        packaged_egg_bridge_path,
+    )
 
     return build_native_snapshot(
         AtlasNativeBinding.profile(),
@@ -353,8 +342,8 @@ class LoopedMNKTest(unittest.TestCase):
         from merlin.compiler.semantic.search.exploration import SearchLimits
         from merlin.compiler.semantic.target_binding import NativeCompilationError
 
-        for shape, relu in (((32, 32, 32), False), ((33, 35, 65), False), ((1, 7, 65), True)):
-            source = seeded_source_request(shape, relu)
+        for shape in ((32, 32, 32), (33, 35, 65), (1, 7, 65)):
+            source = seeded_source_request(shape)
             destination = self.root / ("seeded_" + "_".join(map(str, shape)))
             _, _, _, _, execution = compile_case(self.snapshot, shape, destination, source=source)
             body = json.loads((destination / "tile-body-selection.json").read_text())
@@ -383,18 +372,21 @@ class LoopedMNKTest(unittest.TestCase):
             with self.assertRaisesRegex(NativeCompilationError, "completed BF16"):
                 AtlasNativeBinding.plan_boundary_abi(dataclasses.replace(source, nodes=(a, w, altered, result)))
         with patch(
-            "merlin.semantic_compiler.buffer_allocation.allocate_buffers",
+            "merlin.compiler.semantic.search.buffers.allocate_buffers",
             return_value=BufferAllocation("unknown", reason="test work limit"),
         ):
             with self.assertRaises(NativeCompilationError) as error:
                 AtlasNativeBinding.plan_boundary_abi(source)
-            self.assertEqual(error.exception.status, "search_timeout")
+            self.assertEqual(error.exception.status, "resource_limit")
+            self.assertIn("buffer_solver_rlimit_per_query", error.exception.reason)
 
     def test_source_bound_contraction_preserves_windows_and_orients_weights(self):
         import numpy as np
         from atlas_mlir_native.looped_tiling import prepare_plan
 
-        from merlin.compiler.transforms.contraction_mnk import materialize_looped_mnk_inputs
+        from merlin.compiler.transforms.contraction_mnk import (
+            materialize_looped_mnk_inputs,
+        )
 
         plan = self.source_bound_contraction()
         self.assertTrue(plan.whole_contraction)
@@ -413,7 +405,9 @@ class LoopedMNKTest(unittest.TestCase):
     def test_looped_shapes_and_tails_use_checked_native_bodies(self):
         from atlas_mlir_native.layout import unpack_bf16_pair_halves
 
-        from merlin.compiler.transforms.contraction_mnk import assemble_looped_mnk_outputs
+        from merlin.compiler.transforms.contraction_mnk import (
+            assemble_looped_mnk_outputs,
+        )
 
         for shape in SHAPES:
             with self.subTest(shape=shape):
@@ -448,7 +442,7 @@ class LoopedMNKTest(unittest.TestCase):
             [
                 sys.executable,
                 "-m",
-                "merlin.targetgen.cli",
+                "merlin.development.targetgen.cli",
                 "native-compile",
                 *common,
                 "--abi",
@@ -467,7 +461,7 @@ class LoopedMNKTest(unittest.TestCase):
             [
                 sys.executable,
                 "-m",
-                "merlin.targetgen.cli",
+                "merlin.development.targetgen.cli",
                 "native-verify",
                 *common,
                 "--artifact",
@@ -500,49 +494,13 @@ class LoopedMNKTest(unittest.TestCase):
         torch.set_num_threads(1)
         cases = [(shape, None) for shape in SHAPES] + [((1, 7, 65), panel) for panel in ("ties", "cancellation")]
         cases.append(((3, 35, 72), "source"))
-        cases.append(((1, 7, 65), "relu_after_reduction"))
         for shape, panel in cases:
             with self.subTest(shape=shape, panel=panel):
                 destination = self.root / ("model_" + "_".join(map(str, shape)) + ("_" + panel if panel else ""))
                 source = self.source_bound_contraction().request if panel == "source" else None
-                if panel == "relu_after_reduction":
-                    from atlas_mlir_native.binding import BF16_RELU_ATTRS
-
-                    from merlin.compiler.semantic.model import SemanticNode, TensorType, pointwise_identity_maps
-
-                    base = source_request(*shape)
-                    activation = SemanticNode(
-                        "activated",
-                        "relu",
-                        ("y",),
-                        TensorType((1, 7), "bf16", "raw-bit-pattern"),
-                        BF16_RELU_ATTRS,
-                        index_maps=pointwise_identity_maps(2, 1),
-                    )
-                    source = dataclasses.replace(base, nodes=(*base.nodes, activation), outputs=("activated",))
                 _, _, inputs, expected, execution = compile_case(self.snapshot, shape, destination, source=source)
                 if panel in ("ties", "cancellation"):
                     inputs, expected = rounding_case_data(panel)
-                if panel == "relu_after_reduction":
-                    from atlas_mlir_native.looped_tiling import prepare_plan
-
-                    from merlin.compiler.transforms.contraction_mnk import materialize_looped_mnk_inputs
-
-                    # Partial sums are negative until the final K tile. Applying
-                    # ReLU to each partial sum would produce 32 instead of 1.
-                    activation = bytes([0x38]) * 65
-                    weights = b"".join(
-                        bytes([0xB8]) * 32 + bytes([0x38]) * 33
-                        if column % 2 == 0
-                        else bytes([0x38]) * 32 + bytes([0xB8]) * 33
-                        for column in range(7)
-                    )
-                    inputs = materialize_looped_mnk_inputs(prepare_plan(source), {"a": activation, "w": weights})
-                    expected = bytearray(2048)
-                    for column in range(0, 7, 2):
-                        struct.pack_into("<H", expected, column * 2, 0x3F80)
-                    expected = bytes(expected)
-                    self.assertEqual(execution["epilogue"]["op"], "relu")
                 binary = (destination / "program.bin").read_bytes()
                 decoded = decode_binary(inventory, binary)
                 program = InstantiableProgram(
