@@ -560,7 +560,7 @@ def plan_abi(request):
 
 def compose_fragments(fragments, *, tools, boundaries_lowered=False, share_bodies=False):
     """Link parsed functions; never rewrite SSA names or addresses as text."""
-    from xdsl.dialects.builtin import ArrayAttr, ModuleOp, StringAttr
+    from xdsl.dialects.builtin import ArrayAttr, ModuleOp, StringAttr, UnitAttr
     from xdsl.dialects.func import FuncOp
     from xdsl.printer import Printer
 
@@ -593,6 +593,17 @@ def compose_fragments(fragments, *, tools, boundaries_lowered=False, share_bodie
         module.body.block.detach_op(function)
         functions.append(function)
         names.append(StringAttr(name))
+    # This lowering hint only folds MXU accumulator round trips. Propagating it
+    # to a stage without MXU operations is inert and lets checked pack/layout
+    # stages compose with an opted-in contraction. A contraction that omitted
+    # the hint keeps its choice; the native attribute check still refuses it.
+    retain = 'atlas.retain_bf16_accumulators'
+    if any(isinstance(function.attributes.get(retain), UnitAttr) for function in functions):
+        for function in functions:
+            if (retain not in function.attributes
+                    and not any((op.op_name.data if op.name == 'builtin.unregistered' else op.name)
+                                .startswith('atlas.virtual_mxu_') for op in function.walk())):
+                function.attributes[retain] = UnitAttr()
     linked = ModuleOp(functions, attributes={"atlas.program_entries": ArrayAttr(names)})
     stream = io.StringIO()
     Printer(stream=stream).print_op(linked)
