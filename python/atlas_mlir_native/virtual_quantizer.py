@@ -92,7 +92,8 @@ def program(p):
     # Hoist the complete one-tile dynamic input above both counted loops. Its
     # SSA value dominates reduction and encoding; the allocator owns retention.
     # Multi-tile groups retain their counted traversal and bounded footprint.
-    cache_input = p.attrs['mode'] == 'dynamic' and p.group_elements == lanes
+    single_tile = p.group_elements == lanes
+    cache_input = p.attrs['mode'] == 'dynamic' and single_tile
     exponent_zero = b.op('virtual_vpu_splat', [], [], [BF16], 'bits = 0 : i32')
     zeros = b.op('virtual_raw_pack_fp8', [exponent_zero, c(127)], [BF16, 'i32'], [FP8])
     state = b.save(state, exponent_slot, zeros, FP8)
@@ -106,10 +107,14 @@ def program(p):
         if cache_input:
             group_state, cached_tile = b.op('virtual_dma_load_bf16', [group_state, '%gip', c(lanes * 2)],
                                            [STATE, 'i32', 'i32'], [STATE, BF16])
-        b.emit(f'cf.br ^amax({group_state}, {c(0)}, {c(0)}, %gip : {STATE}, i32, i32, i32)')
-        b.emit(f'^amax(%as: {STATE}, %ai: i32, %am: i32, %aptr: i32):')
-        more = b.cmp('ult', '%ai', c(p.group_elements // lanes))
-        b.emit(f'cf.cond_br {more}, ^amax_body(%as : {STATE}), ^scale(%as, %am : {STATE}, i32)')
+            maximum = c(0)
+            b.emit(f'cf.br ^amax_body({group_state} : {STATE})')
+        else:
+            maximum = '%am'
+            b.emit(f'cf.br ^amax({group_state}, {c(0)}, {c(0)}, %gip : {STATE}, i32, i32, i32)')
+            b.emit(f'^amax(%as: {STATE}, %ai: i32, %am: i32, %aptr: i32):')
+            more = b.cmp('ult', '%ai', c(p.group_elements // lanes))
+            b.emit(f'cf.cond_br {more}, ^amax_body(%as : {STATE}), ^scale(%as, %am : {STATE}, i32)')
         b.emit(f'^amax_body(%abs: {STATE}):')
         if cache_input:
             ds, tile = '%abs', cached_tile
@@ -129,7 +134,7 @@ def program(p):
         b.emit(f'cf.cond_br {exceptional}, ^exception({ds} : {STATE}), ^fast({ds} : {STATE})')
         b.emit(f'^exception(%es: {STATE}):')
         es = b.save('%es', scratch, tile, BF16)
-        b.emit(f'cf.br ^lane({es}, {c(0)}, %am : {STATE}, i32, i32)')
+        b.emit(f'cf.br ^lane({es}, {c(0)}, {maximum} : {STATE}, i32, i32)')
         b.emit(f'^lane(%ls: {STATE}, %li: i32, %lm: i32):')
         more = b.cmp('ult', '%li', c(lanes))
         b.emit(f'cf.cond_br {more}, ^lane_body(%ls : {STATE}), ^join(%ls, %lm : {STATE}, i32)')
@@ -141,11 +146,14 @@ def program(p):
         ni = add('%li', c(1))
         b.emit(f'cf.br ^lane({ls}, {ni}, {corrected} : {STATE}, i32, i32)')
         b.emit(f'^fast(%fs: {STATE}):')
-        fast = b.select(absmax, '%am', b.compare('ult', '%am', absmax))
+        fast = absmax if cache_input else b.select(absmax, maximum, b.compare('ult', maximum, absmax))
         b.emit(f'cf.br ^join(%fs, {fast} : {STATE}, i32)')
         b.emit(f'^join(%js: {STATE}, %jm: i32):')
-        ni, np = add('%ai', c(1)), add('%aptr', c(lanes * 2))
-        b.emit(f'cf.br ^amax(%js, {ni}, %jm, {np} : {STATE}, i32, i32, i32)')
+        if cache_input:
+            b.emit(f'cf.br ^scale(%js, %jm : {STATE}, i32)')
+        else:
+            ni, np = add('%ai', c(1)), add('%aptr', c(lanes * 2))
+            b.emit(f'cf.br ^amax(%js, {ni}, %jm, {np} : {STATE}, i32, i32, i32)')
         b.emit(f'^scale(%ss: {STATE}, %sm: i32):')
         exp, clamped = exponent(b, '%sm', p.attrs['rule'])
         state = '%ss'
@@ -155,36 +163,49 @@ def program(p):
     exp_count = 1 if p.attrs['mode'] == 'static' or p.attrs['reduce'] in ('tensor', 'head') else p.group_elements // p.row_elements
     if groups * exp_count > 256:
         raise ValueError('ordinary virtual quantizer exponent body exceeds one slot')
-    b.emit(f'cf.br ^exponent({state}, {c(0)} : {STATE}, i32)')
-    b.emit(f'^exponent(%xs: {STATE}, %xi: i32):')
-    more = b.cmp('ult', '%xi', c(exp_count))
-    b.emit(f'cf.cond_br {more}, ^exponent_body(%xs : {STATE}), ^encode_start(%xs : {STATE})')
-    b.emit(f'^exponent_body(%xbs: {STATE}):')
-    absolute = c(0)
-    for bit in range(exp_count.bit_length()):
-        if exp_count & (1 << bit):
-            term = b.binary('shl', '%gi', c(bit)) if bit else '%gi'
-            absolute = add(absolute, term)
-    absolute = add(absolute, '%xi')
+    absolute = '%gi'
+    if exp_count != 1:
+        b.emit(f'cf.br ^exponent({state}, {c(0)} : {STATE}, i32)')
+        b.emit(f'^exponent(%xs: {STATE}, %xi: i32):')
+        more = b.cmp('ult', '%xi', c(exp_count))
+        b.emit(f'cf.cond_br {more}, ^exponent_body(%xs : {STATE}), ^encode_start(%xs : {STATE})')
+        b.emit(f'^exponent_body(%xbs: {STATE}):')
+        state, absolute = '%xbs', c(0)
+        for bit in range(exp_count.bit_length()):
+            if exp_count & (1 << bit):
+                term = b.binary('shl', '%gi', c(bit)) if bit else '%gi'
+                absolute = add(absolute, term)
+        absolute = add(absolute, '%xi')
     index = b.binary('and', absolute, c(255))
-    state = b.op('virtual_slot_store', ['%xbs', exponent_slot, exp, index], [STATE, SLOT, 'i32', 'i32'], [STATE],
+    state = b.op('virtual_slot_store', [state, exponent_slot, exp, index], [STATE, SLOT, 'i32', 'i32'], [STATE],
                  'kind = "sw", byte_offset = 0 : i32')
-    ni = add('%xi', c(1))
-    b.emit(f'cf.br ^exponent({state}, {ni} : {STATE}, i32)')
+    if exp_count == 1:
+        b.emit(f'cf.br ^encode_start({state} : {STATE})')
+    else:
+        ni = add('%xi', c(1))
+        b.emit(f'cf.br ^exponent({state}, {ni} : {STATE}, i32)')
     b.emit(f'^encode_start(%start_encode: {STATE}):')
-    b.emit(f'cf.br ^encode(%start_encode, {c(0)}, %gip, %gop : {STATE}, i32, i32, i32)')
-    b.emit(f'^encode(%cs: {STATE}, %ci: i32, %cip: i32, %cop: i32):')
-    more = b.cmp('ult', '%ci', c(p.group_elements // lanes))
-    b.emit(f'cf.cond_br {more}, ^encode_body(%cs : {STATE}), ^group_end(%cs : {STATE})')
+    if single_tile:
+        b.emit(f'cf.br ^encode_body(%start_encode : {STATE})')
+    else:
+        b.emit(f'cf.br ^encode(%start_encode, {c(0)}, %gip, %gop : {STATE}, i32, i32, i32)')
+        b.emit(f'^encode(%cs: {STATE}, %ci: i32, %cip: i32, %cop: i32):')
+        more = b.cmp('ult', '%ci', c(p.group_elements // lanes))
+        b.emit(f'cf.cond_br {more}, ^encode_body(%cs : {STATE}), ^group_end(%cs : {STATE})')
     b.emit(f'^encode_body(%cbs: {STATE}):')
     if not cache_input:
-        state, tile = b.op('virtual_dma_load_bf16', ['%cbs', '%cip', c(lanes * 2)], [STATE, 'i32', 'i32'], [STATE, BF16])
+        state, tile = b.op('virtual_dma_load_bf16', ['%cbs', '%gip' if single_tile else '%cip', c(lanes * 2)],
+                           [STATE, 'i32', 'i32'], [STATE, BF16])
     else:
         state, tile = '%cbs', cached_tile
     codes = b.op('virtual_raw_pack_fp8', [tile, scale], [BF16, 'i32'], [FP8])
-    state = b.op('virtual_dma_store_fp8', [state, codes, '%cop', c(lanes)], [STATE, FP8, 'i32', 'i32'], [STATE])
-    ni, np, no = add('%ci', c(1)), add('%cip', c(lanes * 2)), add('%cop', c(lanes))
-    b.emit(f'cf.br ^encode({state}, {ni}, {np}, {no} : {STATE}, i32, i32, i32)')
+    state = b.op('virtual_dma_store_fp8', [state, codes, '%gop' if single_tile else '%cop', c(lanes)],
+                 [STATE, FP8, 'i32', 'i32'], [STATE])
+    if single_tile:
+        b.emit(f'cf.br ^group_end({state} : {STATE})')
+    else:
+        ni, np, no = add('%ci', c(1)), add('%cip', c(lanes * 2)), add('%cop', c(lanes))
+        b.emit(f'cf.br ^encode({state}, {ni}, {np}, {no} : {STATE}, i32, i32, i32)')
     b.emit(f'^group_end(%ges: {STATE}):')
     gi, ip, op = add('%gi', c(1)), add('%gip', c(p.group_elements * 2)), add('%gop', c(p.group_elements))
     b.emit(f'cf.br ^group(%ges, {gi}, {ip}, {op} : {STATE}, i32, i32, i32)')

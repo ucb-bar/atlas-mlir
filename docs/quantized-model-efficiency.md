@@ -117,6 +117,12 @@ with measurements. Historical performance numbers are context, not this branch's
   generated-C replay pass (27 focused tests; 59 related tests and 32 subtests).
   Multi-tile traversal is unchanged. Static and folded-input quantizers retain
   their source and publication checks.
+- Removed reduction/encoding loop control when the group is statically one
+  tile, and exponent-broadcast loop control when exactly one exponent is stored.
+  Scalar correction loops for exceptional values remain counted. Static,
+  token, block, head-block, head and multi-tile tensor sources match independent
+  references in both pipelines (100 tests and 32 subtests across the affected
+  suites; two Python-model-only tests remain separately gated).
 - Remaining integration work: complete-layer measurements, residency interaction,
   and more useful overlap in the optimized schedule. No complete-layer or board
   speedup is claimed from the kernel experiments below.
@@ -198,13 +204,25 @@ run, the combined changes remove 27.12% of device cycles and 20% of device reads
 The unbatched run also benefits (61,392 cycles). Matching output hashes and
 receipts are in `out/efficiency/captured-linear-input-reuse`.
 
+Removing the one-iteration loops then reduces the batched fixture to **49,882
+cycles** and **12,624 executed instructions**, versus 51,322 and 14,608 after
+input reuse alone. Dispatch and byte counts remain unchanged; output hashes
+still match. This is 29.16% fewer cycles than the original 70,416-cycle run.
+Artifacts: `out/efficiency/captured-linear-single-iteration`.
+
 An experiment extended one-prefix reuse to non-power-of-two groups. With mixed
 finite/special inputs, 3 × 96 optimized quantization fell from 12,231 to 6,898
 cycles, but 3 × 768 regressed from 26,132 to 31,352: one exceptional value now
 forces a larger scalar finite-only scan. This broader change is **not retained**.
 Results and machine sources: `out/efficiency/quantizer-prefix-experiment`.
-Next: preserve exceptional-scan granularity while reducing repeated reads,
-remove unnecessary one-iteration loop control, and examine cross-region residency.
+The larger authored 32 × 5632 × 2048 projection takes 9,376,678 cycles with both
+panel policies: one M tile uses the existing row-cache fallback, so the new
+interleaved panel path does not apply. This identifies a separate target for
+row-exponent reuse. Outputs match; no gain is claimed for that shape. Artifacts:
+`out/efficiency/panel-32-5632-2048`.
+Next: extend exponent-page reuse to the row-cache fallback, preserve
+exceptional-scan granularity while reducing repeated quantizer reads, and
+examine cross-region residency.
 
 Merlin's full structure gate currently reports the pre-existing root-level
 `merlin/tests/test_application_deployment_paging.py`; the no-regex gate reports
