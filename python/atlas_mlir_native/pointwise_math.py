@@ -4,7 +4,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 
-from merlin.compiler.semantic.model import KernelRequest, SemanticNode, TensorType, pointwise_identity_maps
+from merlin.compiler.semantic.model import (
+    KernelRequest,
+    SemanticNode,
+    TensorType,
+    pointwise_identity_maps,
+)
 from merlin.compiler.transforms.pointwise import PointwiseTiling
 
 from .binding import (

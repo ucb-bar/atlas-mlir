@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from .binding import io_memory_base as selected_io_base
+
 import hashlib
 import json
 import os
@@ -9,15 +11,16 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 
 from merlin.common.fp8_formats import float_format_params
-from merlin.compiler.semantic.model import KernelRequest, SemanticNode, TensorType
+from merlin.compiler.semantic.model import KernelRequest, SemanticNode, TensorType, pointwise_identity_maps
 from merlin.compiler.transforms.pointwise import PointwiseTiling
 from merlin.compiler.quantization.contraction.values import FloatBoundarySpec
 from merlin.compiler.semantic.target_binding import NativeCompilationError
 
+from .memory_windows import dma_span_in_window
 from .binding import (
     BF16_BINARY_ATTRS,
+    BF16_EXP_ATTRS,
     BF16_BINARY_MODES,
-    BF16_RELU_ATTRS,
     TARGET_IDENTITY,
     AtlasNativeBinding,
 )
@@ -30,7 +33,7 @@ _OPS = {
     "f32_sub": "sub_bf16_rne",
     "f32_mul": "mul_bf16_zero",
 }
-_UNARY_RULES = {"atlas.vpu_relu_bf16_tile": "relu"}
+_UNARY_RULES = {"atlas.vpu_exp_bf16_tile": "exp"}
 
 
 def input_spec(*, policy=POINTWISE_POLICY):
@@ -89,9 +92,18 @@ class PointwisePrecision:
         }
 
 
-def prepare_source(source, *, allow_math=False, bf16_policy=None):
-    from .application_precision import is_source_relu
+def prepare_source(source, *, allow_math=False, bf16_policy=None, rne_add_policy=None, exp_policy=None):
+    if source.nodes[-1].op == "source_f32_exp_unqualified":
+        from .source_exp import prepare_source as prepare_exp
 
+        return prepare_exp(source, exp_policy)
+
+    if rne_add_policy is not None:
+        from .qualified_rne_add import RNE_ADD_POLICY, prepare_source as prepare_rne_add
+
+        if rne_add_policy != RNE_ADD_POLICY:
+            raise ValueError("RNE add precision policy differs")
+        return prepare_rne_add(source)
     if bf16_policy is not None and bf16_policy != BF16_POINTWISE_POLICY:
         raise ValueError("BF16 pointwise precision policy differs")
     if (allow_math and len(source.nodes) == 3 and source.nodes[1].effect == "pure"
@@ -125,26 +137,25 @@ def prepare_source(source, *, allow_math=False, bf16_policy=None):
     ):
         raise ValueError("pointwise precision needs one plain diagnostic source computation")
     output = pure[0]
-    relu = is_source_relu(output)
     bf16 = output.type.dtype == "bf16"
     if bf16 and bf16_policy != BF16_POINTWISE_POLICY:
         raise ValueError("BF16 pointwise source needs its separately selected precision policy")
     operations = _BF16_OPS if bf16 else _OPS
     source_dtype = "bf16" if bf16 else "f32"
     if (
-        (not relu and output.op not in operations)
-        or len(output.inputs) != (1 if relu else 2)
+        output.op not in operations
+        or len(output.inputs) != 2
         or source.outputs != (output.id,)
-        or (not relu and dict(output.attrs) != {
+        or dict(output.attrs) != {
             "numeric_semantics": f"ieee754-{source_dtype}-{output.op[len(source_dtype) + 1:]}-rne-v1"
-        })
+        }
         or any(node.type.dtype != source_dtype or node.type.numerical_policy != "raw-bit-pattern"
                for node in source.nodes)
         or {node.id for node in source.nodes} != {*output.inputs, output.id}
     ):
         raise ValueError("pointwise source operation, attributes or accounting differ")
-    op = "relu" if relu else operations[output.op]
-    attrs = BF16_RELU_ATTRS if relu else BF16_BINARY_ATTRS[op]
+    op = operations[output.op]
+    attrs = BF16_BINARY_ATTRS[op]
     inputs, views, operands = [], [], []
     for key, mapping in zip(output.inputs, output.index_maps[:-1], strict=True):
         # Equal source values may share a prepared tile only when their index
@@ -192,6 +203,10 @@ def prepare_source(source, *, allow_math=False, bf16_policy=None):
 
 
 def _prepare_plan(request):
+    if request.nodes[-1].op == "rne_add_bf16":
+        from .qualified_rne_add import prepare_plan as rne_add_plan
+
+        return rne_add_plan(request)
     if request.nodes[-1].op == "tanh_gelu_bf16_lut":
         from .gelu import prepare_plan as gelu_plan
 
@@ -207,8 +222,8 @@ def _prepare_plan(request):
     if (
         request.target_identity != TARGET_IDENTITY
         or request.lowering_policy != "diagnostic"
-        or request.nodes[-1].op not in {*_OPS.values(), "relu"}
-        or len(request.nodes[-1].inputs) != (1 if request.nodes[-1].op == "relu" else 2)
+        or request.nodes[-1].op not in {*_OPS.values(), "mul_bf16_finite", "exp_bf16"}
+        or len(request.nodes[-1].inputs) != (1 if request.nodes[-1].op == "exp_bf16" else 2)
         or len(request.nodes) != len(set(request.nodes[-1].inputs)) + 1
     ):
         raise NativeCompilationError(
@@ -216,7 +231,7 @@ def _prepare_plan(request):
             "pointwise loop needs an admitted BF16 operation",
         )
     *inputs, output = request.nodes
-    attrs = BF16_RELU_ATTRS if output.op == "relu" else BF16_BINARY_ATTRS[output.op]
+    attrs = BF16_EXP_ATTRS if output.op == "exp_bf16" else BF16_BINARY_ATTRS[output.op]
     if (
         output.attrs != attrs
         or output.type.dtype != "bf16"
@@ -245,12 +260,55 @@ def prepare_plan(request):
     return plan
 
 
+def prepare_execution_plan(request):
+    """Bound device storage while preserving full source packing and ordering.
+
+    A block divides the complete padded tile count. The same compiled body
+    therefore serves every launch, including logical tails, without reading
+    or publishing a partial device frame. Host assembly discards tail lanes.
+    """
+    from .binding import TILE_BYTES, dram_slots
+
+    full = prepare_plan(request)
+    sizes = (*full.input_packed_bytes, full.packed_bytes)
+    capacity = dram_slots() * TILE_BYTES
+    if sum(sizes) <= capacity:
+        return full, full, None
+    arity = len(request.nodes) - 1
+    limit = capacity // ((arity + 1) * full.tile_bytes)
+    if limit < 1:
+        raise NativeCompilationError("resource_limit", "pointwise memory window cannot hold one complete tile frame")
+    tiles = full.packed_bytes // full.tile_bytes
+    block = next(count for count in range(min(limit, tiles), 0, -1) if tiles % count == 0)
+    shape = (full.tile_shape[0], full.tile_shape[1] * block)
+    *operands, result = request.nodes
+    device_source = replace(request, nodes=(
+        *(replace(node, type=replace(node.type, shape=shape)) for node in operands),
+        replace(result, type=replace(result.type, shape=shape),
+                index_maps=pointwise_identity_maps(2, len(result.inputs))),
+    ))
+    device = replace(full, source=device_source, compact_broadcasts=False)
+    streaming = {
+        "schema": "atlas.pointwise_streaming.v1",
+        "source_request_digest": request.digest(),
+        "device_request_digest": device_source.digest(),
+        "block_tiles": block,
+        "total_tiles": tiles,
+        "launch_count": tiles // block,
+        "launch_counts": [tiles // block],
+        "order": "row_tiles_then_column_tiles",
+        "input_tile_strides": [list(full.input_tile_strides(i)) for i in range(arity)],
+        "output_column_tiles": full.tile_counts[1],
+    }
+    return full, device, streaming
+
+
 def is_pointwise_request(request):
-    if request.nodes[-1].op in {"divide_bf16_lut", "rsqrt_bf16_lut", "sigmoid_bf16_lut", "silu_bf16_lut", "tanh_gelu_bf16_lut"}:
+    if request.nodes[-1].op in {"divide_bf16_lut", "rsqrt_bf16_lut", "sigmoid_bf16_lut", "silu_bf16_lut", "tanh_gelu_bf16_lut", "rne_add_bf16"}:
         return True
     return (
         len(request.nodes) in (2, 3)
-        and request.nodes[-1].op in {*_OPS.values(), "relu"}
+        and request.nodes[-1].op in {*_OPS.values(), "mul_bf16_finite"}
         and (
             any(node.type.shape != (32, 32) for node in request.nodes)
             or any(
@@ -261,24 +319,44 @@ def is_pointwise_request(request):
     )
 
 
+def _checked_pointwise_allocation(buffers, bank):
+    """Pin a checked same-lifetime proposal, then retain the solver gate.
+
+    All pointwise ABI buffers are live together in source order. A successful
+    first-fit proposal has the same lexicographic addresses as the unpinned
+    solver, while avoiding repeated minimization queries under a work budget.
+    Failure to propose a placement remains inconclusive.
+    """
+    from merlin.compiler.semantic.search.buffers import (
+        check_buffer_allocation, first_fit_buffer_assignment,
+    )
+    from .work_budget import allocate_native_buffers as allocate_buffers
+
+    if any(item.first_event != 0 or item.last_event != 1 or item.view_of is not None
+           or item.persistent or item.fixed_start is not None for item in buffers):
+        raise ValueError("pointwise ABI allocation requires unpinned same-lifetime buffers")
+    proposed = first_fit_buffer_assignment(buffers, (bank,))
+    pinned = buffers if proposed is None else tuple(
+        replace(item, fixed_start=proposed[item.name]) for item in buffers)
+    solved = allocate_buffers(pinned, (bank,))
+    if solved.status != "sat":
+        raise NativeCompilationError("resource_limit", "pointwise packed buffers exceed the selected memory window: " + solved.reason)
+    addresses = dict(solved.addresses)
+    check_buffer_allocation(buffers, (bank,), addresses)
+    return addresses
+
+
 def plan_abi(request):
     from merlin.compiler.semantic.search.buffers import Buffer
-    from atlas_mlir_native.work_budget import allocate_native_buffers as allocate_buffers
 
     from .binding import TILE_BYTES
 
-    plan = prepare_plan(request)
+    _, plan, _ = prepare_execution_plan(request)
     bank = next(item for item in AtlasNativeBinding.profile().banks if item.name == "external")
     sizes = (*plan.input_packed_bytes, plan.packed_bytes)
     buffers = tuple(Buffer(node.id, bank.name, (size + TILE_BYTES - 1) // TILE_BYTES, 0, 1)
                     for node, size in zip(request.nodes, sizes, strict=True))
-    solved = allocate_buffers(buffers, (bank,))
-    if solved.status != "sat":
-        raise NativeCompilationError(
-            "resource_limit",
-            "pointwise packed buffers exceed the selected memory window",
-        )
-    addresses = dict(solved.addresses)
+    addresses = _checked_pointwise_allocation(buffers, bank)
     return {
         "fixed_inputs": {node.id: addresses[node.id] for node in request.nodes[:-1]},
         "fixed_outputs": [addresses[request.outputs[0]]],
@@ -288,7 +366,7 @@ def plan_abi(request):
 def selected_body_descriptor(plan, directory):
     """Require a selected tile implementation before lifting it into a loop."""
     selected = json.loads((directory / "native-selection.json").read_text())
-    if plan.source.nodes[-1].op in {"divide_bf16_lut", "rsqrt_bf16_lut", "sigmoid_bf16_lut", "silu_bf16_lut", "tanh_gelu_bf16_lut"}:
+    if plan.source.nodes[-1].op in {"divide_bf16_lut", "rsqrt_bf16_lut", "sigmoid_bf16_lut", "silu_bf16_lut", "tanh_gelu_bf16_lut", "rne_add_bf16"}:
         from .pointwise_math import selected_steps
 
         return selected_steps(plan, selected)
@@ -305,7 +383,33 @@ def selected_body_descriptor(plan, directory):
     return names[0]
 
 
-def virtual_program(plan, addresses, output, descriptor):
+def virtual_program(plan, addresses, output, descriptor, *, static_output_exponent=None):
+    """Keep BF16 arithmetic, optionally packing its sole final output store."""
+    from .row_output_quantize import validate_exponent, pack_store
+
+    validate_exponent(static_output_exponent)
+    text = _virtual_program(plan, addresses, output, descriptor)
+    if static_output_exponent is None:
+        return text
+    from io import StringIO
+    from merlin.compiler.frontend.linalg_mlir import parse_mlir_text
+    from xdsl.printer import Printer
+
+    module = parse_mlir_text(text)
+    stores = [op for op in module.walk() if op.name == 'builtin.unregistered'
+              and op.op_name.data.startswith('atlas.virtual_dma_store_')]
+    # Both pointwise generators have one final output store in their counted
+    # tile body. They never store or reload intermediate results. Pointer bounds
+    # and disjoint input/output frames are checked by native compilation.
+    if len(stores) != 1 or stores[0].op_name.data != 'atlas.virtual_dma_store_bf16':
+        raise ValueError('packed pointwise output requires one final BF16 tile store')
+    pack_store(stores[0], static_output_exponent)
+    stream = StringIO()
+    Printer(stream=stream).print_op(module)
+    return stream.getvalue() + '\n'
+
+
+def _virtual_program(plan, addresses, output, descriptor):
     composite = isinstance(descriptor, list)
     unary = len(addresses) == 1 if composite else descriptor in _UNARY_RULES
     second_load = len(addresses) == 2
@@ -458,6 +562,8 @@ def compile_pointwise(
     target_source,
     destination,
     limits,
+    io_memory_base=None,
+    static_output_exponent=None,
 ):
     from .binding import (
         DRAM_BASE,
@@ -470,7 +576,14 @@ def compile_pointwise(
         dram_slots,
     )
 
-    plan = prepare_plan(request)
+    from .region_composition import compile_virtual_with_receipt
+
+    from .row_output_quantize import record as quantization_record
+
+    quantization = quantization_record(static_output_exponent)
+    full_plan, plan, streaming = prepare_execution_plan(request)
+    if quantization and streaming:
+        raise ValueError('packed pointwise output requires a single resident frame')
     if set(fixed_inputs) != {node.id for node in request.nodes[:-1]} or len(fixed_outputs) != 1:
         raise NativeCompilationError("compile_error", "pointwise loop needs every input and one output binding")
     slots = tuple(fixed_inputs[node.id] for node in request.nodes[:-1]) + tuple(fixed_outputs)
@@ -480,9 +593,16 @@ def compile_pointwise(
         for slot, size in zip(slots, sizes, strict=True)
     ):
         raise NativeCompilationError("resource_limit", "pointwise buffers exceed the selected memory window")
-    addresses = [DRAM_BASE + fixed_inputs[node.id] * TILE_BYTES for node in request.nodes[:-1]]
-    output = DRAM_BASE + fixed_outputs[0] * TILE_BYTES
+    base = selected_io_base() if io_memory_base is None else io_memory_base
+    if type(base) is not int or base < 0 or base % 32:
+        raise NativeCompilationError("resource_limit", "pointwise buffers leave selected DMA memory windows")
+    from .binding import validate_explicit_io_base
+    validate_explicit_io_base(base)
+    addresses = [base + fixed_inputs[node.id] * TILE_BYTES for node in request.nodes[:-1]]
+    output = base + fixed_outputs[0] * TILE_BYTES
     ranges = [(address, address + size) for address, size in zip([*addresses, output], sizes, strict=True)]
+    if any(not dma_span_in_window(a, b - a) for a, b in ranges):
+        raise NativeCompilationError("resource_limit", "pointwise buffers leave selected DMA memory windows")
     if any(a < d and c < b for i, (a, b) in enumerate(ranges) for c, d in ranges[i + 1 :]):
         raise NativeCompilationError("infeasible_candidate", "pointwise physical buffers overlap")
     destination.mkdir(parents=True, exist_ok=False)
@@ -499,13 +619,10 @@ def compile_pointwise(
         allow_staging=False,
     )
     descriptor = selected_body_descriptor(plan, destination / "body")
-    virtual = virtual_program(plan, addresses, output, descriptor)
+    virtual = virtual_program(plan, addresses, output, descriptor, static_output_exponent=static_output_exponent)
     tools = Path(os.environ.get("ATLAS_OOT_BIN_DIR", target_source / "build/bin"))
     pipeline = _native_pipeline()
-    mandatory = _run(
-        [str(tools / "atlas-opt"), *NATIVE_PIPELINES["mandatory"], "-"],
-        input_text=virtual,
-    )
+    mandatory = compile_virtual_with_receipt(virtual, tools=tools, pipeline="mandatory", destination=destination)
     _run(
         [str(tools / "atlas-opt"), *NATIVE_CHECKS, "--verify-atlas-timing", "-"],
         input_text=mandatory,
@@ -513,10 +630,7 @@ def compile_pointwise(
     machine = (
         mandatory
         if pipeline == "mandatory"
-        else _run(
-            [str(tools / "atlas-opt"), *NATIVE_PIPELINES[pipeline], "-"],
-            input_text=virtual,
-        )
+        else compile_virtual_with_receipt(virtual, tools=tools, pipeline=pipeline, destination=destination)
     )
     _run(
         [str(tools / "atlas-opt"), *NATIVE_CHECKS, "--verify-atlas-timing", "-"],
@@ -525,6 +639,14 @@ def compile_pointwise(
     program = json.loads(_run([str(tools / "atlas-emit"), "--program-json", "-"], input_text=machine))
     if program.get("selected_rtl_revision") != RTL_REVISION:
         raise NativeCompilationError("unqualified_target", "pointwise emitter uses a different RTL")
+    from .restoration_budget import instruction_bound
+    from .limits import functional_instruction_limit
+    try:
+        bound = instruction_bound(virtual, machine, program, max_instructions=functional_instruction_limit(limits))
+    except (ValueError, KeyError, IndexError) as error:
+        raise NativeCompilationError("resource_limit", "pointwise instruction bound is unproved: " + str(error)) from error
+    if not bound["admitted"]:
+        raise NativeCompilationError("resource_limit", "pointwise worst-case instruction bound exceeds " + str(bound["max_instructions"]) + ": " + str(bound["instruction_bound"]))
     binary = b"".join(row["word_u32"].to_bytes(4, "little") for row in program["instructions"])
     execution = {
         "schema": "atlas.pointwise_execution_plan.v1",
@@ -533,14 +655,17 @@ def compile_pointwise(
         "input_buffer_bytes": list(plan.input_packed_bytes),
         "output_addresses": [output],
         "output_bytes": plan.packed_bytes,
-        "output_physical_layouts": ["mn_tiles_bf16_pair_halves"],
+        "output_physical_layouts": ["mn_tiles_fp8_in_bf16_slots" if quantization else "mn_tiles_bf16_pair_halves"],
+        **quantization,
         "tiling": plan.record(),
+        **({"streaming": streaming, "source_tiling": full_plan.record()} if streaming else {}),
     }
     files = {
         "source-request.json": request.record(),
         "execution_plan.json": execution,
-        "pointwise-tiling.json": plan.record(),
+        "pointwise-tiling.json": full_plan.record(),
         "physical-program.json": program,
+        "pointwise-instruction-bound.json": bound,
     }
     for name, data in files.items():
         (destination / name).write_text(json.dumps(data, sort_keys=True, indent=2) + "\n")
@@ -562,6 +687,7 @@ def compile_pointwise(
         "engine": "merlin_native",
         "compile_mode": "diagnostic",
         "qualification_scope": "diagnostic_only",
+        **({"execution_requires": "streamed_host_dispatch"} if streaming else {}),
         "request_digest": request.digest(),
         "target_identity": request.target_identity,
         "binary_sha256": sha(binary),
@@ -574,6 +700,7 @@ def compile_pointwise(
         "pointwise_lowering_source_sha256": sha(Path(__file__).read_bytes()),
         "native_snapshot_sha256": sha((snapshot.root / "manifest.json").read_bytes()),
         "io_memory_bytes": dram_slots() * TILE_BYTES,
+        **({"io_memory_base": base} if base != DRAM_BASE else {}),
         "stage_artifacts": {
             path.relative_to(destination).as_posix(): sha(path.read_bytes())
             for path in sorted(destination.rglob("*"))

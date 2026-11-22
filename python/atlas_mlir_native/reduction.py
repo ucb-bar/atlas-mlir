@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from .binding import io_memory_base as selected_io_base
+
 import hashlib
 import json
 import os
@@ -9,10 +11,19 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 
 from merlin.compiler.semantic.search.buffers import Buffer
-from atlas_mlir_native.work_budget import allocate_native_buffers as allocate_buffers
-from merlin.compiler.semantic.model import IndexMap, KernelRequest, SemanticNode, TensorType, pointwise_identity_maps
+from merlin.compiler.semantic.model import (
+    IndexMap,
+    KernelRequest,
+    SemanticNode,
+    TensorType,
+    pointwise_identity_maps,
+)
 from merlin.compiler.transforms.reduction import ReductionTiling
-from merlin.compiler.semantic.target_binding import NativeCompilationError, verify_native_publication
+from merlin.compiler.quantization.contraction.values import FloatBoundarySpec
+from merlin.compiler.semantic.target_binding import (
+    NativeCompilationError,
+    verify_native_publication,
+)
 
 from .binding import (
     DRAM_BASE,
@@ -27,12 +38,37 @@ from .binding import (
     dram_slots,
 )
 from .pointwise import input_spec as pointwise_input_spec
+from .work_budget import allocate_native_buffers as allocate_buffers
 
 REDUCTION_POLICY = "bf16-adjacent-fp32-tree-rne-seeded-tile-sum-ltr-chop-v1"
+NONNEGATIVE_NORMAL_REDUCTION_POLICY = "bf16-nonnegative-normal-adjacent-fp32-tree-rne-seeded-tile-sum-ltr-chop-v1"
+REDUCTION_POLICIES = (REDUCTION_POLICY, NONNEGATIVE_NORMAL_REDUCTION_POLICY)
 
 
-def input_spec():
-    """Bounded RNE encoding, explicitly canonicalizing source negative zero."""
+class _NonnegativeNormalBoundary(FloatBoundarySpec):
+    def encode(self, source):
+        import numpy as np
+
+        if not isinstance(source, np.ndarray) or source.dtype != np.float32:
+            raise ValueError("reduction encoding requires a float32 source array")
+        bits = source.view(np.uint32)
+        magnitude = bits & 0x7fffffff
+        code = ((magnitude + 0x7fff + ((magnitude >> 16) & 1)) >> 16) | ((bits >> 16) & 0x8000)
+        if np.any(magnitude >= 0x7f800000) or np.any((code != 0) & ((code < 0x0080) | (code > 0x7f7f))):
+            raise ValueError("reduction encoding needs nonnegative normal or positive zero without overflow")
+        return code.astype("<u2")
+
+    def record(self):
+        return {**super().record(), "overflow": "reject"}
+
+
+def input_spec(*, reduction_policy=REDUCTION_POLICY):
+    """Select the boundary domain independently of the unchanged native arithmetic."""
+    if reduction_policy == NONNEGATIVE_NORMAL_REDUCTION_POLICY:
+        return _NonnegativeNormalBoundary(reduction_policy, "bf16", "encode",
+                                          admitted_code_ranges=((0, 0), (0x0080, 0x7f7f)))
+    if reduction_policy != REDUCTION_POLICY:
+        raise ValueError("reduction policy must be explicitly selected from the supported domains")
     return replace(pointwise_input_spec(), policy=REDUCTION_POLICY, canonicalize_negative_zero=True)
 
 
@@ -46,14 +82,14 @@ class ReductionPrecision:
             "schema": "atlas.reduction_precision.v1",
             "source_request_digest": self.source.digest(),
             "request_digest": self.request.digest(),
-            "input_conversion": input_spec().record(),
-            "arithmetic": REDUCTION_POLICY,
+            "input_conversion": input_spec(reduction_policy=self.request.nodes[-1].type.numerical_policy).record(),
+            "arithmetic": self.request.nodes[-1].type.numerical_policy,
             "output_conversion": "bf16-to-f32-exact",
             "qualification": "diagnostic_precision_change; original_model_quality_unmeasured",
         }
 
 
-def prepare_source(source):
+def prepare_source(source, *, reduction_policy=REDUCTION_POLICY):
     """Select new arithmetic explicitly; this is not an f32 equality rewrite."""
     if (
         source.target_identity != TARGET_IDENTITY
@@ -63,6 +99,7 @@ def prepare_source(source):
         or source.physical_extents
     ):
         raise ValueError("reduction precision needs a plain diagnostic source graph")
+    selected_spec = input_spec(reduction_policy=reduction_policy)
     pure = [node for node in source.nodes if node.effect == "pure"]
     if len(pure) != 1 or len(pure[0].inputs) != 2:
         raise ValueError("reduction needs one computation with explicit data and seed")
@@ -99,7 +136,7 @@ def prepare_source(source):
     data, seed = (source.node(key) for key in result.inputs)
     if any(n.effect not in {"input", "constant"} or n.index_maps for n in (data, seed)):
         raise ValueError("source reduction operands must be explicit boundary values")
-    request = request_for(data.type.shape, axes)
+    request = request_for(data.type.shape, axes, reduction_policy=reduction_policy)
     if (
         seed.type.shape != request.nodes[1].type.shape
         or result.type.shape != request.nodes[2].type.shape
@@ -116,12 +153,13 @@ def prepare_source(source):
             binding = constants[node.id]
             if binding.encoding != "f32-le-raw":
                 raise ValueError("reduction parameter needs exact f32 bytes")
-            input_spec().encode(np.frombuffer(bytes.fromhex(binding.data_hex), dtype="<f4"))
+            selected_spec.encode(np.frombuffer(bytes.fromhex(binding.data_hex), dtype="<f4"))
     return ReductionPrecision(source, request)
 
 
-def request_for(shape, axes):
+def request_for(shape, axes, *, reduction_policy=REDUCTION_POLICY):
     """Construct a public BF16 request; source-float precision selection is separate."""
+    input_spec(reduction_policy=reduction_policy)
     rank = len(shape)
     axes = tuple(axes)
     if (
@@ -163,7 +201,7 @@ def request_for(shape, axes):
                 "result",
                 "reduce_sum",
                 ("data", "seed"),
-                replace(seed_type, numerical_policy=REDUCTION_POLICY),
+                replace(seed_type, numerical_policy=reduction_policy),
                 (("axes", ",".join(map(str, axes))),),
                 index_maps=(
                     pointwise_identity_maps(rank, 1)[0],
@@ -198,7 +236,7 @@ def prepare_plan(request):
     if (
         out.attrs != (("axes", ",".join(map(str, axes))),)
         or out.type.dtype != "bf16"
-        or out.type.numerical_policy != REDUCTION_POLICY
+        or out.type.numerical_policy not in REDUCTION_POLICIES
         or any(node.type.numerical_policy != "raw-bit-pattern" for node in (data, seed))
         or data.attrs != (row.required_attrs[0],)
         or seed.attrs != (add.required_attrs[0],)
@@ -353,8 +391,16 @@ def compile_reduction(
     target_source,
     destination,
     limits,
+    io_memory_base=None,
 ):
+    io_memory_base = selected_io_base() if io_memory_base is None else io_memory_base
+    from .memory_windows import dma_span_in_window
+
     plan = prepare_plan(request)
+    if type(io_memory_base) is not int or io_memory_base < 0 or io_memory_base % TILE_BYTES:
+        raise NativeCompilationError("compile_error", "reduction I/O base must be a tile-aligned integer")
+    from .binding import validate_explicit_io_base
+    validate_explicit_io_base(io_memory_base, alignment=2048)
     if set(fixed_inputs) != {request.nodes[0].id, request.nodes[1].id} or len(fixed_outputs) != 1:
         raise NativeCompilationError("compile_error", "reduction ABI must bind data, seed and output")
     slots = tuple(fixed_inputs[n.id] for n in request.nodes[:2]) + tuple(fixed_outputs)
@@ -363,8 +409,10 @@ def compile_reduction(
         for slot, size in zip(slots, plan.packed_sizes, strict=True)
     ):
         raise NativeCompilationError("resource_limit", "reduction bindings exceed the selected byte window")
-    addresses = tuple(DRAM_BASE + slot * TILE_BYTES for slot in slots)
+    addresses = tuple(io_memory_base + slot * TILE_BYTES for slot in slots)
     ranges = [(address, address + size) for address, size in zip(addresses, plan.packed_sizes, strict=True)]
+    if not dma_span_in_window(io_memory_base, max(end for _, end in ranges) - io_memory_base):
+        raise NativeCompilationError("compile_error", "complete reduction span must fit one DMA memory window")
     if any(a < d and c < b for i, (a, b) in enumerate(ranges) for c, d in ranges[i + 1 :]):
         raise NativeCompilationError("infeasible_candidate", "reduction physical buffers overlap")
     destination.mkdir(parents=True, exist_ok=False)
@@ -415,6 +463,14 @@ def compile_reduction(
     program = json.loads(program_text)
     if program.get("selected_rtl_revision") != RTL_REVISION:
         raise NativeCompilationError("unqualified_target", "reduction emitter uses a different RTL")
+    from .restoration_budget import instruction_bound
+    from .limits import functional_instruction_limit
+    try:
+        bound = instruction_bound(virtual, machine, program, max_instructions=functional_instruction_limit(limits))
+    except (ValueError, KeyError, IndexError) as error:
+        raise NativeCompilationError("resource_limit", "reduction instruction bound is unproved: " + str(error)) from error
+    if not bound["admitted"]:
+        raise NativeCompilationError("resource_limit", "reduction worst-case instruction bound exceeds " + str(bound["max_instructions"]) + ": " + str(bound["instruction_bound"]))
     binary = b"".join(row["word_u32"].to_bytes(4, "little") for row in program["instructions"])
     execution = {
         "schema": "atlas.reduction_execution_plan.v1",
@@ -429,6 +485,7 @@ def compile_reduction(
         "source-request.json": request.record(),
         "execution_plan.json": execution,
         "reduction-tiling.json": plan.record(),
+        "reduction-instruction-bound.json": bound,
     }.items():
         (destination / name).write_text(json.dumps(value, sort_keys=True, indent=2) + "\n")
     for name, text in {
@@ -461,6 +518,7 @@ def compile_reduction(
         "semantic_qualification_pipeline": "mandatory",
         "native_snapshot_sha256": sha((snapshot.root / "manifest.json").read_bytes()),
         "io_memory_bytes": dram_slots() * TILE_BYTES,
+        **({"io_memory_base": io_memory_base} if io_memory_base != DRAM_BASE else {}),
         "reduction_lowering_source_sha256": sha(Path(__file__).read_bytes()),
         "target_inventory_sha256": sha((target_source / "docs/selected-variant-inventory.json").read_bytes()),
         "stage_artifacts": {
