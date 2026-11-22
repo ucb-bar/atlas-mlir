@@ -40,6 +40,28 @@ def packed(value):
     return data.ravel()
 
 
+def output_read_spans(plan):
+    """Independent logical-word indexing bounds the occupied register halves."""
+    batches, mc, nc = prod(plan.batch_shape), (plan.m+31)//32, (plan.n+31)//32
+    if plan.m % 32 == plan.n % 32 == 0:
+        return [(0, batches*mc*nc*2048)]
+    ends = {}
+    for b in range(batches):
+        for r in range(plan.m):
+            for c in range(plan.n):
+                word = (((b*mc+r//32)*nc+c//32)*1024
+                        +(c%32//16)*512+(r%32)*16+c%16)
+                register = word//512*1024
+                ends[register] = max(ends.get(register, 0), 2*word+2-register)
+    spans = []
+    for address, size in ends.items():
+        if spans and spans[-1] == (address-1024, 1024) and address%2048 == 1024 and size == 1024:
+            spans[-1] = (address-1024, 2048)
+        else:
+            spans.append((address, size))
+    return spans
+
+
 
 class QuantizedLoopTest(unittest.TestCase):
     def test_layout_and_virtual_unit_batch_contract(self):
@@ -128,7 +150,9 @@ static int get(void *c,uintptr_t a,uint8_t *v,size_t n){
  (void)c;++calls;++gets;if(mode==2)return 1;
  if(mode==4 && gets==@READS@u)return 1;
  if(a==@STATUS@&&n==4u){uint32_t status=mode==1?1u:0u;memcpy(v,&status,4u);return 0;}
- if(a>=@OUT@&&a-@OUT@+n<=@OUTBYTES@&&(a-@OUT@)%2048u==0u&&n==@CHUNK@){memcpy(v,result+a-@OUT@,n);return 0;}return 1;
+ const size_t offsets[]={@READOFFSETS@},sizes[]={@READSIZES@};
+ if(gets>=2u && gets<=@READS@u && a==@OUT@+offsets[gets-2u] && n==sizes[gets-2u]){
+   memcpy(v,result+a-@OUT@,n);return 0;}return 1;
 }
 unsigned callback_count(void){return calls;}unsigned start_count(void){return starts;}
 unsigned write_count(void){return puts;}unsigned read_count(void){return gets;}
@@ -136,8 +160,12 @@ int padding_untouched(void){
  const size_t offsets[]={@EXPOFFSETS@},sizes[]={@EXPSIZES@};
  for(unsigned i=0;i<2u;++i)for(size_t page=0;page<sizes[i];page+=2048u)
    for(size_t byte=128u;byte<2048u;++byte)if(raw[offsets[i]+page+byte]!=0xa5u)return 0;
- for(size_t tile=0;tile<@OUTBYTES@;tile+=2048u)for(size_t byte=@PREFIX@;byte<2048u;++byte)
-   if(raw[@OUTOFFSET@+tile+byte]!=0xa5u)return 0;
+ const size_t read_offsets[]={@READOFFSETS@},read_sizes[]={@READSIZES@};
+ for(size_t byte=0;byte<@OUTBYTES@;++byte){
+   unsigned read=0;for(size_t i=0;i<@READS@u-1u;++i)
+     if(byte>=read_offsets[i]&&byte-read_offsets[i]<read_sizes[i])read=1;
+   if(!read && raw[@OUTOFFSET@+byte]!=0xa5u)return 0;
+ }
  return 1;
 }
 int invoke(const void *a,const void *sx,const void *w,const void *sw,void *out,
@@ -151,11 +179,13 @@ int invoke(const void *a,const void *sx,const void *w,const void *sw,void *out,
 }
 '''
                 writes=2+sum(geometry['pages'] for geometry in execution['exponent_layouts'])
-                reads=1+(execution['output_bytes']//2048 if 'output_tile_store_bytes' in execution else 1)
+                spans=output_read_spans(plan)
+                reads=1+len(spans)
                 for key,value in {'ADDRESSES':','.join(str(v)+'u' for v in inputs),'SIZES':','.join(str(v)+'u' for v in sizes),
                     'WRITES':str(writes),
-                    'READS':str(reads),'CHUNK':str(execution.get('output_tile_store_bytes',execution['output_bytes']))+'u',
-                    'PREFIX':str(execution.get('output_tile_store_bytes',2048))+'u','OUTOFFSET':str(sum(sizes))+'u',
+                    'READS':str(reads),'OUTOFFSET':str(sum(sizes))+'u',
+                    'READOFFSETS':','.join(str(offset)+'u' for offset,_ in spans),
+                    'READSIZES':','.join(str(size)+'u' for _,size in spans),
                     'EXPOFFSETS':','.join(str(sum(execution['input_buffer_bytes'])+sum(execution['exponent_buffer_bytes'][:i]))+'u' for i in range(2)),
                     'EXPSIZES':','.join(str(size)+'u' for size in execution['exponent_buffer_bytes']),
                     'STATUS':str(execution['status_address'])+'u','OUT':str(execution['output_addresses'][0])+'u',

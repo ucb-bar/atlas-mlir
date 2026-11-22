@@ -23,7 +23,7 @@ from atlas_mlir_native.source_translation import contraction_numerics_attribute
 from merlin.compiler.semantic.model import SemanticNode, pointwise_identity_maps
 from merlin.compiler.partition.global_plan import BufferRepresentation, CycleInterval, RegionAlternative, ValueRepresentation
 from test_already_quantized import source_request
-from test_quantized_loop import packed
+from test_quantized_loop import packed, output_read_spans
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -181,7 +181,9 @@ static int put(void *c,uintptr_t a,const uint8_t *v,size_t n) {
 static int get(void *c,uintptr_t a,uint8_t *v,size_t n) {
   (void)c; ++calls; ++gets;
   if(a==@STATUS@&&n==4u) { uint32_t status=mode?1u:0u; memcpy(v,&status,4u); return 0; }
-  if(a>=@OUT@&&a-@OUT@+n<=@OUTBYTES@&&(a-@OUT@)%2048u==0u&&n==@CHUNK@) { memcpy(v,result+a-@OUT@,n); return 0; }
+  const size_t offsets[]={@READOFFSETS@},sizes[]={@READSIZES@};
+  if(gets>=2u && gets<=@READS@u && a==@OUT@+offsets[gets-2u] && n==sizes[gets-2u]) {
+    memcpy(v,result+a-@OUT@,n); return 0; }
   return 1;
 }
 unsigned callback_count(void) { return calls; } unsigned start_count(void) { return starts; }
@@ -197,10 +199,13 @@ int invoke(const void *a,const void *sx,const void *w,const void *sw,const void 
   return probe_source_dispatch(&source,inputs,outputs);
 }
 '''
+                spans=output_read_spans(plan)
                 replacements = {'ADDRESSES': ','.join(str(value) + 'u' for value in addresses),
                     'SIZES': ','.join(str(value) + 'u' for value in sizes), 'STATUS': str(layout['status_address']) + 'u',
                     'OUT': str(layout['output_addresses'][0]) + 'u', 'OUTBYTES': str(layout['output_bytes']) + 'u',
-                    'CHUNK': str(layout.get('output_tile_store_bytes',layout['output_bytes'])) + 'u'}
+                    'READS': str(1+len(spans)),
+                    'READOFFSETS': ','.join(str(offset)+'u' for offset,_ in spans),
+                    'READSIZES': ','.join(str(size)+'u' for _,size in spans)}
                 for key, value in replacements.items(): shim = shim.replace('@' + key + '@', value)
                 (root / 'shim.c').write_text(shim)
                 process = subprocess.run(['cc', '-std=c11', '-O2', '-Wall', '-Wextra', '-Werror', '-shared', '-fPIC',
@@ -235,7 +240,7 @@ int invoke(const void *a,const void *sx,const void *w,const void *sw,const void 
                 frozen = [value.tobytes() for value in (a, sx, w, sw, other)]
                 self.assertEqual(invoke(), 0); np.testing.assert_array_equal(output, expected)
                 writes = 3 + sum(geometry['pages'] for geometry in layout['exponent_layouts'])
-                reads = 1+(layout['output_bytes']//2048 if 'output_tile_store_bytes' in layout else 1)
+                reads = 1+len(spans)
                 self.assertEqual((lib.start_count(), lib.write_count(), lib.read_count()), (1, writes, reads))
                 self.assertEqual(invoke(1), 2); self.assertTrue(np.all(output.view(np.uint8) == 0xa5))
                 self.assertEqual((lib.start_count(), lib.write_count(), lib.read_count()), (1, writes, 1))

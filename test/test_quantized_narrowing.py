@@ -17,6 +17,7 @@ from atlas_mlir_native.quantized_loop import execution_layout, virtual_source
 from atlas_mlir_native.quantized_narrowing import alternatives, prepare_source
 from merlin.compiler.semantic.model import SemanticNode, pointwise_identity_maps
 from test_quantized_epilogue import case as product_case
+from test_quantized_loop import output_read_spans
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -197,7 +198,9 @@ static int put(void *c,uintptr_t a,const uint8_t *v,size_t n) { (void)c;(void)a;
 static int get(void *c,uintptr_t a,uint8_t *v,size_t n) {
   (void)c; ++calls;
   if(a==@STATUS@&&n==4u) { uint32_t status=fail?1u:0u; memcpy(v,&status,4u); return 0; }
-  if(a>=@OUTPUT@&&a-@OUTPUT@+n<=@BYTES@&&(a-@OUTPUT@)%2048u==0u&&n==@CHUNK@) { memcpy(v,result+a-@OUTPUT@,n); return 0; }
+  const size_t offsets[]={@READOFFSETS@},sizes[]={@READSIZES@};
+  for(size_t i=0;i<@READS@u;++i) if(a==@OUTPUT@+offsets[i]&&n==sizes[i]) {
+    memcpy(v,result+a-@OUTPUT@,n); return 0; }
   return 1;
 }
 unsigned call_count(void) { return calls; }
@@ -210,10 +213,13 @@ int invoke(const void *a,const void *sx,const void *w,const void *sw,void *out,c
   return probe_source_dispatch(&source,inputs,outputs);
 }
 '''
-            for key, value in {'STATUS':layout['status_address'], 'OUTPUT':layout['output_addresses'][0],
-                               'BYTES':layout['output_bytes'],
-                               'CHUNK':layout.get('output_tile_store_bytes',layout['output_bytes'])}.items():
+            for key, value in {'STATUS':layout['status_address'], 'OUTPUT':layout['output_addresses'][0]}.items():
                 shim = shim.replace('@'+key+'@', str(value)+'u')
+            spans=output_read_spans(plan)
+            for key,value in {'READS': str(len(spans)),
+                              'READOFFSETS': ','.join(str(offset)+'u' for offset,_ in spans),
+                              'READSIZES': ','.join(str(size)+'u' for _,size in spans)}.items():
+                shim = shim.replace('@'+key+'@',value)
             (root/'shim.c').write_text(shim)
             process = subprocess.run(['cc','-std=c11','-O2','-Wall','-Wextra','-Werror','-shared','-fPIC',
                 'probe.c','runtime/atlas_host.c','shim.c','-o','probe.so'],cwd=root,text=True,capture_output=True)

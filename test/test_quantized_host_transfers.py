@@ -11,6 +11,7 @@ from atlas_mlir_native.already_quantized import prepare_source
 from atlas_mlir_native.binding import DRAM_BASE
 from atlas_mlir_native.options import codegen_options, current_codegen_options
 from test_exponent_page_cache import fixture
+from test_quantized_loop import output_read_spans
 
 
 @pytest.mark.skipif(not (os.environ.get('ATLAS_RUST_NPU_MODEL') and os.environ.get('ATLAS_OOT_BIN_DIR')),
@@ -21,6 +22,8 @@ from test_exponent_page_cache import fixture
     (3,35,65,(2,),'scalar','batch',False),
     (3,5,65,(2,),'row','row',True),
     (35,3,65,(2,),'row','batch',False),
+    (1,17,33,(),'scalar','row',True),
+    (32,32,32,(),'scalar','row',True),
 ])
 def test_host_prefixes_keep_padding_and_late_refusal_atomic(tmp_path,pipeline,shape):
     from atlas_mlir_native.application import AtlasApplicationAdapter
@@ -67,7 +70,7 @@ def test_host_prefixes_keep_padding_and_late_refusal_atomic(tmp_path,pipeline,sh
     assert len(app.stats) == 1
     assert app.upload_bytes == sum(layout['input_buffer_bytes']) + sum(
         geometry['pages']*128 for geometry in layout['exponent_layouts'])
-    assert app.download_bytes == layout['output_bytes']//2048*layout.get('output_tile_store_bytes',2048)+4
+    assert app.download_bytes == sum(size for _,size in output_read_spans(plan))+4
     for address,geometry in zip(layout['exponent_addresses'],layout['exponent_layouts'],strict=True):
         for page in range(geometry['pages']):
             offset = address-app.base+page*2048

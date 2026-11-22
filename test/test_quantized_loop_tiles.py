@@ -17,7 +17,7 @@ from atlas_mlir_native.quantized_loop import execution_layout
 from atlas_mlir_native.options import CodegenOptions, codegen_options
 from test_already_quantized import source_request
 from test_quantized_epilogue import case
-from test_quantized_loop import head, shared
+from test_quantized_loop import head, shared, output_read_spans
 
 ROOT = Path(__file__).resolve().parents[1]
 BASE = 0x200C0000
@@ -38,7 +38,8 @@ static int put(void *c,uintptr_t a,const uint8_t *v,size_t n) {
   (void)c; ++puts; if (!span(a,n)) return 1; memcpy(memory+(a-@BASE@u),v,n); return 0;
 }
 static int get(void *c,uintptr_t a,uint8_t *v,size_t n) {
-  (void)c; ++gets; if (mode==2 && a==@OUT@u) return 1; if (!span(a,n)) return 1; memcpy(v,memory+(a-@BASE@u),n); return 0;
+  (void)c; ++gets; if ((mode==2 && a==@OUT@u) || (mode==3 && gets==@READS@u)) return 1;
+  if (!span(a,n)) return 1; memcpy(v,memory+(a-@BASE@u),n); return 0;
 }
 const uint8_t *device_memory(void) { return memory; }
 unsigned start_count(void) { return starts; } unsigned write_count(void) { return puts; } unsigned read_count(void) { return gets; }
@@ -132,8 +133,9 @@ class TileTransferTest(unittest.TestCase):
                 rhs = batches if source.node(plan.operand_ids[1]).type.shape[:-2] else 1
                 pages = sum(geometry['pages'] for geometry in execution['exponent_layouts'])
                 extra = batches*mc*nc if len(execution['input_addresses']) == 3 else 0
-                self.assertEqual(full[3], (1, 4+bool(extra), 2))
-                self.assertEqual(tiles[3], (1, batches*mc*kc+rhs*nc*kc+pages+extra, 1+batches*mc*nc))
+                reads=1+len(output_read_spans(plan))
+                self.assertEqual(full[3], (1, 2+pages+bool(extra), reads))
+                self.assertEqual(tiles[3], (1, batches*mc*kc+rhs*nc*kc+pages+extra, reads))
 
     def run_package(self, source, plan, execution, window, files):
         with tempfile.TemporaryDirectory() as temp:
@@ -142,7 +144,8 @@ class TileTransferTest(unittest.TestCase):
                 path = root/key; path.parent.mkdir(parents=True, exist_ok=True); path.write_bytes(payload)
             text = SHIM
             for key, item in {'BASE': BASE, 'BYTES': window, 'OUT': execution['output_addresses'][0],
-                              'OUTBYTES': execution['output_bytes'], 'STATUS': execution['status_address']}.items():
+                              'OUTBYTES': execution['output_bytes'], 'STATUS': execution['status_address'],
+                              'READS': 1+len(output_read_spans(plan))}.items():
                 text = text.replace('@'+key+'@', str(item))
             (root/'shim.c').write_text(text)
             proc = subprocess.run(['cc', '-std=c11', '-O2', '-Wall', '-Wextra', '-Werror', '-Wno-misleading-indentation',
@@ -156,7 +159,7 @@ class TileTransferTest(unittest.TestCase):
             inputs = (ctypes.c_void_p*len(values))(*(item.ctypes.data for item in values))
             output = np.empty(source.node(plan.output_id).type.shape, '<u2' if plan.output_dtype == 'bf16' else '<f4')
             device = (0x3f80+np.arange(execution['output_bytes']//2, dtype=np.uint16) % 64).astype('<u2')
-            for mode, status in ((1, 2), (2, 3)):
+            for mode, status in ((1, 2), (2, 3), (3, 3)):
                 output.view(np.uint8).fill(0xa5)
                 self.assertEqual(lib.invoke(ctypes.cast(inputs, ctypes.c_void_p), output.ctypes.data, device.ctypes.data, mode), status)
                 self.assertTrue(np.all(output.view(np.uint8) == 0xa5))
