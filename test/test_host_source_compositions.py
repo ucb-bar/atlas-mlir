@@ -370,3 +370,153 @@ def test_unadmitted_convolutions_stay_decomposed_and_have_no_family():
             generate_policy(graph, describe_compiler(), describe_numerical_families(),
                             original_source_sha256="a" * 64, preparation_sha256="b" * 64,
                             selected_family_ids=EXPORT_FAMILIES)
+
+
+def _f32_region(operation, shape):
+    from merlin.compiler.semantic.linalg.linalg_recognition import _f32_reduce_maps
+    from merlin.compiler.semantic.model import ConstantBinding, KernelRequest, SemanticNode, TensorType, pointwise_identity_maps
+
+    typ = TensorType(shape, "f32", "raw-bit-pattern")
+    x = SemanticNode("x", "input", (), typ, effect="input")
+    rank, constants = len(shape), ()
+    if operation == "sum":
+        out = TensorType(shape[:-1], "f32", "raw-bit-pattern")
+        seed = SemanticNode("seed", "constant", (), out, effect="constant")
+        node = SemanticNode("r", "source_f32_reduce_add_unqualified", ("x", "seed"), out,
+                            attrs=(("axis", rank - 1), ("reduction_order", "unresolved"),
+                                   ("numeric_semantics", "source-f32-add-unqualified-v1"),
+                                   ("scalar_add_order", "input-accumulator"), ("source_operation", "aten.mean.dim")),
+                            index_maps=_f32_reduce_maps(rank, (rank - 1,)))
+        constants = (ConstantBinding("seed", "f32-le-raw", (b"\0" * (4 * int(np.prod(shape[:-1])))).hex()),)
+        nodes = (x, seed, node)
+    else:
+        op, attrs = (("f32_silu", (("input_domain", "finite-f32"), ("numeric_semantics", "torch-2.11-cpu-f32-silu-v1")))
+                     if operation == "silu" else
+                     ("source_f32_rsqrt_unqualified", (("numeric_semantics", "source-f32-rsqrt-unqualified-v1"),
+                                                       ("source_operation", "aten.rsqrt.default"))))
+        node = SemanticNode("r", op, ("x",), typ, attrs=attrs, index_maps=pointwise_identity_maps(rank, 1))
+        nodes = (x, node)
+    return KernelRequest(nodes, ("r",), ("ram",), (("x", "ram"),), "fixture", constants=constants)
+
+
+def _f32_values(operation, shape, seed):
+    rng = np.random.default_rng([20261121, seed, *shape])
+    if operation == "rsqrt":
+        return (np.abs(rng.standard_normal(shape)) * 10.0 ** rng.uniform(-30, 30, shape)).astype(np.float32)
+    if operation == "sum":
+        return (rng.standard_normal(shape) * 10.0 ** rng.uniform(-3, 3, shape)).astype(np.float32)
+    if shape[-1] == 1 << 20:
+        # Where the exponential dominates the denominator, so its last bit reaches the quotient.
+        return rng.uniform(-30, 5, shape).astype(np.float32)
+    # Both exponential branches, the rounding-sensitive middle, and wide magnitudes.
+    return (rng.standard_normal(shape) * rng.choice([1e-3, 1.0, 8.0, 40.0, 120.0], shape)).astype(np.float32)
+
+
+@pytest.mark.parametrize("operation,shape", [
+    ("silu", (1, 50, 720)), ("silu", (1, 50, 2048)), ("silu", (1, 4416)), ("silu", (1, 1 << 20)), ("rsqrt", (1, 50, 1)), ("rsqrt", (3, 64)),
+    ("sum", (1, 50, 720)), ("sum", (1, 50, 2048)), ("sum", (1, 4416)), ("sum", (1, 15, 227)), ("sum", (3, 7)),
+    ("sum", (4, 8)), ("sum", (4, 13)), ("sum", (2, 1025)), ("sum", (2, 4097)), ("sum", (2, 70000)),
+])
+def test_f32_host_families_match_torch_eager(tmp_path, operation, shape):
+    """Emitted C and the independent reference equal unforced torch eager bit for bit on nonzero data."""
+    from atlas_mlir_native.reference_eval import host
+
+    assert torch.backends.cpu.get_cpu_capability() in {"AVX2", "AVX512"}
+    record, function = _compile(tmp_path, _f32_region(operation, shape), "f32_" + operation)
+    assert record["inputs"] == ["x"]
+    out_shape = shape[:-1] if operation == "sum" else shape
+    eager = {"silu": torch.nn.functional.silu, "rsqrt": torch.rsqrt, "sum": lambda t: t.sum(-1)}[operation]
+    rules = {"host_order": {"default": "lexicographic-f32", "aten.sum.dim_IntList": host.TORCH_F32_SUM}}
+
+    def call(values):
+        output = np.full(out_shape, 0x55555555, np.uint32)
+        status = function(None, (ctypes.c_void_p * 1)(values.ctypes.data_as(ctypes.c_void_p)),
+                          (ctypes.c_void_p * 1)(output.ctypes.data_as(ctypes.c_void_p)))
+        return status, output
+
+    for seed in range(6):
+        values = _f32_values(operation, shape, seed)
+        expected = eager(torch.from_numpy(values.copy())).numpy().view(np.uint32)
+        assert np.count_nonzero(expected & 0x7fffffff) > expected.size // 2
+        status, actual = call(values)
+        assert status == 0 and np.array_equal(actual, expected)
+        tensor = Tensor(values.view(np.uint32).copy(), "f32")
+        if operation == "sum":
+            reference = host.call("aten.sum.dim_IntList", [tensor, [-1], False], {}, rules)
+        else:
+            reference = host.call(f"aten.{operation}.default", [tensor], {}, {})
+        assert np.array_equal(reference.raw, expected)
+    poisoned = values.copy()
+    poisoned.flat[poisoned.size // 2] = np.inf
+    status, untouched = call(poisoned)
+    assert status == -2 and np.all(untouched == 0x55555555)
+
+
+def _captured_graph(tmp_path, module, example):
+    from m2m.capture.bundle import write_bundle
+
+    write_bundle(module.eval(), (example,), tmp_path, capture_regions=False, capture_trace=True)
+    text = (tmp_path / "model.mlir").read_text()
+    return prepare_source(translate_linalg_text(text, entry="forward", target_identity="declared-target",
+                                                lowering_policy="diagnostic").request)[0]
+
+
+class _Source(torch.nn.Module):
+    def __init__(self, function):
+        super().__init__()
+        self.function = function
+
+    def forward(self, x):
+        return self.function(x)
+
+
+@pytest.mark.parametrize("form,ops,families", [
+    ("silu", ["f32_silu"], ["atlas.host-f32-silu"]),
+    ("bf16-silu", ["f32_to_bf16", "bf16_to_f32", "f32_silu", "f32_to_bf16"], None),
+    ("x-times-sigmoid", ["source_f32_composite_unqualified", "f32_mul"], None),
+    ("rms", None, None),
+    ("softmax", None, None),
+    ("f32-layer-norm", None, None),
+])
+def test_captured_f32_forms_select_only_their_torch_family(tmp_path, form, ops, families):
+    function = {
+        "silu": torch.nn.functional.silu,
+        "bf16-silu": lambda x: torch.nn.functional.silu(x.to(torch.bfloat16)),
+        "x-times-sigmoid": lambda x: x * torch.sigmoid(x),
+        "rms": lambda x: x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + 1e-5),
+        "softmax": lambda x: torch.softmax(x, -1),
+        "f32-layer-norm": lambda x: torch.nn.functional.layer_norm(x, (24,), eps=1e-5),
+    }[form]
+    graph = _captured_graph(tmp_path, _Source(function), torch.randn(2, 24))
+    pure = [node.op for node in graph.nodes if node.effect == "pure"]
+    if ops is not None:
+        assert pure == ops
+    def select():
+        return generate_policy(graph, describe_compiler(), describe_numerical_families(),
+                               original_source_sha256="a" * 64, preparation_sha256="b" * 64,
+                               selected_family_ids=EXPORT_FAMILIES)
+    if form in {"x-times-sigmoid", "softmax", "f32-layer-norm"}:
+        # A real product with a sigmoid keeps its own rounding; softmax and f32 layer norm have other kernels.
+        with pytest.raises(PolicyGenerationError):
+            select()
+        if form != "x-times-sigmoid":
+            from merlin.compiler.quantization import policy_generation as pg
+
+            rows = [row for row in describe_numerical_families() if row.family == "atlas.host-f32-sum"]
+            sums = [item for item in pg.graph_requirements(graph)
+                    if item["operation"] == "source_f32_reduce_add_unqualified"]
+            assert sums and not any(pg._matches(item, rows[0]) for item in sums)
+            if form == "f32-layer-norm":
+                roots = [row for row in describe_numerical_families() if row.family == "atlas.host-f32-rsqrt"]
+                inverses = [item for item in pg.graph_requirements(graph)
+                            if item["operation"] == "source_f32_rsqrt_unqualified"]
+                assert inverses and not any(pg._matches(item, roots[0]) for item in inverses)
+        return
+    selected = [row["family"] for row in select()["selected_families"]]
+    assert all(row is None for row in (r["precision_change"] for r in select()["selected_families"]))
+    if families is not None:
+        assert selected == families
+    if form == "bf16-silu":
+        assert "atlas.host-f32-silu" in selected
+    if form == "rms":
+        assert {"atlas.host-f32-sum", "atlas.host-f32-rsqrt"} <= set(selected)

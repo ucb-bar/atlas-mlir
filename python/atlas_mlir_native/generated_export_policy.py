@@ -24,6 +24,7 @@ EXPORT_FAMILIES = (
     "atlas.host-layer-norm", "atlas.host-sign-flip", "atlas.host-bf16-contraction", "atlas.exact-bf16-add",
     "atlas.device-bf16-mul",
     "atlas.host-f32-add", "atlas.host-f32-sub", "atlas.host-f32-mul", "atlas.host-f32-div",
+    "atlas.host-f32-silu", "atlas.host-f32-rsqrt", "atlas.host-f32-sum",
     "atlas.exact-bf16-to-f32", "atlas.exact-f32-to-bf16", "atlas.host-static-quantize-f32",
 )
 

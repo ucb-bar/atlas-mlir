@@ -52,7 +52,8 @@ def reference(context):
     """Execute the source evaluator using authenticated placement metadata only."""
     out = context['out']
     selected = dict(npu_model_revision='b97b2f5a97e432141c4ef8504bec396651d77a8f',
-                    numerics='rtl', k_order='ascending-k32', host_order='lexicographic-f32')
+                    numerics='rtl', k_order='ascending-k32',
+                    host_order={'default': 'lexicographic-f32', 'aten.mean.dim': 'torch-2.11-cpu-f32-sum-v1'})
     regions = json.loads((out / 'compiled' / 'application' / 'compiled-regions.json').read_text())
     if any(region.get('description', {}).get('host_math_symbols') for region in regions):
         selected['host_math'] = _host_math(out)

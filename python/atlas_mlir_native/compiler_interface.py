@@ -61,6 +61,13 @@ _FAMILIES = (
      "checked source binary32 tanh or erf GELU order; pinned correctly rounded host supplier; finite BF16 inputs"),
     ("host-layer-norm", "host_pointwise", ("bf16_layer_norm",),
      "checked pinned torch 2.11.0+cpu AVX2/AVX512 layer norm kernel (chunked Welford moments); finite inputs and results"),
+    ("host-f32-silu", "host_pointwise", ("f32_silu",),
+     "checked source f32 SiLU in the pinned torch 2.11.0+cpu vector arithmetic, x/(1+expf(-x)); finite inputs"),
+    ("host-f32-rsqrt", "host_pointwise", ("source_f32_rsqrt_unqualified",),
+     "checked source f32 rsqrt operation as two binary32 roundings, 1/sqrt(x); finite nonnegative inputs"),
+    ("host-f32-sum", "host_pointwise", ("source_f32_reduce_add_unqualified",),
+     "checked +0-seeded sum of a source f32 mean over the last axis in the pinned torch 2.11.0+cpu cascade order; finite "
+     "inputs and results; reductions lowered from other source operations stay refused"),
     ("host-bf16-contraction", "host_pointwise", ("bf16_affine_contraction",),
      "checked BF16 contraction over one affine loop domain (unfolded convolution); binary32 products (exact unless underflow), ascending binary32 sums"),
     ("host-sign-flip", "host_pointwise", ("bf16_neg",),

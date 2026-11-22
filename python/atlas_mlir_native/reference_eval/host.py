@@ -131,12 +131,85 @@ def _bf16_add(a, b, subtract=False):
     return Tensor(result, "bf16")
 
 
+TORCH_F32_SUM = "torch-2.11-cpu-f32-sum-v1"
+
+
+def _cascade(rows):
+    """The wheel's scalar row sum: four interleaved partials, each a four-level cascade, then a left fold."""
+    length = rows.shape[1]
+    size = length // 4
+    power = max(4, (0 if size <= 1 else int(size - 1).bit_length()) // 4)
+    step, mask = 1 << power, (1 << power) - 1
+    levels = np.zeros((4, rows.shape[0], 4), np.float32)
+    index = 0
+    while index + step <= size:
+        for _ in range(step):
+            levels[0] = np.add(levels[0], rows[:, index * 4:index * 4 + 4])
+            index += 1
+        for level in range(1, 4):
+            levels[level] = np.add(levels[level], levels[level - 1])
+            levels[level - 1] = 0
+            if index & (mask << (level * power)):
+                break
+    for at in range(index, size):
+        levels[0] = np.add(levels[0], rows[:, at * 4:at * 4 + 4])
+    for level in range(1, 4):
+        levels[level] = np.add(levels[level], levels[level - 1])
+    partial = levels[3].copy()
+    for column in range(size * 4, length):
+        partial[:, 0] = np.add(partial[:, 0], rows[:, column])
+    total = partial[:, 0]
+    for lane in range(1, 4):
+        total = np.add(total, partial[:, lane])
+    return total
+
+
+def _torch_f32_sum(numbers):
+    """Sum the last axis in the order of the pinned wheel's kernel, for every leading shape."""
+    outer, length = numbers.shape[:-1], numbers.shape[-1]
+    rows = numbers.reshape(-1, length)
+    count = length // 8
+    if not count:
+        return _cascade(rows).reshape(outer)
+    lanes = [_cascade(rows[:, lane:count * 8:8]) for lane in range(8)]
+    if length % 8:
+        tail = rows[:, count * 8]
+        for column in range(count * 8 + 1, length):
+            tail = np.add(tail, rows[:, column])
+        lanes[0] = np.add(lanes[0], tail)
+    total = lanes[0]
+    for lane in lanes[1:]:
+        total = np.add(total, lane)
+    return total.reshape(outer)
+
+
+def _sleef_expf(x):
+    """SLEEF expf at 1.0 ULP with fused steps, as the wheel's vector kernels call it."""
+    x = np.asarray(x, np.float32)
+    d = np.clip(x, np.float32(-104), np.float32(100))
+    q = np.rint(np.multiply(d, np.float32(1.442695040888963407359924681001892137426645954152985934135449406931)))
+    s = _fma32(q, np.float32(-0.693145751953125), d)
+    s = _fma32(q, np.float32(-1.428606765330187045e-06), s)
+    u = np.full(x.shape, np.float32(0.000198527617612853646278381), np.float32)
+    for c in (0.00139304355252534151077271, 0.00833336077630519866943359, 0.0416664853692054748535156,
+              0.166666671633720397949219, 0.5):
+        u = _fma32(u, s, np.float32(c))
+    u = np.add(np.float32(1), _fma32(np.multiply(s, s), u, s))
+    n = q.astype(np.int32)
+    half = n >> 1
+    for part in (half, n - half):
+        u = np.multiply(u, ((part + 127).astype(np.uint32) << 23).view(np.float32))
+    u = np.where(x < -104, np.float32(0), u)
+    return np.where(x > 100, np.float32(np.inf), u)
+
+
 def _ordered(rules, target):
     order = (rules or {}).get("host_order")
     if isinstance(order, Mapping):
         order = order.get(target, order.get("default"))
-    if order != "lexicographic-f32":
+    if order not in {"lexicographic-f32", TORCH_F32_SUM} or (order == TORCH_F32_SUM and target not in _REDUCTIONS):
         raise ValueError("host reduction/matmul requires declared host_order='lexicographic-f32'")
+    return order
 
 
 def _host_math(function, raw, rules):
@@ -245,7 +318,7 @@ def _reduce(value, dims, keepdim, kind, rules, target, dtype=None):
         raise ValueError("ordered host reduction requires BF16 or F32 input")
     if dtype is not None and dtype not in {"f32", "bf16"}:
         raise ValueError("floating host reduction to integer dtype is not qualified")
-    _ordered(rules, target)
+    order = _ordered(rules, target)
     dims = tuple(range(value.raw.ndim)) if dims is None or dims == [] else tuple(dims) if isinstance(dims, (list, tuple)) else (dims,)
     axes = tuple(_axis(x, value.raw.ndim) for x in dims)
     if len(set(axes)) != len(axes):
@@ -260,10 +333,17 @@ def _reduce(value, dims, keepdim, kind, rules, target, dtype=None):
     if kind in {"min", "max"} and count == 0:
         raise ValueError("extrema reduction of empty source dimension")
     result = np.zeros(outer, np.float32)
-    if kind in {"min", "max"}:
-        result = numbers[..., 0].copy()
-    for i in range(1 if kind in {"min", "max"} else 0, count):
-        result = ({"min": np.minimum, "max": np.maximum}.get(kind, np.add))(result, numbers[..., i])
+    if order == TORCH_F32_SUM:
+        if value.dtype != "f32" or kind not in {"sum", "mean"} or axes != (value.raw.ndim - 1,) or not outer or not count:
+            raise ValueError("the torch f32 sum order is qualified for a nonempty f32 last axis")
+        if not np.isfinite(numbers).all():
+            raise ValueError("the torch f32 sum order is qualified for finite inputs")
+        result = _torch_f32_sum(numbers)
+    else:
+        if kind in {"min", "max"}:
+            result = numbers[..., 0].copy()
+        for i in range(1 if kind in {"min", "max"} else 0, count):
+            result = ({"min": np.minimum, "max": np.maximum}.get(kind, np.add))(result, numbers[..., i])
     if kind == "mean":
         with np.errstate(all="ignore"):
             result = np.divide(result, np.float32(count))
@@ -334,6 +414,13 @@ def call(target, args, kwargs, target_rules=None):
         return _matmul(target, args, kwargs, rules)
     if target in _MATH:
         _signature(args, kwargs, 1)
+        if target == "aten.rsqrt.default" and _tensor(args[0]).dtype == "f32":
+            # The wheel's kernel rounds twice: the IEEE square root, then its reciprocal.
+            x = _numbers(_tensor(args[0]))
+            if not np.isfinite(x).all() or (x < 0).any():
+                raise ValueError("source f32 rsqrt is qualified for finite nonnegative inputs")
+            with np.errstate(divide="ignore"):
+                return _pack(np.divide(np.float32(1), np.sqrt(x)), "f32")
         return _unary_math(_MATH[target], args[0], rules)
     if target in _UNARY:
         _signature(args, kwargs, 1)
@@ -814,8 +901,9 @@ def _composite(target, args, kwargs, rules):
         value = _tensor(args[0]); x = _numbers(value)
         if value.dtype not in {"f32", "bf16"}: raise ValueError("activation requires floating input")
         if "silu" in target:
-            exp = _host_math("expf", np.negative(x).view(np.uint32), rules)
-            return _pack(np.divide(x, np.add(np.float32(1), exp)), value.dtype)
+            # The pinned wheel's kernel: SLEEF expf in binary32, x/(1+e), one rounding to a BF16 result.
+            if not np.isfinite(x).all(): raise ValueError("source SiLU is qualified for finite inputs")
+            return _pack(np.divide(x, np.add(np.float32(1), _sleef_expf(np.negative(x)))), value.dtype)
         approximate = args[1] if len(args) > 1 else kwargs.get("approximate", "none")
         if approximate == "none":
             erf = _host_math("erff", np.multiply(x, np.float32(0.7071067811865476)).view(np.uint32), rules)

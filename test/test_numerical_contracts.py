@@ -64,7 +64,7 @@ def test_declarations_extend_every_current_family_with_immutable_contracts():
     compiler = describe_compiler()
     rows = describe_numerical_families()
     assert {row.family for row in rows} == {family.id for family in compiler.families}
-    assert len(rows) == 25
+    assert len(rows) == 28
     for row in rows:
         family = next(family for family in compiler.families if family.id == row.family)
         assert row.pattern in family.patterns
