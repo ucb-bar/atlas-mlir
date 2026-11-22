@@ -611,7 +611,13 @@ class StartupTests(unittest.TestCase):
                 subprocess.run([compiler, f'-march={march}', '-mabi=lp64d', '-nostdlib', '-o', str(elf), str(source)],
                                check=True, capture_output=True)
                 if issue is None:
-                    self.assertTrue(d._startup_check(elf)['core_errata_clear'])
+                    checked = d._startup_check(elf)
+                    self.assertTrue(checked['core_errata_clear'])
+                    # The same ELF in another folder is the same code, so its digest is unchanged.
+                    moved = Path(directory) / 'other' / elf.name
+                    moved.parent.mkdir()
+                    shutil.copyfile(elf, moved)
+                    self.assertEqual(d._startup_check(moved)['disassembly_sha256'], checked['disassembly_sha256'])
                 else:
                     self.assertRaisesRegex(Refusal, r'at 0x[0-9a-f]+ in main.*' + issue, d._startup_check, elf)
 

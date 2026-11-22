@@ -208,7 +208,9 @@ def _startup_check(path):
     objdump = shutil.which('riscv64-unknown-elf-objdump')
     if objdump is None:
         raise Refusal('RISC-V objdump required for startup qualification')
-    result = subprocess.run([objdump, '-d', str(path)], capture_output=True, text=True)
+    # objdump names its input in the header; name the file alone so the digest is the code's, not the folder's.
+    elf = Path(path).resolve()
+    result = subprocess.run([objdump, '-d', elf.name], cwd=elf.parent, capture_output=True, text=True)
     if result.returncode:
         raise Refusal('ELF disassembly failed')
     _core_errata_check(result.stdout, _executable_code(path))
