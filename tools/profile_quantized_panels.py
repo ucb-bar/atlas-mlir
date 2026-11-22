@@ -32,6 +32,7 @@ def main():
     for dimension, default in (('m', 128), ('n', 128), ('k', 768)):
         parser.add_argument('--'+dimension, type=int, default=default)
     parser.add_argument('--pipeline', choices=('mandatory', 'optimized'), default='optimized')
+    parser.add_argument('--lhs-exponents', choices=('scalar', 'row'), default='scalar')
     parser.add_argument('--rust-model', type=Path, default=os.environ.get('ATLAS_RUST_NPU_MODEL'))
     parser.add_argument('--out', type=Path, required=True)
     args = parser.parse_args()
@@ -46,13 +47,13 @@ def main():
     from atlas_mlir_native.options import codegen_options, current_codegen_options
     from atlas_mlir_native.quantized_loop import execution_layout, virtual_source
     from atlas_mlir_native.restoration_budget import instruction_bound
-    from test_already_quantized import source_request
+    from test_exponent_page_cache import fixture
     from test_exponent_restoration import compile_fixture
     from test_quantized_operand_reuse import memory_fixture
     from rust_model import execute
 
     args.out.mkdir(parents=True, exist_ok=False)
-    request = source_request(m=args.m, n=args.n, k=args.k, batch=())
+    request = fixture(args.m, args.n, args.k, (), args.lhs_exponents, 'row', True)
     plan = prepare_source(request)
     options = replace(current_codegen_options(), io_memory_bytes=67108864,
                       execution_instruction_limit=128000000, exponent_page_cache=True)
@@ -92,7 +93,8 @@ def main():
                                 virtual_sha256=sha256(source.encode()).hexdigest(),
                                 machine_sha256=sha256(machine.encode()).hexdigest(), **stats))
     assert outputs[0] == outputs[1], 'complete output memory differs'
-    report = dict(shape=[args.m, args.n, args.k], pipeline=args.pipeline, provenance=provenance,
+    report = dict(shape=[args.m, args.n, args.k], lhs_exponents=args.lhs_exponents,
+                  pipeline=args.pipeline, provenance=provenance,
                   exact_memory_match=True, measurements=results,
                   scope='authored contraction; Rust RTL numerics, measured-curve DMA; device cycles only')
     (args.out / 'comparison.json').write_text(json.dumps(report, indent=2)+'\n')

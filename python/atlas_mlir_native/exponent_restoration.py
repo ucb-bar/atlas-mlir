@@ -446,12 +446,24 @@ class Restoration:
             output_state=output_state, prefix='restore_cache_batch'), output_state
 
     def tile(self, *, additional_resident_exponents=(), **kwargs):
-        resident = (*self.page_cache.resident, *additional_resident_exponents)
+        resident = (*self.page_cache.resident, *additional_resident_exponents,
+                    *((0,) if self.page_cache.row_roles else ()))
         if self.vector:
             return _vector_tile(self.plan, self.layout, scalar_fallback=self.scalar_fallback,
                                 resident_exponents=resident, **kwargs)
         return _tile(self.plan, self.layout, logical_rows=self.logical_rows,
                      resident_exponents=resident, **kwargs)
+
+    def row_entry(self, input_state, exponent_addresses):
+        if not self.page_cache.row_roles:
+            return [], input_state
+        e = Emitter('restore_cache_row')
+        e.state = input_state
+        load_pages(e, exponent_addresses, skip=(1,))
+        output_state = 'restore_row_ready'
+        e.emit(f'cf.br ^restore_cache_row_ready(%{e.state} : {STATE})')
+        e.lines.append(f'  ^restore_cache_row_ready(%{output_state}: {STATE}):')
+        return e.lines, output_state
 
     def finish(self, state):
         e = Emitter('restore_finish')

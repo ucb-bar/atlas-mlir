@@ -42,6 +42,18 @@ def panel_record(plan, layout):
     return dict(exponent_panel_cache_roles=roles) if roles else {}
 
 
+def row_record(plan, layout):
+    """Keep the LHS row page across N when the selected policy uses row caching."""
+    from .exponent_restoration import exponent_geometry
+
+    if (recorded_enabled(layout)
+            and layout.get('operand_reuse_requested') == 'interleaved-panel-cache'
+            and layout.get('operand_reuse') in ('row-cache', 'prefix-cache')
+            and plan.n > 32 and exponent_geometry(plan)[0]['mode'] == 'row'):
+        return dict(exponent_row_cache_roles=['lhs'])
+    return {}
+
+
 class ExponentPageCache:
     """Describe immutable page lifetimes without changing factor admission."""
 
@@ -59,6 +71,12 @@ class ExponentPageCache:
                      or layout['exponent_panel_cache_roles'] != panel['exponent_panel_cache_roles'])):
             raise ValueError('exponent panel cache roles differ from the selected traversal')
         self.panel_roles = tuple(layout.get('exponent_panel_cache_roles', ()))
+        row = row_record(plan, layout)
+        if ('exponent_row_cache_roles' in layout
+                and ('exponent_row_cache_roles' not in row
+                     or layout['exponent_row_cache_roles'] != row['exponent_row_cache_roles'])):
+            raise ValueError('exponent row cache roles differ from the selected traversal')
+        self.row_roles = tuple(layout.get('exponent_row_cache_roles', ()))
 
     @property
     def resident(self):

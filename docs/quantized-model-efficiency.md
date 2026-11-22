@@ -216,13 +216,39 @@ cycles, but 3 × 768 regressed from 26,132 to 31,352: one exceptional value now
 forces a larger scalar finite-only scan. This broader change is **not retained**.
 Results and machine sources: `out/efficiency/quantizer-prefix-experiment`.
 The larger authored 32 × 5632 × 2048 projection takes 9,376,678 cycles with both
-panel policies: one M tile uses the existing row-cache fallback, so the new
-interleaved panel path does not apply. This identifies a separate target for
-row-exponent reuse. Outputs match; no gain is claimed for that shape. Artifacts:
+panel policies with scalar LHS exponents: one M tile uses the existing row-cache
+fallback and its scalar page is already invocation-cached. Outputs match; no
+gain is claimed for that configuration. Artifacts:
 `out/efficiency/panel-32-5632-2048`.
-Next: extend exponent-page reuse to the row-cache fallback, preserve
-exceptional-scan granularity while reducing repeated quantizer reads, and
-examine cross-region residency.
+
+At 128 × 5632 × 2048, the existing interleaved panel improvements reduce cycles
+from **15,101,929 to 13,405,993** (11.23%) and reads from **14,682,112 to
+13,600,768 bytes** (7.37%). Writes remain 2,885,632 bytes and both runs use one
+dispatch. Complete memory matches. Artifacts: `out/efficiency/panel-128-5632-2048`.
+
+The profiler now accepts `--lhs-exponents row` for per-token scales. With this
+source, the 32 × 5632 × 2048 row-cache fallback can retain its LHS exponent page
+across columns. It reduces cycles from **9,736,339 to 9,473,598** (2.70%) and
+reads from **12,320,768 to 11,962,368 bytes**, with the same output, writes and
+dispatch count. This cache is recorded explicitly under the selected
+`interleaved-panel-cache` policy; old records without the new row role retain
+their prior traversal. Each new M row and batch refreshes its page, while scale
+domain checks and scalar-refusal behavior remain active. The affected row,
+panel, page-cache and interleaving suites pass 38 tests, including native
+rebinding and C export. Artifacts:
+`out/efficiency/panel-token-exponents-32-5632-2048`.
+
+Two baseline compiler limits were encountered independently of row-page reuse:
+the batched 65 × 35 × 65 QK path exhausts non-spillable working registers, and
+the optimized 3 × 35 × 6145 wide-cache path reaches its 256-spill work limit.
+Neither limit was raised. Baseline sources/refusals are retained in
+`out/efficiency/row-cache-existing-register-refusal` and
+`out/efficiency/row-cache-existing-wide-spill-refusal`. Long-prefix numerical
+checks currently use the admitted mandatory pipeline.
+
+Next: load only the used prefix of exponent pages, preserve exceptional-scan
+granularity while reducing repeated quantizer reads, and examine cross-region
+residency and compiler register-pressure limits.
 
 Merlin's full structure gate currently reports the pre-existing root-level
 `merlin/tests/test_application_deployment_paging.py`; the no-regex gate reports

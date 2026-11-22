@@ -362,6 +362,9 @@ def _virtual(
             effect("save", prefix + "_loaded", prefix + "_saved",
                    [f"cached_a{index}", prefix + "_value"], [slot, fp8])
             row_ready = prefix + "_saved"
+    if restoration is not None:
+        prefetch, row_ready = restoration.row_entry(row_ready, page_addresses)
+        lines.extend(prefetch)
     c("zero_n", 0)
     if nc > 1:
         lines += [

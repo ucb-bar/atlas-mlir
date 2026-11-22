@@ -81,7 +81,7 @@ def _execution_geometry(plan):
 
 def execution_layout(plan, *, operand_reuse=None, exponent_page_cache=None):
     from .quantized_operand_reuse import schedule_record
-    from .exponent_page_cache import record as page_cache_record, panel_record
+    from .exponent_page_cache import record as page_cache_record, panel_record, row_record
     from .quantized_resident import bind_geometry
     geometry, end = _execution_geometry(plan)
     if end > selected_io_memory_base() + dram_slots()*TILE_BYTES:
@@ -96,7 +96,7 @@ def execution_layout(plan, *, operand_reuse=None, exponent_page_cache=None):
                     vector_per_operand_range=list(fast_factor_range(plan)),
                     out_of_domain='sticky_status_1_and_atomic_host_output_refusal'),
                 )
-    return {**layout, **panel_record(plan, layout)}
+    return {**layout, **panel_record(plan, layout), **row_record(plan, layout)}
 
 
 def virtual_source(plan, layout):
