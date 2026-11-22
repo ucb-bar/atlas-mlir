@@ -11,6 +11,9 @@ from math import prod
 STATE = '!atlas.virtual_state'
 BF16 = '!atlas.virtual_bf16'
 SLOT = '!atlas.virtual_spill'
+# A page contains at most 32 signed i32 exponents; the rest of its 2 KiB ABI
+# allocation is transport padding. Partial BF16 loads zero the unused lanes.
+EXPONENT_PAGE_PAYLOAD_BYTES = 32 * 4
 
 
 
@@ -127,6 +130,15 @@ class Emitter:
         self.effect('slot_store', [slot, value, index], [SLOT, 'i32', 'i32'], attrs=' {kind = \"sw\", byte_offset = 0 : i32}')
 
 
+def load_pages(e, addresses, skip=()):
+    """Copy each used exponent prefix, zero-filling the rest of its scratch slot."""
+    for index, (which, address) in enumerate(zip(('lhs', 'rhs'), addresses, strict=True)):
+        if index not in skip:
+            address = e.const(address) if isinstance(address, int) else address
+            page = e.effect('dma_load_bf16', [address, e.const(EXPONENT_PAGE_PAYLOAD_BYTES)], ['i32', 'i32'], BF16)
+            e.effect('save', ['restore_' + which, page], [SLOT, BF16])
+
+
 def _entry(*, output_state='restore_start'):
     return [
         f'    %restore_data = "atlas.virtual_slot"() {{kind = "bf16", words = 512 : i32, slot_word = -1 : i32, purpose = "scratch", atlas.exponent_scratch = "data"}} : () -> {SLOT}',
@@ -157,11 +169,7 @@ def _tile(plan, layout, *, output_address="ytile", exponent_addresses=("restore_
     mt = row_tile if (plan.m + 31)//32 > 1 else zero
     nt = column_tile if (plan.n + 31)//32 > 1 else zero
     e.effect('save', ['restore_data', result], [SLOT, BF16])
-    for index, (which, address) in enumerate(zip(('lhs', 'rhs'), exponent_addresses, strict=True)):
-        if index in resident_exponents:
-            continue
-        value = e.effect('dma_load_bf16', [address, e.const(2048)], ['i32', 'i32'], BF16)
-        e.effect('save', ['restore_'+which, value], [SLOT, BF16])
+    load_pages(e, exponent_addresses, resident_exponents)
     invalid = e.load('restore_status', zero)
     entry_state = e.state
     e.emit(f'cf.br ^{prefix}_word_header(%{entry_state}, %{zero}, %{invalid} : {STATE}, i32, i32)')
@@ -312,11 +320,7 @@ def _vector_tile(plan, layout, *, output_address, exponent_addresses, scalar_fal
     """Build separable exact factors and choose the proven normal fast path."""
     e=Emitter(prefix+'_factor')
     e.state=input_state
-    for index,(which,address) in enumerate(zip(('lhs','rhs'),exponent_addresses,strict=True)):
-        if index in resident_exponents:
-            continue
-        value=e.effect('dma_load_bf16',[address,e.const(2048)],['i32','i32'],BF16)
-        e.effect('save',['restore_'+which,value],[SLOT,BF16])
+    load_pages(e, exponent_addresses, resident_exponents)
     zero_tile=e.name('zero')
     e.emit(f'%{zero_tile} = "atlas.virtual_vpu_splat"() {{bits = 0 : i32}} : () -> {BF16}')
     for slot in ('restore_factor_lhs','restore_factor_rhs0','restore_factor_rhs1'):

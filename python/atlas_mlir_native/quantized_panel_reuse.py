@@ -7,7 +7,7 @@ one sticky status before exposing any result.
 """
 from math import prod
 
-from .exponent_restoration import Emitter, STATE, BF16, SLOT
+from .exponent_restoration import Emitter, STATE, BF16, SLOT, EXPONENT_PAGE_PAYLOAD_BYTES
 
 FP8 = '!atlas.virtual_fp8'
 WEIGHT = '!atlas.virtual_mxu_weight<1>'
@@ -91,9 +91,10 @@ def virtual_source(plan, layout, restoration, *, geometry=None, allow_batches=Fa
         e.lines.append(f'  ^{label}(' + ', '.join('%'+name+': '+dtype for name,dtype in zip(names,types,strict=True)) + '):')
         e.state = names[0]
 
-    def load(address, dtype):
+    def load(address, dtype, byte_count=None):
+        byte_count = (1024 if dtype == FP8 else 2048) if byte_count is None else byte_count
         return e.effect('dma_load_'+('fp8' if dtype==FP8 else 'bf16'),
-                        [address,e.const(1024 if dtype==FP8 else 2048)],['i32','i32'],dtype)
+                        [address,e.const(byte_count)],['i32','i32'],dtype)
 
     def save(slot, value, dtype):
         e.effect('save',[slot,value],[SLOT,dtype])
@@ -165,7 +166,7 @@ def virtual_source(plan, layout, restoration, *, geometry=None, allow_batches=Fa
 
     if 'lhs' in cached_roles:
         for row in range(m_tiles):
-            save(f'panel_exp_{row}', load(offset('pair_lpage', row*2048), BF16), BF16)
+            save(f'panel_exp_{row}', load(offset('pair_lpage', row*2048), BF16, EXPONENT_PAGE_PAYLOAD_BYTES), BF16)
 
     # The panel count is statically capped. Each N traversal is counted, so
     # generated code grows with bounded K, never with the number of columns.
@@ -191,7 +192,7 @@ def virtual_source(plan, layout, restoration, *, geometry=None, allow_batches=Fa
         e.emit(f'cf.cond_br %{more}, ^p{phase}_body(%{e.state} : {STATE}), ^p{phase}_done(%{e.state} : {STATE})')
         block(f'p{phase}_body',[f'p{phase}_body_s'],[STATE])
         if 'rhs' in cached_roles and first + count == kc:
-            save('restore_rhs', load(names[4], BF16), BF16)
+            save('restore_rhs', load(names[4], BF16, EXPONENT_PAGE_PAYLOAD_BYTES), BF16)
         partials = []
         if interleave_rows:
             partials = [load(offset(names[3], row*nc*2048), BF16) if first else None

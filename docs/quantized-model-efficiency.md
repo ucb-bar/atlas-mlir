@@ -246,9 +246,32 @@ Neither limit was raised. Baseline sources/refusals are retained in
 `out/efficiency/row-cache-existing-wide-spill-refusal`. Long-prefix numerical
 checks currently use the admitted mandatory pipeline.
 
-Next: load only the used prefix of exponent pages, preserve exceptional-scan
-granularity while reducing repeated quantizer reads, and examine cross-region
-residency and compiler register-pressure limits.
+Exponent DMA now loads only the first **128 bytes** of each 2 KiB page: those
+32 signed words contain every scale used by restoration. Page addresses,
+allocation sizes, host uploads and resident asset formats are unchanged; the
+partial BF16 load zero-fills the remaining scratch lanes. Both ordinary and
+panel-prefetch paths use the bounded prefix. The affected suites pass **51
+tests** (five separately gated Python-model tests), including poisoned unused
+padding, scalar/row/batch scales, invalid scales, both pipelines, native
+rebinding and C replay.
+
+With this change, the captured batched linear fixture takes **47,301 cycles**
+and **4,352 read bytes**, retaining two dispatches, 5,248 write bytes and the
+same public output hash. Against the original corrected baseline, that is
+32.83% fewer cycles and 57.5% fewer device reads; host uploads are still 8,192
+bytes. Artifacts: `out/efficiency/captured-linear-prefix-scales`.
+
+The row-scaled 32 × 5632 × 2048 projection improves further from **9,473,598 to
+9,257,750 cycles**, with reads falling from 11,962,368 to **11,622,528 bytes**.
+The scalar-LHS 128 × 5632 × 2048 interleaved case improves from **13,405,993 to
+13,156,874 cycles** and from 13,600,768 to **13,260,928 read bytes**. Writes,
+dispatch counts and complete memory bytes are unchanged in both comparisons.
+Artifacts: `out/efficiency/panel-prefix-scales-32-5632-2048` and
+`out/efficiency/panel-prefix-scales-128-5632-2048`.
+
+Next: reduce padded host transfers and status writes without weakening saved
+layout contracts, preserve exceptional-scan granularity while reducing repeated
+quantizer reads, and examine cross-region residency and compiler register pressure.
 
 Merlin's full structure gate currently reports the pre-existing root-level
 `merlin/tests/test_application_deployment_paging.py`; the no-regex gate reports

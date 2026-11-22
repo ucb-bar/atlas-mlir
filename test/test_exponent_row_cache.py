@@ -103,7 +103,7 @@ def test_rows_batches_tails_and_late_refusals_keep_all_bytes(
             end = status+layout['status_bytes']
             assert bool(int.from_bytes(actual[status:status+4],'little')) == (rejected_role is not None)
             assert actual[:output] == memory[:output] and actual[end:] == memory[end:]
-            saved = prod(batch)*((m+31)//32)*(((n+31)//32)-1)*2048
+            saved = prod(batch)*((m+31)//32)*(((n+31)//32)-1)*128
             difference = results[0][1]['dram_read_bytes'] - stats['dram_read_bytes']
             # A legacy scalar-refusal fallback can reload the same page again.
             assert difference == saved if rejected_role is None else difference >= saved
