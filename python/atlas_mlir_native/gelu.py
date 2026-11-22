@@ -3,7 +3,13 @@
 from dataclasses import dataclass, replace
 from math import prod
 
-from merlin.compiler.semantic.model import ConstantBinding, KernelRequest, SemanticNode, TensorType, pointwise_identity_maps
+from merlin.compiler.semantic.model import (
+    ConstantBinding,
+    KernelRequest,
+    SemanticNode,
+    TensorType,
+    pointwise_identity_maps,
+)
 from merlin.compiler.transforms.pointwise import PointwiseTiling
 from merlin.compiler.quantization.contraction.values import FloatBoundarySpec
 
