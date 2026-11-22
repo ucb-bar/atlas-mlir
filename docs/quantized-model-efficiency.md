@@ -68,6 +68,18 @@ with measurements. Historical performance numbers are context, not this branch's
 - Explicit next-weight prefetch was tested on optimized 128 × 128 × 768 panels.
   The scheduler already produces identical machine code (236,013 cycles), so
   that source change was not retained. Artifacts: `out/efficiency/prefetch-*`.
+- Added bounded row-exponent reuse to inline interleaved panels when exponent
+  caching is selected. Four or fewer LHS pages persist across columns; a RHS
+  row page is loaded once per column. Exact outputs, tails, batch identity,
+  multi-panel K, shared weights and late invalid exponents pass in both pipelines
+  (nine focused tests). Legacy records without panel roles retain their schedule.
+- Repaired composition of accumulator-retention stages with stages that contain
+  no MXU operations. The latter can inherit the inert hint; a contraction that
+  omitted the hint still refuses a mismatch. The three-stage authored MLP
+  (32 × 32 → 288 → 32, ReLU and explicit FP8 packing) now executes in one image.
+  Both pipelines match independent reference values for all stored intermediates
+  and both outputs on two input panels. This is a diagnostic graph, not a
+  TorchAO model or a model-quality measurement.
 - Remaining integration work: complete-layer measurements, residency interaction,
   and more useful overlap in the optimized schedule. No complete-layer or board
   speedup is claimed from the kernel experiments below.
@@ -94,6 +106,31 @@ Local source, machine IR, input/output hashes and measurements are retained in
 and tools. `test/test_interleaved_panels.py` executes independent shapes, tails,
 batches, late exponent rejection, both pipelines and native/C export replay with
 `ATLAS_RUST_NPU_MODEL` and `ATLAS_OOT_BIN_DIR` explicitly selected.
+
+## Follow-up measurements
+
+With both weight sharing and row-exponent caching, the optimized 128 × 128 × 768
+case takes **218,865 cycles** versus the original panel policy's **241,661**
+(9.43% fewer). Reads fall from **231,424 to 206,848 bytes** (10.62% fewer), writes
+stay at 34,816 bytes, and the image shrinks from 15,852 to 14,812 bytes. Complete
+memory bytes match. Reproduce with the selected environment:
+
+```sh
+"$EFFICIENCY_PYTHON" tools/profile_quantized_panels.py \
+  --m 128 --n 128 --k 768 --pipeline optimized \
+  --out out/efficiency/a-new-panel-run
+```
+
+The command saves source requests, schedules, virtual and machine IR, full input
+and output bytes, instruction proofs, simulator reports and source/tool hashes.
+It uses a fresh output directory and the explicitly selected Rust binary.
+
+The connected MLP baseline is 68,289 cycles (mandatory) or 67,777 (optimized),
+with 55,296 read bytes and 29,696 write bytes. Applying the existing explicit
+`resident-a` policy to the complete mandatory graph reduces it to 61,774 cycles
+and 47,104 read bytes, with unchanged outputs and writes. This measures an
+existing reuse policy on the newly composable graph; it is not a new kernel
+algorithm. Its optimized-pipeline refusal remains in force.
 
 Merlin's full structure gate currently reports the pre-existing root-level
 `merlin/tests/test_application_deployment_paging.py`; the no-regex gate reports
