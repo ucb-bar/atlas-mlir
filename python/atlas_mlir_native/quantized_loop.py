@@ -131,6 +131,10 @@ def virtual_source(plan, layout):
             interleave_rows=schedule.get('operand_reuse_panel_order') == 'k-major'))
     virtual = _virtual(Geometry(), tuple(layout['input_addresses'][:2]), layout['output_addresses'][0],
                        unit=1, k_unroll=8 if prod(plan.batch_shape) == 1 else 1,
+                       # One M/N tile has a constant valid-row prefix in every
+                       # K tile. Partial FP8 DMA fills its remaining rows with
+                       # positive zero, preserving the packed operand contract.
+                       input_prefix_bytes=(min(plan.m, 32)*32, min(plan.n, 32)*32),
                        batch_count=prod(plan.batch_shape),
                        shared_weight=not plan.source.node(plan.operand_ids[1]).type.shape[:-2],
                        exponent_pages=restoration.pages(), restoration=restoration,

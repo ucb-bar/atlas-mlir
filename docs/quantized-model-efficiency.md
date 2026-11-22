@@ -300,12 +300,52 @@ the original public output hash. That is 37.59% fewer device cycles than the
 corrected 70,416-cycle baseline. Artifacts:
 `out/efficiency/captured-linear-mask-setup`.
 
-Next: prove a device handoff between private dynamic quantization and its
-contraction, including physical layouts and removal of the intermediate host
-code-domain check. Start with a composed kernel experiment before changing
-application selection. Also reduce padded host transfers, preserve exceptional
-scan granularity while reducing repeated quantizer reads, and examine residency
-and compiler register pressure.
+An explicit physical handoff experiment connects the capture's 32 × 32 dynamic
+quantizer to its contraction in one image. Both pipelines pass the existing
+native checks and original 1,000,000-instruction proof. Quantizer intermediates
+match the independent host reference; complete memory matches two separate
+device programs on captured, varied, exceptional and refusal inputs. The
+optimized finite case changes **41,561 → 40,655 cycles** and **two → one
+dispatch**. Mandatory changes **43,949 → 44,025 cycles**, and the subnormal
+refusal path also regresses. DMA bytes are unchanged. This is **an experiment,
+not an application fusion provider**: it uses an explicitly authored frame and
+does not yet prove generic selection, packing or removal of the intermediate
+host code-domain check. No host-transfer timing claim is made. Artifacts:
+`out/efficiency/quantized-handoff-experiment` and its local probe script.
+
+Single-M-tile and single-N-tile contractions now read only their active FP8
+rows. A one-row activation uses **32 bytes per K tile**, instead of 1,024;
+partial DMA supplies positive zero to the unused rows. Packed addresses,
+strides, allocations and host transfers stay unchanged. The counted emitter
+uses independent activation/weight transfer sizes, including activation-cache
+fills. Multi-row-tile tails retain their original full transfers.
+
+Matched optimized measurements, with complete memory equality:
+
+| Shape | Policy | Cycles before → after | Read bytes before → after |
+| --- | --- | ---: | ---: |
+| 3 × 65 × 257 | ordered | 56,939 → 38,559 | 56,064 → 31,008 |
+| 3 × 65 × 257 | interleaved/row cache | 42,496 → 36,721 | 37,376 → 29,024 |
+| 1 × 5632 × 2048 | ordered | 17,798,048 → 10,001,073 | 23,091,328 → 11,917,440 |
+| 1 × 5632 × 2048 | interleaved/row cache | 9,163,281 → 9,122,116 | 11,622,528 → 11,559,040 |
+
+All remain one dispatch with unchanged writes. The incremental large-case
+benefit is smaller with activation caching already enabled. Partial-load zero
+fill also adds instructions: the large cached image grows from 11,592 to 13,508
+bytes, still within its checked limit. Artifacts:
+`out/efficiency/operand-prefix-experiment`.
+Checks cover both pipelines, activation and weight prefixes, cache fills,
+batches, late scale refusals and poisoned unused rows. Native/C rebinding and
+the existing interleaved/page-prefix regressions pass. The broader installed
+CLI check initially lacked the Atlas entry point in the test interpreter;
+installing the provider into isolated `out/efficiency/provider-site` resolves
+that setup issue (six looped-CLI tests and 21 subtests pass; the additional
+reuse/interleaving/prefix suite passes 29 tests).
+
+Next: extend the handoff proof to useful larger physical layouts before changing
+application selection. Reduce padded host transfers and repeated zero-fill
+setup, preserve exceptional scan granularity while reducing quantizer reads,
+and examine residency and compiler register pressure.
 
 Merlin's full structure gate currently reports the pre-existing root-level
 `merlin/tests/test_application_deployment_paging.py`; the no-regex gate reports

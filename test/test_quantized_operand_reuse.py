@@ -322,7 +322,7 @@ class QuantizedOperandReuseTest(unittest.TestCase):
                 at = layout['status_address'] - DRAM_BASE
                 self.assertEqual(bool(int.from_bytes(actual[at:at+4], 'little')), refused)
                 mc, nc, kc = ((value + 31)//32 for value in (plan.m, plan.n, plan.k))
-                saved = prod(plan.batch_shape) * mc * (nc - 1) * kc * 1024
+                saved = prod(plan.batch_shape) * mc * (nc - 1) * kc * min(plan.m, 32) * 32
                 self.assertEqual((baseline.load_beats - cached.load_beats) * 32, saved)
                 self.assertEqual(cached.store_beats, baseline.store_beats)
 

@@ -152,6 +152,7 @@ def _virtual(
     cache_a=False,
     cache_a_tiles=None,
     wide_cache_a=False,
+    input_prefix_bytes=None,
 ) -> str:
     """Emit only typed operations; scheduling and physical placement stay downstream."""
     if type(batch_count) is not int or batch_count < 1 or type(shared_weight) is not bool:
@@ -175,6 +176,10 @@ def _virtual(
     if cache_a and (unit != 1 or not 1 <= cached_tiles <= min(kc, cache_limit)):
         raise ValueError("quantized activation residency requires MXU1 and a bounded tile count")
     ab, wb, ob = plan.tile_bytes
+    load_ab, load_wb = (ab, wb) if input_prefix_bytes is None else input_prefix_bytes
+    if any(type(size) is not int or size <= 0 or size % 32 or size > full
+           for size, full in ((load_ab, ab), (load_wb, wb))):
+        raise ValueError('operand DMA prefixes require positive whole beats within their tiles')
     a, w = addresses
     state, fp8, bf16 = "!atlas.virtual_state", "!atlas.virtual_fp8", "!atlas.virtual_bf16"
     retention = "atlas.retain_bf16_accumulators, " if k_unroll > 1 or cache_a else ""
@@ -207,7 +212,11 @@ def _virtual(
                          f'{{kind = "fp8", words = {ab // 4} : i32, slot_word = -1 : i32, purpose = "scratch"}} : () -> {slot}')
 
     def tile_operands(prefix, before, ap, wp, cached=None):
-        c(prefix + "_bytes", ab)
+        c(prefix + "_bytes", load_ab)
+        weight_bytes = prefix + "_bytes"
+        if load_wb != load_ab:
+            weight_bytes = prefix + "_w_bytes"
+            c(weight_bytes, load_wb)
         if cached is None:
             effect("dma_load_fp8", before, prefix + "_a_s", [ap, prefix + "_bytes"], ["i32", "i32"], (prefix + "_a", fp8))
         else:
@@ -216,7 +225,7 @@ def _virtual(
             "dma_load_fp8",
             prefix + "_a_s",
             prefix + "_w_s",
-            [wp, prefix + "_bytes"],
+            [wp, weight_bytes],
             ["i32", "i32"],
             (prefix + "_w", fp8),
         )
@@ -355,7 +364,7 @@ def _virtual(
         for index in range(cached_tiles):
             prefix = f"cache_a{index}"
             c(prefix + "_offset", index * ab)
-            c(prefix + "_bytes", ab)
+            c(prefix + "_bytes", load_ab)
             lines.append(f"    %{prefix}_address = arith.addi %{a_row}, %{prefix}_offset : i32")
             effect("dma_load_fp8", row_ready, prefix + "_loaded",
                    [prefix + "_address", prefix + "_bytes"], ["i32", "i32"], (prefix + "_value", fp8))
