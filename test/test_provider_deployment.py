@@ -843,3 +843,65 @@ def test_provider_publishes_the_deploy_clock_or_the_declared_host_clock(tmp_path
     assert CodegenOptions(host_clock_hz=500000000).identity_record()["host_clock_hz"] == 500000000
     with pytest.raises(ValueError, match="host_clock_hz"):
         CodegenOptions(host_clock_hz=0)
+
+
+@pytest.mark.parametrize("host", [0, 28672])
+@pytest.mark.parametrize("kind", ["no_parameters", "state", "arena_too_large"])
+def test_a_board_deploy_that_residency_cannot_apply_to_is_placed_exactly_as_without_it(tmp_path, monkeypatch, kind,
+                                                                                       host):
+    """The real adapter on the board geometry the driver selects: a declined application sees residency off."""
+    from types import SimpleNamespace
+    from merlin.compiler.build.deployment import place
+    from merlin.compiler.schedule.storage import application_residency as residency
+    from atlas_mlir_native.options import current_codegen_options
+    from atlas_mlir_native.soc import SOC
+
+    ddr = SOC.memory_region("ddr")
+    # The measuring compile's window starts at the DDR base; the bound compile's starts after the measured host.
+    base, size = ddr.base + host, ddr.capacity_bytes - host
+    publish(tmp_path, counted(base))
+    tensor = SimpleNamespace(shape=(4, 4), dtype="bf16", record=lambda: dict(shape=[4, 4], dtype="bf16"))
+    source = SimpleNamespace(node=lambda key: SimpleNamespace(type=tensor), digest=lambda: "0" * 64,
+                             target_identity="atlas")
+    rows = [dict(row, id=f"r{i}", context_index=i) for i, row in enumerate(regions())]
+    contract = dict(interface(), workspace_alignment=64)
+    board = dict(application_deployment="onchip", io_memory_base=base, io_memory_bytes=size,
+                 io_memory_capacity_base=base, io_memory_capacity_bytes=size)
+    parameters, state = None, None
+    if kind == "state":
+        parameters, state = object(), object()
+    if kind == "arena_too_large":
+        # An arena as large as the whole DDR leaves no staging window after the host, or does not fit.
+        entry = SimpleNamespace(offset=0, nbytes=4, name="w")
+        parameters = SimpleNamespace(node_ids=("a",), entries=(entry,), check=lambda request: None)
+        plan = SimpleNamespace(selected=(SimpleNamespace(id="device", placement="accelerator"),))
+        region = SimpleNamespace(digest=lambda: "region", input_storages=(("a", "external"),))
+        monkeypatch.setattr(residency, "application_plan", lambda *args: plan)
+        monkeypatch.setattr(residency, "outline_semantic_regions",
+                            lambda *args, **kwargs: SimpleNamespace(regions=(("device", region),)))
+        monkeypatch.setattr(AtlasApplicationAdapter, "inventory_resident_inputs", staticmethod(
+            lambda region, alternative: [dict(node_id="a", bytes=ddr.capacity_bytes, alignment=4096, layout={})]))
+    admitted = []
+    monkeypatch.setattr(AtlasApplicationAdapter, "admit_resident_deployment",
+                        staticmethod(lambda *args, **kwargs: admitted.append(args)), raising=False)
+
+    def deploy():
+        provider = AtlasApplicationAdapter.deployment_requirements(rows, tmp_path)
+        return provider, place(source, AtlasApplicationAdapter, rows, contract, tmp_path)
+
+    with codegen_options(CodegenOptions(**board)):
+        expected = deploy()
+    with codegen_options(CodegenOptions(application_residency=True, **board)):
+        with residency.residency_scope(source, AtlasApplicationAdapter, parameters, state):
+            reason = residency.declined()
+            assert residency.publication() is None
+            assert current_codegen_options() == CodegenOptions(**board)
+            actual = deploy()
+    assert json.dumps(actual, sort_keys=True, default=str) == json.dumps(expected, sort_keys=True, default=str)
+    assert actual[0]["window"] == dict(address=base, bytes=size) and "resident_section" not in actual[0]
+    assert expected[1] is not None and not admitted
+    assert reason == {"no_parameters": "the application has no external parameters to keep resident",
+                      "state": "the application has persistent state inputs, which stay a host interface",
+                      "arena_too_large": (f"the resident arena of {ddr.capacity_bytes} bytes leaves no staging window"
+                                          if not host else f"the resident arena of {ddr.capacity_bytes} bytes does "
+                                          f"not fit the declared capacity of {size} bytes")}[kind]
