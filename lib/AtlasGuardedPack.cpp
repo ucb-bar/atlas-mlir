@@ -138,7 +138,9 @@ struct LowerAtlasPackRelayoutPass : PassWrapper<LowerAtlasPackRelayoutPass, Oper
           if (Value acc = virtualMXUReadoutAcc(&op)) --liveAcc[cast<VirtualMXUAccType>(acc.getType()).getUnit()];
           if (op.getNumResults() && isa<VirtualStateType>(op.getResult(0).getType())) state = op.getResult(0);
           auto pack = dyn_cast<VirtualPackFP8Op>(op);
-          if (!pack || !state || pack.getScaleCode() < 122 || pack.getScaleCode() > 128) continue;
+          if (!pack || !state) continue;
+          // Every verified raw scale byte has the exact unit round-trip route.
+          if (failed(pack.verify())) return signalPassFailure();
           unsigned unit = liveAcc[0] < kVirtualMXUSlots ? 0 : 1;
           if (liveAcc[unit] >= kVirtualMXUSlots) continue;
           OpBuilder builder(pack);
