@@ -514,10 +514,13 @@ def _virtual(
         ]
         tile_product("step", "kb", "ap", "wp", "carried")
         c("one_k", 1)
+        # Partial DMA changes the transfer extent, not the packed tile stride.
+        c("step_a_stride", ab)
+        c("step_w_stride", wb)
         lines += [
             "    %kn = arith.addi %k, %one_k : i32",
-            "    %an = arith.addi %ap, %step_bytes : i32",
-            "    %wn = arith.addi %wp, %step_bytes : i32",
+            "    %an = arith.addi %ap, %step_a_stride : i32",
+            "    %wn = arith.addi %wp, %step_w_stride : i32",
             f"    cf.br ^k_header(%step_result_s, %kn, %an, %wn, %step_result : {state}, i32, i32, i32, {bf16})",
         ]
     else:

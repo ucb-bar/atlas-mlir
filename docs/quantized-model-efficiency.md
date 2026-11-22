@@ -416,6 +416,18 @@ mandatory 1 × 5632 × 2048 case regressed to 9,528,387 cycles. That extension i
 `out/efficiency/scalar-delta-reuse-experiment` and
 `out/efficiency/captured-linear-scalar-delta-reuse`.
 
+Additional generated-C testing exposed a partial-load regression in the ordered,
+batched K loop: after the first continuation tile, both operand pointers advanced
+by the activation transfer length instead of the packed 1,024-byte tile stride.
+A 3 × 35 × 65 batched QK example returned 64 instead of 65 before scaling.
+The counted loop now carries separate activation/weight stride constants.
+Both pipelines match full-transfer programs on left-only, right-only and two-sided
+short operands, shared and per-batch weights, and late exponent refusals. The
+existing unbatched captured benchmark uses a different K path and is unaffected.
+The prefix/generated-C suite passes 20 cases; the broader counted, resident,
+panel, interleaving and work-bound suite passes 42 tests and 42 subtests (six
+optional Python-model integrations are separately gated).
+
 Next: extend the handoff proof to useful larger physical layouts before changing
 application selection. Reduce padded host transfers, preserve exceptional scan
 granularity while reducing quantizer reads, and examine residency and compiler

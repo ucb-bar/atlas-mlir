@@ -23,6 +23,9 @@ from test_quantized_operand_reuse import memory_fixture
     ((3,5,65,(),'row','row',True), 'ordered'),
     ((65,3,33,(),'row','row',True), 'interleaved-panel-cache'),
     ((3,35,65,(2,),'row','batch',False), 'interleaved-panel-cache'),
+    ((3,35,65,(2,),'scalar','batch',False), 'ordered'),
+    ((35,3,65,(2,),'batch','row',False), 'ordered'),
+    ((3,5,97,(2,),'row','row',True), 'ordered'),
 ])
 def test_prefix_loads_preserve_outputs_rejections_batches_and_guards(tmp_path,pipeline,shape,policy):
     from rust_model import execute
