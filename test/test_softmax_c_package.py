@@ -240,7 +240,7 @@ class SoftmaxCPackageTest(unittest.TestCase):
         command = [
             os.sys.executable,
             "-m",
-            "merlin.targetgen.cli",
+            "merlin.development.targetgen.cli",
             "native-compile",
             *common,
             "--target-source",
@@ -257,7 +257,7 @@ class SoftmaxCPackageTest(unittest.TestCase):
         verify = [
             os.sys.executable,
             "-m",
-            "merlin.targetgen.cli",
+            "merlin.development.targetgen.cli",
             "native-verify",
             *common,
             "--artifact",
@@ -284,10 +284,13 @@ class SoftmaxCPackageTest(unittest.TestCase):
 
         from merlin.compiler.semantic.tiled_softmax import assemble_row_softmax_outputs
 
-        origin = json.loads(importlib.metadata.distribution("npu-model").read_text("direct_url.json") or "{}")
-        self.assertTrue(
-            MODEL_REVISION in origin.get("url", "") or origin.get("vcs_info", {}).get("commit_id") == MODEL_REVISION
-        )
+        if hasattr(self, "authenticate_model_source"):
+            self.authenticate_model_source()
+        else:
+            origin = json.loads(importlib.metadata.distribution("npu-model").read_text("direct_url.json") or "{}")
+            self.assertTrue(
+                MODEL_REVISION in origin.get("url", "") or origin.get("vcs_info", {}).get("commit_id") == MODEL_REVISION
+            )
         compiler = shutil.which("cc")
         self.assertIsNotNone(compiler, "host C compiler required")
         torch.set_num_threads(1)
@@ -661,7 +664,13 @@ const void *source_workspace(void) { return source_scratch; }
         from merlin.runtime.program import build_program
         from merlin.compiler.semantic.search.exploration import SearchLimits
         from merlin.compiler.schedule.storage.arena import ArenaRequirements
-        from merlin.compiler.partition.global_plan import BufferRepresentation, CycleInterval, GlobalPlan, RegionAlternative, ValueRepresentation
+        from merlin.compiler.partition.global_plan import (
+            BufferRepresentation,
+            CycleInterval,
+            GlobalPlan,
+            RegionAlternative,
+            ValueRepresentation,
+        )
         from merlin.compiler.partition.global_plan_emission import dispatch_digest
 
         # Both consumers read one source tensor; all their results remain visible.

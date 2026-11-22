@@ -30,7 +30,12 @@ class MXU1FiniteGraphReferenceTest(unittest.TestCase):
 
     @staticmethod
     def request():
-        from merlin.compiler.semantic.model import IndexMap, KernelRequest, SemanticNode, TensorType
+        from merlin.compiler.semantic.model import (
+            IndexMap,
+            KernelRequest,
+            SemanticNode,
+            TensorType,
+        )
 
         operand = TensorType((32, 32), "fp8_e4m3", "raw-bit-pattern")
         result = TensorType((32, 32), "bf16", POLICY)

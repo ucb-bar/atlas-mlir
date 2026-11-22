@@ -113,8 +113,6 @@ PACK_RULE_BY_TRANSPOSE_RULE = {
     transpose: PACK_RULE_BY_POLICY[policy]
     for policy, transpose in TRANSPOSE_RULE_BY_POLICY.items()
 }
-BF16_RELU_ATTRS = (("input_domain", "finite-normal-or-zero-bf16"),
-                  ("numeric_semantics", "bf16-sign-clamp-v1"))
 BF16_SIGMOID_DOMAIN = ("input_domain", "bf16-signed-zero-or-normal-pow2-minus63-to32-v1")
 BF16_ADD_ATTRS = (("input_domain", "finite-normal-exact-fp32-sum-v1"),
                   ("numeric_semantics", "selected-f32-rne-bf16-chop-v1"))

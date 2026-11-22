@@ -277,7 +277,7 @@ class TiledSoftmaxTest(unittest.TestCase):
         command = [
             sys.executable,
             "-m",
-            "merlin.targetgen.cli",
+            "merlin.development.targetgen.cli",
             "native-compile",
             *common,
             "--abi",
@@ -294,7 +294,7 @@ class TiledSoftmaxTest(unittest.TestCase):
         verification = [
             sys.executable,
             "-m",
-            "merlin.targetgen.cli",
+            "merlin.development.targetgen.cli",
             "native-verify",
             *common,
             "--artifact",

@@ -21,7 +21,12 @@ def request_for(operation):
         TARGET_IDENTITY,
     )
 
-    from merlin.compiler.semantic.model import KernelRequest, SemanticNode, TensorType, pointwise_identity_maps
+    from merlin.compiler.semantic.model import (
+        KernelRequest,
+        SemanticNode,
+        TensorType,
+        pointwise_identity_maps,
+    )
 
     attributes = (BF16_BINARY_ATTRS | BF16_UNARY_ATTRS)[operation]
     names = ("x", "y") if operation in BF16_BINARY_ATTRS else ("x",)

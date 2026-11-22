@@ -6,7 +6,11 @@ from dataclasses import replace
 from atlas_mlir_native.binding import BF16_ZERO_BINARY_ATTRS, AtlasNativeBinding
 from atlas_mlir_native.reference import evaluate_bf16_binary_zero, evaluate_bf16_mul
 
-from merlin.compiler.semantic.model import SemanticNode, TensorType, pointwise_identity_maps
+from merlin.compiler.semantic.model import (
+    SemanticNode,
+    TensorType,
+    pointwise_identity_maps,
+)
 from merlin.compiler.semantic.reference import TensorValue
 
 

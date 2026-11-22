@@ -13,7 +13,12 @@ from atlas_mlir_native.sigmoid import (
     prepare_source,
 )
 
-from merlin.compiler.semantic.model import KernelRequest, SemanticNode, TensorType, pointwise_identity_maps
+from merlin.compiler.semantic.model import (
+    KernelRequest,
+    SemanticNode,
+    TensorType,
+    pointwise_identity_maps,
+)
 
 
 def source_request(shape=(2, 3, 35)):
