@@ -21,6 +21,7 @@ class Application:
         self.words, self.stats, self.errors = {}, [], []
         self.retired = 0
         self.upload_bytes = self.download_bytes = 0
+        self.upload_calls = self.download_calls = 0
         shim = destination / 'shim.c'
         shim.write_text(f'''#include "combined/{name}_combined.h"
 static atlas_host host;
@@ -90,6 +91,7 @@ uint64_t launches(void) {{return host.launches;}}
             offset = self._range(address, size)
             self.memory[offset:offset+size] = self.ctypes.string_at(pointer, size)
             self.upload_bytes += size
+            self.upload_calls += 1
             return 0
         except Exception as error:
             self.errors.append(str(error))
@@ -100,6 +102,7 @@ uint64_t launches(void) {{return host.launches;}}
             offset = self._range(address, size)
             self.ctypes.memmove(pointer, bytes(self.memory[offset:offset+size]), size)
             self.download_bytes += size
+            self.download_calls += 1
             return 0
         except Exception as error:
             self.errors.append(str(error))

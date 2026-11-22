@@ -91,6 +91,7 @@ def main():
         payloads.append(payload)
         results.append(dict(policy=destination.name, dispatches=len(app.stats),
             upload_bytes=app.upload_bytes, download_bytes=app.download_bytes,
+            upload_calls=app.upload_calls, download_calls=app.download_calls,
             output_sha256=[sha256(value).hexdigest() for value in payload],
             **{key: sum(row[key] for row in app.stats) for key in
                ('cycles', 'total_instructions', 'dram_read_bytes', 'dram_write_bytes')}))
