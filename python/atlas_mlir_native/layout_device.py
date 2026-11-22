@@ -99,15 +99,9 @@ def _segment(index, shape, source_strides, output_strides, source_offset, output
         ss.pop()
         ds.pop()
     if block % 32 == 0 and source_offset % 32 == output_offset % 32 == 0 and all(s % 32 == 0 for s in (*ss, *ds)):
-        # DMA lengths need beat alignment, not power-of-two divisibility.
-        # Bound the emitted body to 4 KiB while keeping the largest complete
-        # run: gcd(block, 4096) turns a 265-beat copy into 265 tiny transfers.
-        chunk = next(size for size in range(min(block, 4096), 0, -32) if block % size == 0)
-        if chunk < block:
-            shape.append(block // chunk)
-            ss.append(chunk)
-            ds.append(chunk)
-        mode, block = "dma", chunk
+        # The emitter bounds long spans with a counted full-tile loop and one
+        # final aligned transfer. No divisibility requirement fragments a run.
+        mode = "dma"
     else:
         # Scalar fallback traverses bytes in dense output order, with one
         # zero-initialized 32-byte output window and aligned source windows.
@@ -205,7 +199,9 @@ def prepare_source(source, *, io_memory_base=None):
         if (len(operands) != 1 or output.attrs or output.index_maps
                 or prod(operands[0].type.shape) != prod(shape)):
             raise ValueError("device reshape/copy must preserve dense element order and count")
-        segments.append(_segment(0, (prod(shape),), (width,), (width,), 0, 0, width))
+        # Both operands own private beat-rounded transport padding. Copy it with
+        # the dense payload; only logical output bytes cross the public ABI.
+        segments.append(_segment(0, (_aligned(prod(shape)*width),), (1,), (1,), 0, 0, 1))
     elif output.op in {"gather", "transpose"}:
         if len(operands) != 1 or output.attrs or len(output.index_maps) != 2 or output.index_maps[-1] != identity:
             raise ValueError("device gather needs one affine source map and identity output")
@@ -228,7 +224,10 @@ def prepare_source(source, *, io_memory_base=None):
         swapped_strides = _strides(swapped_shape)
         swaps_last = (output.op == "transpose" and width == 1 and rank >= 2
                       and strides == (*swapped_strides[:-2], swapped_strides[-1], swapped_strides[-2]))
-        if swaps_last and shape[-1] % 32 == shape[-2] % 32 == 0:
+        if (offset == 0 and strides == _strides(shape, width)
+                and prod(shape) == prod(operands[0].type.shape)):
+            segments.append(_segment(0, (_aligned(prod(shape)*width),), (1,), (1,), 0, 0, 1))
+        elif swaps_last and shape[-1] % 32 == shape[-2] % 32 == 0:
             counts = (*shape[:-2], shape[-2] // 32, shape[-1] // 32)
             ss = (*strides[:-2], strides[-2] * 32, strides[-1] * 32)
             ds = (*_strides(shape)[:-2], shape[-1] * 32, 32)
@@ -607,9 +606,17 @@ def virtual_transfers(segments, *, input_addresses, output_address, output_bytes
 
         def transport(sp, dp):
             if segment["mode"] == "dma":
-                for start in range(0, segment["block_bytes"], 1024):
-                    size = min(1024, segment["block_bytes"] - start)
-                    store(load(add(sp, start), size), add(dp, start), size)
+                size = segment["block_bytes"]
+                if size <= 4096:
+                    for start in range(0, size, 1024):
+                        count = min(1024, size-start)
+                        store(load(add(sp, start), count), add(dp, start), count)
+                else:
+                    count, tail = divmod(size, 1024)
+                    repeat(count, sp, dp, 1024, 1024,
+                           lambda source, target: store(load(source, 1024), target, 1024))
+                    if tail:
+                        store(load(add(sp, count*1024), tail), add(dp, count*1024), tail)
                 return
             if segment["mode"] == "ragged_xlu":
                 ragged_transport(sp, dp, segment)

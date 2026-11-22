@@ -92,7 +92,7 @@ class LayoutDeviceRecognitionTest(unittest.TestCase):
         selected = {name: [s["mode"] for s in prepare_source(source).segments] for name, source in cases().items()}
         self.assertEqual(selected["xlu"], ["xlu"])
         self.assertEqual(selected["ragged_xlu"], ["ragged_xlu"])
-        self.assertEqual(selected["small_scalar_reshape"], ["scalar"])
+        self.assertEqual(selected["small_scalar_reshape"], ["dma"])
         self.assertEqual(selected["ragged_scalar_transpose"], ["scalar"])
         self.assertEqual(selected["concat"], ["dma", "dma"])
         self.assertEqual(selected["broadcast"], ["dma"])

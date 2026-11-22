@@ -17,8 +17,8 @@ def test_dense_spans_are_not_split_at_unnecessary_power_of_two_boundaries():
         assert plan.segments[0]['counts'] == []
         assert plan.segments[0]['block_bytes'] == size
     plan = prepare_source(request('copy', ((8480,),), (8480,), dtype='i8'))
-    assert plan.segments[0]['counts'] == [5]
-    assert plan.segments[0]['block_bytes'] == 1696
+    assert plan.segments[0]['counts'] == []
+    assert plan.segments[0]['block_bytes'] == 8480
 
 
 @pytest.mark.skipif(not (os.environ.get('ATLAS_RUST_NPU_MODEL') and os.environ.get('ATLAS_OOT_BIN_DIR')),
@@ -29,7 +29,14 @@ def test_dense_spans_are_not_split_at_unnecessary_power_of_two_boundaries():
     request('copy', ((320,),), (320,), dtype='i8'),
     request('copy', ((1536,),), (1536,), dtype='i8'),
     request('copy', ((8480,),), (8480,), dtype='i8'),
+    request('copy', ((8224,),), (8224,), dtype='i8'),
+    request('copy', ((8193,),), (8193,), dtype='i8'),
+    request('reshape', ((3,7),), (21,), dtype='bf16'),
+    request('transpose', ((1,3,7),), (3,7,1), dtype='bf16',
+            mapping=IndexMap(3, ((0,0,1),(1,0,0),(0,1,0)), (0,0,0))),
     request('transpose', ((2,3,96),), (3,2,96), dtype='i8',
+            mapping=IndexMap(3, ((0,1,0),(1,0,0),(0,0,1)), (0,0,0))),
+    request('transpose', ((2,3,4128),), (3,2,4128), dtype='i8',
             mapping=IndexMap(3, ((0,1,0),(1,0,0),(0,0,1)), (0,0,0))),
 ])
 def test_bursts_execute_every_byte_with_affine_rows_and_outer_guards(tmp_path, pipeline, source):
@@ -49,4 +56,4 @@ def test_bursts_execute_every_byte_with_affine_rows_and_outer_guards(tmp_path, p
     assert actual[:output] == memory[:output]
     assert actual[output+plan.physical_bytes:] == memory[output+plan.physical_bytes:]
     if 'dram_read_bytes' in stats:
-        assert stats['dram_read_bytes'] == stats['dram_write_bytes'] == len(raw)
+        assert stats['dram_read_bytes'] == stats['dram_write_bytes'] == plan.physical_bytes

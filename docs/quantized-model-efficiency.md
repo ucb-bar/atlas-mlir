@@ -85,6 +85,13 @@ with measurements. Historical performance numbers are context, not this branch's
   320 bytes takes 689 versus 1,703; and 8,480 bytes takes 13,482 versus 77,137.
   Bytes moved and the single device launch are unchanged. The layout suite
   passes 48 tests and 74 subtests, including nontrivial affine outer dimensions.
+- Extended long dense spans to a bounded full-tile loop plus one tail transfer,
+  so prime beat counts also stay coalesced. An 8,224-byte copy falls from 74,809
+  to 12,953 cycles; 8,480 bytes improves further to 13,313. Dense copies and
+  proven dense-order affine reads include only their existing private transport
+  padding in the last beat. Large odd-byte payloads and nested affine rows pass
+  exact-output/guard checks; the expanded layout suite passes 58 tests and 74
+  subtests. The externally visible element count is unchanged.
 - Remaining integration work: complete-layer measurements, residency interaction,
   and more useful overlap in the optimized schedule. No complete-layer or board
   speedup is claimed from the kernel experiments below.
