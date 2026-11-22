@@ -31,7 +31,7 @@ typedef struct {
   atlas_exponent_pack exponents[2]; /* mode 0: resident, 1: rows, 2: pages */
   int (*extra)(const void *,uint8_t *); uint32_t extra_input,extra_offset,extra_bytes;
   uint32_t read_count; atlas_transfer reads[5]; /* device-read buffers in launch order; resident ones are not written */
-  uint32_t status_address,status_bytes,status_offset,output_address,output_offset,device_output_bytes,streamed;
+  uint32_t status_address,status_bytes,status_offset,output_address,output_offset,device_output_bytes,output_tile_store_bytes,streamed;
 } atlas_matmul_plan;
 static __attribute__((unused)) int atlas_matmul_bind(atlas_region_context *ctx,atlas_host *host,const atlas_tile_memory_io *io,void *scratch,
                              size_t bytes,size_t polls,const atlas_matmul_plan *plan) {
@@ -145,11 +145,16 @@ static __attribute__((unused)) int atlas_matmul_dispatch(const atlas_matmul_plan
   if (status!=ATLAS_HOST_OK) return 4;
   if (io->read(io->context,p->status_address,w+p->status_offset,4u)) return 3;
   if (w[p->status_offset] || w[p->status_offset+1u] || w[p->status_offset+2u] || w[p->status_offset+3u]) return 2;
-  if (!p->streamed && io->read(io->context,p->output_address,w+p->output_offset,p->device_output_bytes)) return 3;
+  if (!p->streamed) {
+    if (p->output_tile_store_bytes<2048u) {
+      for (size_t tile=0;tile<p->device_output_bytes;tile+=2048u)
+        if (io->read(io->context,p->output_address+tile,w+p->output_offset+tile,p->output_tile_store_bytes)) return 3;
+    } else if (io->read(io->context,p->output_address,w+p->output_offset,p->device_output_bytes)) return 3;
+  }
   for (size_t batch=0;batch<p->batches;++batch) for (size_t first_m=0;first_m<m;first_m+=32u)
     for (size_t first_n=0;first_n<n;first_n+=32u) {
       size_t tile=((batch*mc+first_m/32u)*nc+first_n/32u)*2048u;
-      if (p->streamed && io->read(io->context,p->output_address+tile,w,2048u)) return 3;
+      if (p->streamed && io->read(io->context,p->output_address+tile,w,p->output_tile_store_bytes)) return 3;
       for (size_t row=0;row<32u && first_m+row<m;++row) for (size_t c=0;c<32u && first_n+c<n;++c) {
         size_t at=(p->streamed?0u:tile)+(c/16u)*1024u+(row*16u+c%16u)*2u;
         uint32_t word=(uint32_t)w[p->output_offset+at]|((uint32_t)w[p->output_offset+1u+at]<<8);
@@ -428,7 +433,7 @@ static const {helper}_plan {name}_plan={{{image_words},{len(binary)//4}u,{raw}u,
   {prod(a.type.shape)}u,{prod(b.type.shape)}u,{batches}u,{rhs_batches}u,{m}u,{n}u,{k}u,{mc}u,{nc}u,{kc}u,{operand_offsets[1]}u,{output_offset}u,
   {{{','.join(exponent_packs)}}},{name + '_extra' if extra_bytes else '0'},{extra_index}u,{extra_offset}u,{extra_bytes}u,
   {len(read_spans)}u,{{{reads}}},
-  {execution['status_address']}u,{execution['status_bytes']}u,{status_offset}u,{out}u,{output_offset}u,{device_output_bytes}u,{int(streamed)}u}};
+  {execution['status_address']}u,{execution['status_bytes']}u,{status_offset}u,{out}u,{output_offset}u,{device_output_bytes}u,{execution.get('output_tile_store_bytes',2048)}u,{int(streamed)}u}};
 int {name}_bind({name}_context *ctx,atlas_host *host,atlas_tile_memory_io io,void *scratch,size_t bytes,size_t polls) {{
   return {helper}_bind(ctx,host,&io,scratch,bytes,polls,&{name}_plan);
 }}

@@ -476,13 +476,24 @@ column boundary, full-size controls, both pipelines, replay and late refusal.
 The broader contraction/residency/epilogue/restoration/panel suite passes **50
 tests and 26 subtests** (eight optional integrations gated). Artifacts:
 `out/efficiency/output-prefix-recorded`; the earlier isolated experiment is
-`out/efficiency/output-prefix-experiment`. Host output downloads still use the
-full allocation and are the next transfer reduction. The 32 × 32 captured linear
+`out/efficiency/output-prefix-experiment`. The 32 × 32 captured linear
 fixture requires both complete halves, so this shape-specific change does not
 improve its measured 43,238 cycles.
 
+Generated C now also downloads just the recorded prefix of each output tile,
+with the complete permission span and allocation retained. Real generated-C/Rust
+runs verify output-plus-status downloads of **8,196 → 4,484 bytes** for batched
+3 × 35 × 65 QK, **4,100 → 196 bytes** for batched 3 × 5 × 65 linear, and
+**8,196 → 4,100 bytes** for batched 35 × 3 × 65 QK. Device programs and cycles are
+unchanged by this host change. Host output padding remains untouched; the last
+tile download failing leaves public output unchanged. Full-output records keep
+their one bulk read. These smaller transfers add callbacks for multiple tiles;
+host latency is not measured. The generated-C, transport, resident, narrowing,
+epilogue and row-block suite passes **32 tests and 26 subtests** (two optional
+integrations gated).
+
 Next: extend the handoff proof to useful larger physical layouts before changing
-application selection. Trim host output downloads using checked prefixes, preserve exceptional scan
+application selection. Preserve exceptional scan
 granularity while reducing quantizer reads, and examine residency and compiler
 register pressure. Investigate the panel scheduling tradeoffs before broadening
 scalar-literal reuse across control-flow boundaries.

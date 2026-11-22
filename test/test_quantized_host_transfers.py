@@ -67,7 +67,7 @@ def test_host_prefixes_keep_padding_and_late_refusal_atomic(tmp_path,pipeline,sh
     assert len(app.stats) == 1
     assert app.upload_bytes == sum(layout['input_buffer_bytes']) + sum(
         geometry['pages']*128 for geometry in layout['exponent_layouts'])
-    assert app.download_bytes == layout['output_bytes']+4
+    assert app.download_bytes == layout['output_bytes']//2048*layout.get('output_tile_store_bytes',2048)+4
     for address,geometry in zip(layout['exponent_addresses'],layout['exponent_layouts'],strict=True):
         for page in range(geometry['pages']):
             offset = address-app.base+page*2048

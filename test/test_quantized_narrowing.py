@@ -197,7 +197,7 @@ static int put(void *c,uintptr_t a,const uint8_t *v,size_t n) { (void)c;(void)a;
 static int get(void *c,uintptr_t a,uint8_t *v,size_t n) {
   (void)c; ++calls;
   if(a==@STATUS@&&n==4u) { uint32_t status=fail?1u:0u; memcpy(v,&status,4u); return 0; }
-  if(a==@OUTPUT@&&n==@BYTES@) { memcpy(v,result,n); return 0; }
+  if(a>=@OUTPUT@&&a-@OUTPUT@+n<=@BYTES@&&(a-@OUTPUT@)%2048u==0u&&n==@CHUNK@) { memcpy(v,result+a-@OUTPUT@,n); return 0; }
   return 1;
 }
 unsigned call_count(void) { return calls; }
@@ -211,7 +211,8 @@ int invoke(const void *a,const void *sx,const void *w,const void *sw,void *out,c
 }
 '''
             for key, value in {'STATUS':layout['status_address'], 'OUTPUT':layout['output_addresses'][0],
-                               'BYTES':layout['output_bytes']}.items():
+                               'BYTES':layout['output_bytes'],
+                               'CHUNK':layout.get('output_tile_store_bytes',layout['output_bytes'])}.items():
                 shim = shim.replace('@'+key+'@', str(value)+'u')
             (root/'shim.c').write_text(shim)
             process = subprocess.run(['cc','-std=c11','-O2','-Wall','-Wextra','-Werror','-shared','-fPIC',

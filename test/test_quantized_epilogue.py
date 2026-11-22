@@ -178,7 +178,7 @@ static int put(void *c,uintptr_t a,const uint8_t *v,size_t n) {
 static int get(void *c,uintptr_t a,uint8_t *v,size_t n) {
   (void)c; ++calls; ++gets;
   if(a==@STATUS@&&n==4u) { uint32_t status=mode?1u:0u; memcpy(v,&status,4u); return 0; }
-  if(a==@OUT@&&n==@OUTBYTES@) { memcpy(v,result,n); return 0; }
+  if(a>=@OUT@&&a-@OUT@+n<=@OUTBYTES@&&(a-@OUT@)%2048u==0u&&n==@CHUNK@) { memcpy(v,result+a-@OUT@,n); return 0; }
   return 1;
 }
 unsigned callback_count(void) { return calls; } unsigned start_count(void) { return starts; }
@@ -196,7 +196,8 @@ int invoke(const void *a,const void *sx,const void *w,const void *sw,const void 
 '''
                 replacements = {'ADDRESSES': ','.join(str(value) + 'u' for value in addresses),
                     'SIZES': ','.join(str(value) + 'u' for value in sizes), 'STATUS': str(layout['status_address']) + 'u',
-                    'OUT': str(layout['output_addresses'][0]) + 'u', 'OUTBYTES': str(layout['output_bytes']) + 'u'}
+                    'OUT': str(layout['output_addresses'][0]) + 'u', 'OUTBYTES': str(layout['output_bytes']) + 'u',
+                    'CHUNK': str(layout.get('output_tile_store_bytes',layout['output_bytes'])) + 'u'}
                 for key, value in replacements.items(): shim = shim.replace('@' + key + '@', value)
                 (root / 'shim.c').write_text(shim)
                 process = subprocess.run(['cc', '-std=c11', '-O2', '-Wall', '-Wextra', '-Werror', '-shared', '-fPIC',
@@ -231,7 +232,8 @@ int invoke(const void *a,const void *sx,const void *w,const void *sw,const void 
                 frozen = [value.tobytes() for value in (a, sx, w, sw, other)]
                 self.assertEqual(invoke(), 0); np.testing.assert_array_equal(output, expected)
                 writes = 3 + sum(geometry['pages'] for geometry in layout['exponent_layouts'])
-                self.assertEqual((lib.start_count(), lib.write_count(), lib.read_count()), (1, writes, 2))
+                reads = 1+(layout['output_bytes']//2048 if 'output_tile_store_bytes' in layout else 1)
+                self.assertEqual((lib.start_count(), lib.write_count(), lib.read_count()), (1, writes, reads))
                 self.assertEqual(invoke(1), 2); self.assertTrue(np.all(output.view(np.uint8) == 0xa5))
                 self.assertEqual((lib.start_count(), lib.write_count(), lib.read_count()), (1, writes, 1))
                 self.assertEqual(invoke(target=other), 1); self.assertEqual(lib.callback_count(), 0)
