@@ -374,6 +374,7 @@ private:
   // launch and issues them later as `tileCommand`.
   void record(Operation *op, std::optional<unsigned> tileCommand = std::nullopt) {
     updateZeroTemporary(op);
+    invalidateScalarLiteral(op);
     state = op->getResult(0);
     planned.push_back(op);
     op->setAttr(kAtlasTagCFGBlock, i32(currentCFGBlock));
@@ -409,6 +410,19 @@ private:
       zeroTemporary = false;
   }
 
+  // Only materializeScalar establishes a reusable literal. Every issued scalar
+  // write invalidates its destination; unknown operations discard all facts.
+  void invalidateScalarLiteral(Operation *op) {
+    llvm::TypeSwitch<Operation *>(op)
+        .Case<ALURegOp, ALUImmOp, UpperOp, ScalarLoadOp, CSROp>(
+            [&](auto write) { scalarLiterals[write.getDst()].reset(); })
+        .Case<VLoadOp, VStoreOp, VLIOp, VPUUnaryOp, VPUBinaryOp,
+              VPUReduceOp, VPUPackOp, XLUTransposeOp, MXUPushOp,
+              MXUPopOp, MXUMatmulOp, DMAOp, DMAWaitOp, DMAConfigOp,
+              ScalarStoreOp>([](auto) {})
+        .Default([&](auto) { scalarLiterals = {}; });
+  }
+
   // A mailbox or slot load or store that is a tile command too.
   void tagTileCommand() {
     planned.back()->setAttr(kAtlasTagTileCommand, i32(nextTileCommand++));
@@ -431,6 +445,7 @@ private:
   }
   void mark(unsigned label) {
     zeroTemporary = false;
+    scalarLiterals = {};
     labelPC[label] = planned.size();
   }
 
@@ -521,7 +536,10 @@ private:
   // Loads `value` with the fewest instructions, as RISC-V `li` expands: LUI
   // sets the upper 20 bits, rounded because ADDI's 12-bit immediate is signed,
   // and each is left out when its part is zero.
-  void materializeScalar(unsigned dst, uint32_t value, Location loc) {
+  void materializeScalar(unsigned dst, uint32_t value, Location loc,
+                         bool forceIssue = false) {
+    if (!forceIssue && scalarLiterals[dst] == value)
+      return;
     uint32_t upper = ((static_cast<uint64_t>(value) + 0x800) >> 12) & 0xfffff;
     int32_t lower = static_cast<int32_t>(value & 0xfff);
     if (lower >= 2048)
@@ -530,6 +548,7 @@ private:
       emit<UpperOp>(loc, "lui", dst, /*immediate=*/upper);
     if (lower || !upper)
       emit<ALUImmOp>(loc, "addi", dst, /*src=*/upper ? dst : 0, /*immediate=*/lower);
+    scalarLiterals[dst] = value;
   }
 
   void stageScalarArguments(Location loc) {
@@ -1085,7 +1104,8 @@ private:
       if (isVirtualDMAImmediate(constant.getResult()) || isVirtualScalarImmediate(constant.getResult()))
         return success(); // DMA and ALU users encode these literals directly.
       materializeScalar(scalar(constant.getResult()),
-                        static_cast<uint32_t>(value.getValue().getZExtValue()), loc);
+                        static_cast<uint32_t>(value.getValue().getZExtValue()), loc,
+                        /*forceIssue=*/true); // Source constants retain their SSA producer.
       return success();
     }
     if (auto immediate = scalarImmediateFor(&op)) {
@@ -1232,6 +1252,7 @@ private:
   unsigned nextMXUCommand = 0;
   unsigned nextTileCommand = 0;
   bool zeroTemporary = false;
+  std::array<std::optional<uint32_t>, 32> scalarLiterals{};
   llvm::DenseSet<Operation *> reusedPrefills;
   std::array<std::optional<uint32_t>, 2> scalarSlotBases{};
   llvm::DenseMap<Value, PendingLoad> pendingLoads;

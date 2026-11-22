@@ -652,7 +652,17 @@ class VirtualDMALoweringTest(unittest.TestCase):
                 self.assertFalse(pending)
 
     def test_generated_pending_intervals_reject_missing_wrong_wait_and_unsafe_work(self) -> None:
+        from verification_support import insert_after
+
         machine, _ = self.checked(independent_work())
+        lines = machine.splitlines()
+        launch = next(i for i, line in enumerate(lines) if '"atlas.dma"' in line and MARKER in line)
+        # Supply an inert mutation site explicitly: lowering may reuse captured
+        # scalar literals and need no setup instruction inside this interval.
+        machine = insert_after(machine,launch,[('alu_imm',
+            'dst = 0 : i32, src = 0 : i32, immediate = 0 : i32, kind = "addi"')])
+        accepted = run('atlas-opt',machine,'--verify-atlas-generated-schedule','--verify-atlas-timing')
+        self.assertEqual(accepted.returncode,0,accepted.stderr)
         lines = machine.splitlines()
         launch = next(i for i, line in enumerate(lines) if '"atlas.dma"' in line and MARKER in line)
         wait = next(i for i in range(launch + 1, len(lines)) if '"atlas.dma_wait"' in lines[i])

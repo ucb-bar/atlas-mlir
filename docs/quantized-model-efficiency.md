@@ -376,12 +376,51 @@ The broader DMA, scheduling, CFG, tile, source-memory, buffer and quantized-pref
 suites pass **182 tests and 1,881 subtests** (three separately gated tests).
 Four additional focused cases cover full BF16 writes and corrupted reused tails.
 
-Next: eliminate repeated scalar address/size materialization where physical
-register contents are provably unchanged; measure scheduling effects before
-retaining it. Extend the handoff proof to useful larger physical layouts before
-changing application selection. Reduce padded host transfers, preserve
-exceptional scan granularity while reducing quantizer reads, and examine
-residency and compiler register pressure.
+Scalar helper literals now survive until an actual scalar write invalidates
+their destination. Repeated setup of an unchanged DMA address, size or scratch
+base emits no instruction. Unknown operations and control-flow boundaries
+discard all facts; source constants retain explicit SSA producers. Final
+address, CFG, buffer and timing checks remain active. Two verifier mutation
+fixtures now supply explicit mutation sites/stable bases instead of assuming
+redundant setup instructions exist.
+
+The captured batched application changes **43,844 → 43,238 cycles** (1.38%
+fewer), with **10,615 → 10,512 executed instructions** and unchanged two
+dispatches, DMA/host bytes and exact output. Relative to the original corrected
+70,416-cycle capture, the retained changes now remove 38.60% of device cycles.
+Artifacts: `out/efficiency/captured-linear-scalar-reuse-only`.
+
+This is a code-size/captured-application win with small panel cycle tradeoffs:
+
+| Shape | Pipeline | Cycles before → after | Image bytes before → after |
+| --- | --- | ---: | ---: |
+| 3 × 65 × 257 | mandatory | 39,181 → 39,191 | 3,324 → 3,196 |
+| 3 × 65 × 257 | optimized | 36,484 → 36,484 | 3,348 → 3,240 |
+| 128 × 128 × 768 | mandatory | 260,626 → 260,826 | 16,196 → 15,204 |
+| 128 × 128 × 768 | optimized | 219,022 → 219,220 | 16,420 → 15,532 |
+| 1 × 5632 × 2048 | mandatory | 9,528,146 → 9,525,747 | 10,560 → 9,772 |
+| 1 × 5632 × 2048 | optimized | 9,119,905 → 9,119,912 | 11,736 → 10,536 |
+
+Complete memory, traffic and single-dispatch counts match. The largest measured
+regression is 0.091%; fewer instructions do not guarantee fewer device cycles.
+Artifacts: `out/efficiency/scalar-reuse-experiment`; measured `atlas-opt` SHA256
+`4ee4b31c3a03145a281ed0d1b0ff3fa49518be252db968aca41b16aef5307b6b`.
+The affected native, DMA, CFG, buffer, spill, scalar, PACK, slot, work-budget
+and quantized-prefix suites pass **191 tests and 2,400 subtests** (five optional
+integration tests separately gated). Compiler policy limits are unchanged.
+
+A further experiment used signed ADDI deltas for nearby known addresses.
+It saved only one additional cycle in the captured application, while the
+mandatory 1 × 5632 × 2048 case regressed to 9,528,387 cycles. That extension is
+**not retained**, despite its smaller images. Candidate source and receipts:
+`out/efficiency/scalar-delta-reuse-experiment` and
+`out/efficiency/captured-linear-scalar-delta-reuse`.
+
+Next: extend the handoff proof to useful larger physical layouts before changing
+application selection. Reduce padded host transfers, preserve exceptional scan
+granularity while reducing quantizer reads, and examine residency and compiler
+register pressure. Investigate the panel scheduling tradeoffs before broadening
+scalar-literal reuse across control-flow boundaries.
 
 Merlin's full structure gate currently reports the pre-existing root-level
 `merlin/tests/test_application_deployment_paging.py`; the no-regex gate reports

@@ -149,9 +149,16 @@ class TileContractVerificationTest(BoundaryChecks, unittest.TestCase):
                               ("branch skips the DMA", insert_after(chain, line_index(chain, tag(0)) - 1, skip))):
             with self.subTest(order=name):
                 self.rejected(changed, "predecessor is not established on every emitted path")
+        # Give both stores a stable base so their independence does not depend
+        # on the number of address-setup instructions emitted around them.
+        vector = insert_after(vector, 2, constant(15, 0x20000))
+        for identity, offset in ((4, 0), (5, 8)):
+            vector = mutate(vector, identity, "base = 4 : i32", "base = 15 : i32")
+            if offset:
+                vector = mutate(vector, identity, "offset = 0 : i32", f"offset = {offset} : i32")
         ops = operations(vector)
         first, second = (next(n for n, line in enumerate(ops) if tag(i) in line) for i in (4, 5))
-        self.accepted(reorder(vector, ops[:first - 2] + ops[first + 1:second + 1] + ops[first - 2:first + 1] + ops[second + 1:]))
+        self.accepted(reorder(vector, ops[:first] + [ops[second]] + ops[first + 1:second] + [ops[first]] + ops[second + 1:]))
 
     def test_pack_endpoints_preserve_source_result_and_scratch_addresses(self) -> None:
         machine = lower(pack_program())
