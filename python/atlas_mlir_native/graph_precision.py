@@ -12,9 +12,22 @@ import json
 import struct
 from dataclasses import dataclass, replace
 
-from merlin.compiler.semantic.linalg.linalg_bridge import LinalgBridgeError, translate_linalg_text
-from merlin.compiler.semantic.model import ConstantBinding, IndexMap, KernelRequest, SemanticNode, TensorType, pointwise_identity_maps
-from merlin.compiler.quantization.contraction.values import FloatBoundarySpec, contraction_restore_exponent
+from merlin.compiler.semantic.linalg.linalg_bridge import (
+    LinalgBridgeError,
+    translate_linalg_text,
+)
+from merlin.compiler.semantic.model import (
+    ConstantBinding,
+    IndexMap,
+    KernelRequest,
+    SemanticNode,
+    TensorType,
+    pointwise_identity_maps,
+)
+from merlin.compiler.quantization.contraction.values import (
+    FloatBoundarySpec,
+    contraction_restore_exponent,
+)
 from merlin.compiler.schedule.elementwise.row_softmax import RowSoftmaxSource
 
 from .binding import (
@@ -22,7 +35,6 @@ from .binding import (
     BF16_EXP_ATTRS,
     BF16_MUL_ATTRS,
     BF16_RECIP_ATTRS,
-    BF16_RELU_ATTRS,
     BF16_ROW_MAX_ATTRS,
     BF16_ROW_SUM_ATTRS,
     BF16_SUB_ATTRS,
@@ -328,18 +340,24 @@ def lower_diagnostic_graph(source: str, *, entry: str, policy: dict[str, object]
             mapping[node.inputs[2]] = None
             replacements.append((node.id, "f32 matmul -> ordered FP8/BF16 MXU0 reset"))
         elif node.op == "f32_mul":
-            _require(node.type.shape == _TILE and node.index_maps == pointwise_identity_maps(2, 2)
+            identity, broadcast = pointwise_identity_maps(2, 1)[0], IndexMap(2, ((0, 0), (0, 0)), (0, 0))
+            _require(node.type.shape == _TILE and len(node.index_maps) == 3 and node.index_maps[2] == identity
                      and dict(node.attrs) == {"numeric_semantics": "ieee754-f32-mul-rne-v1"},
                      "unsupported source multiply")
             operands: list[str] = []
-            for source_id in node.inputs:
+            for source_id, source_map in zip(node.inputs, node.index_maps):
+                shape = source_nodes[source_id].type.shape
                 if source_nodes[source_id].op != "constant":
+                    _require(source_map == identity, "unsupported source multiply")
                     operands.append(mapped(source_id))
                     continue
                 binding = source_constants[source_id]
-                _require(binding.encoding == "f32-le-raw" and source_nodes[source_id].type.shape == _TILE,
+                # A one-element literal read through zero map rows is the same bits in every lane.
+                _require(binding.encoding == "f32-le-raw" and ((shape, source_map) == (_TILE, identity)
+                                                               or (shape, source_map) == ((1, 1), broadcast)),
                          "multiply literal must be a declared f32 tile")
                 bits = struct.unpack(f"<{len(binding.data_hex) // 8}I", bytes.fromhex(binding.data_hex))
+                bits *= _TILE[0] * _TILE[1] // len(bits)
                 data = b"".join(struct.pack("<H", _bf16_rne(bit)) for bit in bits)
                 mapping[source_id] = append(SemanticNode(
                     source_id, "constant", (), _BF16, attrs=(mul_attrs[0],), effect="constant",
@@ -452,31 +470,9 @@ def lower_diagnostic_graph(source: str, *, entry: str, policy: dict[str, object]
                 attrs=mul_attrs, index_maps=pointwise_identity_maps(2, 2),
             ))
             replacements.append((node.id, "f32 division -> BF16 reciprocal LUT and multiply"))
-        elif node.op == "f32_relu_ordered_select":
-            _require(len(node.type.shape) == 2 and len(node.inputs) == 1
-                     and node.index_maps == pointwise_identity_maps(2, 1)
-                     and dict(node.attrs) == {
-                         "numeric_semantics": "f32-ordered-lt-positive-zero-select-v1",
-                     }, "unsupported source ordered ReLU")
-            mapping[node.id] = append(SemanticNode(
-                node.id, "relu", (mapped(node.inputs[0]),), replace(_BF16, shape=node.type.shape),
-                attrs=BF16_RELU_ATTRS, index_maps=pointwise_identity_maps(2, 1),
-            ))
-            # This is part of the selected precision transformation. The
-            # source preserves -0; hardware sign clamp canonicalizes it.
-            replacements.append((node.id, "f32 ordered zero select -> BF16 sign clamp; negative zero canonicalized"))
-        elif node.op == "source_f32_composite_unqualified":
-            _require(len(node.type.shape) == 2 and node.index_maps == pointwise_identity_maps(2, 1)
-                     and dict(node.attrs).get("operation") == "clamp_lower_literal"
-                     and dict(node.attrs).get("literal_bits") == "0x00000000"
-                     and dict(node.attrs).get("numeric_semantics")
-                     == "source-f32-composite-unqualified-v1",
-                     "unsupported source composite")
-            mapping[node.id] = append(SemanticNode(
-                node.id, "relu", (mapped(node.inputs[0]),), replace(_BF16, shape=node.type.shape),
-                attrs=BF16_RELU_ATTRS, index_maps=pointwise_identity_maps(2, 1),
-            ))
-            replacements.append((node.id, "f32 zero clamp -> BF16 sign clamp"))
+        elif node.op in {"f32_relu_ordered_select", "source_f32_composite_unqualified"}:
+            # BF16 sign clamp differs from the source at -0 and NaN; no reviewed contract admits it.
+            raise LinalgBridgeError(f"source node {node.id}: f32 ReLU has no exact BF16 precision route")
         else:
             raise LinalgBridgeError(f"source node {node.id} has unsupported operation {node.op}")
 

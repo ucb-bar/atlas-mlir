@@ -163,14 +163,20 @@ class GraphPrecisionTest(unittest.TestCase):
             self.skipTest("set ATLAS_OOT_BIN_DIR for physical emission")
         from atlas_mlir_native.binding import AtlasNativeBinding
         from atlas_mlir_native.graph_abi import prepare_graph_inputs
-        from merlin.compiler.semantic.target_binding import build_native_snapshot, packaged_egg_bridge_path
+        from merlin.compiler.semantic.target_binding import (
+            build_native_snapshot,
+            packaged_egg_bridge_path,
+        )
 
         result = self.lower(self.source, entry="forward", policy=self.policy)
         cli = Path(sys.executable).with_name("merlin-targetgen")
         if not cli.is_file():
             self.skipTest("install merlin-targetgen for the CLI integration")
         environment = os.environ.copy()
-        environment["PYTHONPATH"] = os.pathsep.join((str(ROOT / "python"), str(Path(MERLIN) / "src")))
+        environment["PYTHONPATH"] = os.pathsep.join((
+            str(ROOT / "python"), str(Path(MERLIN) / "src"),
+            environment.get("PYTHONPATH", ""),
+        ))
         with tempfile.TemporaryDirectory(dir=os.environ.get("TMPDIR")) as directory:
             root = Path(directory)
             snapshot = build_native_snapshot(
