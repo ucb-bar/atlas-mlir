@@ -243,26 +243,34 @@ def record_compiler_recipe(export_region):
     @wraps(export_region)
     def described_export(self, region, alternative, *args, **kwargs):
         product = export_region(self, region, alternative, *args, **kwargs)
-        kind = dict(alternative.metadata).get("kind")
-        pure = [node.op for node in region.nodes if node.effect == "pure"]
-        selected_family = dict(alternative.metadata).get("numerical_family")
-        if kind == "already_quantized" and selected_family is None and region.outputs:
-            # Without a generated claim, the contraction family follows the region's declared output type.
-            output = next((node for node in region.nodes if node.id == region.outputs[0]), None)
-            if output is not None:
-                selected_family = "atlas.ordered-quantized-contraction" + ("-f32" if output.type.dtype == "f32" else "")
-        matches = [("atlas." + family, ops) for family, selected, ops in _routes(selected_family)
-                   if selected == kind and pure and set(pure) <= set(ops)
-                   and (selected_family is None or "atlas." + family == selected_family)]
-        types = set(describe_compiler().source_domain.types)
-        if len(matches) != 1 or any(node.type.dtype not in types for node in region.nodes):
-            if selected_family is not None:
-                raise ValueError("selected numerical family differs from exported route or source roots")
+        recipe = region_compiler_recipe(region, alternative)
+        if recipe is None:
             return product
-        numerics = None
-        if kind == "already_quantized":
-            from .source_translation import lower_already_quantized_contraction
-            numerics = lower_already_quantized_contraction(region).numerics
-        recipe = lowering_recipe(alternative, numerics=numerics, family_id=matches[0][0])
-        return replace(product, description={**product.description, "compiler_recipe": json.loads(json.dumps(asdict(recipe)))})
+        return replace(product, description={**product.description, "compiler_recipe": recipe})
     return described_export
+
+
+def region_compiler_recipe(region, alternative):
+    """The recipe record an exported region carries, or None outside the declared kind and operation subset."""
+    kind = dict(alternative.metadata).get("kind")
+    pure = [node.op for node in region.nodes if node.effect == "pure"]
+    selected_family = dict(alternative.metadata).get("numerical_family")
+    if kind == "already_quantized" and selected_family is None and region.outputs:
+        # Without a generated claim, the contraction family follows the region's declared output type.
+        output = next((node for node in region.nodes if node.id == region.outputs[0]), None)
+        if output is not None:
+            selected_family = "atlas.ordered-quantized-contraction" + ("-f32" if output.type.dtype == "f32" else "")
+    matches = [("atlas." + family, ops) for family, selected, ops in _routes(selected_family)
+               if selected == kind and pure and set(pure) <= set(ops)
+               and (selected_family is None or "atlas." + family == selected_family)]
+    types = set(describe_compiler().source_domain.types)
+    if len(matches) != 1 or any(node.type.dtype not in types for node in region.nodes):
+        if selected_family is not None:
+            raise ValueError("selected numerical family differs from exported route or source roots")
+        return None
+    numerics = None
+    if kind == "already_quantized":
+        from .source_translation import lower_already_quantized_contraction
+        numerics = lower_already_quantized_contraction(region).numerics
+    recipe = lowering_recipe(alternative, numerics=numerics, family_id=matches[0][0])
+    return json.loads(json.dumps(asdict(recipe)))

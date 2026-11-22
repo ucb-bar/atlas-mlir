@@ -184,12 +184,12 @@ class AtlasApplicationAdapter:
 
     # Analysis parameters only; neither attribute is removed from compilation.
     region_loop_parameters = ("static_exp", "tag")
-    # Provider capability only. Both caller reuse options default to False.
+    # Provider capability only.
     supports_materialization_cache = True
     # Deployment sharing admits host code and proved one-image exact-float
     # bodies only. Other device routes retain their established compilation.
-    # Off until a staged loop can keep shared bodies: Merlin refuses a loop whose staging is found after binding.
-    supports_deployment_loop_sharing = False
+    # A loop whose staging is found after binding is published as the unbound compile.
+    supports_deployment_loop_sharing = True
     publication_options = staticmethod(publication_options)
 
     def bind_loop_region(self, representative, region, alternative, nodes, segments, target_source):
@@ -239,6 +239,19 @@ class AtlasApplicationAdapter:
                 or package.programs):
             return None
         return package
+
+    def _register_loop_body(self, package, region, root, record):
+        """Record a replayable body so later trips can bind it under the same options."""
+        from dataclasses import asdict
+
+        options = asdict(current_codegen_options())
+        options.pop("resident_bindings", None)
+        if not hasattr(self, "_loop_body_packages"):
+            self._loop_body_packages = {}
+        self._loop_body_packages[package.symbol] = {
+            "files": package.files, "options": options, "root": root.resolve(),
+            "source_digest": region.digest(), "native_manifest_sha256": record["native_manifest_sha256"],
+        }
 
     def finalize_loop_regions(self, compiled, *, target_source):
         """Freeze pending resident tables after every trip has been authenticated."""
@@ -1145,6 +1158,8 @@ class AtlasApplicationAdapter:
         return module, {"policy": selected}
 
     def plan(self, source):
+        # Every compile and replay plans first, so loop tables never outlive the one that recorded them.
+        self._loop_body_packages, self._resident_loop_packages = {}, {}
         if source.target_identity != TARGET_IDENTITY or source.lowering_policy != "diagnostic":
             raise NativeCompilationError(
                 "unsupported_semantics",
@@ -1915,17 +1930,7 @@ class AtlasApplicationAdapter:
             module = vector_quantize if kind == "vector_quantize" else exact_float_application
             package = module.prepare_c_package(region, segments / name, name, target_source=target_source)
             if kind == "exact_float_device" and not package.description.get("resident_bindings"):
-                from dataclasses import asdict
-
-                options = asdict(current_codegen_options())
-                options.pop("resident_bindings", None)
-                if not hasattr(self, "_loop_body_packages"):
-                    self._loop_body_packages = {}
-                self._loop_body_packages[package.symbol] = {
-                    "files": package.files, "options": options, "root": (segments / name).resolve(),
-                    "source_digest": region.digest(),
-                    "native_manifest_sha256": package.description["native_manifest_sha256"],
-                }
+                self._register_loop_body(package, region, segments / name, package.description)
             return package
         if kind == "layout_device":
             from .layout_device import prepare_c_package
@@ -1938,33 +1943,13 @@ class AtlasApplicationAdapter:
                 tuple(record["input_node_ids"]), region.outputs, files, RUNTIME_SHARED_FILES,
                 programs, record)
             if not record.get("resident_bindings"):
-                from dataclasses import asdict
-
-                options = asdict(current_codegen_options())
-                options.pop("resident_bindings", None)
-                if not hasattr(self, "_loop_body_packages"):
-                    self._loop_body_packages = {}
-                self._loop_body_packages[package.symbol] = {
-                    "files": package.files, "options": options, "root": (segments / name).resolve(),
-                    "source_digest": region.digest(),
-                    "native_manifest_sha256": record["native_manifest_sha256"],
-                }
+                self._register_loop_body(package, region, segments / name, record)
             return package
         if kind == "activation_quantize_device":
             from .activation_quantize_application import prepare_c_package
 
             package = prepare_c_package(region, segments / name, name, target_source=target_source)
-            from dataclasses import asdict
-
-            options = asdict(current_codegen_options())
-            options.pop("resident_bindings", None)
-            if not hasattr(self, "_loop_body_packages"):
-                self._loop_body_packages = {}
-            self._loop_body_packages[package.symbol] = {
-                "files": package.files, "options": options, "root": (segments / name).resolve(),
-                "source_digest": region.digest(),
-                "native_manifest_sha256": package.description["native_manifest_sha256"],
-            }
+            self._register_loop_body(package, region, segments / name, package.description)
             return package
         if kind == "scalar_broadcast":
             from .scalar_broadcast import prepare_c_package

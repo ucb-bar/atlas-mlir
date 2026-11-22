@@ -297,6 +297,14 @@ class ResidentDeploymentTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'reused without a checked shared body'):
             self.check(layout, rows=rows, sources=sources)
 
+    def test_layout_compiler_recipe_is_part_of_the_source_replay(self):
+        layout = self.layout
+        self.assertIn('compiler_recipe', layout.rows[0]['description'])
+        altered = deepcopy(layout.rows)
+        altered[0]['description']['compiler_recipe']['implementation_sha256'] = 'f'*64
+        with self.assertRaisesRegex(ValueError, 'strong ordinary source replay'):
+            self.check(layout, rows=altered)
+
     def test_wrong_current_allocation_staging_and_self_rehashed_layout_native_refuse(self):
         case = self.cases[0]
         with self.assertRaises(ValueError):

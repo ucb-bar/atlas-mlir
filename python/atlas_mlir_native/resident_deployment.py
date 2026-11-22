@@ -298,9 +298,13 @@ def checked_resident_deployment(regions, source_regions, native_root, target_sou
         function = description.get('binding_function', '')
         name = function[:-5] if isinstance(function, str) and function.endswith('_bind') else ''
         expected, emitted = prepare_c_package(source, folder, name, target_source=target_source)
-        # The adapter adds its compiler recipe after the C package; full application replay checks it.
-        replayed = {key: value for key, value in description.items() if key != 'compiler_recipe'}
-        _same(replayed, expected, 'resident layout description differs from strong ordinary source replay')
+        # The adapter adds its compiler recipe after the C package, so the replay recomputes it from the same source.
+        from .compiler_interface import region_compiler_recipe
+
+        recipe = region_compiler_recipe(source, SimpleNamespace(metadata=(('kind', description.get('kind')),)))
+        if recipe is not None:
+            expected = dict(expected, compiler_recipe=recipe)
+        _same(description, expected, 'resident layout description differs from strong ordinary source replay')
         if row['inputs'] != expected['input_node_ids'] or row['outputs'] != expected['output_node_ids']:
             raise ValueError('resident layout C port order differs from source replay')
         contexts[index] = CheckedResidentContext(index, row['id'], source.digest(), paths, 'ordinary_layout_source_replay',
