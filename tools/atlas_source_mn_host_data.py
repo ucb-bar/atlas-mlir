@@ -17,7 +17,7 @@ else:
 
 ROOT = Path(__file__).resolve().parents[1]
 RUNTIME_FILES = (
-    "atlas_host.h", "atlas_host.c", "atlas_ordered_k.h", "atlas_ordered_k.c",
+    "atlas_host_layout.h", "atlas_host.h", "atlas_host.c", "atlas_ordered_k.h", "atlas_ordered_k.c",
     "atlas_ordered_mn.h", "atlas_ordered_mn.c", "atlas_source_mn.h",
     "atlas_source_mn.c", "atlas_model_tile.h", "atlas_source_mn_memref.h",
     "atlas_source_mn_memref.c",
@@ -215,7 +215,10 @@ def prepare(tiles_root: Path, host_map: Path, packer_header: Path,
             boundary_header: Path, *, staged_root: Path | None = None) -> tuple[dict[str, bytes], dict]:
     from atlas_mlir_native.binding import AtlasNativeBinding
     from merlin.frontends.compile_inputs import load_compile_inputs
-    from merlin.semantic_compiler.precision_codegen import finite_f32_codebook, render_finite_f32_codebook_c
+    from merlin.semantic_compiler.precision_codegen import (
+        finite_f32_codebook,
+        render_finite_f32_codebook_c,
+    )
     from merlin.semantic_compiler.precision_values import FloatBoundarySpec
 
     if (packer_header.name != "row_major_k_window.h" or packer_header.is_symlink()

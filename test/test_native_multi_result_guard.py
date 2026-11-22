@@ -32,7 +32,11 @@ class NativeMultiResultGuardTest(unittest.TestCase):
         from atlas_mlir_native.binding import AtlasNativeBinding
         from merlin.compiler.semantic.model import KernelRequest
         from merlin.compiler.semantic.search.exploration import SearchLimits
-        from merlin.compiler.semantic.target_binding import NativeSnapshot, build_native_snapshot, packaged_egg_bridge_path
+        from merlin.compiler.semantic.target_binding import (
+            NativeSnapshot,
+            build_native_snapshot,
+            packaged_egg_bridge_path,
+        )
 
         snapshot = build_native_snapshot(
             AtlasNativeBinding.profile(), destination=self.work / "snapshot",
