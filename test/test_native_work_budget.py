@@ -97,6 +97,24 @@ class NativeWorkBudgetTest(unittest.TestCase):
         self.assertIn("spill rewrite work limit reached", result.stderr)
         self.assertIn("budget=spill-atlas-virtual.max-spills, limit=0, used=0, requested=1", result.stderr)
 
+    def test_machine_ready_set_keeps_deterministic_budget_refusal(self):
+        from test_delay_insertion import addi, program
+
+        source = program([addi(1, 0, 1), addi(2, 0, 2), addi(3, 1, 3),
+                          addi(4, 2, 4), ("trap", 'kind = "ecall"')])
+        baseline = run(source, 100_000_000, "--schedule-atlas-stream")
+        self.assertEqual(baseline.returncode, 0, baseline.stderr)
+        count = work_report(baseline)["algorithms"]["machine-scheduling"]["maximum_used"]
+        self.assertGreater(count, 1)
+        for _ in range(2):
+            exact = run(source, count, "--schedule-atlas-stream")
+            self.assertEqual(exact.returncode, 0, exact.stderr)
+            self.assertEqual(exact.stdout, baseline.stdout)
+        refused = run(source, count-1, "--schedule-atlas-stream")
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertEqual(refused.stdout, "")
+        self.assertIn("Atlas work budget exhausted: machine-scheduling", refused.stderr)
+
     def test_legacy_mxu_cap_names_the_invoking_pass(self):
         from test_mxu_spilling import mxu_pressure
 

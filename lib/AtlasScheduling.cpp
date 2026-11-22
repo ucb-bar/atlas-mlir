@@ -5,6 +5,7 @@
 #include "Atlas/AtlasStream.h"
 #include "Atlas/AtlasVerificationContext.h"
 #include "mlir/Pass/Pass.h"
+#include "llvm/ADT/BitVector.h"
 #include <algorithm>
 #include <climits>
 #include <numeric>
@@ -86,6 +87,14 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block, bool generated,
   std::vector<std::string> why(n), reason(n);
   for (const Edge &e : g.edges)
     waitingPreds[e.to]++;
+  // Keep the original index order for every priority tie, but visit only
+  // graph-ready body instructions. Repeatedly scanning already issued nodes
+  // makes large generated blocks quadratic even when very little is ready.
+  llvm::BitVector ready(nb);
+  for (int i = 0; i < nb; ++i) {
+    if (failed(work.charge())) return failure();
+    if (!waitingPreds[i]) ready.set(i);
+  }
 
   // npu_model's DMA timing only decides when to issue a dma.wait; after the
   // wait the schedule assumes nothing.
@@ -99,13 +108,12 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block, bool generated,
   ReservationTable table;
   int cycle = 0, placed = 0, nextFree = 0, lastPlaced = 0;
   while (placed < nb) {
+    if (failed(work.charge())) return failure();
     // Take the ready instruction on the longest path that fits this cycle.
     int best = -1, bestWait = -1;
     bool otherWork = false;
-    for (int i = 0; i < nb; i++) {
+    for (int i = ready.find_first(); i >= 0; i = ready.find_next(i)) {
       if (failed(work.charge())) return failure();
-      if (issue[i] >= 0 || waitingPreds[i] > 0)
-        continue;
       if (!isWait(i))
         otherWork = true;
       if (earliest[i] > cycle)
@@ -181,6 +189,7 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block, bool generated,
                                     : "list scheduler priority";
     }
     issue[best] = cycle;
+    ready.reset(best);
     table.reserve(nodes[best], g.footprints[best], cycle);
     if (isWait(best))
       table.extendForWait(cycle);
@@ -197,6 +206,7 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block, bool generated,
         why[ed.to] = ed.reason + " after " + name(best);
       }
       waitingPreds[ed.to]--;
+      if (ed.to < nb && !waitingPreds[ed.to]) ready.set(ed.to);
     }
     nextFree = cycle + naturalGap(nodes[best]);
     lastPlaced = cycle;
