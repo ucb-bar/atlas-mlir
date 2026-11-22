@@ -96,7 +96,7 @@ class QuantizedEpilogueLoweringTest(unittest.TestCase):
                 wanted[at:at+len(payload)]=payload
                 rejected=(label in ('following_operand_domain','bad_exponents_cancel') or
                           (label=='zero_scale_min' and not scalar_fallback));at=layout['status_address']-DRAM_BASE
-                wanted[at:at+2048]=int(rejected).to_bytes(4,'little')+bytes(2044)
+                wanted[at:at+32]=int(rejected).to_bytes(4,'little')+bytes(28)
                 cases.append(dict(label=label,memory=memory.hex(),expected_memory=wanted.hex()))
             groups.append(dict(kind=f'quantized_epilogue_{dtype}_operand{operand}_n{n}',binary=binary.hex(),cases=cases))
         # Direct completed-readout injection isolates the raw-admission guard.
@@ -110,7 +110,7 @@ class QuantizedEpilogueLoweringTest(unittest.TestCase):
             memory[at:at+len(payload)]=payload
             expected=np.full((2,32,32),0x4000,dtype='<u2');expected[0].fill(0);wanted=bytearray(memory)
             payload=packed_extra(expected,plan).tobytes();at=layout['output_addresses'][0]-DRAM_BASE;wanted[at:at+len(payload)]=payload
-            at=layout['status_address']-DRAM_BASE;wanted[at:at+2048]=b'\1\0\0\0'+bytes(2044)
+            at=layout['status_address']-DRAM_BASE;wanted[at:at+32]=b'\1\0\0\0'+bytes(28)
             cases.append(dict(label=label,memory=memory.hex(),expected_memory=wanted.hex()))
         groups.append(dict(kind='quantized_epilogue_raw_clamping',binary=binary.hex(),cases=cases))
         with tempfile.TemporaryDirectory(prefix='atlas-quantized-epilogue-model-') as directory:

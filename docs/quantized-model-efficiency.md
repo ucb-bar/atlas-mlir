@@ -269,9 +269,23 @@ dispatch counts and complete memory bytes are unchanged in both comparisons.
 Artifacts: `out/efficiency/panel-prefix-scales-32-5632-2048` and
 `out/efficiency/panel-prefix-scales-128-5632-2048`.
 
-Next: reduce padded host transfers and status writes without weakening saved
-layout contracts, preserve exceptional-scan granularity while reducing repeated
-quantizer reads, and examine cross-region residency and compiler register pressure.
+Completion now writes one **32-byte DMA beat**, instead of a complete 2 KiB
+status page. The page reservation and subsequent buffer alignment are unchanged;
+the host still checks the first u32 before exposing output. The remaining 2,016
+private padding bytes are intentionally untouched. Repeated success after stale
+failure status, late invalid scales, input/output guards, both pipelines,
+residency, epilogues, canonical rebinding and generated C pass **52 tests and
+39 subtests** (two Python-model tests separately gated).
+
+The captured batched fixture consequently takes **45,965 cycles** and writes
+**3,232 bytes**, down from 47,301 cycles and 5,248 bytes. Reads remain 4,352 bytes,
+launches remain two, and public output hashes match the original corrected run.
+Artifacts: `out/efficiency/captured-linear-status-prefix`. This comparison uses
+public outputs and protected memory; unused status padding is no longer zeroed.
+
+Next: reduce constant mask setup and padded host transfers, preserve
+exceptional-scan granularity while reducing repeated quantizer reads, and
+examine cross-region residency and compiler register pressure.
 
 Merlin's full structure gate currently reports the pre-existing root-level
 `merlin/tests/test_application_deployment_paging.py`; the no-regex gate reports

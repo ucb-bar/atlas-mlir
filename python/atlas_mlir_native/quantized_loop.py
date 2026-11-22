@@ -61,6 +61,8 @@ def _execution_geometry(plan):
                           zip(plan.exponent_ids, exponent_bytes, strict=True)]
     output = cursor
     status = output+output_bytes
+    # Reserve a complete page for aligned following buffers. Restoration only
+    # publishes the first DMA beat; the host observes its first u32.
     end = status+2048
     epilogue = getattr(plan, 'epilogue_precision', None)
     extra = {}

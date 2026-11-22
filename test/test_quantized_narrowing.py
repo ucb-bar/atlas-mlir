@@ -146,7 +146,7 @@ class QuantizedNarrowingTest(unittest.TestCase):
         payload = packed_extra(expected, plan).tobytes()
         wanted[at:at+len(payload)] = payload
         status = layout['status_address']-DRAM_BASE
-        wanted[status:status+layout['status_bytes']] = bytes(layout['status_bytes'])
+        wanted[status:status+32] = bytes(32)
         self.assertEqual(actual, wanted)
         # Last exponent page rejects after earlier output tiles have completed.
         at = layout['exponent_addresses'][1]-DRAM_BASE+2048

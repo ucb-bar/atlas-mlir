@@ -14,6 +14,9 @@ SLOT = '!atlas.virtual_spill'
 # A page contains at most 32 signed i32 exponents; the rest of its 2 KiB ABI
 # allocation is transport padding. Partial BF16 loads zero the unused lanes.
 EXPONENT_PAGE_PAYLOAD_BYTES = 32 * 4
+# Only the first u32 is public. Publish one complete DMA beat and leave the
+# rest of the reserved status page untouched, including between invocations.
+STATUS_WRITE_BYTES = 32
 
 
 
@@ -473,6 +476,6 @@ class Restoration:
         e = Emitter('restore_finish')
         e.state = state
         status = e.effect('restore', ['restore_status'], [SLOT], BF16)
-        e.effect('dma_store_bf16', [status, e.const(self.layout['status_address']), e.const(2048)], [BF16, 'i32', 'i32'])
+        e.effect('dma_store_bf16', [status, e.const(self.layout['status_address']), e.const(STATUS_WRITE_BYTES)], [BF16, 'i32', 'i32'])
         e.emit(f'return %{e.state} : {STATE}')
         return e.lines
