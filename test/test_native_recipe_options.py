@@ -43,6 +43,7 @@ RECIPE_VARIANTS = [
     ("looped_operand_reuse", "resident-a"),
     *[("quantized_operand_reuse", policy) for policy in (
         "row-cache", "prefix-cache", "wide-cache", "paired-cache", "panel-cache", "batch-panel-cache",
+        "interleaved-panel-cache",
     )],
     ("exact_binary_lane_groups", True),
     ("exact_binary_vector_preflight", True),

@@ -14,6 +14,7 @@ STAGING_STORAGE = ("dram", "vmem", "vmem-inputs")
 LOOPED_OPERAND_REUSE = ("ordered", "resident-a")
 QUANTIZED_OPERAND_REUSE = (
     "ordered", "row-cache", "prefix-cache", "wide-cache", "paired-cache", "panel-cache", "batch-panel-cache",
+    "interleaved-panel-cache",
 )
 
 

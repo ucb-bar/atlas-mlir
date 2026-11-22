@@ -3,7 +3,7 @@ from dataclasses import dataclass
 
 
 POLICIES = ('ordered', 'row-cache', 'prefix-cache', 'wide-cache', 'paired-cache',
-            'panel-cache', 'batch-panel-cache')
+            'panel-cache', 'batch-panel-cache', 'interleaved-panel-cache')
 WIDE_CACHE_TILES = 192
 
 
@@ -33,9 +33,9 @@ def activation_residency(plan, policy=None):
         raise ValueError('unsupported recorded quantized operand reuse policy')
     if policy == 'ordered':
         return None
-    if policy in ('panel-cache', 'batch-panel-cache'):
+    if policy in ('panel-cache', 'batch-panel-cache', 'interleaved-panel-cache'):
         from .quantized_panel_geometry import panel_geometry
-        if panel_geometry(plan, allow_batches=policy == 'batch-panel-cache') is not None:
+        if panel_geometry(plan, allow_batches=policy != 'panel-cache') is not None:
             return None
         policy = 'wide-cache'
     if policy == 'paired-cache':
@@ -59,6 +59,14 @@ def activation_residency(plan, policy=None):
 
 def schedule_record(plan, policy=None):
     requested = reuse_policy() if policy is None else policy
+    if requested == 'interleaved-panel-cache':
+        from .quantized_panel_reuse import MAX_INLINE_READOUT_ROWS
+        record = schedule_record(plan, 'batch-panel-cache')
+        record['operand_reuse_requested'] = requested
+        if (record.get('operand_reuse') == 'panel-cache'
+                and record['operand_reuse_panel_m_tiles'] <= MAX_INLINE_READOUT_ROWS):
+            record['operand_reuse_panel_order'] = 'k-major'
+        return record
     if requested in ('panel-cache', 'batch-panel-cache'):
         from .quantized_panel_geometry import panel_geometry
         geometry = panel_geometry(plan, allow_batches=requested == 'batch-panel-cache')

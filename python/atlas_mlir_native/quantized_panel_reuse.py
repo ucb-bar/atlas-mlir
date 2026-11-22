@@ -41,7 +41,8 @@ def admitted(plan, *, m_tiles=2, min_k_tiles=MIN_K_TILES, allow_batches=False):
             and min_k_tiles <= kc <= MAX_K_TILES)
 
 
-def virtual_source(plan, layout, restoration, *, geometry=None, allow_batches=False):
+def virtual_source(plan, layout, restoration, *, geometry=None, allow_batches=False,
+                   interleave_rows=False):
     """Emit typed slots/operations; native allocation and timing remain mandatory."""
     m_tiles, k_tiles = (2, PANEL_K_TILES) if geometry is None else geometry
     if not admitted(plan, m_tiles=m_tiles, min_k_tiles=MIN_K_TILES if geometry is None else 1,
@@ -51,6 +52,8 @@ def virtual_source(plan, layout, restoration, *, geometry=None, allow_batches=Fa
         raise ValueError('K panels require between 1 and 64 tiles')
     if (m_tiles + 1) * k_tiles > 192:
         raise ValueError('operand panels exceed the selected 192 KiB reservation')
+    if interleave_rows and m_tiles > MAX_INLINE_READOUT_ROWS:
+        raise ValueError('interleaved panels require at most four live result tiles')
     mc, nc, kc = ((v+31)//32 for v in (plan.m, plan.n, plan.k))
     a, w = layout['input_addresses'][:2]
     output = layout['output_addresses'][0]
@@ -64,7 +67,7 @@ def virtual_source(plan, layout, restoration, *, geometry=None, allow_batches=Fa
         f'atlas.output_dram_base = {output} : i64, '
         f'atlas.output_dram_bytes = {layout["output_bytes"]+layout["status_bytes"]} : i64}} {{',
         f'    %start = "atlas.virtual_start"() : () -> {STATE}']
-    for kind, rows in (('a', m_tiles), ('w', 1)):
+    for kind, rows in (('a', m_tiles), ('w', 0 if interleave_rows else 1)):
         for row in range(rows):
             for tile in range(min(k_tiles,kc)):
                 e.emit(f'%panel_{kind}_{row}_{tile} = "atlas.virtual_slot"() '
@@ -91,8 +94,9 @@ def virtual_source(plan, layout, restoration, *, geometry=None, allow_batches=Fa
     def restore(slot, dtype):
         return e.effect('restore',[slot],[SLOT],dtype)
 
-    def product(left, right, partial):
-        weight = e.effect('mxu_load_weight',[right],[FP8],WEIGHT,' {unit = 1 : i32}')
+    def product(left, right, partial, *, weight=None):
+        if weight is None:
+            weight = e.effect('mxu_load_weight',[right],[FP8],WEIGHT,' {unit = 1 : i32}')
         if partial is None:
             value = e.effect('mxu_reset',[left,weight],[FP8,WEIGHT],ACC)
         else:
@@ -175,15 +179,32 @@ def virtual_source(plan, layout, restoration, *, geometry=None, allow_batches=Fa
         more = e.cmp('ult',names[1],e.const(nc))
         e.emit(f'cf.cond_br %{more}, ^p{phase}_body(%{e.state} : {STATE}), ^p{phase}_done(%{e.state} : {STATE})')
         block(f'p{phase}_body',[f'p{phase}_body_s'],[STATE])
-        for tile in range(count):
-            save(f'panel_w_0_{tile}',load(offset(names[2],tile*1024),FP8),FP8)
+        partials = []
+        if interleave_rows:
+            partials = [load(offset(names[3], row*nc*2048), BF16) if first else None
+                        for row in range(m_tiles)]
+            # Reuse one loaded MXU weight for every activation row. Each output
+            # still visits K in its original order and rounds through a BF16
+            # readout before the next term; no accumulator precision is retained.
+            for tile in range(count):
+                right = load(offset(names[2], tile*1024), FP8)
+                weight = e.effect('mxu_load_weight', [right], [FP8], WEIGHT, ' {unit = 1 : i32}')
+                for row in range(m_tiles):
+                    left = restore(f'panel_a_{row}_{tile}', FP8)
+                    partials[row] = product(left, None, partials[row], weight=weight)
+        else:
+            for tile in range(count):
+                save(f'panel_w_0_{tile}',load(offset(names[2],tile*1024),FP8),FP8)
         for row in range(m_tiles):
             address = offset(names[3],row*nc*2048)
-            partial = load(address,BF16) if first else None
-            for tile in range(count):
-                left = restore(f'panel_a_{row}_{tile}',FP8)
-                right = restore(f'panel_w_0_{tile}',FP8)
-                partial = product(left,right,partial)
+            if interleave_rows:
+                partial = partials[row]
+            else:
+                partial = load(address,BF16) if first else None
+                for tile in range(count):
+                    left = restore(f'panel_a_{row}_{tile}',FP8)
+                    right = restore(f'panel_w_0_{tile}',FP8)
+                    partial = product(left,right,partial)
             if first + count < kc or not inline_readout:
                 store(partial,address)
             else:

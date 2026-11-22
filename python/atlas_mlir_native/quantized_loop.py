@@ -110,7 +110,8 @@ def virtual_source(plan, layout):
     schedule = schedule_record(plan, layout.get('operand_reuse_requested', 'ordered'))
     if any(layout.get(key) != schedule.get(key) for key in (
             'operand_reuse_requested', 'operand_reuse', 'operand_reuse_cached_tiles',
-            'operand_reuse_panel_m_tiles', 'operand_reuse_panel_k_tiles', 'operand_reuse_flattened_batches')):
+            'operand_reuse_panel_m_tiles', 'operand_reuse_panel_k_tiles', 'operand_reuse_flattened_batches',
+            'operand_reuse_panel_order')):
         raise ValueError('recorded quantized operand reuse schedule differs')
     restoration = Restoration(plan, layout, scalar_fallback=bool(fallback_tiles(plan)))
     if schedule.get('operand_reuse') == 'paired-cache':
@@ -123,7 +124,8 @@ def virtual_source(plan, layout):
         restoration = Restoration(physical, layout, scalar_fallback=bool(fallback_tiles(plan)))
         geometry = (schedule['operand_reuse_panel_m_tiles'], schedule['operand_reuse_panel_k_tiles'])
         return rematerialize_scalar_constants(panel_source(physical, layout, restoration, geometry=geometry,
-            allow_batches=schedule.get('operand_reuse_requested') == 'batch-panel-cache'))
+            allow_batches=schedule.get('operand_reuse_requested') in ('batch-panel-cache', 'interleaved-panel-cache'),
+            interleave_rows=schedule.get('operand_reuse_panel_order') == 'k-major'))
     virtual = _virtual(Geometry(), tuple(layout['input_addresses'][:2]), layout['output_addresses'][0],
                        unit=1, k_unroll=8 if prod(plan.batch_shape) == 1 else 1,
                        batch_count=prod(plan.batch_shape),
@@ -132,7 +134,7 @@ def virtual_source(plan, layout):
                        output_window_bytes=layout['output_bytes']+layout['status_bytes'],
                        cache_a=schedule.get('operand_reuse', 'ordered') in ('row-cache', 'prefix-cache'),
                        cache_a_tiles=schedule.get('operand_reuse_cached_tiles'),
-                       wide_cache_a=(schedule.get('operand_reuse_requested') in ('wide-cache', 'paired-cache', 'panel-cache', 'batch-panel-cache')
+                       wide_cache_a=(schedule.get('operand_reuse_requested') in ('wide-cache', 'paired-cache', 'panel-cache', 'batch-panel-cache', 'interleaved-panel-cache')
                                      and 'operand_reuse_cached_tiles' in schedule))
     return rematerialize_scalar_constants(virtual)
 
