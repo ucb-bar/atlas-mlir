@@ -132,7 +132,6 @@ For the projected attention + MLP application, select its explicit diagnostic
 precision settings and run:
 
 ```sh
-ATLAS_NATIVE_PIPELINE=optimized \
 ATLAS_OPERAND_SCALE_EXPONENTS='[0,0]' \
 ATLAS_CONTRACTION_EPILOGUES='["relu"]' \
 ATLAS_POINTWISE_POLICY=f32-to-bf16-bounded-pointwise-rne-chop-v1 \
@@ -140,6 +139,10 @@ MERLIN_APPLICATION_NAME=attention \
 examples/handoff/captured_attention_core/build_c_package.sh \
   "$MERLIN_ROOT" "$COMPILER_PYTHON" "$ATLAS_BIN" "$CAPTURE" out/attention-application
 ```
+
+`--native-pipeline optimized` selects optimized scheduling on direct
+`merlin-targetgen native-compile` invocations. The script above uses the default
+mandatory pipeline.
 
 `CAPTURE` is the completed frontend bundle, not a runtime input directory.
 The script stages compiler-only inputs before compilation. The policy selects

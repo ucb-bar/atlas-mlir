@@ -26,7 +26,10 @@ for tool in atlas-opt atlas-emit; do
 done
 export PYTHONPATH="$merlin_root/src:$root/python${PYTHONPATH:+:$PYTHONPATH}"
 export ATLAS_OOT_BIN_DIR="$atlas_bin"
-export ATLAS_NATIVE_PIPELINE="$pipeline"
+recipe_args=(--native-pipeline "$pipeline")
+if [[ "$pipeline" == optimized ]]; then
+  recipe_args+=(--static-quantizer-sizing --exact-binary-routes)
+fi
 export CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-2}
 mkdir -p "$out"
 source_ir="$root/test/examples/captured_attention_mlp32_two_outputs_linalg.mlir"
@@ -44,6 +47,7 @@ abi=${ATLAS_GRAPH_ABI:-$abi}
   --cargo-target-dir "${CARGO_TARGET_DIR:-$out/cargo}" \
   --source-revision "$(git -C "$merlin_root" rev-parse HEAD)" --out "$out/snapshot"
 "$python" -m merlin.targetgen.cli native-compile --engine merlin_native --support atlas \
+  "${recipe_args[@]}" \
   --snapshot "$out/snapshot" --linalg "$source_ir" --linalg-entry forward \
   --diagnostic-graph-policy "$policy" \
   --abi "$abi" \
@@ -59,6 +63,7 @@ if status.get("status") != "emitted" or status.get("artifact_kind") != "program"
     raise SystemExit("this example requires one device program; segmented output is not accepted")
 PY
 "$python" -m merlin.targetgen.cli native-verify --engine merlin_native --support atlas \
+  "${recipe_args[@]}" \
   --snapshot "$out/snapshot" --linalg "$source_ir" --linalg-entry forward \
   --diagnostic-graph-policy "$policy" --mode diagnostic \
   --artifact "$out/compiled" --out "$out/verification.json"
