@@ -89,6 +89,10 @@ def program(p):
     # integral counted tile size, while authored full groups use 1,024 lanes.
     lanes = gcd(1024, p.group_elements)
     scratch, exponent_slot = b.slot('bf16', 512), b.slot('fp8', 256)
+    # Hoist the complete one-tile dynamic input above both counted loops. Its
+    # SSA value dominates reduction and encoding; the allocator owns retention.
+    # Multi-tile groups retain their counted traversal and bounded footprint.
+    cache_input = p.attrs['mode'] == 'dynamic' and p.group_elements == lanes
     exponent_zero = b.op('virtual_vpu_splat', [], [], [BF16], 'bits = 0 : i32')
     zeros = b.op('virtual_raw_pack_fp8', [exponent_zero, c(127)], [BF16, 'i32'], [FP8])
     state = b.save(state, exponent_slot, zeros, FP8)
@@ -98,12 +102,19 @@ def program(p):
     b.emit(f'cf.cond_br {more}, ^group_body(%gs : {STATE}), ^finish(%gs : {STATE})')
     b.emit(f'^group_body(%gbs: {STATE}):')
     if p.attrs['mode'] == 'dynamic':
-        b.emit(f'cf.br ^amax(%gbs, {c(0)}, {c(0)}, %gip : {STATE}, i32, i32, i32)')
+        group_state = '%gbs'
+        if cache_input:
+            group_state, cached_tile = b.op('virtual_dma_load_bf16', [group_state, '%gip', c(lanes * 2)],
+                                           [STATE, 'i32', 'i32'], [STATE, BF16])
+        b.emit(f'cf.br ^amax({group_state}, {c(0)}, {c(0)}, %gip : {STATE}, i32, i32, i32)')
         b.emit(f'^amax(%as: {STATE}, %ai: i32, %am: i32, %aptr: i32):')
         more = b.cmp('ult', '%ai', c(p.group_elements // lanes))
         b.emit(f'cf.cond_br {more}, ^amax_body(%as : {STATE}), ^scale(%as, %am : {STATE}, i32)')
         b.emit(f'^amax_body(%abs: {STATE}):')
-        ds, tile = b.op('virtual_dma_load_bf16', ['%abs', '%aptr', c(lanes * 2)], [STATE, 'i32', 'i32'], [STATE, BF16])
+        if cache_input:
+            ds, tile = '%abs', cached_tile
+        else:
+            ds, tile = b.op('virtual_dma_load_bf16', ['%abs', '%aptr', c(lanes * 2)], [STATE, 'i32', 'i32'], [STATE, BF16])
         maxrow = b.op('virtual_vpu_reduce', [tile], [BF16], [BF16], 'kind = "row_max"')
         maxtile = b.op('virtual_vpu_reduce', [maxrow], [BF16], [BF16], 'kind = "col_max"')
         ds = b.save(ds, scratch, maxtile, BF16)
@@ -166,7 +177,10 @@ def program(p):
     more = b.cmp('ult', '%ci', c(p.group_elements // lanes))
     b.emit(f'cf.cond_br {more}, ^encode_body(%cs : {STATE}), ^group_end(%cs : {STATE})')
     b.emit(f'^encode_body(%cbs: {STATE}):')
-    state, tile = b.op('virtual_dma_load_bf16', ['%cbs', '%cip', c(lanes * 2)], [STATE, 'i32', 'i32'], [STATE, BF16])
+    if not cache_input:
+        state, tile = b.op('virtual_dma_load_bf16', ['%cbs', '%cip', c(lanes * 2)], [STATE, 'i32', 'i32'], [STATE, BF16])
+    else:
+        state, tile = '%cbs', cached_tile
     codes = b.op('virtual_raw_pack_fp8', [tile, scale], [BF16, 'i32'], [FP8])
     state = b.op('virtual_dma_store_fp8', [state, codes, '%cop', c(lanes)], [STATE, FP8, 'i32', 'i32'], [STATE])
     ni, np, no = add('%ci', c(1)), add('%cip', c(lanes * 2)), add('%cop', c(lanes))

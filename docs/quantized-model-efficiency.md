@@ -110,6 +110,13 @@ with measurements. Historical performance numbers are context, not this branch's
   and saved-schedule replay checks pass 250 tests and 32 subtests (one separately
   gated Python-model test). A 256 × 1024 source uses eight admitted 32-group
   bodies under the original 1,000,000-instruction limit.
+- Hoisted a complete single-tile dynamic input above reduction and encoding so
+  the same SSA tensor feeds both phases. This removes its second DRAM read
+  without introducing a VMEM scratch buffer. Independent bitwise references,
+  special values, multiple groups, public guards, actual read counters and
+  generated-C replay pass (27 focused tests; 59 related tests and 32 subtests).
+  Multi-tile traversal is unchanged. Static and folded-input quantizers retain
+  their source and publication checks.
 - Remaining integration work: complete-layer measurements, residency interaction,
   and more useful overlap in the optimized schedule. No complete-layer or board
   speedup is claimed from the kernel experiments below.
@@ -184,9 +191,20 @@ Reproduce a matched application comparison with an existing lifted capture:
 The evaluator requires one runtime BF16 input, keeps captured parameters and
 source policy, compiles both applications before reading execution samples,
 replays exports, and retains simulator configuration and source/tool hashes.
-Next: remove the second DRAM read of single-tile dynamic quantizer groups by
-retaining the exact input tile through scale selection, then measure its VMEM
-cost and cross-region residency opportunities.
+With single-tile input reuse, the same batched captured fixture improves further
+from **60,438 to 51,322 cycles** and **10,240 to 8,192 read bytes**. Dispatches
+remain two and writes remain 5,248 bytes. Relative to the original 33-launch
+run, the combined changes remove 27.12% of device cycles and 20% of device reads.
+The unbatched run also benefits (61,392 cycles). Matching output hashes and
+receipts are in `out/efficiency/captured-linear-input-reuse`.
+
+An experiment extended one-prefix reuse to non-power-of-two groups. With mixed
+finite/special inputs, 3 × 96 optimized quantization fell from 12,231 to 6,898
+cycles, but 3 × 768 regressed from 26,132 to 31,352: one exceptional value now
+forces a larger scalar finite-only scan. This broader change is **not retained**.
+Results and machine sources: `out/efficiency/quantizer-prefix-experiment`.
+Next: preserve exceptional-scan granularity while reducing repeated reads,
+remove unnecessary one-iteration loop control, and examine cross-region residency.
 
 Merlin's full structure gate currently reports the pre-existing root-level
 `merlin/tests/test_application_deployment_paging.py`; the no-regex gate reports
