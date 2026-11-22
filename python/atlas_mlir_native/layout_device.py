@@ -86,7 +86,13 @@ class LayoutPlan:
 def _segment(index, shape, source_strides, output_strides, source_offset, output_offset, width):
     # Collapse the common dense suffix into aligned DMA runs. The remainder is
     # a small counted affine iteration space, independent of tensor names.
-    shape, ss, ds = list(shape), list(source_strides), list(output_strides)
+    # A unit dimension never advances either pointer. Its arbitrary stride must
+    # not block dense-suffix collapse or impose an unused DMA alignment check.
+    dimensions = [(count, source, output) for count, source, output in
+                  zip(shape, source_strides, output_strides, strict=True) if count != 1]
+    shape = [count for count, _, _ in dimensions]
+    ss = [source for _, source, _ in dimensions]
+    ds = [output for _, _, output in dimensions]
     block = width
     while shape and ss[-1] == ds[-1] == block:
         block *= shape.pop()
@@ -209,21 +215,24 @@ def prepare_source(source, *, io_memory_base=None):
                 or tuple(shape[row.index(1)] for row in mapping.coefficients) != operands[0].type.shape):
             raise ValueError("device transpose needs a complete dimension permutation")
         offset, strides = _flatten(mapping, operands[0].type.shape, width)
-        if (output.op == "transpose" and width == 1 and len(shape) >= 2
-                and shape[-1] % 32 == shape[-2] % 32 == 0
-                and mapping.coefficients == tuple(tuple(int(j == (i if i < len(shape)-2 else 2*len(shape)-3-i))
-                                                     for j in range(len(shape))) for i in range(len(shape)))):
+        # Ignore axes with one coordinate when recognizing the physical byte
+        # transpose. A singleton between the matrix axes does not require a
+        # scalar gather; the checked source permutation still binds the layout.
+        strides = tuple(stride for count, stride in zip(shape, strides, strict=True) if count != 1)
+        shape = tuple(count for count in shape if count != 1)
+        rank = len(shape)
+        swapped_shape = (*shape[:-2], shape[-1], shape[-2]) if rank >= 2 else ()
+        swapped_strides = _strides(swapped_shape)
+        swaps_last = (output.op == "transpose" and width == 1 and rank >= 2
+                      and strides == (*swapped_strides[:-2], swapped_strides[-1], swapped_strides[-2]))
+        if swaps_last and shape[-1] % 32 == shape[-2] % 32 == 0:
             counts = (*shape[:-2], shape[-2] // 32, shape[-1] // 32)
             ss = (*strides[:-2], strides[-2] * 32, strides[-1] * 32)
             ds = (*_strides(shape)[:-2], shape[-1] * 32, 32)
             segments.append(dict(input=0, mode="xlu", counts=list(counts), source_strides=list(ss),
                                  output_strides=list(ds), source_offset=0, output_offset=0, block_bytes=1024,
-                                 source_row_bytes=operands[0].type.shape[-1], output_row_bytes=shape[-1]))
-        elif (current_codegen_options().device_kv_quantizer
-                and output.op == "transpose" and width == 1 and len(shape) >= 2
-                and shape[-2] % 32 == 0
-                and mapping.coefficients == tuple(tuple(int(j == (i if i < len(shape)-2 else 2*len(shape)-3-i))
-                                                     for j in range(len(shape))) for i in range(len(shape)))):
+                                 source_row_bytes=shape[-2], output_row_bytes=shape[-1]))
+        elif current_codegen_options().device_kv_quantizer and swaps_last and shape[-2] % 32 == 0:
             # Reject impossible images before constructing their source. Every
             # assembled row needs eight word loads and stores; the retained
             # four-column pack needs at least one load and store per word.
@@ -260,7 +269,7 @@ def prepare_source(source, *, io_memory_base=None):
                 source_strides=[*strides[:-2], 32],
                 output_strides=[*_strides(shape)[:-2], shape[-1] * 32],
                 source_offset=0, output_offset=0, block_bytes=shape[-1] * 32,
-                source_row_bytes=operands[0].type.shape[-1], output_row_bytes=shape[-1]))
+                source_row_bytes=shape[-2], output_row_bytes=shape[-1]))
         else:
             segments.append(_segment(0, shape, strides, _strides(shape, width), offset, 0, width))
     else:
