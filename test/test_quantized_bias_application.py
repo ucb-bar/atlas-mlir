@@ -1,6 +1,12 @@
 """Keep authored bias arithmetic after device readout on the host."""
 
+import ctypes
 from dataclasses import replace
+from fractions import Fraction
+import json
+from math import floor, log2
+import os
+import subprocess
 from unittest.mock import Mock
 
 import numpy as np
@@ -9,9 +15,10 @@ import pytest
 from atlas_mlir_native.already_quantized import POLICY, prepare_source
 from atlas_mlir_native.application import AtlasApplicationAdapter
 from atlas_mlir_native.source_translation import NUMERICS_ATTRIBUTE, contraction_numerics_attribute
+from merlin.compiler.lower.c.float_arithmetic import emit_float_arithmetic_c
 from merlin.compiler.partition.semantic_regions import extract_semantic_region
-from merlin.compiler.semantic.model import ConstantBinding, SemanticNode, TensorType, pointwise_identity_maps
-from merlin.compiler.semantic.source_preparation import split_prequantized_bias
+from merlin.compiler.semantic.model import ConstantBinding, IndexMap, SemanticNode, TensorType, pointwise_identity_maps
+from merlin.compiler.semantic.source_preparation import is_prequantized_bias_add, split_prequantized_bias
 from merlin.compiler.semantic.target_binding import NativeCompilationError
 from test_already_quantized import source_request as base_source_request
 from test_application_float_arithmetic import policy as arithmetic_policy
@@ -337,3 +344,153 @@ def test_unbiased_qlinear_residual_add_uses_base_routes(device_admitted, kind, p
     assert [(dict(row.metadata)["kind"], row.placement) for row in plan.selected] == [
         ("already_quantized", "accelerator"), (kind, placement)]
     selected._supports_device_source.assert_called_once_with(source, addition, "exact_float_device")
+
+
+def source_form_bias():
+    """The split graph under source names: the same operands, order, maps, and types."""
+    names = {"y.readout": "contraction", "y.bias": "broadcast"}
+    split = prepared_source()
+    nodes = tuple(replace(node, id=names.get(node.id, node.id),
+                          inputs=tuple(names.get(key, key) for key in node.inputs)) for node in split.nodes)
+    return split, replace(split, nodes=nodes)
+
+
+def bf16_value(bits):
+    exponent, fraction = (bits >> 7) & 255, bits & 127
+    magnitude = Fraction(fraction | 128, 128) * Fraction(2) ** (exponent - 127) if exponent \
+        else Fraction(fraction, 128) * Fraction(2) ** -126
+    return -magnitude if bits >> 15 else magnitude
+
+
+def bf16_add_reference(a, b):
+    """Round the exact rational sum to BF16 with ties to even, independently of the emitted C."""
+    total = bf16_value(a) + bf16_value(b)
+    if not total:
+        return a & b & 0x8000
+    sign, magnitude = 0x8000 if total < 0 else 0, abs(total)
+    exponent = max(floor(log2(magnitude)) - 1, -126)
+    while Fraction(2) ** (exponent + 1) <= magnitude:
+        exponent += 1
+    scaled = magnitude / Fraction(2) ** (exponent - 7)
+    whole = floor(scaled)
+    whole += scaled - whole > Fraction(1, 2) or (scaled - whole == Fraction(1, 2) and whole & 1)
+    if whole == 256:
+        whole, exponent = 128, exponent + 1
+    if whole < 128:
+        return sign | whole
+    return sign | 0x7f80 if exponent > 127 else sign | ((exponent + 127) << 7) | (whole - 128)
+
+
+def compiled_add(source, name, root):
+    _, files = emit_float_arithmetic_c(extract_semantic_region(source, (source.node("y").id,)), name)
+    folder = root / name
+    folder.mkdir()
+    for file_name, text in files.items():
+        (folder / file_name).write_text(text)
+    library = folder / f"{name}.so"
+    subprocess.run([os.environ["ATLAS_HOST_CC"], "-O1", "-shared", "-fPIC", "-fuse-ld=lld", "-o", str(library),
+                    str(folder / f"{name}.c")], check=True)
+    function = getattr(ctypes.CDLL(str(library)), name)
+    function.argtypes = (ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p), ctypes.POINTER(ctypes.c_void_p))
+
+    def run(a, b):
+        left, right, out = (np.array(v, "<u2") for v in (a, b, np.zeros_like(a)))
+        inputs = (ctypes.c_void_p * 2)(left.ctypes.data, right.ctypes.data)
+        outputs = (ctypes.c_void_p * 1)(out.ctypes.data)
+        assert function(None, inputs, outputs) == 0
+        return out
+    return run
+
+
+def test_source_form_bias_add_computes_the_split_form_bytes(tmp_path):
+    split, source = source_form_bias()
+    assert is_prequantized_bias_add(split, split.node("y"))
+    assert is_prequantized_bias_add(source, source.node("y"))
+    split_add, source_add = compiled_add(split, "split_add", tmp_path), compiled_add(source, "source_add", tmp_path)
+    random = np.random.default_rng(20261121)
+    checked = nonzero = 0
+    for _ in range(400):
+        a, b = random.integers(0, 1 << 16, (2, 2, 3), dtype=np.uint16)
+        finite = lambda v: np.where((v & 0x7f80) == 0x7f80, v & 0x807f, v)
+        a, b = finite(a), finite(b)
+        first, second = split_add(a, b), source_add(a, b)
+        assert first.tobytes() == second.tobytes()
+        assert first.tolist() == [[bf16_add_reference(int(x), int(y)) for x, y in zip(p, q)] for p, q in zip(a, b)]
+        checked += first.size
+        nonzero += int(np.count_nonzero(first))
+    assert checked == 2400 and nonzero > 2000
+
+
+def test_source_form_bias_add_routes_like_the_split_form():
+    _, source = source_form_bias()
+    selected = adapter()
+    selected._supports_device_source = Mock(return_value=True)
+    assert [(dict(region.metadata)["kind"], region.placement) for region in selected.plan(source).selected] == [
+        ("already_quantized", "accelerator"), ("layout", "host"), ("float_arithmetic", "host")]
+    selected._supports_device_source.assert_not_called()
+
+
+def edit_node(source, key, **changes):
+    return replace(source, nodes=tuple(replace(n, **changes) if n.id == key else n for n in source.nodes))
+
+
+def with_bias_vector(source, vector_type):
+    """Feed the column broadcast from a new runtime vector of the given type."""
+    broadcast = source.node("broadcast")
+    vector = SemanticNode(broadcast.inputs[0] + ".probe", "input", (), vector_type, effect="input")
+    nodes = []
+    for node in source.nodes:
+        if node.id == broadcast.id:
+            nodes.append(vector)
+            node = replace(node, inputs=(vector.id,))
+        nodes.append(node)
+    return replace(source, nodes=tuple(nodes), input_storages=(*source.input_storages, (vector.id, "external")))
+
+
+@pytest.mark.parametrize("label", [
+    "swapped", "row map", "offset map", "bias in stages", "not a contraction", "constant", "add map", "bias order",
+    "bias shape", "bias dtype", "bias policy", "not a gather", "stale bias stage"])
+def test_non_equivalent_source_add_is_not_a_bias_add(label):
+    _, source = source_form_bias()
+    column = source.node("broadcast").index_maps
+    vector = source.node(source.node("broadcast").inputs[0]).type
+    readout = dict(source.node("contraction").attrs)
+    if label == "swapped":
+        bad = edit_node(source, "y", inputs=("broadcast", "contraction"))
+    elif label == "row map":
+        bad = edit_node(source, "broadcast", index_maps=(IndexMap(2, ((1, 0),), (0,)), column[1]))
+    elif label == "offset map":
+        bad = edit_node(source, "broadcast", index_maps=(IndexMap(2, ((0, 1),), (1,)), column[1]))
+    elif label == "bias in stages":
+        attrs = dict(source.node("contraction").attrs)
+        attrs[NUMERICS_ATTRIBUTE] = contraction_numerics_attribute(source.node("contraction").op, "bfloat16", bias=True)
+        bad = edit_node(source, "contraction", attrs=tuple(sorted(attrs.items())))
+    elif label == "not a contraction":
+        attrs = tuple((k, v) for k, v in source.node("contraction").attrs if k != "semantic_kind")
+        bad = edit_node(source, "contraction", attrs=attrs)
+    elif label == "add map":
+        # The add reads the bias operand with its columns reversed.
+        y = source.node("y")
+        reversed_columns = IndexMap(2, ((1, 0), (0, -1)), (0, y.type.shape[1] - 1))
+        bad = edit_node(source, "y", index_maps=(y.index_maps[0], reversed_columns, y.index_maps[2]))
+    elif label == "bias order":
+        readout["bias_order"] = "before_output_cast"
+        bad = edit_node(source, "contraction", attrs=tuple(sorted(readout.items())))
+    elif label == "bias shape":
+        bad = with_bias_vector(source, TensorType((vector.shape[0] + 1,), vector.dtype, vector.numerical_policy))
+    elif label == "bias dtype":
+        bad = with_bias_vector(source, TensorType(vector.shape, "f32", vector.numerical_policy))
+    elif label == "bias policy":
+        bad = with_bias_vector(source, TensorType(vector.shape, vector.dtype, "signed-i64"))
+    elif label == "not a gather":
+        bad = edit_node(source, "broadcast", op="reshape")
+    elif label == "stale bias stage":
+        row = json.loads(readout[NUMERICS_ATTRIBUTE])
+        row["stages"] = [*row["stages"], "source-bias-after-output-cast"]
+        readout[NUMERICS_ATTRIBUTE] = json.dumps(row, sort_keys=True, separators=(",", ":"))
+        bad = edit_node(source, "contraction", attrs=tuple(sorted(readout.items())))
+    else:
+        broadcast = replace(source.node("broadcast"), op="constant", effect="constant", inputs=(), index_maps=())
+        bad = replace(source, nodes=tuple(broadcast if n.id == "broadcast" else n for n in source.nodes),
+                      constants=(*source.constants, ConstantBinding("broadcast", "bf16-le-raw", "803f" * 6)))
+    assert not is_prequantized_bias_add(bad, bad.node("y"))
