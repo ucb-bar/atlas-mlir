@@ -14,6 +14,7 @@ from atlas_mlir_native import quantized_loop as loop, quantized_loop_c as native
 from atlas_mlir_native.already_quantized import prepare_source
 from atlas_mlir_native.binding import DRAM_BASE
 from atlas_mlir_native.quantized_loop_sizing import size_counted, untimed_bound
+from atlas_mlir_native.source_translation import contraction_numerics_attribute
 
 from merlin.compiler.semantic.target_binding import NativeCompilationError
 from test_already_quantized import source_request
@@ -38,7 +39,9 @@ def cache_source(m=4, n=2048, k=2048, *, batch=(1,), op='atlas.qlinear',
             node = replace(node, op=op)
             if op == 'atlas.qk_matmul':
                 node = replace(node, type=replace(node.type, dtype='f32'),
-                    attrs=tuple((key, 'float32' if key == 'output_dtype' else value)
+                    attrs=tuple((key, 'float32' if key == 'output_dtype' else
+                                contraction_numerics_attribute(op, 'float32')
+                                if key == 'numerical.contraction' else value)
                                 for key, value in node.attrs))
         nodes.append(node)
     return replace(source, nodes=tuple(nodes))

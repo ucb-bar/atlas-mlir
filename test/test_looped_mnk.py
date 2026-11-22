@@ -68,7 +68,7 @@ def case_data(shape):
     """
     from atlas_mlir_native.looped_tiling import prepare_plan
 
-    from merlin.compiler.transforms.contraction_mnk import (
+    from merlin.compiler.transforms.tiling import (
         materialize_looped_mnk_inputs,
     )
 
@@ -173,7 +173,7 @@ def rounding_case_data(panel):
     from atlas_mlir_native.looped_tiling import prepare_plan
     from rtl.make_ordered_tile_fixture import _bf16, _fp8, _round_bf16
 
-    from merlin.compiler.transforms.contraction_mnk import (
+    from merlin.compiler.transforms.tiling import (
         materialize_looped_mnk_inputs,
     )
 
@@ -384,7 +384,7 @@ class LoopedMNKTest(unittest.TestCase):
         import numpy as np
         from atlas_mlir_native.looped_tiling import prepare_plan
 
-        from merlin.compiler.transforms.contraction_mnk import (
+        from merlin.compiler.transforms.tiling import (
             materialize_looped_mnk_inputs,
         )
 
@@ -405,7 +405,7 @@ class LoopedMNKTest(unittest.TestCase):
     def test_looped_shapes_and_tails_use_checked_native_bodies(self):
         from atlas_mlir_native.layout import unpack_bf16_pair_halves
 
-        from merlin.compiler.transforms.contraction_mnk import (
+        from merlin.compiler.transforms.tiling import (
             assemble_looped_mnk_outputs,
         )
 
@@ -424,8 +424,14 @@ class LoopedMNKTest(unittest.TestCase):
                 self.assertEqual(len(assemble_looped_mnk_outputs(plan, logical)), shape[0] * shape[1] * 2)
 
     def test_installed_cli_compiles_and_verifies_the_whole_contraction(self):
+        from atlas_mlir_native.binding import AtlasNativeBinding
+        from merlin.compiler.semantic.model import KernelRequest
+
         source = ROOT / "test/examples/native_mxu0_looped_request.json"
         destination = self.root / "cli-compiled"
+        abi = self.root / "cli-abi.json"
+        abi.write_text(json.dumps(AtlasNativeBinding.plan_boundary_abi(
+            KernelRequest.from_record(json.loads(source.read_text())))))
         common = [
             "--engine",
             "merlin_native",
@@ -446,7 +452,7 @@ class LoopedMNKTest(unittest.TestCase):
                 "native-compile",
                 *common,
                 "--abi",
-                "auto",
+                str(abi),
                 "--target-source",
                 str(ROOT),
                 "--out",
