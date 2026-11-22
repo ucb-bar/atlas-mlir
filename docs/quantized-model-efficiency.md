@@ -283,9 +283,29 @@ launches remain two, and public output hashes match the original corrected run.
 Artifacts: `out/efficiency/captured-linear-status-prefix`. This comparison uses
 public outputs and protected memory; unused status padding is no longer zeroed.
 
-Next: reduce constant mask setup and padded host transfers, preserve
-exceptional-scan granularity while reducing repeated quantizer reads, and
-examine cross-region residency and compiler register pressure.
+Constant scaling masks are now omitted when the RHS exponent is scalar or
+per-batch: those factors already broadcast over the complete tile. Row-scale
+setup clears eight adjacent words per counted iteration, reducing 256 loop
+iterations to 32. An unroll sweep of 1/2/4/8/16/32 retained eight as the smaller
+image tradeoff: the mandatory 32 × 32 × 32 case falls from **10,915 to 8,899
+cycles**, while its image grows from 3,008 to 3,176 bytes. Larger unrolls offer
+diminishing savings. The affected suites pass **43 tests** (five separately
+gated Python-model tests), including scalar/batch mask omission, invalid scales,
+complete-memory equality, both pipelines and native/C replay. Sweep artifacts:
+`out/efficiency/mask-setup-experiment`.
+
+The captured batched fixture now takes **43,949 cycles** and **10,624 executed
+instructions**, retaining two dispatches, 4,352 read bytes, 3,232 write bytes and
+the original public output hash. That is 37.59% fewer device cycles than the
+corrected 70,416-cycle baseline. Artifacts:
+`out/efficiency/captured-linear-mask-setup`.
+
+Next: prove a device handoff between private dynamic quantization and its
+contraction, including physical layouts and removal of the intermediate host
+code-domain check. Start with a composed kernel experiment before changing
+application selection. Also reduce padded host transfers, preserve exceptional
+scan granularity while reducing repeated quantizer reads, and examine residency
+and compiler register pressure.
 
 Merlin's full structure gate currently reports the pre-existing root-level
 `merlin/tests/test_application_deployment_paging.py`; the no-regex gate reports

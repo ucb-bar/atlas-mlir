@@ -17,6 +17,8 @@ EXPONENT_PAGE_PAYLOAD_BYTES = 32 * 4
 # Only the first u32 is public. Publish one complete DMA beat and leave the
 # rest of the reserved status page untouched, including between invocations.
 STATUS_WRITE_BYTES = 32
+# Eight adjacent words amortize counted-loop control with bounded image growth.
+_MASK_CLEAR_WORDS_PER_ITERATION = 8
 
 
 
@@ -285,14 +287,17 @@ def _scratch(name):
     return f'    %{name} = "atlas.virtual_slot"() {{kind = "bf16", words = 512 : i32, slot_word = -1 : i32, purpose = "scratch"}} : () -> {SLOT}'
 
 
-def _vector_entry(*, output_state='restore_start'):
+def _vector_entry(*, output_state='restore_start', row_rhs=True):
     """Create constant half masks once, using a fixed initialized tile."""
-    lines = _entry()
-    # Initialize masks before entering the contraction loops. The mask loop
-    # depends only on its 256-word bound and writes initialized scratch.
-    lines[-1] = f'    %restore_status_start = "atlas.virtual_save"(%start, %restore_status, %restore_zero) : ({STATE}, {SLOT}, {BF16}) -> {STATE}'
-    lines += [_scratch(name) for name in ('restore_mask_left', 'restore_mask_right',
-                                         'restore_factor_lhs', 'restore_factor_rhs0', 'restore_factor_rhs1')]
+    # Only row-wise RHS factors need separate masks for their two column halves.
+    # Scalar/batch factors broadcast directly across both halves.
+    lines = _entry(output_state='restore_status_start' if row_rhs else output_state)
+    masks = ('restore_mask_left', 'restore_mask_right') if row_rhs else ()
+    lines += [_scratch(name) for name in (*masks, 'restore_factor_lhs',
+                                         'restore_factor_rhs0', 'restore_factor_rhs1')]
+    if not row_rhs:
+        return lines
+    # Initialize all 256 high-half words before the contraction loops.
     e = Emitter('restore_mask')
     e.state = 'restore_status_start'
     e.emit(f'%restore_ones = "atlas.virtual_vpu_splat"() {{bits = 16256 : i32}} : () -> {BF16}')
@@ -303,8 +308,10 @@ def _vector_entry(*, output_state='restore_start'):
     e.emit(f'cf.cond_br %{more}, ^restore_mask_body(%restore_mask_s : {STATE}), ^restore_mask_done(%restore_mask_s : {STATE})')
     e.lines.append(f'  ^restore_mask_body(%restore_mask_b: {STATE}):')
     e.state='restore_mask_b'
-    e.store('restore_mask_left','restore_mask_i',e.const(0))
-    nxt=e.binary('addi','restore_mask_i',e.const(1))
+    for offset in range(_MASK_CLEAR_WORDS_PER_ITERATION):
+        index = e.binary('addi','restore_mask_i',e.const(offset)) if offset else 'restore_mask_i'
+        e.store('restore_mask_left',index,e.const(0))
+    nxt=e.binary('addi','restore_mask_i',e.const(_MASK_CLEAR_WORDS_PER_ITERATION))
     e.emit(f'cf.br ^restore_mask_header(%{e.state}, %{nxt} : {STATE}, i32)')
     e.lines.append(f'  ^restore_mask_done(%restore_mask_d: {STATE}):')
     e.state='restore_mask_d'
@@ -439,9 +446,10 @@ class Restoration:
 
     def entry(self):
         entry = _vector_entry if self.vector else _entry
+        kwargs = dict(row_rhs=exponent_geometry(self.plan)[1]['mode'] == 'row') if self.vector else {}
         if 'invocation' not in self.page_cache.scopes:
-            return entry()
-        return entry(output_state='restore_uncached') + self.page_cache.prefetch(
+            return entry(**kwargs)
+        return entry(output_state='restore_uncached', **kwargs) + self.page_cache.prefetch(
             'invocation', self.layout['exponent_addresses'], input_state='restore_uncached',
             output_state='restore_start', prefix='restore_cache_entry')
 
