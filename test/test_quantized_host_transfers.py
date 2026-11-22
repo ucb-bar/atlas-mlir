@@ -19,6 +19,8 @@ from test_exponent_page_cache import fixture
 @pytest.mark.parametrize('shape',[
     (35,37,65,(2,),'row','row',True),
     (3,35,65,(2,),'scalar','batch',False),
+    (3,5,65,(2,),'row','row',True),
+    (35,3,65,(2,),'row','batch',False),
 ])
 def test_host_prefixes_keep_padding_and_late_refusal_atomic(tmp_path,pipeline,shape):
     from atlas_mlir_native.application import AtlasApplicationAdapter
@@ -70,6 +72,10 @@ def test_host_prefixes_keep_padding_and_late_refusal_atomic(tmp_path,pipeline,sh
         for page in range(geometry['pages']):
             offset = address-app.base+page*2048
             assert app.memory[offset+128:offset+2048] == bytes([0xa5])*1920
+    stored = layout.get('output_tile_store_bytes',2048)
+    for tile in range(layout['output_bytes']//2048):
+        offset = layout['output_addresses'][0]-app.base+tile*2048
+        assert app.memory[offset+stored:offset+2048] == bytes([0xa5])*(2048-stored)
     assert app.memory[:64] == app.memory[-64:] == bytes([0xa5])*64
     for argument,key in zip(arguments,plan.input_ids,strict=True):
         assert argument.raw[:-1] == arrays[key].tobytes()

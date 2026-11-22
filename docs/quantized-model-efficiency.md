@@ -451,8 +451,38 @@ outputs against independently calculated dot products, poisoned host/device page
 padding, protected memory, unchanged inputs, and atomic refusal of a bad final
 exponent. A last-upload failure also prevents launch, download and publication.
 
+Counted contractions now record a shorter output-tile write prefix when M fits
+one row tile or N fits one 16-column register half. The prefix covers every
+logical BF16 lane in the two physical register halves; allocations and 2,048-byte
+tile strides remain unchanged. Multi-row-tile tails retain full row coverage.
+Only final restored outputs use this extent: intermediate panel stores remain
+complete. Padding after the recorded prefix is untouched and must not be assumed
+initialized by a later consumer. Missing metadata preserves the older full store;
+source generation and C export validate the recorded extent against the shape.
+
+Matched optimized measurements (mandatory improves on all four shapes too):
+
+| Shape | Batches | Cycles before → after | DMA write bytes before → after |
+| --- | ---: | ---: | ---: |
+| 3 × 65 × 257 | 1 | 36,484 → 34,672 | 6,176 → 3,392 |
+| 1 × 5632 × 2048 | 1 | 9,119,912 → 9,006,216 | 360,480 → 185,888 |
+| 3 × 5 × 65 | 2 | 13,516 → 10,913 | 4,128 → 224 |
+| 35 × 3 × 65 | 2 | 32,140 → 29,480 | 8,224 → 4,128 |
+
+Reads and dispatch counts are unchanged. Every logical output and written prefix
+matches the full-store program; untouched tails match poisoned initial memory.
+The focused prefix/generated-C suite passes **21 tests**, including the 16/17
+column boundary, full-size controls, both pipelines, replay and late refusal.
+The broader contraction/residency/epilogue/restoration/panel suite passes **50
+tests and 26 subtests** (eight optional integrations gated). Artifacts:
+`out/efficiency/output-prefix-recorded`; the earlier isolated experiment is
+`out/efficiency/output-prefix-experiment`. Host output downloads still use the
+full allocation and are the next transfer reduction. The 32 × 32 captured linear
+fixture requires both complete halves, so this shape-specific change does not
+improve its measured 43,238 cycles.
+
 Next: extend the handoff proof to useful larger physical layouts before changing
-application selection. Evaluate short-row output transfers, preserve exceptional scan
+application selection. Trim host output downloads using checked prefixes, preserve exceptional scan
 granularity while reducing quantizer reads, and examine residency and compiler
 register pressure. Investigate the panel scheduling tradeoffs before broadening
 scalar-literal reuse across control-flow boundaries.

@@ -21,6 +21,15 @@ STATUS_WRITE_BYTES = 32
 _MASK_CLEAR_WORDS_PER_ITERATION = 8
 
 
+def output_tile_prefix_bytes(plan):
+    """Cover logical BF16 lanes in both physical 32-by-16 register halves.
+
+    Keep full row coverage when M spans multiple tiles. Single-column-half
+    outputs need no second register; other outputs retain the gap between halves.
+    The 2 KiB tile stride and allocation are independent of this transfer extent.
+    """
+    return min(plan.m, 32)*32 + (1024 if plan.n > 16 else 0)
+
 
 def fast_factor_range(plan):
     if getattr(plan, 'epilogue_precision', None) is None:
@@ -280,6 +289,8 @@ def _store_completed(e, tile, plan, layout, output_address, output_state, output
         product = e.name('epilogue_product')
         e.emit(f'%{product} = "atlas.virtual_vpu_binary"(%{operands[0]}, %{operands[1]}) {{kind = "mul"}} : ({BF16}, {BF16}) -> {BF16}')
         tile = product
+    if 'output_tile_store_bytes' in layout:
+        output_bytes = e.const(layout['output_tile_store_bytes'])
     e.emit(f'%{output_state} = "atlas.virtual_dma_store_bf16"(%{e.state}, %{tile}, %{output_address}, %{output_bytes}) : ({STATE}, {BF16}, i32, i32) -> {STATE}')
 
 
@@ -434,6 +445,10 @@ class Restoration:
     """Typed readout hook used by the counted-loop emitter."""
     def __init__(self, plan, layout, *, vector=True, logical_rows=True, scalar_fallback=True):
         from .exponent_page_cache import ExponentPageCache
+        if 'output_tile_store_bytes' in layout:
+            size = layout['output_tile_store_bytes']
+            if type(size) is not int or size != output_tile_prefix_bytes(plan):
+                raise ValueError('output tile prefix differs from the source layout')
         self.plan, self.layout = plan, layout
         self.vector, self.logical_rows = vector, logical_rows
         self.scalar_fallback = scalar_fallback

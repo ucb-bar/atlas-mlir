@@ -291,7 +291,8 @@ def prepare_c_package(source, compiled, name, *, target_source, _resident_runtim
     execution = json.loads((compiled/"execution_plan.json").read_text())
     from .exponent_page_cache import recorded_enabled
     if execution != execution_layout(plan, operand_reuse=execution.get("operand_reuse_requested", "ordered"),
-                                     exponent_page_cache=recorded_enabled(execution)):
+                                     exponent_page_cache=recorded_enabled(execution),
+                                     output_prefix='output_tile_store_bytes' in execution):
         raise ValueError("already-quantized loop execution ABI differs from its publication")
     if sha256((target_source/"docs/selected-variant-inventory.json").read_bytes()).hexdigest() != manifest["target_inventory_sha256"]:
         raise ValueError("already-quantized runtime differs from its checked target inventory")

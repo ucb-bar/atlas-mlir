@@ -13,7 +13,7 @@ from .already_quantized import prepare_source
 from .binding import (DRAM_BASE, TILE_BYTES, MXU1_CAP448_POLICY, NATIVE_CHECKS,
                       RTL_REVISION, _native_pipeline, _tile_io_base, io_memory_base as selected_io_memory_base, validate_io_window, dram_slots, _run)
 from .looped_tiling import _virtual
-from .exponent_restoration import exponent_geometry, Restoration, fast_factor_range
+from .exponent_restoration import exponent_geometry, Restoration, fast_factor_range, output_tile_prefix_bytes
 from .restoration_budget import fallback_tiles, instruction_bound
 
 
@@ -81,10 +81,12 @@ def _execution_geometry(plan):
                 status_address=status, status_bytes=2048, **extra), end
 
 
-def execution_layout(plan, *, operand_reuse=None, exponent_page_cache=None):
+def execution_layout(plan, *, operand_reuse=None, exponent_page_cache=None, output_prefix=True):
     from .quantized_operand_reuse import schedule_record
     from .exponent_page_cache import record as page_cache_record, panel_record, row_record
     from .quantized_resident import bind_geometry
+    if type(output_prefix) is not bool:
+        raise ValueError('output prefix selection must be boolean')
     geometry, end = _execution_geometry(plan)
     if end > selected_io_memory_base() + dram_slots()*TILE_BYTES:
         raise NativeCompilationError("resource_limit", "quantized loop buffers exceed selected DRAM window")
@@ -98,6 +100,8 @@ def execution_layout(plan, *, operand_reuse=None, exponent_page_cache=None):
                     vector_per_operand_range=list(fast_factor_range(plan)),
                     out_of_domain='sticky_status_1_and_atomic_host_output_refusal'),
                 )
+    if output_prefix and output_tile_prefix_bytes(plan) < 2048:
+        layout['output_tile_store_bytes'] = output_tile_prefix_bytes(plan)
     return {**layout, **panel_record(plan, layout), **row_record(plan, layout)}
 
 
