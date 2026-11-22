@@ -475,6 +475,25 @@ def describe_numerical_families() -> tuple[NumericalFamily, ...]:
                      "publication": "a first pass evaluates every row without stores; any refusal writes nothing"},
         ),
         _family(
+            "host-f32-softmax", "host-softmax-f32-left-fold-div-rne-v1", source_policies=("raw-bit-pattern",),
+            constraints=_constraints(
+                (("operand_count",), 1), (("result", "dtype"), "f32"), (("operands", "0", "dtype"), "f32"),
+                (("attributes", "numeric_semantics"), "source-f32-softmax-unqualified-v1"),
+                (("attributes", "reduction_order"), "unresolved"),
+            ),
+            arithmetic={"kernel": "declared order at source f32 precision, the same on every host; not torch eager's "
+                                  "vector order, which differs between CPU capabilities",
+                        "order": ["left-fold maximum from -inf", "RN32(x - maximum)", "correctly rounded expf",
+                                  "left-fold RN32 sum from +0", "RN32(e / sum)"],
+                        "source_form": "a complete last-axis softmax lowered from one source softmax; an additive "
+                                       "mask before it stays its own f32 add"},
+            runtime={"domain": "binary32 scores; NaN results are canonical 0x7fc00000",
+                     "environment": "binary32 RNE and gradual underflow; no fast-math or contraction",
+                     "checks": ["dense disjoint buffers", "FP environment preflight"],
+                     "qualification": "requires independently linked exact receipt; declaration is not qualification",
+                     "publication": "exponentials are stored and normalized in place per row"},
+        ),
+        _family(
             "host-bf16-contraction", "bf16-exact-product-f32-ltr-rne-bf16-rne-v1", source_policies=("raw-bit-pattern",),
             constraints=_constraints(
                 (("result", "dtype"), "bf16"), (("operands", "0", "dtype"), "bf16"),

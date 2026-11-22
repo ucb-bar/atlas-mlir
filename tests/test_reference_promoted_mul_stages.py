@@ -65,6 +65,30 @@ class PromotedMultiplyTests(unittest.TestCase):
                 self.assertEqual(admission.call_args.args[0]['selected_routes'], ['source_exact_float_device'])
                 self.assertEqual([s['adapter'] for s in graph['stages']], ['widen', 'multiply'])
 
+    def test_views_of_the_bf16_operand_may_carry_it_to_the_widening(self):
+        low = Tensor(np.array([0x3f81, 0xbf80, 0x0080], np.uint16), 'bf16')
+        high = Tensor(np.array([[1.000000119, 0.0, 0.5], [3.1, -0.0, -0.5]], np.float32), 'f32')
+        views = [{'id': 'any-view', 'implementation': 'source_layout', 'placement': 'host', 'kind': 'layout',
+                  'inputs': ['arg0'], 'buffers': ['broadcast']},
+                 {'id': 'any-alias', 'implementation': 'merlin.dense_buffer_view', 'placement': 'host',
+                  'inputs': ['broadcast'], 'buffers': ['aliased']}]
+        rows = _rows()
+        rows[0]['inputs'] = ['aliased']
+        graph = stages.build([*views, *rows], _binding(), 'aten.mul.Tensor')
+        self.assertEqual([s['adapter'] for s in graph['stages']], ['widen', 'multiply', 'identity', 'identity'])
+        with patch('atlas_mlir_native.reference_eval.placed_device._rtl'):
+            actual = stages.call('aten.mul.Tensor', [low, high], {}, {'numerical_stages': graph})
+        wide = (low.raw.astype(np.uint32) << 16).view(np.float32)
+        np.testing.assert_array_equal(actual.raw, np.multiply(wide, high.raw.view(np.float32)).view(np.uint32))
+        for mutation in ('other_operand', 'unused', 'skips_view'):
+            with self.subTest(mutation=mutation):
+                changed = copy.deepcopy([*views, *rows])
+                if mutation == 'other_operand': changed[0]['inputs'] = ['arg1']
+                elif mutation == 'unused': changed[2]['inputs'] = ['broadcast']
+                elif mutation == 'skips_view': changed[2]['inputs'] = ['arg0']
+                with self.assertRaisesRegex(ValueError, '^invalid numerical stage graph:'):
+                    stages.build(changed, _binding(), 'aten.mul.Tensor')
+
     def test_policy_accepts_the_proven_mixed_routes_and_records_edges(self):
         policy = object.__new__(decisions.SelectedDecisions)
         policy._bindings, policy._by_node = {'mul': _binding()}, {'mul': _rows()}

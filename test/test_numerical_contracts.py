@@ -12,6 +12,7 @@ from merlin.compiler.quantization.policy_generation import (
     PolicyGenerationError,
     generate_policy,
 )
+from merlin.compiler.semantic.linalg.source_compositions import row_reduction_maps
 from merlin.compiler.semantic.model import (
     IndexMap,
     KernelRequest,
@@ -64,7 +65,7 @@ def test_declarations_extend_every_current_family_with_immutable_contracts():
     compiler = describe_compiler()
     rows = describe_numerical_families()
     assert {row.family for row in rows} == {family.id for family in compiler.families}
-    assert len(rows) == 28
+    assert len(rows) == 29
     for row in rows:
         family = next(family for family in compiler.families if family.id == row.family)
         assert row.pattern in family.patterns
@@ -98,11 +99,10 @@ def test_declarations_extend_every_current_family_with_immutable_contracts():
         index_maps=pointwise_identity_maps(4, 1))
     affine = tuple(SemanticNode(role, "input", (), TensorType((3,), "bf16", "raw-bit-pattern"), effect="input")
                    for role in ("weight", "bias"))
-    trailing = IndexMap(4, ((0, 0, 0, 1),), (0,))
     layer_norm = SemanticNode("result", "bf16_layer_norm", ("activation", "weight", "bias"), type_,
         (("affine_operands", "weight,bias"), ("epsilon_f32_bits", 0x358637BD), ("input_domain", "finite-bf16"),
          ("normalized_rank", 1), ("numeric_semantics", "torch-2.11-cpu-fma-bf16-layer-norm-v1")),
-        index_maps=(identity, trailing, trailing, identity))
+        index_maps=row_reduction_maps(4, 1, 2))
     negation = SemanticNode("result", "bf16_neg", ("activation",), type_,
         (("numeric_semantics", "bf16-sign-bit-flip-v1"),), index_maps=pointwise_identity_maps(4, 1))
     for node, extra, family in ((negation, (), "atlas.host-sign-flip"), (batch_norm, terms, "atlas.host-batch-norm"),

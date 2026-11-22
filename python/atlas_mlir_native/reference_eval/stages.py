@@ -23,13 +23,14 @@ CONTRACTS = {
 
 
 def composite_silu_route(target, routes):
-    """Recognize the declared exact-cast plus pointwise SiLU composition.
+    """Recognize the declared exact-cast plus device or host SiLU composition; return where its SiLU runs, or None.
 
-    Temporary fixed route pair. Replace with authenticated numerical stage
+    Temporary fixed route pairs. Replace with authenticated numerical stage
     contracts for unary compositions, using the same graph validation as build.
     """
-    return (target == "aten.silu.default" and
-            routes == ["source_exact_float_device", "source_pointwise_math"])
+    if target != "aten.silu.default" or len(routes) != 2 or routes[0] != "source_exact_float_device":
+        return None
+    return {"source_pointwise_math": "device", "source_host_pointwise": "host"}.get(routes[1])
 
 
 _ROUTES = {
@@ -382,18 +383,30 @@ def _source_result(buffer, source):
 def _promoted_mul(rows, binding, target):
     """Exact BF16 widening followed by a host F32 add or multiply, including source broadcasting."""
     operands, types, promoted, _, source_result = _promoted_source(binding["ops"], target)
+    # A chain of value-preserving views (a materialized source broadcast) may carry the BF16 operand to its widening.
+    views = [row for row in rows if row["implementation"] in _VIEWS]
+    rows = [row for row in rows if row["implementation"] not in _VIEWS]
     if len(rows) != 2:
         _fail("source promoted arithmetic requires exactly two single-result stages")
     cast, product = rows
+    widened, chain = operands[promoted], []
+    while next_view := next((row for row in views if row not in chain and row.get("inputs") == [widened]), None):
+        if len(next_view.get("buffers", [])) != 1:
+            _fail("each supported adapter requires one result")
+        chain.append(next_view)
+        widened = next_view["buffers"][0]
+    if len(chain) != len(views):
+        _fail("a view in source promoted arithmetic does not carry its BF16 operand")
     intermediate = _stage(cast, "source_exact_float_device", "accelerator", "exact_float_device")
     result = _stage(product, "source_float_arithmetic", "host", "float_arithmetic")
     if (cast["id"] == product["id"] or len(set(operands + [intermediate, result])) != 4
-            or cast.get("inputs") != [operands[promoted]]
+            or cast.get("inputs") != [widened]
             or sorted(product.get("inputs", [])) != sorted([intermediate, operands[1 - promoted]])):
         _fail("selected promoted arithmetic edges differ from source operands")
     _source_result(result, source_result)
     return {"target": target, "binding": binding, "stages": [{**cast, "adapter": "widen"},
-              {**product, "adapter": _PROMOTED[target][1]}], "operands": operands, "types": types, "promoted": promoted}
+              {**product, "adapter": _PROMOTED[target][1]}, *({**row, "adapter": "identity"} for row in chain)],
+            "operands": operands, "types": types, "promoted": promoted}
 
 
 def _promoted_in_place(rows, binding, target):

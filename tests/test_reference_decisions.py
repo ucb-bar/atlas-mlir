@@ -140,6 +140,21 @@ def test_composite_silu_keeps_both_constituent_routes(selected):
         for i, route in enumerate(['source_exact_float_device', 'source_pointwise_math'])]
     rules = policy.node_rules({'id': 'silu', 'target': 'aten.silu.default'}, {})
     assert rules['selected_routes'] == ['source_exact_float_device', 'source_pointwise_math']
+    assert rules['execution'] == 'device'
+
+
+def test_host_silu_between_exact_casts_runs_on_the_host(selected):
+    policy, _ = selected
+    routes = [('accelerator', 'source_exact_float_device'), ('host', 'source_host_pointwise'),
+              ('accelerator', 'source_exact_float_device')]
+    policy._by_node['silu'] = [{'id': str(i), 'placement': placement, 'implementation': route, 'buffers': []}
+                               for i, (placement, route) in enumerate(routes)]
+    rules = policy.node_rules({'id': 'silu', 'target': 'aten.silu.default'}, {})
+    assert rules['execution'] == 'host' and 'numerical_stages' not in rules
+    assert rules['selected_routes'] == ['source_exact_float_device', 'source_host_pointwise']
+    policy._by_node['gelu'] = policy._by_node['silu']
+    with pytest.raises(ValueError, match='missing or conflicting source operand'):
+        policy.node_rules({'id': 'gelu', 'target': 'aten.gelu.default'}, {})
 
 
 def _binding(target='atlas.qlinear.default'):

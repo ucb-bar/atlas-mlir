@@ -195,6 +195,55 @@ def test_wide_layer_norm_matches_torch_eager_through_tail_and_cascade(tmp_path, 
     assert torch.equal(actual.view(torch.int16), expected.view(torch.int16))
 
 
+@pytest.mark.parametrize("shape,k,roles", [((4, 8), 1, ()), ((4, 8), 1, ("weight", "bias")), ((1, 8), 1, ()),
+                                           ((2, 4, 4), 2, ("weight",)), ((2, 4, 4), 1, ())])
+def test_layer_norm_window_splits_keep_whole_rows(tmp_path, shape, k, roles):
+    """No planned piece normalizes part of a row, and whole-row pieces reproduce the unsplit output."""
+    from math import prod
+
+    from merlin.compiler.build import staging
+    from merlin.compiler.semantic.linalg.source_compositions import row_reduction_maps
+    from merlin.compiler.semantic.model import KernelRequest, SemanticNode, TensorType
+
+    rank, rows = len(shape), prod(shape[:-k])
+    typ = TensorType(shape, "bf16", "raw-bit-pattern")
+    terms = tuple(SemanticNode(role, "input", (), TensorType(shape[-k:], "bf16", "raw-bit-pattern"), effect="input")
+                  for role in roles)
+    node = SemanticNode("r", "bf16_layer_norm", ("x", *roles), typ,
+                        attrs=(("affine_operands", ",".join(roles)), ("epsilon_f32_bits", 0x358637BD),
+                               ("input_domain", "finite-bf16"), ("normalized_rank", k),
+                               ("numeric_semantics", "torch-2.11-cpu-fma-bf16-layer-norm-v1")),
+                        index_maps=row_reduction_maps(rank, k, len(roles)))
+    inputs = (SemanticNode("x", "input", (), typ, effect="input"), *terms)
+    region = KernelRequest((*inputs, node), ("r",), ("ram",), tuple((item.id, "ram") for item in inputs), "fixture")
+    assert staging.split_rule(region) is None
+    assert not {split.axis for split in staging.band_rules(region)} & set(range(rank - k, rank))
+    total = prod(shape)
+    admitted = [count for count in range(2, total + 1) if not total % count and staging.leading_rows(region, count)]
+    assert all(not rows % count for count in admitted)
+    torch.manual_seed(rows + k)
+    x = torch.randn(shape).to(torch.bfloat16)
+    values = {"x": x, **{role: torch.randn(shape[-k:]).to(torch.bfloat16) for role in roles}}
+    record, function = _compile(tmp_path, region, "whole_norm")
+    status, whole = _run(function, [values[key] for key in record["inputs"]], shape)
+    assert status == 0
+    if rows == 1:
+        assert not admitted
+        return
+    assert admitted == [count for count in range(2, rows + 1) if not rows % count]
+    assert staging.leading_rows(region, rows) == {"r": "split", "x": "split", **{role: "whole" for role in roles}}
+    piece = staging.row_slice(region, rows)
+    record, function = _compile(tmp_path, piece, "row_norm")
+    flat = x.reshape(rows, *shape[-k:])
+    parts = []
+    for row in flat:
+        status, part = _run(function, [row[None] if key == "x" else values[key] for key in record["inputs"]],
+                            (1, *shape[-k:]) if rank - k == 1 else (*(1,) * (rank - k), *shape[-k:]))
+        assert status == 0
+        parts.append(part.reshape(shape[-k:]))
+    assert torch.equal(torch.stack(parts).view(torch.int16).reshape(shape), whole.view(torch.int16))
+
+
 # A width-264, mean-1,000 row whose output fusing the AddMomentsVec m1 or tail m2 update changes (BF16, big-endian hex).
 _REGRESSION_ROW = bytes.fromhex(
     "447C447B447A447A447B447A4479447B447B447A447A447A447A447A447A44794478447B4479447B447944794478447A"
@@ -452,6 +501,81 @@ def test_f32_host_families_match_torch_eager(tmp_path, operation, shape):
     assert status == -2 and np.all(untouched == 0x55555555)
 
 
+def _rounded_exp(x):
+    """Correctly rounded binary32 exp: binary64 exp where it decides the rounding, else 60-digit Decimal."""
+    wide = np.exp(x.astype(np.float64))
+    result = wide.astype(np.float32)
+    below, above = (np.nextafter(result, np.float32(limit)).astype(np.float64) for limit in (-np.inf, np.inf))
+    midpoints = np.stack([(result + below) / 2, (result + above) / 2])
+    near = np.isfinite(wide) & (np.abs(midpoints - wide).min(axis=0) <= np.abs(wide) * 2.0 ** -40)
+    with localcontext() as context:
+        context.prec = 60
+        for index in zip(*np.nonzero(near)):
+            exact = Decimal(float(x[index])).exp()
+            low, high = (Decimal(float(m)) for m in midpoints[(slice(None), *index)])
+            result[index] = below[index] if exact < low else above[index] if exact > high else result[index]
+    return result
+
+
+def _declared_softmax(values):
+    """host-softmax-f32-left-fold-div-rne-v1 over the last axis, one binary32 operation at a time."""
+    rows = values.reshape(-1, values.shape[-1])
+    maximum = np.full(rows.shape[0], -np.inf, np.float32)
+    for column in rows.T:
+        maximum = np.where(column > maximum, column, maximum)
+    e = _rounded_exp(np.subtract(rows, maximum[:, None]))
+    total = np.zeros(rows.shape[0], np.float32)
+    for column in e.T:
+        total = np.add(total, column)
+    return np.divide(e, total[:, None]).reshape(values.shape)
+
+
+@pytest.mark.parametrize("shape", [(1, 15, 50, 227), (1, 15, 50, 177), (1, 8, 24, 24), (3, 1), (2, 1025)])
+def test_f32_softmax_matches_its_declared_order(tmp_path, shape):
+    """Emitted C and the reference evaluator equal an independent left-fold softmax with a proven rounded exp."""
+    import json
+    import os
+    from pathlib import Path
+
+    from merlin.compiler.build import staging
+    from merlin.compiler.semantic.linalg.source_compositions import softmax_maps
+    from merlin.compiler.semantic.model import KernelRequest, SemanticNode, TensorType
+    from atlas_mlir_native.reference_eval import host
+
+    rules = json.loads(Path(os.environ["ATLAS_REFERENCE_TEST_RULES"]).read_text())
+    typ = TensorType(shape, "f32", "raw-bit-pattern")
+    node = SemanticNode("r", "source_f32_softmax_unqualified", ("x",), typ,
+                        attrs=(("axis", len(shape) - 1), ("numeric_semantics", "source-f32-softmax-unqualified-v1"),
+                               ("reduction_order", "unresolved")), index_maps=softmax_maps(len(shape)))
+    region = KernelRequest((SemanticNode("x", "input", (), typ, effect="input"), node), ("r",), ("ram",),
+                           (("x", "ram"),), "fixture")
+    # A window split may cut whole rows, never the reduced axis.
+    assert staging.split_rule(region) is None
+    assert all(split.axis != len(shape) - 1 for split in staging.band_rules(region))
+    read = softmax_maps(len(shape))[0]
+    assert [read.apply((*(0,) * len(shape), k))[-1] for k in range(shape[-1])] == list(range(shape[-1]))
+    if shape[0] > 1:
+        assert staging.leading_rows(region, shape[0]) == {"r": "split", "x": "split"}
+    record, function = _compile(tmp_path, region, "f32_softmax")
+    assert record["numeric_semantics"] == "host-softmax-f32-left-fold-div-rne-v1"
+    assert record["host_math_symbols"] == ["merlin_host_expf"]
+    for seed in range(3):
+        rng = np.random.default_rng([20261121, seed, *shape])
+        values = (rng.standard_normal(shape) * rng.choice([1e-3, 1.0, 8.0, 30.0], shape)).astype(np.float32)
+        # Additive-mask magnitudes: the most negative BF16 value and -inf, never a whole row.
+        masked = rng.random(shape) < 0.2
+        masked[..., 0] = False
+        values[masked] = rng.choice(np.float32([-3.3895313892515355e38, -np.inf]), np.count_nonzero(masked))
+        expected = _declared_softmax(values).view(np.uint32)
+        assert np.count_nonzero(expected) > expected.size // 2
+        output = np.full(shape, 0x55555555, np.uint32)
+        status = function(None, (ctypes.c_void_p * 1)(values.ctypes.data_as(ctypes.c_void_p)),
+                          (ctypes.c_void_p * 1)(output.ctypes.data_as(ctypes.c_void_p)))
+        assert status == 0 and np.array_equal(output, expected)
+        reference = host.call("aten._softmax.default", [Tensor(values.view(np.uint32).copy(), "f32"), -1, False],
+                              {}, rules)
+        assert np.array_equal(reference.raw, expected)
+
 def _captured_graph(tmp_path, module, example):
     from m2m.capture.bundle import write_bundle
 
@@ -475,7 +599,11 @@ class _Source(torch.nn.Module):
     ("bf16-silu", ["f32_to_bf16", "bf16_to_f32", "f32_silu", "f32_to_bf16"], None),
     ("x-times-sigmoid", ["source_f32_composite_unqualified", "f32_mul"], None),
     ("rms", None, None),
-    ("softmax", None, None),
+    ("softmax", ["source_f32_softmax_unqualified"], ["atlas.host-f32-softmax"]),
+    ("scaled-masked-softmax", ["f32_mul", "gather", "f32_add", "source_f32_softmax_unqualified"],
+     ["atlas.host-f32-mul", "atlas.layout", "atlas.host-f32-add", "atlas.host-f32-softmax"]),
+    ("hand-softmax", None, None),
+    ("first-axis-softmax", None, None),
     ("f32-layer-norm", None, None),
 ])
 def test_captured_f32_forms_select_only_their_torch_family(tmp_path, form, ops, families):
@@ -485,6 +613,9 @@ def test_captured_f32_forms_select_only_their_torch_family(tmp_path, form, ops, 
         "x-times-sigmoid": lambda x: x * torch.sigmoid(x),
         "rms": lambda x: x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + 1e-5),
         "softmax": lambda x: torch.softmax(x, -1),
+        "scaled-masked-softmax": lambda x: torch.softmax(x * 0.125 + x[..., :1], -1),
+        "hand-softmax": lambda x: (lambda e: e / e.sum(-1, keepdim=True))((x - x.amax(-1, keepdim=True)).exp()),
+        "first-axis-softmax": lambda x: torch.softmax(x, 0),
         "f32-layer-norm": lambda x: torch.nn.functional.layer_norm(x, (24,), eps=1e-5),
     }[form]
     graph = _captured_graph(tmp_path, _Source(function), torch.randn(2, 24))
@@ -495,8 +626,9 @@ def test_captured_f32_forms_select_only_their_torch_family(tmp_path, form, ops, 
         return generate_policy(graph, describe_compiler(), describe_numerical_families(),
                                original_source_sha256="a" * 64, preparation_sha256="b" * 64,
                                selected_family_ids=EXPORT_FAMILIES)
-    if form in {"x-times-sigmoid", "softmax", "f32-layer-norm"}:
-        # A real product with a sigmoid keeps its own rounding; softmax and f32 layer norm have other kernels.
+    if form in {"x-times-sigmoid", "hand-softmax", "first-axis-softmax", "f32-layer-norm"}:
+        # A real product with a sigmoid keeps its own rounding; only a source softmax over the last axis is one
+        # node, and f32 layer norm has another kernel.
         with pytest.raises(PolicyGenerationError):
             select()
         if form != "x-times-sigmoid":

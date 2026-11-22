@@ -227,19 +227,21 @@ class SelectedDecisions:
         self.record["applied"][node_id] = entry
         split = None
         binding = self._bindings.get(node_id)
-        if len(placements) > 1 or (len(rows) > 1 and binding and "ops" not in binding and
-                binding.get("target") in CONTRACTS):
+        routes = sorted({r["implementation"] for r in arithmetic})
+        # The exact casts reproduce the source's own widening and RNE, so the SiLU's placement is the node's.
+        composite_silu = composite_silu_route(node.get("target"), routes)
+        if not composite_silu and (len(placements) > 1 or (len(rows) > 1 and binding and "ops" not in binding and
+                binding.get("target") in CONTRACTS)):
             split = build(rows, self._bindings.get(node_id), node.get("target"))
-        if (len(placements) != 1 and split is None) or not placements <= {"host", "accelerator"}:
+        if (len(placements) != 1 and split is None and not composite_silu) or not placements <= {"host", "accelerator"}:
             raise ValueError("conflicting arithmetic placements for source node " + node_id)
-        rules = {**base_rules, "execution": "device" if "accelerator" in placements else "host", "authenticated_placement": True}
+        execution = composite_silu or ("device" if "accelerator" in placements else "host")
+        rules = {**base_rules, "execution": execution, "authenticated_placement": True}
         if split is not None:
             rules["numerical_stages"] = split
             entry["numerical_stages"] = split
-        routes = sorted({r["implementation"] for r in arithmetic})
         rules["selected_routes"] = routes
         entry["numerical_routes"] = routes
-        composite_silu = composite_silu_route(node.get("target"), routes)
         if "source_exact_float_device" in routes and len(routes) != 1 and not composite_silu and split is None:
             raise ValueError("conflicting exact-float numerical routes for source node " + node_id)
         softmax = [r["id"] for r in arithmetic if r["implementation"] in ("source_softmax", "source_masked_softmax")]

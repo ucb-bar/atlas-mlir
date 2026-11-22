@@ -68,6 +68,9 @@ _FAMILIES = (
     ("host-f32-sum", "host_pointwise", ("source_f32_reduce_add_unqualified",),
      "checked +0-seeded sum of a source f32 mean over the last axis in the pinned torch 2.11.0+cpu cascade order; finite "
      "inputs and results; reductions lowered from other source operations stay refused"),
+    ("host-f32-softmax", "host_pointwise", ("source_f32_softmax_unqualified",),
+     "checked source f32 softmax over the last axis in the declared order host-softmax-f32-left-fold-div-rne-v1 "
+     "(left-fold maximum and sum, pinned correctly rounded expf, one division); not torch eager's vector order"),
     ("host-bf16-contraction", "host_pointwise", ("bf16_affine_contraction",),
      "checked BF16 contraction over one affine loop domain (unfolded convolution); binary32 products (exact unless underflow), ascending binary32 sums"),
     ("host-sign-flip", "host_pointwise", ("bf16_neg",),
