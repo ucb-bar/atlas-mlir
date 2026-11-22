@@ -17,7 +17,7 @@ from atlas_mlir_native.graph_precision import (
 )
 from graph_semantic_checker import bf16_outputs_as_f32, evaluate_selected_graph
 from make_graph_source_fixture import _source_outputs
-from merlin.semantic_compiler.target_binding import verify_native_publication
+from merlin.compiler.semantic.target_binding import verify_native_publication
 from safetensors.numpy import load_file
 
 ROOT = Path(__file__).resolve().parents[2]

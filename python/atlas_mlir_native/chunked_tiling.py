@@ -7,16 +7,10 @@ import json
 from dataclasses import replace
 from pathlib import Path
 
-from merlin.semantic_compiler.buffer_allocation import (
-    Buffer,
-    allocate_buffers,
-    check_buffer_allocation,
-)
-from merlin.semantic_compiler.model import SemanticNode
-from merlin.semantic_compiler.target_binding import (
-    NativeCompilationError,
-    verify_native_publication,
-)
+from merlin.compiler.semantic.search.buffers import Buffer, check_buffer_allocation
+from atlas_mlir_native.work_budget import allocate_native_buffers as allocate_buffers
+from merlin.compiler.semantic.model import SemanticNode
+from merlin.compiler.semantic.target_binding import NativeCompilationError, verify_native_publication
 
 
 def chunk_bodies(request, plan):

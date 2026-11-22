@@ -12,14 +12,9 @@ from atlas_mlir_native.pointwise import (
     prepare_plan,
     prepare_source,
 )
-from merlin.semantic_compiler.model import (
-    KernelRequest,
-    SemanticNode,
-    TensorType,
-    pointwise_identity_maps,
-)
-from merlin.semantic_compiler.target_binding import NativeCompilationError
-from merlin.tests.runtime.test_unary_math_c import policy as math_policy
+from merlin.compiler.semantic.model import KernelRequest, SemanticNode, TensorType, pointwise_identity_maps
+from merlin.compiler.semantic.target_binding import NativeCompilationError
+from atlas_test_fixtures.unary_math_c import policy as math_policy
 
 
 def request(shape=(3, 7), *, shared=False):
@@ -66,7 +61,7 @@ def test_bf16_application_admission_is_explicit_and_preserves_old_policies():
 
 
 def test_bf16_source_numerics_and_constant_domain_are_not_relaxed():
-    from merlin.semantic_compiler.model import ConstantBinding
+    from merlin.compiler.semantic.model import ConstantBinding
 
     source = request()
     output = replace(source.nodes[-1], attrs=(("numeric_semantics", "ieee754-bf16-mul-rtz-v1"),))
@@ -82,7 +77,7 @@ def test_bf16_source_numerics_and_constant_domain_are_not_relaxed():
 @pytest.mark.parametrize("shared", [False, True])
 def test_shared_binary_read_does_not_admit_distinct_value_or_result_overlap(shared):
     from atlas_mlir_native.binding import _check_bf16_selection
-    from merlin.semantic_compiler.allocate import CandidateGraph, Value
+    from merlin.compiler.semantic.search.extraction import CandidateGraph, Value
 
     ids = ("x",) if shared else ("x", "y")
     count = len(ids)
@@ -110,11 +105,8 @@ def test_shared_binary_read_does_not_admit_distinct_value_or_result_overlap(shar
 
 @pytest.mark.skipif(not os.environ.get("ATLAS_OOT_BIN_DIR"), reason="select native Atlas tools")
 def test_shared_bf16_producer_compiles_with_two_ordered_outputs(tmp_path):
-    from merlin.compile.semantic_application import (
-        compile_semantic_application,
-        verify_semantic_application,
-    )
-    from merlin.semantic_compiler.search import SearchLimits
+    from merlin.compiler.build.regions import compile_semantic_application, verify_semantic_application
+    from merlin.compiler.semantic.search.exploration import SearchLimits
     from test_looped_mnk import ROOT, build_snapshot
 
     source = request()
@@ -142,13 +134,10 @@ def test_exact_cast_broadcast_source_compiles_with_one_device_region(tmp_path):
     import shutil
     import subprocess
 
-    from merlin.compile.semantic_application import (
-        compile_semantic_application,
-        verify_semantic_application,
-    )
-    from merlin.semantic_compiler.search import SearchLimits
-    from merlin.semantic_compiler.source_preparation import prepare_source
-    from merlin.tests.ir.test_affine_views import source as broadcast_source
+    from merlin.compiler.build.regions import compile_semantic_application, verify_semantic_application
+    from merlin.compiler.semantic.search.exploration import SearchLimits
+    from atlas_mlir_native.pointwise import prepare_source
+    from atlas_test_fixtures.affine_views import source as broadcast_source
     from test_looped_mnk import ROOT, build_snapshot
 
     policy = fixtures.policy()

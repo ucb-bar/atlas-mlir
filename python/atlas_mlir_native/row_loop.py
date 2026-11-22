@@ -9,10 +9,10 @@ import os
 from dataclasses import dataclass, replace
 from pathlib import Path
 
-from merlin.compile.counted_loop import repeat_state_cfg, simplify_state_cfg
-from merlin.frontends.linalg_mlir import parse_mlir_text
-from merlin.semantic_compiler.target_binding import NativeCompilationError, verify_native_publication
-from merlin.semantic_compiler.tiled_softmax import RowSoftmaxTiling
+from merlin.compiler.schedule.counted_loop import repeat_state_cfg, simplify_state_cfg
+from merlin.compiler.frontend.linalg_mlir import parse_mlir_text
+from merlin.compiler.semantic.target_binding import NativeCompilationError, verify_native_publication
+from merlin.compiler.semantic.tiled_softmax import RowSoftmaxTiling
 
 from .binding import (
     DRAM_BASE,

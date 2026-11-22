@@ -46,9 +46,9 @@ class GuardedSoftmaxTest(unittest.TestCase):
         from atlas_mlir_native.application import AtlasApplicationAdapter
         from atlas_mlir_native.binding import TARGET_IDENTITY
 
-        from merlin.compile.semantic_application import compile_semantic_application, verify_semantic_application
-        from merlin.semantic_compiler.search import SearchLimits
-        from merlin.tests.ir.test_guarded_softmax_source import guarded_graph
+        from merlin.compiler.build.regions import compile_semantic_application, verify_semantic_application
+        from merlin.compiler.semantic.search.exploration import SearchLimits
+        from atlas_test_fixtures.guarded_softmax_source import guarded_graph
 
         cls.temporary = tempfile.TemporaryDirectory(dir=os.environ.get("TMPDIR"))
         cls.root = Path(cls.temporary.name)
@@ -80,7 +80,7 @@ class GuardedSoftmaxTest(unittest.TestCase):
     def test_explicit_policy_one_program_and_mixed_source_C_interface(self):
         from atlas_mlir_native.application import AtlasApplicationAdapter
 
-        from merlin.semantic_compiler.target_binding import NativeCompilationError
+        from merlin.compiler.semantic.target_binding import NativeCompilationError
 
         self.assertEqual(self.check["status"], "checked")
         self.assertEqual(len(self.manifest["segments"]), 1)

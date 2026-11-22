@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from math import prod
 
-from merlin.compile.c_sources import c_source_pair
+from merlin.compiler.lower.c.dispatch import c_source_pair
 
 from .c_runtime import program_array, runtime_members
 

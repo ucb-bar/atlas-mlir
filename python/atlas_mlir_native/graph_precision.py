@@ -12,23 +12,10 @@ import json
 import struct
 from dataclasses import dataclass, replace
 
-from merlin.semantic_compiler.linalg_bridge import (
-    LinalgBridgeError,
-    translate_linalg_text,
-)
-from merlin.semantic_compiler.model import (
-    ConstantBinding,
-    IndexMap,
-    KernelRequest,
-    SemanticNode,
-    TensorType,
-    pointwise_identity_maps,
-)
-from merlin.semantic_compiler.precision_values import (
-    FloatBoundarySpec,
-    contraction_restore_exponent,
-)
-from merlin.semantic_compiler.softmax_source import RowSoftmaxSource
+from merlin.compiler.semantic.linalg.linalg_bridge import LinalgBridgeError, translate_linalg_text
+from merlin.compiler.semantic.model import ConstantBinding, IndexMap, KernelRequest, SemanticNode, TensorType, pointwise_identity_maps
+from merlin.compiler.quantization.contraction.values import FloatBoundarySpec, contraction_restore_exponent
+from merlin.compiler.schedule.elementwise.row_softmax import RowSoftmaxSource
 
 from .binding import (
     BF16_ADD_ATTRS,

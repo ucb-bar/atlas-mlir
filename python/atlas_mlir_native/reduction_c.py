@@ -8,9 +8,9 @@ import os
 from math import prod
 from pathlib import Path
 
-from merlin.compile.c_conversions import render_f32_array_c
-from merlin.compile.c_reduction import render_reduction_c
-from merlin.semantic_compiler.target_binding import verify_native_publication
+from merlin.compiler.lower.c.conversions import render_f32_array_c
+from merlin.compiler.lower.c.reduction import render_reduction_c
+from merlin.compiler.semantic.target_binding import verify_native_publication
 
 from .binding import (
     DRAM_BASE,

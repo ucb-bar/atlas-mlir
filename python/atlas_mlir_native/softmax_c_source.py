@@ -5,12 +5,12 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from merlin.compile.c_conversions import render_f32_operand_c
-from merlin.frontends.compile_inputs import load_compile_inputs
-from merlin.semantic_compiler.guarded_softmax_source import GuardedMaskedRowSoftmaxSource
-from merlin.semantic_compiler.model import TensorType
-from merlin.semantic_compiler.precision_intake import SourceValueRef
-from merlin.semantic_compiler.precision_transform import BoundaryConversion
+from merlin.compiler.lower.c.conversions import render_f32_operand_c
+from merlin.compiler.frontend.inputs import load_compile_inputs
+from merlin.compiler.semantic.linalg.guarded_softmax_source import GuardedMaskedRowSoftmaxSource
+from merlin.compiler.semantic.model import TensorType
+from merlin.compiler.quantization.contraction.intake import SourceValueRef
+from merlin.compiler.quantization.contraction.transform import BoundaryConversion
 
 from .softmax_precision import input_spec, lower_source_softmax
 
@@ -71,7 +71,7 @@ def render_source_interface(precision, name: str, raw_workspace: int):
     if masked:
         from math import prod
 
-        from merlin.compile.c_softmax_mask import render_masked_softmax_inputs
+        from merlin.compiler.lower.c.softmax_mask import render_masked_softmax_inputs
 
         region = precision.source_region
         mask_bytes = prod(region.mask_shape) * (1 if guarded else 4)

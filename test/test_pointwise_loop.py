@@ -187,7 +187,7 @@ class PointwiseLoopTest(unittest.TestCase):
         self._check_pointwise_cases(bf16_sources=False, affine_cast=True)
 
     def test_large_io_window_executes_in_one_launch_per_invocation(self):
-        from merlin.semantic_compiler.codegen import CodegenOptions, codegen_options
+        from atlas_mlir_native.options import CodegenOptions, codegen_options
 
         with codegen_options(CodegenOptions(io_memory_bytes=1048576)):
             self._check_pointwise_cases(bf16_sources=False, large=True)
@@ -207,18 +207,10 @@ class PointwiseLoopTest(unittest.TestCase):
             prepare_source,
         )
         from atlas_mlir_native.pointwise_c import prepare_c_package
-        from merlin.semantic_compiler.model import (
-            IndexMap,
-            KernelRequest,
-            SemanticNode,
-            TensorType,
-            pointwise_identity_maps,
-        )
-        from merlin.semantic_compiler.pointwise_tiling import (
-            materialize_pointwise_input,
-        )
-        from merlin.semantic_compiler.reference import TensorValue, evaluate_graph
-        from merlin.semantic_compiler.search import SearchLimits
+        from merlin.compiler.semantic.model import IndexMap, KernelRequest, SemanticNode, TensorType, pointwise_identity_maps
+        from merlin.compiler.transforms.pointwise import materialize_pointwise_input
+        from merlin.compiler.semantic.reference import TensorValue, evaluate_graph
+        from merlin.compiler.semantic.search.exploration import SearchLimits
         from npu_model.configs import isa_definition as isa
         from npu_model.configs.hardware.default import DefaultHardwareConfig
         from npu_model.logging import LoggerConfig
@@ -403,15 +395,9 @@ class PointwiseLoopTest(unittest.TestCase):
                     )
                     original_source = folding = None
                     if affine_cast:
-                        from merlin.compile.semantic_regions import (
-                            extract_semantic_region,
-                        )
-                        from merlin.semantic_compiler.source_preparation import (
-                            prepare_source as prepare_full_source,
-                        )
-                        from merlin.tests.ir.test_affine_views import (
-                            source as broadcast_source,
-                        )
+                        from merlin.compiler.partition.semantic_regions import extract_semantic_region
+                        from merlin.compiler.semantic.source_preparation import prepare_source as prepare_full_source
+                        from atlas_test_fixtures.affine_views import source as broadcast_source
 
                         original_source = dataclasses.replace(
                             broadcast_source(shape=shape), target_identity=source.target_identity,

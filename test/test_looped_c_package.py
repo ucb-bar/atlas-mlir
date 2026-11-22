@@ -57,7 +57,7 @@ class LoopedCPackageTest(unittest.TestCase):
             cls.cases.append((shape, target, package, record, execution))
         from atlas_mlir_native.binding import AtlasNativeBinding
 
-        from merlin.semantic_compiler.search import SearchLimits
+        from merlin.compiler.semantic.search.exploration import SearchLimits
 
         for shape, relu in (((1, 2, 4097), True), ((1, 2, 8193), False)):
             target = cls.root / ("chunked_" + "_".join(map(str, shape)))

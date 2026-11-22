@@ -62,7 +62,7 @@ def prepare_source_wrappers(
         if precision.request.digest() != source.digest() or manifest.get("constant_inputs"):
             raise ValueError("semantic contraction differs from the checked native source")
     elif compile_inputs is not None:
-        from merlin.frontends.compile_inputs import load_compile_inputs
+        from merlin.compiler.frontend.inputs import load_compile_inputs
 
         from .binding import AtlasNativeBinding
 
@@ -85,7 +85,7 @@ def prepare_source_wrappers(
                 raise ValueError("source-bound parameter bytes differ from the looped publication")
     if precision is not None:
         from merlin.common.paths import runtime_dir
-        from merlin.compile.c_conversions import render_f32_operand_c
+        from merlin.compiler.lower.c.conversions import render_f32_operand_c
 
         constants = {item.role: item for item in static}
         arguments, embedded, runtime_inputs, runtime_conversions = [], [], [], []
@@ -189,7 +189,7 @@ _Static_assert(sizeof(float) == 4 && FLT_RADIX == 2 && FLT_MANT_DIG == 24 && FLT
 """ + "\n".join(conversions)
         decode_bits = "((uint32_t)result[2*i] | ((uint32_t)result[2*i+1]<<8))<<16"
         if precision.output.spec.post_decode_scale_exponent:
-            from merlin.compile.c_conversions import render_bf16_decode_c
+            from merlin.compiler.lower.c.conversions import render_bf16_decode_c
 
             decoder = name + "_decode_source_result"
             conversion_source += render_bf16_decode_c(precision.output.spec, decoder)

@@ -17,12 +17,7 @@ def pack_request(shape=(32, 288), code=127):
         ROUNDED_PACK_POLICY,
         TARGET_IDENTITY,
     )
-    from merlin.semantic_compiler.model import (
-        KernelRequest,
-        SemanticNode,
-        TensorType,
-        pointwise_identity_maps,
-    )
+    from merlin.compiler.semantic.model import KernelRequest, SemanticNode, TensorType, pointwise_identity_maps
 
     source = SemanticNode(
         "x",
@@ -52,11 +47,7 @@ def pack_request(shape=(32, 288), code=127):
 
 def connected_request(hidden):
     from atlas_mlir_native.binding import BF16_RELU_ATTRS
-    from merlin.semantic_compiler.model import (
-        SemanticNode,
-        TensorType,
-        pointwise_identity_maps,
-    )
+    from merlin.compiler.semantic.model import SemanticNode, TensorType, pointwise_identity_maps
 
     first = source_request(32, hidden, 32)
     last = source_request(32, 32, hidden)
@@ -93,12 +84,7 @@ class ResidentGraphTest(unittest.TestCase):
         from atlas_mlir_native.layout import pack_bf16_matrix
         from atlas_mlir_native.pointwise import prepare_plan
         from atlas_mlir_native.resident_graph import boundary_request, memory_plan
-        from merlin.semantic_compiler.model import (
-            ConstantBinding,
-            SemanticNode,
-            TensorType,
-            pointwise_identity_maps,
-        )
+        from merlin.compiler.semantic.model import ConstantBinding, SemanticNode, TensorType, pointwise_identity_maps
 
         request = connected_request(64)
         a, w1, w2, dot, activation, packed, result = request.nodes
@@ -170,7 +156,7 @@ class ResidentGraphTest(unittest.TestCase):
 
     def test_internal_tails_and_excess_memory_are_explicit_refusals(self):
         from atlas_mlir_native.resident_graph import memory_plan
-        from merlin.semantic_compiler.target_binding import NativeCompilationError
+        from merlin.compiler.semantic.target_binding import NativeCompilationError
 
         for width, status in ((65, "unsupported_semantics"), (2048, "resource_limit")):
             with self.assertRaises(NativeCompilationError) as caught:
@@ -179,7 +165,7 @@ class ResidentGraphTest(unittest.TestCase):
 
     def test_pack_layout_size_and_signature_mutations(self):
         from atlas_mlir_native.pack_tiling import prepare_plan, virtual_program
-        from merlin.semantic_compiler.target_binding import NativeCompilationError
+        from merlin.compiler.semantic.target_binding import NativeCompilationError
 
         request = pack_request()
         plan = prepare_plan(request)
@@ -209,8 +195,8 @@ class ResidentGraphTest(unittest.TestCase):
 
     def test_pack_body_uses_the_native_selector(self):
         from atlas_mlir_native.pack_tiling import prepare_plan, select_body
-        from merlin.semantic_compiler.search import SearchLimits
-        from merlin.semantic_compiler.snapshot import open_native_snapshot
+        from merlin.compiler.semantic.search.exploration import SearchLimits
+        from merlin.compiler.semantic.target_binding import open_native_snapshot
         from test_looped_mnk import build_snapshot
 
         with tempfile.TemporaryDirectory(dir=os.environ.get("TMPDIR")) as directory:

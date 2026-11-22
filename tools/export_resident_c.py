@@ -25,10 +25,7 @@ def prepare(compiled, compile_inputs, policy_path, name, *, target_source):
     from atlas_mlir_native.resident_graph import memory_plan
 
     from merlin.compile.c_sources import c_source_pair
-    from merlin.frontends.compile_inputs import (
-        load_compile_inputs,
-        load_lifted_argument_bytes,
-    )
+    from merlin.frontends.compile_inputs import load_compile_inputs, load_lifted_argument_bytes
     from merlin.semantic_compiler.model import KernelRequest
     from merlin.semantic_compiler.target_binding import verify_native_publication
 

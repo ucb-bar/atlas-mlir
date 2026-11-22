@@ -6,10 +6,10 @@ import pytest
 import test_application_float_arithmetic as fixtures
 from atlas_mlir_native.application import AtlasApplicationAdapter
 
-from merlin.compile.c_unary_math import OPERATIONS
-from merlin.semantic_compiler.target_binding import NativeCompilationError
-from merlin.tests.runtime.test_unary_math_c import policy as math_policy
-from merlin.tests.runtime.test_unary_math_c import request
+from merlin.compiler.lower.c.unary_math import OPERATIONS
+from merlin.compiler.semantic.target_binding import NativeCompilationError
+from atlas_test_fixtures.unary_math_c import policy as math_policy
+from atlas_test_fixtures.unary_math_c import request
 
 
 @pytest.mark.parametrize("operation", sorted(OPERATIONS))

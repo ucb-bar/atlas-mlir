@@ -14,12 +14,8 @@ from dataclasses import dataclass, replace
 from math import prod
 from pathlib import Path
 
-from merlin.semantic_compiler.model import (
-    KernelRequest,
-    TensorType,
-    pointwise_identity_maps,
-)
-from merlin.semantic_compiler.target_binding import NativeCompilationError
+from merlin.compiler.semantic.model import KernelRequest, TensorType, pointwise_identity_maps
+from merlin.compiler.semantic.target_binding import NativeCompilationError
 
 from .binding import (
     PACK_RULE_BY_POLICY,
@@ -275,7 +271,7 @@ def compile_pack(
             "compile_error", "pack bindings must be nonnegative allocation slots"
         )
     addresses = tuple(DRAM_BASE + slot * TILE_BYTES for slot in slots)
-    from merlin.semantic_compiler.codegen import current_codegen_options
+    from atlas_mlir_native.options import current_codegen_options
 
     virtual = virtual_program(
         plan, *addresses, size_limit=current_codegen_options().program_size_limit_bytes

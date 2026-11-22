@@ -215,10 +215,7 @@ def prepare(tiles_root: Path, host_map: Path, packer_header: Path,
             boundary_header: Path, *, staged_root: Path | None = None) -> tuple[dict[str, bytes], dict]:
     from atlas_mlir_native.binding import AtlasNativeBinding
     from merlin.frontends.compile_inputs import load_compile_inputs
-    from merlin.semantic_compiler.precision_codegen import (
-        finite_f32_codebook,
-        render_finite_f32_codebook_c,
-    )
+    from merlin.semantic_compiler.precision_codegen import finite_f32_codebook, render_finite_f32_codebook_c
     from merlin.semantic_compiler.precision_values import FloatBoundarySpec
 
     if (packer_header.name != "row_major_k_window.h" or packer_header.is_symlink()

@@ -7,6 +7,7 @@ name = "atlas-mlir-native-support"
 version = "0.1.0"
 description = "Atlas out-of-tree binding for Merlin native compilation"
 requires-python = ">=3.11"
+dependencies = ["merlin[semantic-search] @ https://github.com/ucb-bar/merlin/archive/5706178219c5eb888bb61c22ad847d6b479b8e70.zip"]
 
 [project.optional-dependencies]
 test = ["pytest", "numpy", "safetensors"]

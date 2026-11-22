@@ -5,18 +5,11 @@ from __future__ import annotations
 import hashlib
 import json
 
-from merlin.semantic_compiler.guarded_softmax_source import recognize_guarded_masked_row_softmax
-from merlin.semantic_compiler.linalg_bridge import (
-    LinalgBridgeError,
-    translate_linalg_text,
-)
-from merlin.semantic_compiler.model import KernelRequest, SemanticNode, TensorType
-from merlin.semantic_compiler.precision_values import FloatBoundarySpec
-from merlin.semantic_compiler.softmax_source import (
-    MaskedRowSoftmaxSource,
-    recognize_masked_row_softmax,
-    recognize_row_softmax,
-)
+from merlin.compiler.semantic.linalg.guarded_softmax_source import recognize_guarded_masked_row_softmax
+from merlin.compiler.semantic.linalg.linalg_bridge import LinalgBridgeError, translate_linalg_text
+from merlin.compiler.semantic.model import KernelRequest, SemanticNode, TensorType
+from merlin.compiler.quantization.contraction.values import FloatBoundarySpec
+from merlin.compiler.semantic.linalg.softmax_source import MaskedRowSoftmaxSource, recognize_masked_row_softmax, recognize_row_softmax
 
 from .binding import TARGET_IDENTITY
 from .graph_precision import DiagnosticGraphPrecision

@@ -1,0 +1,104 @@
+{
+  "schema": "merlin.soc_description.v1",
+  "resources": [
+    {
+      "id": "penguin.host",
+      "clock_domain": "host",
+      "scratchpad_bytes": 65536,
+      "evidence": "Chipyard generators/chipyard/src/main/scala/config/AbstractConfig.scala: WithMbusScratchpad(base = 0x08000000, size = 64 * 1024)"
+    },
+    {
+      "id": "penguin.uart0",
+      "clock_domain": "host",
+      "scratchpad_bytes": null,
+      "baud": 115200,
+      "evidence": "Baremetal-IDE platform/penguin26/CMakeLists.txt PENGUIN26_UART_BAUDRATE default 115200, the rate the bench receiver used for the 100 MHz divisor-867 kits"
+    },
+    {
+      "id": "atlas.data_banks_3_5",
+      "clock_domain": "atlas",
+      "scratchpad_bytes": 786432,
+      "evidence": "Atlas RTL src/main/scala/atlas/scalar/ScalarCore.scala AtlasMemMap: VMEM_BASE 0x2000_0000, VMEM_SIZE 1.5 MiB in six 256 KiB banks; banks 3 to 5 are the compiler's data window by Atlas convention"
+    },
+    {
+      "id": "atlas.imem",
+      "clock_domain": "atlas",
+      "scratchpad_bytes": 131072,
+      "evidence": "Atlas RTL src/main/scala/atlas/scalar/ScalarCore.scala AtlasMemMap: IMEM_SIZE 0x0002_0000"
+    },
+    {
+      "id": "atlas.csr",
+      "clock_domain": "atlas",
+      "scratchpad_bytes": null,
+      "address": 262144,
+      "evidence": "Atlas RTL src/main/scala/atlas/scalar/ScalarCore.scala AtlasMemMap: CSR_BASE 0x0004_0000"
+    },
+    {
+      "id": "sophialake.ddr",
+      "clock_domain": null,
+      "scratchpad_bytes": null,
+      "evidence": "external DDR controller on the SophiaLake board"
+    },
+    {
+      "id": "atlas.dma",
+      "clock_domain": "atlas",
+      "scratchpad_bytes": null,
+      "evidence": "Atlas RTL ScalarCore DMA addressing: dmaBaseReg concatenated with a 32-bit operand; with the upper half zero the operand reaches 0x80000000 to 0xFFFFFFFF"
+    }
+  ],
+  "clocks": [
+    {
+      "id": "host",
+      "frequency_hz": 100000000,
+      "evidence": "operator-stated bench host clock, unmeasured; selects the compiled UART divisor"
+    },
+    {
+      "id": "atlas",
+      "frequency_hz": null,
+      "evidence": "accelerator frequency not established by selected sources"
+    }
+  ],
+  "board_program": {
+    "start": "tsi",
+    "completion": "tohost",
+    "evidence": "Both known DDR hosts load and start the chip over TSI and end the run on its tohost write: the FireSim tethered image (chipyard generators/firechip/chip/src/main/scala/Penguin26Configs.scala FireSimPenguin26BringupHostConfig, TSI bridge with loadmem into the bring-up DRAM, start and tohost over UART-TSI) and the SophiaLake bring-up host (bringup-chipyard afc886a fpga/src/main/scala/SophiaLake/Configs.scala WithUARTTSIClient). Puffin's host is unconfirmed"
+  },
+  "memory_regions": [
+    {
+      "id": "host_scratch",
+      "base": 134217728,
+      "capacity_bytes": 65536,
+      "owner": "penguin.host",
+      "evidence": "Chipyard generators/chipyard/src/main/scala/config/AbstractConfig.scala: WithMbusScratchpad(base = 0x08000000, size = 64 * 1024)"
+    },
+    {
+      "id": "atlas_data",
+      "base": 537657344,
+      "capacity_bytes": 786432,
+      "owner": "atlas.data_banks_3_5",
+      "evidence": "Atlas RTL src/main/scala/atlas/scalar/ScalarCore.scala AtlasMemMap: VMEM_BASE 0x2000_0000 plus three 256 KiB banks"
+    },
+    {
+      "id": "atlas_imem",
+      "base": 131072,
+      "capacity_bytes": 131072,
+      "owner": "atlas.imem",
+      "evidence": "Atlas RTL src/main/scala/atlas/scalar/ScalarCore.scala AtlasMemMap: IMEM_BASE 0x0002_0000, IMEM_SIZE 0x0002_0000"
+    },
+    {
+      "id": "ddr",
+      "base": 2147483648,
+      "capacity_bytes": 1073741824,
+      "owner": "sophialake.ddr",
+      "evidence": "Chipyard generators/chipyard/src/main/scala/config/EE290Configs.scala WithEE290TapeoutPeripherals: off-chip memory at 0x80000000; 1 GiB populated on the SophiaLake board"
+    },
+    {
+      "id": "dma",
+      "base": 2147483648,
+      "capacity_bytes": 2147483648,
+      "owner": "atlas.dma",
+      "address_space": "dma",
+      "evidence": "Atlas RTL ScalarCore DMA addressing with dmaBaseReg zero: a 32-bit operand from off-chip memory base 0x80000000"
+    }
+  ]
+}

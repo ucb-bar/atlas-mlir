@@ -15,14 +15,9 @@ from atlas_mlir_native.binding import (
     dram_slots,
 )
 from atlas_mlir_native.pointwise import plan_abi, prepare_plan, prepare_source
-from merlin.semantic_compiler.codegen import CodegenOptions, codegen_options
-from merlin.semantic_compiler.model import (
-    KernelRequest,
-    SemanticNode,
-    TensorType,
-    pointwise_identity_maps,
-)
-from merlin.semantic_compiler.target_binding import NativeCompilationError
+from atlas_mlir_native.options import CodegenOptions, codegen_options
+from merlin.compiler.semantic.model import KernelRequest, SemanticNode, TensorType, pointwise_identity_maps
+from merlin.compiler.semantic.target_binding import NativeCompilationError
 
 
 def source(shape=(1, 15, 50, 163)):

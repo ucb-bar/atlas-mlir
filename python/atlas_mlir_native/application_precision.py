@@ -5,12 +5,12 @@ from __future__ import annotations
 from dataclasses import replace
 from hashlib import sha256
 
-from merlin.compile.semantic_regions import extract_semantic_region
-from merlin.semantic_compiler.contraction_precision import lower_semantic_contraction
-from merlin.semantic_compiler.model import SemanticNode, pointwise_identity_maps
-from merlin.semantic_compiler.precision_intake import SourceValueRef
-from merlin.semantic_compiler.precision_values import contraction_restore_exponent
-from merlin.semantic_compiler.target_binding import NativeCompilationError
+from merlin.compiler.partition.semantic_regions import extract_semantic_region
+from merlin.compiler.quantization.contraction.lowering import lower_semantic_contraction
+from merlin.compiler.semantic.model import SemanticNode, pointwise_identity_maps
+from merlin.compiler.quantization.contraction.intake import SourceValueRef
+from merlin.compiler.quantization.contraction.values import contraction_restore_exponent
+from merlin.compiler.semantic.target_binding import NativeCompilationError
 
 from .binding import (
     BF16_RELU_ATTRS,
@@ -94,9 +94,7 @@ def prepare_contraction(source, *, operand_scale_exponents=None, epilogue=None):
             selected_decision=(*profile.selected_decision, ("epilogue", epilogue)),
         )
     if len(contraction_source.node(contraction_source.outputs[0]).type.shape) > 2:
-        from merlin.semantic_compiler.batched_contraction import (
-            lower_batched_contraction,
-        )
+        from merlin.compiler.quantization.contraction.batched import lower_batched_contraction
 
         if epilogue is not None:
             raise ValueError("batched contraction epilogues require a separate checked lowering")

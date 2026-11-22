@@ -30,12 +30,7 @@ class MXU1FiniteGraphReferenceTest(unittest.TestCase):
 
     @staticmethod
     def request():
-        from merlin.semantic_compiler.model import (
-            IndexMap,
-            KernelRequest,
-            SemanticNode,
-            TensorType,
-        )
+        from merlin.compiler.semantic.model import IndexMap, KernelRequest, SemanticNode, TensorType
 
         operand = TensorType((32, 32), "fp8_e4m3", "raw-bit-pattern")
         result = TensorType((32, 32), "bf16", POLICY)
@@ -60,7 +55,7 @@ class MXU1FiniteGraphReferenceTest(unittest.TestCase):
     @staticmethod
     def evaluate(request, lhs: bytes, rhs: bytes):
         from atlas_mlir_native.reference import evaluate_mxu1_finite_reset
-        from merlin.semantic_compiler.reference import TensorValue, evaluate_graph
+        from merlin.compiler.semantic.reference import TensorValue, evaluate_graph
 
         return evaluate_graph(
             request,

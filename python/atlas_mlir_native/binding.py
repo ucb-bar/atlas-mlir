@@ -16,44 +16,16 @@ from collections import Counter
 from dataclasses import dataclass, replace
 from pathlib import Path
 
-from merlin.frontends.compile_inputs import StagedCompileInputs
-from merlin.semantic_compiler.allocate import (
-    AllocationResult,
-    CandidateGraph,
-    StorageBank,
-    check_assignment,
-)
-from merlin.semantic_compiler.model import (
-    IndexMap,
-    KernelRequest,
-    TensorType,
-    pointwise_identity_maps,
-)
-from merlin.semantic_compiler.precision_constants import (
-    PreparedStaticInput,
-    load_declared_static_operand,
-)
-from merlin.semantic_compiler.precision_transform import (
-    DiagnosticMatmulTile,
-    MatmulTileProfile,
-    build_diagnostic_batched_matmul_tiles,
-    build_diagnostic_matmul_tile,
-    build_diagnostic_matmul_tiles,
-)
-from merlin.semantic_compiler.precision_values import FloatBoundarySpec
-from merlin.semantic_compiler.rules import (
-    AddressConstraint,
-    AxisBound,
-    InstructionDescriptor,
-    IntegerAttributeBound,
-)
-from merlin.semantic_compiler.search import (
-    MaterializationDecision,
-    SearchLimits,
-    SearchResult,
-)
-from merlin.semantic_compiler.snapshot import NativeSnapshot, NativeTargetProfile
-from merlin.semantic_compiler.target_binding import NativeCompilationError
+from merlin.compiler.frontend.inputs import StagedCompileInputs
+from merlin.compiler.semantic.search.allocation import AllocationResult, CandidateGraph, StorageBank, check_assignment
+from merlin.compiler.semantic.model import IndexMap, KernelRequest, TensorType, pointwise_identity_maps
+from merlin.compiler.quantization.contraction.constants import PreparedStaticInput, load_declared_static_operand
+from merlin.compiler.quantization.contraction.transform import DiagnosticMatmulTile, MatmulTileProfile, build_diagnostic_batched_matmul_tiles, build_diagnostic_matmul_tile, build_diagnostic_matmul_tiles
+from merlin.compiler.quantization.contraction.values import FloatBoundarySpec
+from merlin.compiler.semantic.rules import AddressConstraint, AxisBound, InstructionDescriptor, IntegerAttributeBound
+from merlin.compiler.semantic.search.exploration import MaterializationDecision, SearchLimits, SearchResult
+from merlin.compiler.semantic.target_binding import NativeSnapshot, NativeTargetProfile
+from merlin.compiler.semantic.target_binding import NativeCompilationError
 
 from .layout import pack_bf16_pair_halves
 from .pack_lane import ROUNDED_PACK_DOMAIN, ROUNDED_PACK_POLICY
@@ -228,7 +200,7 @@ def dram_slots():
     platform mapping, cache policy or additional VMEM/register capacity.
     The current host buffer ABI admits only 32-bit device addresses.
     """
-    from merlin.semantic_compiler.codegen import current_codegen_options
+    from atlas_mlir_native.options import current_codegen_options
 
     size = current_codegen_options().io_memory_bytes
     if size is None:
@@ -253,12 +225,14 @@ NATIVE_CHECKS = ("--verify-atlas-generated-schedule", "--verify-atlas-machine-st
 
 
 def _native_pipeline() -> str:
-    pipeline = os.environ.get("ATLAS_NATIVE_PIPELINE", "mandatory")
-    if pipeline not in NATIVE_PIPELINES:
-        raise NativeCompilationError(
-            "unsupported_semantics", "ATLAS_NATIVE_PIPELINE must be mandatory or optimized"
-        )
-    return pipeline
+    from atlas_mlir_native.options import current_codegen_options
+    return current_codegen_options().native_pipeline
+
+def _scheduled_virtual_pipeline(pipeline=None):
+    """Schedule virtual IR, retaining the selected physical timing policy."""
+    pipeline = _native_pipeline() if pipeline is None else pipeline
+    stages = NATIVE_PIPELINES[pipeline]
+    return ("--atlas-compile-schedule", *stages) if pipeline == "mandatory" else stages
 
 
 def _scaled_pack_code(node) -> int | None:
@@ -759,7 +733,7 @@ def _sha256(data: bytes) -> str:
 
 
 def _run(command: list[str], *, input_text: str) -> str:
-    from merlin.semantic_compiler.codegen import current_codegen_options
+    from atlas_mlir_native.options import current_codegen_options
 
     budget = current_codegen_options().program_size_limit_bytes
     if budget is not None:
@@ -2584,7 +2558,8 @@ class AtlasNativeBinding:
     @staticmethod
     def plan_boundary_abi(request: KernelRequest) -> dict:
         """Place current tile inputs/constants and outputs without source-ID tables."""
-        from merlin.semantic_compiler.buffer_allocation import Buffer, allocate_buffers
+        from merlin.compiler.semantic.search.buffers import Buffer
+        from .work_budget import allocate_native_buffers as allocate_buffers
 
         from .looped_tiling import (
             is_looped_request,
@@ -2654,10 +2629,7 @@ class AtlasNativeBinding:
     @staticmethod
     def prepare_ordered_mn(request: KernelRequest, tile_m: int, tile_n: int):
         """Qualify independent MXU0 output tiles and positive-zero tail rows."""
-        from merlin.semantic_compiler.ordered_mn_tiling import (
-            OrderedMNTilingError,
-            partition_ordered_matmul_mn,
-        )
+        from merlin.compiler.transforms.tiling import OrderedMNTilingError, partition_ordered_matmul_mn
 
         descriptor = next(item for item in AtlasNativeBinding.profile().descriptors
                           if item.name == "atlas.mxu0_reset_acc_tile")
@@ -2689,10 +2661,7 @@ class AtlasNativeBinding:
     @staticmethod
     def prepare_ordered_k(request: KernelRequest, tile_k: int):
         """Qualify MXU0 K windows with any short tile before real elements."""
-        from merlin.semantic_compiler.ordered_k_tiling import (
-            OrderedKTilingError,
-            partition_ordered_matmul_k,
-        )
+        from merlin.compiler.transforms.tiling import OrderedKTilingError, partition_ordered_matmul_k
 
         descriptor = next(item for item in AtlasNativeBinding.profile().descriptors
                           if item.name == "atlas.mxu0_reset_acc_tile")
@@ -2866,9 +2835,7 @@ class AtlasNativeBinding:
                 )
             try:
                 if plan.whole_contraction:
-                    from merlin.semantic_compiler.ordered_mnk_tiling import (
-                        materialize_looped_mnk_operand,
-                    )
+                    from merlin.compiler.transforms.tiling import materialize_looped_mnk_operand
 
                     from .looped_tiling import prepare_plan
 
@@ -4040,7 +4007,7 @@ class AtlasNativeBinding:
         if constant_rows:
             plan["constant_inputs"] = constant_rows
         if mxu_dag:
-            from merlin.semantic_compiler.codegen import current_codegen_options
+            from atlas_mlir_native.options import current_codegen_options
 
             plan["codegen"] = {
                 "requested_reduction_unroll": current_codegen_options().reduction_unroll,

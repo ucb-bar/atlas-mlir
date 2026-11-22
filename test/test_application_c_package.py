@@ -23,10 +23,10 @@ class ApplicationLayoutPolicyTest(unittest.TestCase):
         from atlas_mlir_native.application import AtlasApplicationAdapter
         from test_looped_mnk import build_snapshot
 
-        from merlin.compile.semantic_application import compile_semantic_application, verify_semantic_application
-        from merlin.semantic_compiler.constant_folding import fold_source_constants
-        from merlin.semantic_compiler.linalg_bridge import translate_linalg_text
-        from merlin.semantic_compiler.search import SearchLimits
+        from merlin.compiler.build.regions import compile_semantic_application, verify_semantic_application
+        from merlin.compiler.semantic.constant_folding import fold_source_constants
+        from merlin.compiler.semantic.linalg.linalg_bridge import translate_linalg_text
+        from merlin.compiler.semantic.search.exploration import SearchLimits
 
         policy = self.policy()
         original = translate_linalg_text(
@@ -91,8 +91,8 @@ class ApplicationLayoutPolicyTest(unittest.TestCase):
         from atlas_mlir_native.application import AtlasApplicationAdapter
         from test_looped_mnk import build_snapshot
 
-        from merlin.semantic_compiler.search import SearchLimits
-        from merlin.tests.runtime.test_batched_c import source_graph
+        from merlin.compiler.semantic.search.exploration import SearchLimits
+        from atlas_test_fixtures.batched_c import source_graph
 
         source = source_graph((2,))
         shapes = ((2, 1, 4097), (2, 4097, 2), (2, 1, 2), (2, 1, 2))
@@ -148,9 +148,9 @@ class ApplicationLayoutPolicyTest(unittest.TestCase):
         from atlas_mlir_native.row_softmax import MASKED_SOFTMAX_POLICY
         from atlas_mlir_native.sigmoid import SIGMOID_POLICY
 
-        from merlin.semantic_compiler.linalg_bridge import translate_linalg_text
-        from merlin.semantic_compiler.target_binding import NativeCompilationError
-        from merlin.tests.runtime.test_indexed_update_c import source_text
+        from merlin.compiler.semantic.linalg.linalg_bridge import translate_linalg_text
+        from merlin.compiler.semantic.target_binding import NativeCompilationError
+        from atlas_test_fixtures.indexed_update_c import source_text
 
         old = {
             **self.policy(),
@@ -186,8 +186,8 @@ class ApplicationLayoutPolicyTest(unittest.TestCase):
     def test_batched_relu_keeps_separate_native_regions_when_fusion_is_unavailable(self):
         from atlas_mlir_native.application import AtlasApplicationAdapter
 
-        from merlin.semantic_compiler.model import SemanticNode, pointwise_identity_maps
-        from merlin.tests.runtime.test_batched_c import source_graph
+        from merlin.compiler.semantic.model import SemanticNode, pointwise_identity_maps
+        from atlas_test_fixtures.batched_c import source_graph
 
         policy = self.policy()
         adapter = AtlasApplicationAdapter(policy, original_source_sha256=policy["source_sha256"])
@@ -224,14 +224,9 @@ class ApplicationLayoutPolicyTest(unittest.TestCase):
         from atlas_mlir_native.sigmoid import SIGMOID_POLICY
         from atlas_mlir_native.softmax_precision import lower_semantic_softmax
 
-        from merlin.semantic_compiler.model import (
-            IndexMap,
-            SemanticNode,
-            TensorType,
-            pointwise_identity_maps,
-        )
-        from merlin.semantic_compiler.target_binding import NativeCompilationError
-        from merlin.tests.ir.test_softmax_source import source_graph
+        from merlin.compiler.semantic.model import IndexMap, SemanticNode, TensorType, pointwise_identity_maps
+        from merlin.compiler.semantic.target_binding import NativeCompilationError
+        from atlas_test_fixtures.batched_c import source_graph
 
         old = {
             **self.policy(),
@@ -293,12 +288,8 @@ class ApplicationLayoutPolicyTest(unittest.TestCase):
         from atlas_mlir_native.pointwise_math import MATH_POLICY
         from atlas_mlir_native.reduction import REDUCTION_POLICY
 
-        from merlin.semantic_compiler.model import (
-            KernelRequest,
-            SemanticNode,
-            TensorType,
-        )
-        from merlin.semantic_compiler.target_binding import NativeCompilationError
+        from merlin.compiler.semantic.model import KernelRequest, SemanticNode, TensorType
+        from merlin.compiler.semantic.target_binding import NativeCompilationError
 
         policy = {
             **self.policy(),
@@ -396,9 +387,9 @@ class ApplicationLayoutPolicyTest(unittest.TestCase):
         from atlas_mlir_native.row_softmax import MASKED_SOFTMAX_POLICY
         from atlas_mlir_native.sigmoid import SIGMOID_POLICY
 
-        from merlin.compile.c_integer import INTEGER_OPERATIONS
-        from merlin.semantic_compiler.target_binding import NativeCompilationError
-        from merlin.tests.runtime.test_integer_c import request_for
+        from merlin.compiler.lower.c.integer import INTEGER_OPERATIONS
+        from merlin.compiler.semantic.target_binding import NativeCompilationError
+        from atlas_test_fixtures.integer_c import request_for
 
         old = {
             **self.policy(),
@@ -445,9 +436,9 @@ class ApplicationLayoutPolicyTest(unittest.TestCase):
         from atlas_mlir_native.row_softmax import GUARDED_SOFTMAX_POLICY, MASKED_SOFTMAX_POLICY
         from atlas_mlir_native.sigmoid import SIGMOID_POLICY
 
-        from merlin.compile.c_float_casts import FLOAT_CAST_OPERATIONS
-        from merlin.semantic_compiler.target_binding import NativeCompilationError
-        from merlin.tests.runtime.test_float_casts_c import request_for
+        from merlin.compiler.lower.c.float_casts import FLOAT_CAST_OPERATIONS
+        from merlin.compiler.semantic.target_binding import NativeCompilationError
+        from atlas_test_fixtures.integer_c import request_for
 
         policy = {
             **self.policy(), "schema": "atlas.diagnostic_application_precision.v17",
@@ -497,8 +488,8 @@ class ApplicationLayoutPolicyTest(unittest.TestCase):
         from atlas_mlir_native.row_softmax import MASKED_SOFTMAX_POLICY
         from atlas_mlir_native.sigmoid import SIGMOID_POLICY
 
-        from merlin.semantic_compiler.target_binding import NativeCompilationError
-        from merlin.tests.runtime.test_bucketize_c import request_for
+        from merlin.compiler.semantic.target_binding import NativeCompilationError
+        from atlas_test_fixtures.integer_c import request_for
 
         policy = {
             **self.policy(),
@@ -536,8 +527,8 @@ class ApplicationLayoutPolicyTest(unittest.TestCase):
         from atlas_mlir_native.row_softmax import MASKED_SOFTMAX_POLICY
         from atlas_mlir_native.sigmoid import SIGMOID_POLICY
 
-        from merlin.semantic_compiler.target_binding import NativeCompilationError
-        from merlin.tests.runtime.test_predicates_c import request_for
+        from merlin.compiler.semantic.target_binding import NativeCompilationError
+        from atlas_test_fixtures.integer_c import request_for
 
         old = {
             **self.policy(),
@@ -567,7 +558,7 @@ class ApplicationLayoutPolicyTest(unittest.TestCase):
             self.assertFalse(compiled.programs)
             self.assertEqual(compiled.description["arithmetic"], "exact-source-predicate")
             self.assertIn("predicate.c", compiled.files)
-        from merlin.semantic_compiler.model import TensorType
+        from merlin.compiler.semantic.model import TensorType
 
         for dtype in ("f32", "f64"):
             floats = request_for("slt")
@@ -605,14 +596,8 @@ class ApplicationLayoutPolicyTest(unittest.TestCase):
     def test_indexed_host_layouts_require_explicit_admission(self):
         from atlas_mlir_native.application import AtlasApplicationAdapter
 
-        from merlin.semantic_compiler.model import (
-            IndexMap,
-            KernelRequest,
-            SemanticNode,
-            TensorType,
-            pointwise_identity_maps,
-        )
-        from merlin.semantic_compiler.target_binding import NativeCompilationError
+        from merlin.compiler.semantic.model import IndexMap, KernelRequest, SemanticNode, TensorType, pointwise_identity_maps
+        from merlin.compiler.semantic.target_binding import NativeCompilationError
 
         policy = self.policy()
         a = SemanticNode(
@@ -658,7 +643,7 @@ class ApplicationLayoutPolicyTest(unittest.TestCase):
     def test_host_policy_cannot_admit_arithmetic_or_change_legacy_policies(self):
         from atlas_mlir_native.application import AtlasApplicationAdapter
 
-        from merlin.semantic_compiler.target_binding import NativeCompilationError
+        from merlin.compiler.semantic.target_binding import NativeCompilationError
 
         policy = self.policy()
         for operations in (
@@ -695,7 +680,7 @@ class ApplicationLayoutPolicyTest(unittest.TestCase):
             request_for,
         )
 
-        from merlin.semantic_compiler.target_binding import NativeCompilationError
+        from merlin.compiler.semantic.target_binding import NativeCompilationError
 
         raw = request_for((2, 3, 35), (0, 2))
         x, seed, result = raw.nodes
@@ -788,9 +773,9 @@ class ApplicationCPackageTest(unittest.TestCase):
         from atlas_mlir_native.application import AtlasApplicationAdapter
         from atlas_mlir_native.application_precision import prepare_contraction
 
-        from merlin.compile.semantic_regions import extract_semantic_region
-        from merlin.semantic_compiler.model import KernelRequest
-        from merlin.semantic_compiler.target_binding import NativeCompilationError
+        from merlin.compiler.partition.semantic_regions import extract_semantic_region
+        from merlin.compiler.semantic.model import KernelRequest
+        from merlin.compiler.semantic.target_binding import NativeCompilationError
 
         source = KernelRequest.from_record(json.loads((self.artifact / "source-request.json").read_text()))
         node = next(node for node in source.nodes if node.op == "source_f32_matmul_unqualified")
@@ -837,13 +822,9 @@ class ApplicationCPackageTest(unittest.TestCase):
             split_epilogue,
         )
 
-        from merlin.compile.semantic_regions import extract_semantic_region
-        from merlin.semantic_compiler.model import (
-            KernelRequest,
-            SemanticNode,
-            pointwise_identity_maps,
-        )
-        from merlin.semantic_compiler.target_binding import NativeCompilationError
+        from merlin.compiler.partition.semantic_regions import extract_semantic_region
+        from merlin.compiler.semantic.model import KernelRequest, SemanticNode, pointwise_identity_maps
+        from merlin.compiler.semantic.target_binding import NativeCompilationError
 
         graph = KernelRequest.from_record(json.loads((self.artifact / "source-request.json").read_text()))
         matmul = next(node for node in graph.nodes if node.op == "source_f32_matmul_unqualified")

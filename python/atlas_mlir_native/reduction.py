@@ -8,19 +8,11 @@ import os
 from dataclasses import dataclass, replace
 from pathlib import Path
 
-from merlin.semantic_compiler.buffer_allocation import Buffer, allocate_buffers
-from merlin.semantic_compiler.model import (
-    IndexMap,
-    KernelRequest,
-    SemanticNode,
-    TensorType,
-    pointwise_identity_maps,
-)
-from merlin.semantic_compiler.reduction_tiling import ReductionTiling
-from merlin.semantic_compiler.target_binding import (
-    NativeCompilationError,
-    verify_native_publication,
-)
+from merlin.compiler.semantic.search.buffers import Buffer
+from atlas_mlir_native.work_budget import allocate_native_buffers as allocate_buffers
+from merlin.compiler.semantic.model import IndexMap, KernelRequest, SemanticNode, TensorType, pointwise_identity_maps
+from merlin.compiler.transforms.reduction import ReductionTiling
+from merlin.compiler.semantic.target_binding import NativeCompilationError, verify_native_publication
 
 from .binding import (
     DRAM_BASE,

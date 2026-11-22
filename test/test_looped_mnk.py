@@ -25,12 +25,7 @@ def source_request(m, n, k, *, relu=False):
         _mxu0_maps,
     )
 
-    from merlin.semantic_compiler.model import (
-        KernelRequest,
-        SemanticNode,
-        TensorType,
-        pointwise_identity_maps,
-    )
+    from merlin.compiler.semantic.model import KernelRequest, SemanticNode, TensorType, pointwise_identity_maps
 
     request = KernelRequest(
         (
@@ -80,9 +75,7 @@ def case_data(shape):
     """
     from atlas_mlir_native.looped_tiling import prepare_plan
 
-    from merlin.semantic_compiler.ordered_mnk_tiling import (
-        materialize_looped_mnk_inputs,
-    )
+    from merlin.compiler.transforms.contraction_mnk import materialize_looped_mnk_inputs
 
     m, n, k = shape
     request = source_request(m, n, k)
@@ -119,11 +112,7 @@ def seeded_source_request(shape, relu=False):
         _mxu0_accumulate_maps,
     )
 
-    from merlin.semantic_compiler.model import (
-        SemanticNode,
-        TensorType,
-        pointwise_identity_maps,
-    )
+    from merlin.compiler.semantic.model import SemanticNode, TensorType, pointwise_identity_maps
 
     base = source_request(*shape)
     a, w, result = base.nodes
@@ -200,9 +189,7 @@ def rounding_case_data(panel):
     from atlas_mlir_native.looped_tiling import prepare_plan
     from rtl.make_ordered_tile_fixture import _bf16, _fp8, _round_bf16
 
-    from merlin.semantic_compiler.ordered_mnk_tiling import (
-        materialize_looped_mnk_inputs,
-    )
+    from merlin.compiler.transforms.contraction_mnk import materialize_looped_mnk_inputs
 
     request = source_request(1, 7, 65)
     plan = prepare_plan(request)
@@ -226,10 +213,7 @@ def rounding_case_data(panel):
 def build_snapshot(destination):
     from atlas_mlir_native.binding import AtlasNativeBinding
 
-    from merlin.semantic_compiler.snapshot import (
-        build_native_snapshot,
-        packaged_egg_bridge_path,
-    )
+    from merlin.compiler.semantic.target_binding import build_native_snapshot, packaged_egg_bridge_path
 
     return build_native_snapshot(
         AtlasNativeBinding.profile(),
@@ -244,8 +228,8 @@ def compile_case(snapshot, shape, destination, *, source=None):
     from atlas_mlir_native.binding import AtlasNativeBinding
     from atlas_mlir_native.looped_tiling import prepare_plan
 
-    from merlin.semantic_compiler.search import SearchLimits
-    from merlin.semantic_compiler.target_binding import verify_native_publication
+    from merlin.compiler.semantic.search.exploration import SearchLimits
+    from merlin.compiler.semantic.target_binding import verify_native_publication
 
     request = source if source is not None else source_request(*shape)
     plan = prepare_plan(request)
@@ -290,8 +274,8 @@ class LoopedMNKTest(unittest.TestCase):
         from unittest.mock import patch
 
         from atlas_mlir_native import looped_tiling
-        from merlin.semantic_compiler import codegen
-        from merlin.semantic_compiler.search import SearchLimits
+        from merlin.compiler.semantic import codegen
+        from merlin.compiler.semantic.search.exploration import SearchLimits
 
         with tempfile.TemporaryDirectory(dir=self.root) as directory:
             root = Path(directory)
@@ -343,7 +327,7 @@ class LoopedMNKTest(unittest.TestCase):
             diagnostic_mxu0_f32_profile,
         )
 
-        from merlin.frontends.compile_inputs import StagedCompileInputs
+        from merlin.compiler.frontend.inputs import StagedCompileInputs
 
         source = (ROOT / "test/examples/source_bound_mn_k72_matmul.mlir").read_text()
         digest = hashlib.sha256(source.encode()).hexdigest()
@@ -365,9 +349,9 @@ class LoopedMNKTest(unittest.TestCase):
 
         from atlas_mlir_native.binding import AtlasNativeBinding
 
-        from merlin.semantic_compiler.buffer_allocation import BufferAllocation
-        from merlin.semantic_compiler.search import SearchLimits
-        from merlin.semantic_compiler.target_binding import NativeCompilationError
+        from merlin.compiler.semantic.search.buffers import BufferAllocation
+        from merlin.compiler.semantic.search.exploration import SearchLimits
+        from merlin.compiler.semantic.target_binding import NativeCompilationError
 
         for shape, relu in (((32, 32, 32), False), ((33, 35, 65), False), ((1, 7, 65), True)):
             source = seeded_source_request(shape, relu)
@@ -410,9 +394,7 @@ class LoopedMNKTest(unittest.TestCase):
         import numpy as np
         from atlas_mlir_native.looped_tiling import prepare_plan
 
-        from merlin.semantic_compiler.ordered_mnk_tiling import (
-            materialize_looped_mnk_inputs,
-        )
+        from merlin.compiler.transforms.contraction_mnk import materialize_looped_mnk_inputs
 
         plan = self.source_bound_contraction()
         self.assertTrue(plan.whole_contraction)
@@ -431,9 +413,7 @@ class LoopedMNKTest(unittest.TestCase):
     def test_looped_shapes_and_tails_use_checked_native_bodies(self):
         from atlas_mlir_native.layout import unpack_bf16_pair_halves
 
-        from merlin.semantic_compiler.ordered_mnk_tiling import (
-            assemble_looped_mnk_outputs,
-        )
+        from merlin.compiler.transforms.contraction_mnk import assemble_looped_mnk_outputs
 
         for shape in SHAPES:
             with self.subTest(shape=shape):
@@ -528,11 +508,7 @@ class LoopedMNKTest(unittest.TestCase):
                 if panel == "relu_after_reduction":
                     from atlas_mlir_native.binding import BF16_RELU_ATTRS
 
-                    from merlin.semantic_compiler.model import (
-                        SemanticNode,
-                        TensorType,
-                        pointwise_identity_maps,
-                    )
+                    from merlin.compiler.semantic.model import SemanticNode, TensorType, pointwise_identity_maps
 
                     base = source_request(*shape)
                     activation = SemanticNode(
@@ -550,9 +526,7 @@ class LoopedMNKTest(unittest.TestCase):
                 if panel == "relu_after_reduction":
                     from atlas_mlir_native.looped_tiling import prepare_plan
 
-                    from merlin.semantic_compiler.ordered_mnk_tiling import (
-                        materialize_looped_mnk_inputs,
-                    )
+                    from merlin.compiler.transforms.contraction_mnk import materialize_looped_mnk_inputs
 
                     # Partial sums are negative until the final K tile. Applying
                     # ReLU to each partial sum would produce 32 instead of 1.

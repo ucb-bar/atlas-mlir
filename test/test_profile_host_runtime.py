@@ -22,7 +22,7 @@ class State:
 
 
 def package():
-    from merlin.compile.c_sources import c_source_pair
+    from merlin.compiler.lower.c.sources import c_source_pair
 
     binary = struct.pack("<2I", 123, 456)
     text = c_source_pair(

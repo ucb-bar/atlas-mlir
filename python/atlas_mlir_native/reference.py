@@ -23,8 +23,8 @@ from atlas_mlir_native.pack_lane import (
 from atlas_mlir_native.recip_lane import vrecip_bf16_bits, vrecip_bf16_bounded_bits
 from atlas_mlir_native.sqrt_lane import vsqrt_bf16_bits
 from atlas_mlir_native.tanh_lane import vtanh_bf16_bits
-from merlin.semantic_compiler.model import IndexMap, pointwise_identity_maps
-from merlin.semantic_compiler.reference import TensorValue, _f32_add_rne
+from merlin.compiler.semantic.model import IndexMap, pointwise_identity_maps
+from merlin.compiler.semantic.reference import TensorValue, _f32_add_rne
 
 _BF16_TO_FP8_UNIT = {
     0x0000: 0x00,

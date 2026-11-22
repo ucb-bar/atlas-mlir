@@ -4,12 +4,9 @@ from __future__ import annotations
 
 import struct
 
-from merlin.semantic_compiler.model import TensorType
-from merlin.semantic_compiler.target_binding import NativeCompilationError
-from merlin.semantic_compiler.tiled_softmax import (
-    decompose_row_softmax,
-    materialize_row_softmax_inputs,
-)
+from merlin.compiler.semantic.model import TensorType
+from merlin.compiler.semantic.target_binding import NativeCompilationError
+from merlin.compiler.semantic.tiled_softmax import decompose_row_softmax, materialize_row_softmax_inputs
 
 from .layout import pack_bf16_pair_halves
 

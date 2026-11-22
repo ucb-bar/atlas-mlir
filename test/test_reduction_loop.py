@@ -43,13 +43,10 @@ class ReductionLoopTest(unittest.TestCase):
         from test_vpu_row_sum_reference import _tree_row
         from tools.check_program_decode import decode_binary
 
-        from merlin.semantic_compiler.reduction_tiling import (
-            assemble_reduction_output,
-            materialize_reduction_inputs,
-        )
-        from merlin.semantic_compiler.reference import TensorValue, evaluate_graph
-        from merlin.semantic_compiler.search import SearchLimits
-        from merlin.semantic_compiler.target_binding import verify_native_publication
+        from merlin.compiler.transforms.reduction import assemble_reduction_output, materialize_reduction_inputs
+        from merlin.compiler.semantic.reference import TensorValue, evaluate_graph
+        from merlin.compiler.semantic.search.exploration import SearchLimits
+        from merlin.compiler.semantic.target_binding import verify_native_publication
 
         origin = json.loads(importlib.metadata.distribution("npu-model").read_text("direct_url.json") or "{}")
         self.assertTrue(

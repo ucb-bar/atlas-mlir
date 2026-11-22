@@ -16,12 +16,9 @@ from math import prod
 from pathlib import Path
 from time import monotonic
 
-from merlin.compile.semantic_regions import extract_semantic_region
-from merlin.semantic_compiler.model import TensorType
-from merlin.semantic_compiler.target_binding import (
-    NativeCompilationError,
-    verify_native_publication,
-)
+from merlin.compiler.partition.semantic_regions import extract_semantic_region
+from merlin.compiler.semantic.model import TensorType
+from merlin.compiler.semantic.target_binding import NativeCompilationError, verify_native_publication
 
 from .binding import (
     BF16_BINARY_ATTRS,
@@ -51,7 +48,7 @@ def _bf16_body_work(request):
 
 
 def is_staged_bf16(request):
-    from merlin.semantic_compiler.search import SearchLimits
+    from merlin.compiler.semantic.search.exploration import SearchLimits
 
     from .binding import _bf16_tile_request
 
@@ -90,17 +87,10 @@ def bf16_boundary_request(region):
 
 
 def staged_memory_plan(request):
-    from merlin.compile.semantic_regions import (
-        partition_semantic_dag,
-        semantic_staging_buffers,
-    )
-    from merlin.semantic_compiler.buffer_allocation import (
-        Buffer,
-        allocate_buffers,
-        check_buffer_allocation,
-        first_fit_buffer_assignment,
-    )
-    from merlin.semantic_compiler.search import SearchLimits
+    from merlin.compiler.partition.semantic_regions import partition_semantic_dag, semantic_staging_buffers
+    from merlin.compiler.semantic.search.buffers import Buffer, check_buffer_allocation, first_fit_buffer_assignment
+    from atlas_mlir_native.work_budget import allocate_native_buffers as allocate_buffers
+    from merlin.compiler.semantic.search.exploration import SearchLimits
 
     def admitted(region):
         try:
@@ -324,7 +314,8 @@ def boundary_request(region):
 
 def memory_plan(request):
     """Allocate one immutable frame and one private frame, using the shared allocator."""
-    from merlin.semantic_compiler.buffer_allocation import Buffer, allocate_buffers
+    from merlin.compiler.semantic.search.buffers import Buffer
+    from atlas_mlir_native.work_budget import allocate_native_buffers as allocate_buffers
 
     if is_staged_bf16(request):
         return staged_memory_plan(request)[:3]
@@ -411,7 +402,7 @@ def compose_fragments(fragments, *, tools, boundaries_lowered=False):
     from xdsl.dialects.func import FuncOp
     from xdsl.printer import Printer
 
-    from merlin.frontends.linalg_mlir import parse_mlir_text
+    from merlin.compiler.frontend.linalg_mlir import parse_mlir_text
 
     functions, names = [], []
     for i, text in enumerate(fragments):
@@ -457,11 +448,7 @@ def compile_resident(
     destination,
     limits,
 ):
-    from merlin.semantic_compiler.codegen import (
-        choose_reduction_unroll,
-        codegen_options,
-        current_codegen_options,
-    )
+    from atlas_mlir_native.options import choose_reduction_unroll, codegen_options, current_codegen_options
 
     staged_bf16 = is_staged_bf16(request)
     deadline = monotonic() + limits.wall_timeout_s if staged_bf16 else None
@@ -479,7 +466,7 @@ def compile_resident(
     from xdsl.dialects.builtin import IntegerAttr
     from xdsl.printer import Printer
 
-    from merlin.frontends.linalg_mlir import parse_mlir_text
+    from merlin.compiler.frontend.linalg_mlir import parse_mlir_text
 
     fragments, records = [], []
     unroll, codegen = choose_reduction_unroll(

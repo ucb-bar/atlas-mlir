@@ -8,19 +8,10 @@ import os
 from dataclasses import asdict, replace
 from pathlib import Path
 
-from merlin.semantic_compiler.model import (
-    KernelRequest,
-    SemanticNode,
-    TensorType,
-    pointwise_identity_maps,
-)
-from merlin.semantic_compiler.ordered_k_tiling import (
-    OrderedKTilingError,
-    _validated_oriented_source,
-    partition_ordered_matmul_k,
-)
-from merlin.semantic_compiler.ordered_mnk_tiling import LoopedMNKTiling
-from merlin.semantic_compiler.target_binding import NativeCompilationError
+from merlin.compiler.semantic.model import KernelRequest, SemanticNode, TensorType, pointwise_identity_maps
+from merlin.compiler.transforms.tiling import OrderedKTilingError, _validated_oriented_source, partition_ordered_matmul_k
+from merlin.compiler.transforms.tiling import LoopedMNKTiling
+from merlin.compiler.semantic.target_binding import NativeCompilationError
 
 
 def is_looped_request(request: KernelRequest) -> bool:
@@ -129,10 +120,7 @@ def prepare_plan(request: KernelRequest) -> LoopedMNKTiling:
 
 def prepare_execution_plan(request):
     """Keep the selected DRAM budget and stream independent output panels."""
-    from merlin.semantic_compiler.streamed_mnk_tiling import (
-        plan_streamed_k_reduction,
-        plan_streamed_mnk,
-    )
+    from merlin.compiler.transforms.panels import plan_streamed_k_reduction, plan_streamed_mnk
 
     from .binding import TILE_BYTES, dram_slots
 
@@ -454,7 +442,7 @@ def tuning_key(snapshot, request, fixed_inputs, fixed_outputs, limits):
     import os
     from pathlib import Path
 
-    from merlin.semantic_compiler import codegen
+    from merlin.compiler.semantic import codegen
 
     from .binding import _native_pipeline
 
@@ -479,7 +467,7 @@ def tuning_key(snapshot, request, fixed_inputs, fixed_outputs, limits):
 
 
 def compile_looped(snapshot, request, *, fixed_inputs, fixed_outputs, target_source, destination, limits):
-    from merlin.semantic_compiler.codegen import choose_reduction_unroll
+    from atlas_mlir_native.options import choose_reduction_unroll
 
     from .binding import (
         DRAM_BASE,
@@ -647,7 +635,7 @@ def compile_looped(snapshot, request, *, fixed_inputs, fixed_outputs, target_sou
             f"attributes {{atlas.program_size_limit_bytes = {codegen['program_size_limit_bytes']} : i64, ",
             1,
         )
-    from merlin.semantic_compiler.codegen import materialization_cache
+    from atlas_mlir_native.options import materialization_cache
 
     cache = materialization_cache()
     cache_key = (

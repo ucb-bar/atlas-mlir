@@ -36,9 +36,7 @@ class PrecisionTileAbiTest(unittest.TestCase):
             diagnostic_mxu0_f32_profile,
             diagnostic_mxu1_f32_profile,
         )
-        from merlin.semantic_compiler.precision_transform import (
-            build_diagnostic_matmul_tile,
-        )
+        from merlin.compiler.quantization.contraction.transform import build_diagnostic_matmul_tile
 
         source = (ROOT / "test/examples/captured_attention_mlp32_linalg.mlir").read_text()
         policy = (ROOT / "test/examples/atlas_attention_mlp_source_bound_policy.json").read_bytes()
@@ -51,9 +49,7 @@ class PrecisionTileAbiTest(unittest.TestCase):
 
     def small_plan(self):
         from atlas_mlir_native.binding import diagnostic_mxu0_f32_profile
-        from merlin.semantic_compiler.precision_transform import (
-            build_diagnostic_matmul_tile,
-        )
+        from merlin.compiler.quantization.contraction.transform import build_diagnostic_matmul_tile
 
         source = (ROOT / "test/examples/source_bound_small_matmul.mlir").read_text()
         profile = diagnostic_mxu0_f32_profile()
@@ -97,9 +93,7 @@ class PrecisionTileAbiTest(unittest.TestCase):
     def test_source_output_windows_decode_and_assemble_both_physical_halves(self) -> None:
         from atlas_mlir_native.binding import diagnostic_mxu0_f32_profile
         from atlas_mlir_native.precision_abi import decode_source_results
-        from merlin.semantic_compiler.precision_transform import (
-            build_diagnostic_matmul_tiles,
-        )
+        from merlin.compiler.quantization.contraction.transform import build_diagnostic_matmul_tiles
 
         source = (ROOT / "test/examples/source_bound_mn_matmul.mlir").read_text()
         profile = diagnostic_mxu0_f32_profile()
@@ -137,8 +131,8 @@ class PrecisionTileAbiTest(unittest.TestCase):
             decode_source_results,
             pack_source_operand,
         )
-        from merlin.frontends.compile_inputs import StagedCompileInputs
-        from merlin.semantic_compiler.target_binding import NativeCompilationError
+        from merlin.compiler.frontend.inputs import StagedCompileInputs
+        from merlin.compiler.semantic.target_binding import NativeCompilationError
 
         source = (ROOT / "test/examples/source_bound_batched_matmul.mlir").read_text()
         source_sha = hashlib.sha256(source.encode()).hexdigest()
@@ -189,8 +183,8 @@ class PrecisionTileAbiTest(unittest.TestCase):
             diagnostic_mxu0_f32_profile,
         )
         from atlas_mlir_native.precision_abi import pack_source_operand
-        from merlin.frontends.compile_inputs import StagedCompileInputs
-        from merlin.semantic_compiler.linalg_bridge import LinalgBridgeError
+        from merlin.compiler.frontend.inputs import StagedCompileInputs
+        from merlin.compiler.semantic.linalg.linalg_bridge import LinalgBridgeError
 
         source = (ROOT / "test/examples/source_bound_batched_matmul.mlir").read_text()
         source_sha = hashlib.sha256(source.encode()).hexdigest()

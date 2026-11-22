@@ -1,6 +1,6 @@
 """Generate application context setup from each compiled region's public ABI."""
 
-from merlin.compile.semantic_application import ApplicationCBinding
+from merlin.compiler.build.regions import ApplicationCBinding
 
 
 def application_binding(name, regions, interface):

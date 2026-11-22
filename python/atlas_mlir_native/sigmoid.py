@@ -3,14 +3,8 @@
 from dataclasses import dataclass, replace
 from math import prod
 
-from merlin.semantic_compiler.model import (
-    ConstantBinding,
-    KernelRequest,
-    SemanticNode,
-    TensorType,
-    pointwise_identity_maps,
-)
-from merlin.semantic_compiler.pointwise_tiling import PointwiseTiling
+from merlin.compiler.semantic.model import ConstantBinding, KernelRequest, SemanticNode, TensorType, pointwise_identity_maps
+from merlin.compiler.transforms.pointwise import PointwiseTiling
 
 from .binding import (
     BF16_BOUNDED_RECIP_ATTRS,
@@ -105,7 +99,7 @@ class SiluPrecision(SigmoidPrecision):
 
 
 def prepare_silu_source(source):
-    from merlin.semantic_compiler.silu_source import recognize_silu
+    from merlin.compiler.semantic.linalg.silu_source import recognize_silu
 
     sigmoid_id, output_id = recognize_silu(source, source.outputs[0])
     sigmoid, output = source.node(sigmoid_id), source.node(output_id)

@@ -5,13 +5,10 @@ from __future__ import annotations
 import hashlib
 import json
 
-from merlin.compile.c_sources import c_source_pair
-from merlin.compile.c_tiling import (
-    render_streamed_k_driver_c,
-    streamed_k_driver_workspace_bytes,
-)
-from merlin.semantic_compiler.model import KernelRequest
-from merlin.semantic_compiler.target_binding import verify_native_publication
+from merlin.compiler.lower.c.dispatch import c_source_pair
+from merlin.compiler.lower.c.tiling import render_streamed_k_driver_c, streamed_k_driver_workspace_bytes
+from merlin.compiler.semantic.model import KernelRequest
+from merlin.compiler.semantic.target_binding import verify_native_publication
 
 from .binding import DRAM_BASE, TILE_BYTES
 from .c_runtime import runtime_members

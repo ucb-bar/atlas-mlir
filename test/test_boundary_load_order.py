@@ -21,12 +21,7 @@ def shared_normalization():
         _row_reduce_maps,
     )
 
-    from merlin.semantic_compiler.model import (
-        KernelRequest,
-        SemanticNode,
-        TensorType,
-        pointwise_identity_maps,
-    )
+    from merlin.compiler.semantic.model import KernelRequest, SemanticNode, TensorType, pointwise_identity_maps
 
     tensor = TensorType((32, 32), "bf16", "raw-bit-pattern")
     attrs = {**BF16_BINARY_ATTRS, **BF16_ROW_REDUCTION_ATTRS, **BF16_UNARY_ATTRS}
@@ -60,8 +55,8 @@ class BoundaryLoadOrderTest(unittest.TestCase):
     def test_alternative_order_preserves_shared_values_and_all_outputs(self):
         from atlas_mlir_native.binding import AtlasNativeBinding
 
-        from merlin.semantic_compiler.search import SearchLimits
-        from merlin.semantic_compiler.target_binding import NativeCompilationError, verify_native_publication
+        from merlin.compiler.semantic.search.exploration import SearchLimits
+        from merlin.compiler.semantic.target_binding import NativeCompilationError, verify_native_publication
 
         with tempfile.TemporaryDirectory(prefix="boundary-load-order-") as temporary:
             work = Path(temporary)

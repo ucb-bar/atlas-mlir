@@ -8,11 +8,11 @@ import os
 from dataclasses import dataclass, replace
 from pathlib import Path
 
-from merlin.runtime.fp8_formats import float_format_params
-from merlin.semantic_compiler.model import KernelRequest, SemanticNode, TensorType
-from merlin.semantic_compiler.pointwise_tiling import PointwiseTiling
-from merlin.semantic_compiler.precision_values import FloatBoundarySpec
-from merlin.semantic_compiler.target_binding import NativeCompilationError
+from merlin.common.fp8_formats import float_format_params
+from merlin.compiler.semantic.model import KernelRequest, SemanticNode, TensorType
+from merlin.compiler.transforms.pointwise import PointwiseTiling
+from merlin.compiler.quantization.contraction.values import FloatBoundarySpec
+from merlin.compiler.semantic.target_binding import NativeCompilationError
 
 from .binding import (
     BF16_BINARY_ATTRS,
@@ -262,7 +262,8 @@ def is_pointwise_request(request):
 
 
 def plan_abi(request):
-    from merlin.semantic_compiler.buffer_allocation import Buffer, allocate_buffers
+    from merlin.compiler.semantic.search.buffers import Buffer
+    from atlas_mlir_native.work_budget import allocate_native_buffers as allocate_buffers
 
     from .binding import TILE_BYTES
 

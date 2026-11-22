@@ -2,18 +2,12 @@
 
 from __future__ import annotations
 
-from merlin.compile.layout_c import emit_layout_c
-from merlin.compile.semantic_application import CompiledCRegion
-from merlin.compile.semantic_regions import extract_semantic_region
-from merlin.semantic_compiler.softmax_source import recognize_row_softmax
-from merlin.semantic_compiler.target_binding import NativeCompilationError
-from merlin.xdsl_dialects.lowering.global_plan import (
-    BufferRepresentation,
-    CycleInterval,
-    GlobalPlan,
-    RegionAlternative,
-    ValueRepresentation,
-)
+from merlin.compiler.lower.c.layout import emit_layout_c
+from merlin.compiler.build.regions import CompiledCRegion
+from merlin.compiler.partition.semantic_regions import extract_semantic_region
+from merlin.compiler.semantic.linalg.softmax_source import recognize_row_softmax
+from merlin.compiler.semantic.target_binding import NativeCompilationError
+from merlin.compiler.partition.global_plan import BufferRepresentation, CycleInterval, GlobalPlan, RegionAlternative, ValueRepresentation
 
 from .application_precision import (
     CONTRACTION_POLICY,
@@ -32,7 +26,7 @@ _INDEXED_LAYOUTS = ("gather", "insert_slice", "concat")
 
 def _predicate_c(region, name):
     try:
-        from merlin.compile.c_predicates import emit_predicate_c
+        from merlin.compiler.lower.c.predicates import emit_predicate_c
 
         return emit_predicate_c(region, name)
     except ImportError as error:
@@ -45,7 +39,7 @@ def _predicate_c(region, name):
 
 def _integer_c(region, name):
     try:
-        from merlin.compile.c_integer import emit_integer_c
+        from merlin.compiler.lower.c.integer import emit_integer_c
     except ImportError as error:
         raise NativeCompilationError(
             "tool_unavailable", "selected CPU integer operations need Merlin's integer C emitter"
@@ -58,7 +52,7 @@ def _integer_c(region, name):
 
 def _float_cast_c(region, name):
     try:
-        from merlin.compile.c_float_casts import emit_float_cast_c
+        from merlin.compiler.lower.c.float_casts import emit_float_cast_c
     except ImportError as error:
         raise NativeCompilationError("tool_unavailable", "selected CPU float casts need Merlin's C emitter") from error
     try:
@@ -69,7 +63,7 @@ def _float_cast_c(region, name):
 
 def _float_arithmetic_c(region, name):
     try:
-        from merlin.compile.c_float_arithmetic import emit_float_arithmetic_c
+        from merlin.compiler.lower.c.float_arithmetic import emit_float_arithmetic_c
     except ImportError as error:
         raise NativeCompilationError("tool_unavailable", "selected CPU arithmetic needs Merlin's C emitter") from error
     try:
@@ -80,7 +74,7 @@ def _float_arithmetic_c(region, name):
 
 def _unary_math_c(region, name, policy):
     try:
-        from merlin.compile.c_unary_math import emit_unary_math_c
+        from merlin.compiler.lower.c.unary_math import emit_unary_math_c
     except ImportError as error:
         raise NativeCompilationError("tool_unavailable", "selected CPU math needs Merlin's C emitter") from error
     try:
@@ -436,7 +430,7 @@ class AtlasApplicationAdapter:
             "atlas.diagnostic_application_precision.v20",
         }:
             try:
-                from merlin.compile.c_integer import INTEGER_OPERATIONS
+                from merlin.compiler.lower.c.integer import INTEGER_OPERATIONS
             except ImportError as error:
                 raise NativeCompilationError(
                     "tool_unavailable", "selected CPU integer operations need Merlin's integer C emitter"
@@ -485,7 +479,7 @@ class AtlasApplicationAdapter:
             "atlas.diagnostic_application_precision.v20",
         }:
             try:
-                from merlin.compile.c_float_casts import FLOAT_CAST_OPERATIONS
+                from merlin.compiler.lower.c.float_casts import FLOAT_CAST_OPERATIONS
             except ImportError as error:
                 raise NativeCompilationError(
                     "tool_unavailable", "selected CPU float casts need Merlin's C emitter"
@@ -505,7 +499,7 @@ class AtlasApplicationAdapter:
             in {"atlas.diagnostic_application_precision.v19", "atlas.diagnostic_application_precision.v20"}
             and "source_constant_math" in policy
         ):
-            from merlin.semantic_compiler.constant_math_backend import validate_policy
+            from merlin.compiler.lower.c.host_ops.softmax_precision import validate_policy
 
             try:
                 expected["source_constant_math"] = validate_policy(policy.get("source_constant_math"))
@@ -516,9 +510,7 @@ class AtlasApplicationAdapter:
             "atlas.diagnostic_application_precision.v20",
         }:
             try:
-                from merlin.compile.c_float_arithmetic import (
-                    FLOAT_ARITHMETIC_OPERATIONS,
-                )
+                from merlin.compiler.lower.c.float_arithmetic import FLOAT_ARITHMETIC_OPERATIONS
             except ImportError as error:
                 raise NativeCompilationError(
                     "tool_unavailable", "selected CPU float arithmetic needs Merlin's C emitter"
@@ -536,7 +528,7 @@ class AtlasApplicationAdapter:
             expected["host_float_arithmetic"] = operations
         if policy.get("schema") == "atlas.diagnostic_application_precision.v20":
             try:
-                from merlin.compile.c_unary_math import validate_policy
+                from merlin.compiler.lower.c.host_ops.softmax_precision import validate_policy
             except ImportError as error:
                 raise NativeCompilationError(
                     "tool_unavailable", "selected CPU math needs Merlin's C emitter"
@@ -619,9 +611,7 @@ class AtlasApplicationAdapter:
             claimed.update(keys)
 
         if self.guarded_masked_softmax:
-            from merlin.semantic_compiler.guarded_softmax_source import (
-                recognize_guarded_masked_row_softmax,
-            )
+            from merlin.compiler.semantic.linalg.guarded_softmax_source import recognize_guarded_masked_row_softmax
 
             for node in pure:
                 if node.op != "select" or node.id in claimed:
@@ -639,9 +629,7 @@ class AtlasApplicationAdapter:
             except (KeyError, ValueError):
                 continue
             if self.masked_softmax:
-                from merlin.semantic_compiler.softmax_source import (
-                    recognize_masked_row_softmax,
-                )
+                from merlin.compiler.semantic.linalg.softmax_source import recognize_masked_row_softmax
 
                 try:
                     masked = recognize_masked_row_softmax(source, node.id)
@@ -652,7 +640,7 @@ class AtlasApplicationAdapter:
                     continue
             add(softmax.computations, "softmax")
         if self.sigmoid and self.pointwise:
-            from merlin.semantic_compiler.silu_source import recognize_silu
+            from merlin.compiler.semantic.linalg.silu_source import recognize_silu
 
             for node in pure:
                 if node.op != "f32_mul" or node.id in claimed:
@@ -868,9 +856,7 @@ class AtlasApplicationAdapter:
                 },
             )
         if kind == "contraction":
-            from merlin.semantic_compiler.batched_contraction import (
-                BatchedContractionPrecision,
-            )
+            from merlin.compiler.quantization.contraction.batched import BatchedContractionPrecision
 
             from .looped_c import prepare_c_package
 
