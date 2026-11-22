@@ -14,7 +14,11 @@ from dataclasses import dataclass, replace
 from math import prod
 from pathlib import Path
 
-from merlin.compiler.semantic.model import KernelRequest, TensorType, pointwise_identity_maps
+from merlin.compiler.semantic.model import (
+    KernelRequest,
+    TensorType,
+    pointwise_identity_maps,
+)
 from merlin.compiler.semantic.target_binding import NativeCompilationError
 
 from .binding import (
@@ -172,8 +176,9 @@ def select_body(snapshot, plan, *, limits):
 
 def virtual_program(plan, input_address, output_address, *, size_limit=None):
     """One loop over compact tiles, before the existing allocator and scheduler."""
-    from .binding import DRAM_BASE, TILE_BYTES, dram_slots
+    from .binding import io_memory_base, TILE_BYTES, dram_slots
 
+    io_base = io_memory_base()
     sizes = plan.buffer_bytes
     if size_limit is not None and (type(size_limit) is not int or size_limit <= 0):
         raise NativeCompilationError(
@@ -188,9 +193,9 @@ def virtual_program(plan, input_address, output_address, *, size_limit=None):
     for address, size in zip((input_address, output_address), sizes, strict=True):
         if (
             type(address) is not int
-            or address < DRAM_BASE
-            or address % TILE_BYTES
-            or address + size > DRAM_BASE + dram_slots() * TILE_BYTES
+            or address < io_base
+            or (address - io_base) % TILE_BYTES
+            or address + size > io_base + dram_slots() * TILE_BYTES
         ):
             raise NativeCompilationError(
                 "resource_limit", "pack buffer exceeds the selected diagnostic window"
@@ -252,6 +257,9 @@ def compile_pack(
     """Compile one complete packed conversion; no CPU computation is inserted."""
     from .binding import (
         DRAM_BASE,
+        DRAM_SLOTS,
+        io_memory_base,
+        dram_slots,
         NATIVE_CHECKS,
         NATIVE_PIPELINES,
         RTL_REVISION,
@@ -260,6 +268,7 @@ def compile_pack(
         _run,
     )
 
+    io_base = io_memory_base()
     plan = prepare_plan(request)
     if set(fixed_inputs) != {request.nodes[0].id} or len(fixed_outputs) != 1:
         raise NativeCompilationError(
@@ -270,7 +279,7 @@ def compile_pack(
         raise NativeCompilationError(
             "compile_error", "pack bindings must be nonnegative allocation slots"
         )
-    addresses = tuple(DRAM_BASE + slot * TILE_BYTES for slot in slots)
+    addresses = tuple(io_base + slot * TILE_BYTES for slot in slots)
     from atlas_mlir_native.options import current_codegen_options
 
     virtual = virtual_program(
@@ -332,6 +341,8 @@ def compile_pack(
         "execution_plan_sha256": sha(
             (destination / "execution_plan.json").read_bytes()
         ),
+        **({"io_memory_base": io_base} if io_base != DRAM_BASE else {}),
+        **({"io_memory_bytes": dram_slots() * TILE_BYTES} if dram_slots() != DRAM_SLOTS else {}),
         "body_check_fingerprint": evidence["check_fingerprint"],
         "lowering_pipeline": pipeline,
         "native_snapshot_sha256": sha((snapshot.root / "manifest.json").read_bytes()),

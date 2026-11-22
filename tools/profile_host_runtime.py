@@ -26,8 +26,16 @@ class HostRuntimeProfile:
         if len(source) != 1 or "/" in source[0]:
             raise ValueError("host profiling needs one exported C/H pair")
         name = source[0][:-2]
-        runtime_header = (target_source / "runtime/atlas_host.h").read_bytes()
-        if runtime_header not in files[name + ".h"]:
+        from atlas_mlir_native.c_runtime import runtime_headers
+        from merlin.compile.c_sources import c_source_pair
+
+        expected = c_source_pair(
+            name,
+            public_headers=runtime_headers(target_source / "runtime"),
+            private_headers={},
+            sources={"probe.c": "int profile_runtime_probe;"},
+        )[name + ".h"].rsplit('\n#ifdef __cplusplus\nextern "C" {\n#endif\n', 1)[0].encode()
+        if not files[name + ".h"].startswith(expected):
             raise ValueError("exported C/H and selected runtime headers differ")
         work.mkdir(exist_ok=False)
         for path in (name + ".c", name + ".h"):
@@ -118,6 +126,7 @@ uint64_t profile_counter(unsigned index) {{
                 for p in [
                     target_source / "runtime/atlas_host.c",
                     target_source / "runtime/atlas_host.h",
+                    target_source / "runtime/atlas_host_layout.h",
                 ]
             },
         }
