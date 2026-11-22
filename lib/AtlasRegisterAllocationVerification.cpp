@@ -1,4 +1,5 @@
 #include "Atlas/AtlasRegisterAllocationVerification.h"
+#include "Atlas/AtlasWorkBudget.h"
 #include "Atlas/AtlasOps.h"
 #include "Atlas/AtlasTarget.h"
 #include "Atlas/AtlasVirtualVerification.h"
@@ -79,7 +80,7 @@ public:
     }
     if (failed(verifyAssignments()) || failed(verifyArgumentABI()))
       return failure();
-    computeLiveness();
+    if (failed(computeLiveness())) return failure();
 
     SmallVector<Value> entryArgs;
     for (BlockArgument arg : function.getArguments())
@@ -247,18 +248,22 @@ private:
       live.erase(transfer.getDefiningOp()->getResult(1));
   }
 
-  void computeLiveness() {
+  LogicalResult computeLiveness() {
+    AtlasWorkBudget budget(function, "allocation-verification-liveness");
     bool changed;
     do {
       changed = false;
       for (Block &block : llvm::reverse(function.getBody())) {
+        if (failed(budget.charge(1 + block.getOperations().size()))) return failure();
         ValueSet out;
         forEachEdge(block.getTerminator(), [&](Block *dest, ValueRange operands) {
+          if (failed(budget.charge(liveIn[dest].size() + operands.size()))) return;
           out.insert(liveIn[dest].begin(), liveIn[dest].end());
           // Every incoming value participates in emitted parallel copies,
           // including values passed to otherwise unused destination arguments.
           addOperands(out, operands);
         });
+        if (budget.exhausted()) return failure();
         ValueSet in = out;
         for (Operation &op : llvm::reverse(block.getOperations()))
           transfer(op, in);
@@ -271,6 +276,7 @@ private:
         }
       }
     } while (changed);
+    return success();
   }
 
   SmallVector<Value> ordered(const ValueSet &set) {
@@ -547,6 +553,7 @@ private:
   }
 
   LogicalResult verifyHelperContents() {
+    AtlasWorkBudget budget(function, "allocation-verification-helpers");
     // Existing non-DMA callers need not provide a complete fixed-helper ABI.
     if (dmaAssignments.empty() || function.getBody().empty())
       return success();
@@ -571,11 +578,14 @@ private:
     entries[entry] = initial;
     std::deque<Block *> work = {entry};
     while (!work.empty()) {
+      if (failed(budget.charge())) return failure();
       Block *block = work.front();
       work.pop_front();
       HelperRegisters contents = entries.lookup(block);
-      for (Operation &op : *block)
+      for (Operation &op : *block) {
+        if (failed(budget.charge())) return failure();
         (void)helperEffects(op, contents, false);
+      }
       LogicalResult edges = success();
       forEachEdge(block->getTerminator(), [&](Block *next, ValueRange operands) {
         if (failed(edges))

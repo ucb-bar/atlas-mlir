@@ -13,6 +13,21 @@ target_link_libraries(atlas-host-launch-test PRIVATE atlas-host)
 set_target_properties(atlas-host-launch-test PROPERTIES C_STANDARD 11)
 add_test(NAME atlas-host-launch COMMAND atlas-host-launch-test)
 
+add_executable(atlas-raw-host-test raw-host-test.c)
+target_link_libraries(atlas-raw-host-test PRIVATE atlas-host)
+set_target_properties(atlas-raw-host-test PROPERTIES C_STANDARD 11)
+add_test(NAME atlas-raw-host COMMAND atlas-raw-host-test)
+
+add_executable(atlas-host-runtime-merge-test host-runtime-merge-test.c)
+target_link_libraries(atlas-host-runtime-merge-test PRIVATE atlas-host)
+set_target_properties(atlas-host-runtime-merge-test PROPERTIES C_STANDARD 11)
+add_test(NAME atlas-host-runtime-merge COMMAND atlas-host-runtime-merge-test)
+
+add_executable(atlas-host-residency-test host-residency-test.c)
+target_link_libraries(atlas-host-residency-test PRIVATE atlas-host)
+set_target_properties(atlas-host-residency-test PROPERTIES C_STANDARD 11)
+add_test(NAME atlas-host-residency COMMAND atlas-host-residency-test)
+
 add_executable(atlas-model-tile-test model-tile-test.c)
 target_link_libraries(atlas-model-tile-test PRIVATE atlas-model-tile)
 set_target_properties(atlas-model-tile-test PROPERTIES C_STANDARD 11)
@@ -49,6 +64,16 @@ foreach(thin_k IN ITEMS 1 65)
   add_test(NAME atlas-ordered-mn-thin-k${thin_k}-host
     COMMAND atlas-ordered-mn-thin-k${thin_k}-host-test)
 endforeach()
+
+add_llvm_executable(atlas-cfg-dma-timing-test
+  cfg-dma-timing-verification.cpp PARTIAL_SOURCES_INTENDED)
+llvm_update_compile_flags(atlas-cfg-dma-timing-test)
+target_link_libraries(atlas-cfg-dma-timing-test PRIVATE
+  MLIRAtlas MLIRParser MLIRPass MLIRIR MLIRArithDialect MLIRControlFlowDialect
+  MLIRFuncDialect)
+mlir_check_all_link_libraries(atlas-cfg-dma-timing-test)
+add_test(NAME atlas-cfg-dma-timing COMMAND atlas-cfg-dma-timing-test)
+set_tests_properties(atlas-cfg-dma-timing PROPERTIES TIMEOUT 30)
 
 add_executable(atlas-ordered-mn-single-host-test ordered-mn-host-test.c)
 target_compile_definitions(atlas-ordered-mn-single-host-test PRIVATE ATLAS_TEST_MN_SINGLE=1)
@@ -97,3 +122,12 @@ foreach(suite buffer-contract cfg-contract dma-allocation dma-helper mxu-allocat
     pack-loop source-memory-contract tile-contract timing-provider)
   add_test(NAME atlas-${suite} COMMAND atlas-verification-test ${suite})
 endforeach()
+
+add_executable(atlas-direct-memory-test direct-memory-test.c)
+target_link_libraries(atlas-direct-memory-test PRIVATE atlas-host)
+set_target_properties(atlas-direct-memory-test PROPERTIES C_STANDARD 11)
+add_test(NAME atlas-direct-memory COMMAND atlas-direct-memory-test)
+
+add_executable(atlas-dma-memory-span-test dma-memory-span-test.cpp)
+target_include_directories(atlas-dma-memory-span-test PRIVATE ${PROJECT_SOURCE_DIR}/include)
+add_test(NAME atlas-dma-memory-span COMMAND atlas-dma-memory-span-test)
