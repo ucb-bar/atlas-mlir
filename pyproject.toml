@@ -14,7 +14,8 @@ dependencies = [
   "numpy",
   "safetensors",
   "xdsl==0.68.0",
-  "merlin[semantic-search] @ https://github.com/reed-nicolas/merlin/archive/e563d58ced1242a770c8779dee71fbe5a8d37379.zip",
+  # Immutable tip of reed-nicolas/merlin wip/atlas-nov22.
+  "merlin[semantic-search] @ https://github.com/reed-nicolas/merlin/archive/b9077b094b29307a0de37e65aed317eef1629b47.zip",
 ]
 
 [project.optional-dependencies]
