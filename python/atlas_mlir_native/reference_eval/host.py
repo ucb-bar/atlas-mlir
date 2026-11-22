@@ -336,6 +336,8 @@ def _reduce(value, dims, keepdim, kind, rules, target, dtype=None):
     if order == TORCH_F32_SUM:
         if value.dtype != "f32" or kind not in {"sum", "mean"} or axes != (value.raw.ndim - 1,) or not outer or not count:
             raise ValueError("the torch f32 sum order is qualified for a nonempty f32 last axis")
+        if int(np.prod(outer, dtype=np.int64)) == 1 and count >= 1 << 15:
+            raise ValueError("the declared f32 sum order refuses one row of 32,768 or more elements")
         if not np.isfinite(numbers).all():
             raise ValueError("the torch f32 sum order is qualified for finite inputs")
         result = _torch_f32_sum(numbers)

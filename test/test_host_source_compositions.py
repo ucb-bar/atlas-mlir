@@ -501,6 +501,55 @@ def test_f32_host_families_match_torch_eager(tmp_path, operation, shape):
     assert status == -2 and np.all(untouched == 0x55555555)
 
 
+@pytest.mark.parametrize("shape,admitted", [((1, 32767), True), ((1, 32768), False), ((1, 40000), False),
+                                            ((1, 1, 70000), False), ((2, 70000), True)])
+def test_f32_sum_refuses_one_row_past_the_thread_split(tmp_path, shape, admitted):
+    """The tag, the emitter, and the reference share the bound; admitted shapes equal eager at 1, 2, and 8 threads."""
+    from dataclasses import replace
+
+    from merlin.compiler.semantic.linalg.source_compositions import collapse_source_compositions
+    from atlas_mlir_native.reference_eval import host
+
+    region = _f32_region("sum", shape)
+    bare = tuple(replace(node, attrs=tuple(row for row in node.attrs if row[0] != "source_operation"))
+                 if node.id == "r" else node for node in region.nodes)
+    tagged = {node.id: node for node in collapse_source_compositions(bare, ("r",), region.constants,
+                                                                     sources={"r": "aten.mean.dim"})[0]}["r"]
+    assert ("source_operation" in dict(tagged.attrs)) is admitted
+    values = _f32_values("sum", shape, 0)
+    tensor = Tensor(values.view(np.uint32).copy(), "f32")
+    rules = {"host_order": {"default": "lexicographic-f32", "aten.mean.dim": host.TORCH_F32_SUM}}
+    if not admitted:
+        with pytest.raises(ValueError, match="32,768"):
+            _compile(tmp_path, region, "f32_sum")
+        with pytest.raises(ValueError, match="32,768"):
+            host.call("aten.mean.dim", [tensor, [-1], False], {}, rules)
+        return
+    reference = host.call("aten.mean.dim", [tensor, [-1], False], {}, rules)
+    threads = torch.get_num_threads()
+    try:
+        for count in (1, 2, 8):
+            torch.set_num_threads(count)
+            assert np.array_equal(reference.raw, torch.from_numpy(values.copy()).mean(-1).numpy().view(np.uint32))
+    finally:
+        torch.set_num_threads(threads)
+
+
+def test_f32_sum_is_exact_only_against_its_declared_order():
+    """A transposed operand keeps its strides in eager, whose mean then leaves the declared contiguous order."""
+    from atlas_mlir_native.reference_eval import host
+
+    shape = (4, 50, 960)
+    values = _f32_values("sum", shape, 0)
+    rules = {"host_order": {"default": "lexicographic-f32", "aten.mean.dim": host.TORCH_F32_SUM}}
+    declared = host.call("aten.mean.dim", [Tensor(values.view(np.uint32).copy(), "f32"), [-1], False], {}, rules).raw
+    contiguous = torch.from_numpy(values.copy())
+    transposed = contiguous.transpose(1, 2).contiguous().transpose(1, 2)
+    assert torch.equal(transposed, contiguous) and not transposed.is_contiguous()
+    assert np.array_equal(contiguous.mean(-1).numpy().view(np.uint32), declared)
+    assert np.count_nonzero(transposed.mean(-1).numpy().view(np.uint32) != declared) > 0
+
+
 def _rounded_exp(x):
     """Correctly rounded binary32 exp: binary64 exp where it decides the rounding, else 60-digit Decimal."""
     wide = np.exp(x.astype(np.float64))
@@ -554,6 +603,10 @@ def test_f32_softmax_matches_its_declared_order(tmp_path, shape):
     assert all(split.axis != len(shape) - 1 for split in staging.band_rules(region))
     read = softmax_maps(len(shape))[0]
     assert [read.apply((*(0,) * len(shape), k))[-1] for k in range(shape[-1])] == list(range(shape[-1]))
+    rows, total = int(np.prod(shape[:-1])), int(np.prod(shape))
+    admitted = [count for count in range(2, total + 1) if not total % count and staging.leading_rows(region, count)]
+    # Every admitted count cuts between rows; which divisors are reachable depends on the leading dimensions.
+    assert all(not rows % count for count in admitted) and bool(admitted) == (rows > 1)
     if shape[0] > 1:
         assert staging.leading_rows(region, shape[0]) == {"r": "split", "x": "split"}
     record, function = _compile(tmp_path, region, "f32_softmax")
@@ -606,7 +659,7 @@ class _Source(torch.nn.Module):
     ("first-axis-softmax", None, None),
     ("f32-layer-norm", None, None),
 ])
-def test_captured_f32_forms_select_only_their_torch_family(tmp_path, form, ops, families):
+def test_captured_f32_forms_select_only_their_family(tmp_path, form, ops, families):
     function = {
         "silu": torch.nn.functional.silu,
         "bf16-silu": lambda x: torch.nn.functional.silu(x.to(torch.bfloat16)),

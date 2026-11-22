@@ -66,8 +66,9 @@ _FAMILIES = (
     ("host-f32-rsqrt", "host_pointwise", ("source_f32_rsqrt_unqualified",),
      "checked source f32 rsqrt operation as two binary32 roundings, 1/sqrt(x); finite nonnegative inputs"),
     ("host-f32-sum", "host_pointwise", ("source_f32_reduce_add_unqualified",),
-     "checked +0-seeded sum of a source f32 mean over the last axis in the pinned torch 2.11.0+cpu cascade order; finite "
-     "inputs and results; reductions lowered from other source operations stay refused"),
+     "checked +0-seeded sum of a source f32 mean over the last axis in the declared order torch-2.11-cpu-f32-sum-v1; "
+     "not torch eager for a noncontiguous operand; finite inputs and results; one row of 32,768 or more elements and "
+     "reductions lowered from other source operations stay refused"),
     ("host-f32-softmax", "host_pointwise", ("source_f32_softmax_unqualified",),
      "checked source f32 softmax over the last axis in the declared order host-softmax-f32-left-fold-div-rne-v1 "
      "(left-fold maximum and sum, pinned correctly rounded expf, one division); not torch eager's vector order"),

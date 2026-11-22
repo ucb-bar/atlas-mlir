@@ -463,12 +463,15 @@ def describe_numerical_families() -> tuple[NumericalFamily, ...]:
                 (("attributes", "reduction_order"), "unresolved"),
                 (("attributes", "source_operation"), "aten.mean.dim"),
             ),
-            arithmetic={"kernel": "the sum inside torch eager CPU f32 mean over the last axis; equal under AVX512, AVX2, "
-                                  "and DEFAULT",
+            arithmetic={"kernel": "declared order for the sum inside a source f32 mean over the last axis; EXACT only "
+                                  "against this order. Torch eager equals it under AVX512, AVX2, and DEFAULT when its "
+                                  "operand is contiguous along the reduced axis",
                         "order": ["eight lanes, each four partials of a four-level cascade over the row's vectors",
                                   "scalar tail fold added to lane 0", "lanes folded in ascending order",
                                   "rows under 8 elements: one four-partial cascade"],
-                        "excluded": "a reduction lowered from any other source operation, such as softmax or layer norm"},
+                        "excluded": "a reduction lowered from any other source operation, such as softmax or layer "
+                                    "norm, and one row of 32,768 or more elements",
+                        "not_matched": "an eager operand that is not contiguous along the reduced axis"},
             runtime={"domain": "finite binary32 inputs and sums", "environment": "binary32 RNE and gradual underflow; no fast-math",
                      "checks": ["+0 seed, last axis, dense disjoint buffers", "domain and FP environment preflight"],
                      "qualification": "requires independently linked exact receipt; declaration is not qualification",
