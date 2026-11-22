@@ -1,0 +1,572 @@
+{
+  "scope": "Captured quantized linear application and authored kernel probes; simulator device cycles exclude host and image-loading time.",
+  "wip_base": {
+    "source_digest": "bf00560a71db7e4851f8e923eab7a05f7c191ab09a5d4c0ded80b36c7bb16b5e",
+    "input_sha256": "c78121bfbc8e29f3daa8e644ec7d87407f8c82cd8d51dfbcba4d8b1f5f728001",
+    "output_sha256": [
+      "912221867948cc98cec7a08073e070a211ee268cd7d5c31011c846afc685a3ce"
+    ],
+    "dispatches": 33,
+    "upload_bytes": 8192,
+    "download_bytes": 4100,
+    "options": {
+      "reduction_unroll": "auto",
+      "program_size_limit_bytes": null,
+      "tuning_profile": null,
+      "io_memory_bytes": 1048576,
+      "execution_instruction_limit": 1000000,
+      "native_pipeline": "optimized",
+      "device_kv_quantizer": true
+    },
+    "atlas": {
+      "commit": "fafd5d5244cfcfc1dc38442d36014669311b8d3d",
+      "tracked_diff_sha256": "b562f9e924aecc8fa9d94d846711ff265abd74499e9103e858597746e015f0dc"
+    },
+    "merlin": {
+      "commit": "b9077b094b29307a0de37e65aed317eef1629b47",
+      "tracked_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "tools": {
+      "atlas-opt": "da1b90edae2736d7979fe54c7d6c6d2f41dbab5c97ec5820eb0e1ee91f393c07",
+      "atlas-emit": "7261d9ddb53788f111c2f9c1acefcd46b395e3bafba31ed9554139f939437f19"
+    },
+    "build_note": "Only the existing LLVM definition splitting portability fix was applied to build the WIP base.",
+    "cycles": 66684,
+    "total_instructions": 16348,
+    "dram_read_bytes": 10240,
+    "dram_write_bytes": 6144
+  },
+  "rebased_capture": {
+    "source_digest": "bf00560a71db7e4851f8e923eab7a05f7c191ab09a5d4c0ded80b36c7bb16b5e",
+    "input_sha256": "c78121bfbc8e29f3daa8e644ec7d87407f8c82cd8d51dfbcba4d8b1f5f728001",
+    "exact_public_output_match": true,
+    "measurements": [
+      {
+        "policy": "baseline",
+        "dispatches": 33,
+        "upload_bytes": 4352,
+        "download_bytes": 3204,
+        "upload_calls": 36,
+        "download_calls": 66,
+        "output_sha256": [
+          "912221867948cc98cec7a08073e070a211ee268cd7d5c31011c846afc685a3ce"
+        ],
+        "cycles": 51536,
+        "total_instructions": 11719,
+        "dram_read_bytes": 4352,
+        "dram_write_bytes": 4128
+      },
+      {
+        "policy": "batched",
+        "dispatches": 2,
+        "upload_bytes": 4352,
+        "download_bytes": 3204,
+        "upload_calls": 5,
+        "download_calls": 4,
+        "output_sha256": [
+          "912221867948cc98cec7a08073e070a211ee268cd7d5c31011c846afc685a3ce"
+        ],
+        "cycles": 41528,
+        "total_instructions": 10448,
+        "dram_read_bytes": 4352,
+        "dram_write_bytes": 3232
+      }
+    ],
+    "options": {
+      "reduction_unroll": "auto",
+      "program_size_limit_bytes": null,
+      "tuning_profile": null,
+      "io_memory_bytes": 1048576,
+      "execution_instruction_limit": 1000000,
+      "native_pipeline": "optimized",
+      "device_kv_quantizer": true
+    },
+    "instruction_limit": 1000000,
+    "pack_layout": "register_rows",
+    "provenance": {
+      "atlas": {
+        "commit": "19802c4ea3154910b2653114aba46949d3543b73",
+        "tracked_diff_sha256": "266e034e78a31dbe9eca1f81c63ebb7624f5a9a99d54215f85f20142370e2dcb",
+        "tracked_diff_note": "Only worklist documentation was modified during this measurement; compiler and evaluator sources matched the recorded commit."
+      },
+      "merlin": {
+        "commit": "5e33268d134946665f7be032e12071324884da61",
+        "tracked_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "simulator": {
+        "commit": "a231973e36a1b202e767a9ed33b295f0bb1cafcd",
+        "tracked_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "simulator_binary_sha256": "1d141164229004be150bd89c436b5edd15453089ef369edf1506201af29f890a",
+      "compiler_tools": {
+        "atlas-opt": "2afc6131d4b05f60b01ea422e23cf834a8d0afbc573cb672cfe252fa5ff88050",
+        "atlas-emit": "50e84d0d7aed3133b17b05d4599d5f2a4cf830161da3541f67047d47b82f13b9"
+      },
+      "evaluator_sha256": "ed1a4574b954598271dc01f728bdc3867ea3d643d9dd2f49f4da171555f9a7da"
+    },
+    "scope": "existing lifted capture; matched public bytes; device cycles exclude host and image loading time"
+  },
+  "panels": {
+    "shape": [
+      128,
+      128,
+      768
+    ],
+    "lhs_exponents": "scalar",
+    "pipeline": "optimized",
+    "provenance": {
+      "atlas": {
+        "commit": "76d28b8f7476cd2d116b853bbbd13c405e0ecedd",
+        "tracked_diff_sha256": "7642c70ca629f4af92cc9fe3323c5710824962164b99d1fb4d6dbbafa84e8058"
+      },
+      "merlin": {
+        "commit": "e8811134c7326deb3e79fdd9fd30c75a55d02f47",
+        "tracked_diff_sha256": "3038bc507189e511af2ffe9921ec2d6a1cac9ab17bb3ce8d5097ee211485666a"
+      },
+      "simulator": {
+        "commit": "a231973e36a1b202e767a9ed33b295f0bb1cafcd",
+        "tracked_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "simulator_binary_sha256": "1d141164229004be150bd89c436b5edd15453089ef369edf1506201af29f890a",
+      "compiler_tools": {
+        "atlas-opt": "ca52f5e5f0a89f83ebb655fd5e49506c81dcaa5adff60d4c0317b68873015a80",
+        "atlas-emit": "35d09ba4a030e4c7385bb9fd394f900908080495b18abe51a76b237ac71c8503"
+      },
+      "evaluator_sha256": "48b5aa86b11ce869c5d1ed6757bee22d615572940f85b26edfa403b7fb64d28e"
+    },
+    "exact_memory_match": true,
+    "measurements": [
+      {
+        "policy": "batch-panel-cache",
+        "dispatches": 1,
+        "encoded_bytes": 15300,
+        "input_sha256": "a0b3d1c44322f609a71c90f57f582f67bc6e56de315a0c044df5d82c77f34f99",
+        "output_sha256": "9106125585569ced1d6c7522f3227a348ab3a3f9d96054b10f226545f9c81fb4",
+        "virtual_sha256": "e0f3d8bcdfa9aa4f702bbad3698cc716619a56942d93297a74bcc3dc1bc6a323",
+        "machine_sha256": "297d10cceae62d2c4968f97827ffb6e2de45b622541a6ee3123e72f2a00ff574",
+        "completed": true,
+        "compute": "cpu",
+        "cycles": 231629,
+        "cycles_per_second": 1832491.9785705346,
+        "dram_load_beats": 6212,
+        "dram_port_cycles": 167961.18246004975,
+        "dram_read_bytes": 198784,
+        "dram_store_beats": 1025,
+        "dram_write_bytes": 32800,
+        "engine_busy_cycles": [
+          15184,
+          0,
+          26304,
+          14372,
+          0,
+          171419,
+          57152
+        ],
+        "engine_instructions": [
+          17445,
+          0,
+          784,
+          180,
+          0,
+          227,
+          2610
+        ],
+        "halt_reason": "ecall",
+        "numerics": "rtl",
+        "pack_layout": "register_rows",
+        "simulation_seconds": 0.126401099,
+        "skipped_idle_cycles": 143854,
+        "total_instructions": 21472
+      },
+      {
+        "policy": "interleaved-panel-cache",
+        "dispatches": 1,
+        "encoded_bytes": 14156,
+        "input_sha256": "a0b3d1c44322f609a71c90f57f582f67bc6e56de315a0c044df5d82c77f34f99",
+        "output_sha256": "9106125585569ced1d6c7522f3227a348ab3a3f9d96054b10f226545f9c81fb4",
+        "virtual_sha256": "5af4f2059566295592928d6ffb4cead5d514188d620c5ca7508636fbf516e4c1",
+        "machine_sha256": "d3eddfe7feacda94fbbf810484c7d14ec46eee6c83f081908fd58eb7db32cb72",
+        "completed": true,
+        "compute": "cpu",
+        "cycles": 208761,
+        "cycles_per_second": 1734765.6709766586,
+        "dram_load_beats": 6164,
+        "dram_port_cycles": 166921.23597175558,
+        "dram_read_bytes": 197248,
+        "dram_store_beats": 1025,
+        "dram_write_bytes": 32800,
+        "engine_busy_cycles": [
+          14064,
+          0,
+          28152,
+          13604,
+          0,
+          169787,
+          38140
+        ],
+        "engine_instructions": [
+          16441,
+          0,
+          1232,
+          168,
+          0,
+          215,
+          2058
+        ],
+        "halt_reason": "ecall",
+        "numerics": "rtl",
+        "pack_layout": "register_rows",
+        "simulation_seconds": 0.120339596,
+        "skipped_idle_cycles": 128593,
+        "total_instructions": 20328
+      }
+    ],
+    "scope": "authored contraction; Rust RTL numerics, measured-curve DMA; device cycles only"
+  },
+  "host_partial_reads": [
+    {
+      "m": 35,
+      "n": 37,
+      "k": 65,
+      "batch": [
+        2
+      ],
+      "shared_rhs": true,
+      "previous_download_bytes": 16388,
+      "download_bytes": 6636,
+      "download_calls": 11,
+      "evidence": "Generated application C through Rust; exact output, poisoned guards, late invalid exponents, and callback counts checked in test_quantized_host_transfers.py in both pipelines."
+    },
+    {
+      "m": 3,
+      "n": 35,
+      "k": 65,
+      "batch": [
+        2
+      ],
+      "shared_rhs": false,
+      "previous_download_bytes": 4484,
+      "download_bytes": 528,
+      "download_calls": 7,
+      "evidence": "Generated application C through Rust; exact output, poisoned guards, late invalid exponents, and callback counts checked in test_quantized_host_transfers.py in both pipelines."
+    },
+    {
+      "m": 3,
+      "n": 5,
+      "k": 65,
+      "batch": [
+        2
+      ],
+      "shared_rhs": true,
+      "previous_download_bytes": 196,
+      "download_bytes": 152,
+      "download_calls": 3,
+      "evidence": "Generated application C through Rust; exact output, poisoned guards, late invalid exponents, and callback counts checked in test_quantized_host_transfers.py in both pipelines."
+    },
+    {
+      "m": 35,
+      "n": 3,
+      "k": 65,
+      "batch": [
+        2
+      ],
+      "shared_rhs": false,
+      "previous_download_bytes": 4100,
+      "download_bytes": 2140,
+      "download_calls": 5,
+      "evidence": "Generated application C through Rust; exact output, poisoned guards, late invalid exponents, and callback counts checked in test_quantized_host_transfers.py in both pipelines."
+    },
+    {
+      "m": 1,
+      "n": 17,
+      "k": 33,
+      "batch": [],
+      "shared_rhs": true,
+      "previous_download_bytes": 1060,
+      "download_bytes": 38,
+      "download_calls": 3,
+      "evidence": "Generated application C through Rust; exact output, poisoned guards, late invalid exponents, and callback counts checked in test_quantized_host_transfers.py in both pipelines."
+    },
+    {
+      "m": 32,
+      "n": 32,
+      "k": 32,
+      "batch": [],
+      "shared_rhs": true,
+      "previous_download_bytes": 2052,
+      "download_bytes": 2052,
+      "download_calls": 2,
+      "evidence": "Generated application C through Rust; exact output, poisoned guards, late invalid exponents, and callback counts checked in test_quantized_host_transfers.py in both pipelines."
+    }
+  ],
+  "scheduler": {
+    "before": {
+      "machine_scheduling": {
+        "exhaustions": 0,
+        "invocations": 62,
+        "maximum_used": 33255082,
+        "used": 240189729
+      },
+      "total_work": 440479204,
+      "atlas_opt_sha256": "ca52f5e5f0a89f83ebb655fd5e49506c81dcaa5adff60d4c0317b68873015a80"
+    },
+    "after": {
+      "machine_scheduling": {
+        "exhaustions": 0,
+        "invocations": 62,
+        "maximum_used": 1874485,
+        "used": 15640033
+      },
+      "total_work": 215929508,
+      "atlas_commit": "ce5befeb4adc65164097460b4f3878c7f12df1d0",
+      "atlas_opt_sha256": "2afad3ed6ee88c9675b84a39c78274e2e65d4a4556b2ad95d8361ed29ba13e2d"
+    },
+    "shape": [
+      225,
+      35,
+      3073
+    ],
+    "policy": "panel-cache",
+    "machine_ir_sha256": "3380251f19cbeddc2ac49c7d722675e7c0bf2177badf267e56d15875d813aef6",
+    "exact_machine_ir_match": true,
+    "single_profile_wall_seconds": {
+      "before": 43.2577,
+      "after": 28.2893
+    },
+    "caveat": "Wall time is environment dependent; the existing 30-second pytest case still timed out in a loaded run. No test timeout or compile-work allowance was raised."
+  },
+  "validation": {
+    "logs": [
+      {
+        "path": "out/efficiency/nov22-final-wip-gates.log",
+        "sha256": "6ffaa3fec0bd9a94b5bd485c24397a0b7864be34edd82cbe3d697cb68b812dd1",
+        "summary": "8 failed, 422 passed, 5 skipped, 284 subtests passed in 350.85s (0:05:50)",
+        "failures": [
+          "FAILED test/test_resident_loop_image.py::ResidentLoopImageTest::test_relocated_2_and_22_trip_images_execute_exactly_and_last_weight_mutation_is_observed",
+          "SUBFAILED(names=('static_library_callback.c',)) test/test_deployment_link.py::GeneratedStackTests::test_review_inputs_through_aliases_library_callbacks_and_pointers",
+          "FAILED test/test_deployment_link.py::GeneratedStackTests::test_review_inputs_through_aliases_library_callbacks_and_pointers",
+          "FAILED test/test_deployment_link.py::StartupTests::test_platform_archives_are_byte_reproducible",
+          "FAILED test/test_deployment_link.py::ResidentElfRecordTests::test_a_resident_elf_links_its_arena_read_only_and_its_counted_images_as_symbols",
+          "SUBFAILED(body='vfmv.f.s fa4,v8') test/test_deployment_link.py::ResidentElfRecordTests::test_resident_host_code_gets_the_core_errata_scan",
+          "SUBFAILED(body='fence.i') test/test_deployment_link.py::ResidentElfRecordTests::test_resident_host_code_gets_the_core_errata_scan",
+          "FAILED test/test_deployment_link.py::ResidentElfRecordTests::test_resident_host_code_gets_the_core_errata_scan"
+        ]
+      },
+      {
+        "path": "out/efficiency/nov22-baseline-remaining-gates.log",
+        "sha256": "3fb916ccc258bbfde3935bf394ee19a21bbbbc77eb607e70790854ef71c46132",
+        "summary": "8 failed, 11 subtests passed in 15.02s",
+        "failures": [
+          "FAILED test/test_resident_loop_image.py::ResidentLoopImageTest::test_relocated_2_and_22_trip_images_execute_exactly_and_last_weight_mutation_is_observed",
+          "SUBFAILED(names=('static_library_callback.c',)) test/test_deployment_link.py::GeneratedStackTests::test_review_inputs_through_aliases_library_callbacks_and_pointers",
+          "FAILED test/test_deployment_link.py::GeneratedStackTests::test_review_inputs_through_aliases_library_callbacks_and_pointers",
+          "FAILED test/test_deployment_link.py::StartupTests::test_platform_archives_are_byte_reproducible",
+          "FAILED test/test_deployment_link.py::ResidentElfRecordTests::test_a_resident_elf_links_its_arena_read_only_and_its_counted_images_as_symbols",
+          "SUBFAILED(body='vfmv.f.s fa4,v8') test/test_deployment_link.py::ResidentElfRecordTests::test_resident_host_code_gets_the_core_errata_scan",
+          "SUBFAILED(body='fence.i') test/test_deployment_link.py::ResidentElfRecordTests::test_resident_host_code_gets_the_core_errata_scan",
+          "FAILED test/test_deployment_link.py::ResidentElfRecordTests::test_resident_host_code_gets_the_core_errata_scan"
+        ]
+      },
+      {
+        "path": "out/efficiency/nov22-final-host-transfers.log",
+        "sha256": "c06ced4e92e2d0770f4e2380e3fe9e119e6be30f5cc21c7f882e513ba9e7f9c6",
+        "summary": "12 passed in 96.02s (0:01:36)",
+        "failures": []
+      },
+      {
+        "path": "out/efficiency/nov22-runtime-tail-gates.log",
+        "sha256": "dc5590e15d7026af35b21975085017329a1658de4b1a563ca463b8a2309d179a",
+        "summary": "26 passed, 1 skipped, 40 subtests passed in 31.54s",
+        "failures": []
+      },
+      {
+        "path": "out/efficiency/nov22-ready-scheduler-tests.log",
+        "sha256": "0eb704d6f40ba300c9567dfa5756ba879b688e7ae4700ed094370e44ec530961",
+        "summary": "41 passed, 36 subtests passed in 89.03s (0:01:29)",
+        "failures": []
+      },
+      {
+        "path": "out/efficiency/nov22-ready-work-tests.log",
+        "sha256": "3cbdc6c434c65f18d109efaa62f9dfc90de9d6293cd365dc2486b5a649ce12dd",
+        "summary": "7 passed, 10 subtests passed in 0.34s",
+        "failures": []
+      },
+      {
+        "path": "out/efficiency/nov22-rust-restoration-tests.log",
+        "sha256": "882139d52457854a4252a9979af926b28def9e18933b886a10f5a717d93ceeea",
+        "summary": "57 passed in 374.07s (0:06:14)",
+        "failures": []
+      },
+      {
+        "path": "out/efficiency/nov22-layout-mlp-tests.log",
+        "sha256": "c7d567162b99c6897a82c3fe348af3eb097ff1bee927d205e2e78c8879c6ae70",
+        "summary": "24 passed, 1 skipped, 55 subtests passed in 27.45s",
+        "failures": []
+      },
+      {
+        "path": "out/efficiency/nov22-looped-mnk-tests.log",
+        "sha256": "9f84bb96050cc3bd34adf7d7534f310972a92c05e63e863c939460b8bffe4d5c",
+        "summary": "6 passed, 1 skipped, 21 subtests passed in 15.50s",
+        "failures": []
+      },
+      {
+        "path": "out/efficiency/nov22-qualified-reference-tests.log",
+        "sha256": "45e611aa1fcc3bfab0f9756150fa7a91c3dcaa0305f1dd03641e196b6fba3516",
+        "summary": "33 passed in 1.24s",
+        "failures": []
+      },
+      {
+        "path": "out/efficiency/nov22-edge-index-tests.log",
+        "sha256": "586f9d05ce383b787491b0c2618e03f9b73ce9600121684dfb12f99e788f45a3",
+        "summary": "61 passed, 46 subtests passed in 176.79s (0:02:56)",
+        "failures": [],
+        "source_commit": "19802c4ea3154910b2653114aba46949d3543b73"
+      }
+    ],
+    "scope": "Focused suites overlap; do not sum their counts. The broad WIP run has unresolved failures. Matching baseline failures were rerun with the same reference environment.",
+    "reference_environment": {
+      "python_model_revision": "b97b2f5a97e432141c4ef8504bec396651d77a8f",
+      "torch_version": "2.11.0+cu130",
+      "xdsl_version": "0.68.0",
+      "z3_solver_version": "4.16.0.0",
+      "host_math_supplier": "Built from Merlin efficiency source using src/merlin/runtime/host_math_supplier/build.py --target x86 and selected explicitly in ATLAS_REFERENCE_TEST_RULES."
+    },
+    "remaining_failures": [
+      "External functional_runtime module missing",
+      "RISC-V compiler fails static_library_callback.c and libptr.c fixtures",
+      "Platform archive byte reproducibility assertion",
+      "Resident ELF fixtures omit required inputs field"
+    ],
+    "merlin": {
+      "focused": "113 passed, 4 subtests passed",
+      "artifact_layout": "passed",
+      "structure": "same failure report as WIP base",
+      "test_budget": {
+        "collected": 278,
+        "ceiling": 150,
+        "baseline_collected": 278
+      }
+    },
+    "commands": {
+      "broad_wip": [
+        "python",
+        "-m",
+        "pytest",
+        "-q",
+        "test/test_quantized_loop.py",
+        "test/test_quantized_loop_dram.py",
+        "test/test_quantized_loop_tiles.py",
+        "test/test_quantized_loop_fallback.py",
+        "test/test_quantized_panel_geometry.py",
+        "test/test_quantized_panel_reuse.py",
+        "test/test_shared_weight_panels.py",
+        "test/test_batch_panel_cache.py",
+        "test/test_loop_dma_overlap.py",
+        "test/test_looped_mnk.py",
+        "test/test_resident_loop_image.py",
+        "test/test_resident_loop_publication.py",
+        "test/test_deploy.py",
+        "test/test_deployment.py",
+        "test/test_deployment_link.py",
+        "test/test_deployment_kit.py",
+        "test/test_deployment_gate.py",
+        "test/test_chiprunner_composed.py",
+        "tests"
+      ],
+      "edge_index": [
+        "python",
+        "-m",
+        "pytest",
+        "-q",
+        "test/test_stream_scheduling.py",
+        "test/test_slot_scheduling.py",
+        "test/test_composed_scheduling.py",
+        "test/test_delay_insertion.py",
+        "test/test_cfg_dma_timing.py",
+        "test/test_dma_wait_metadata.py",
+        "test/test_native_work_budget.py",
+        "test/test_compile_work_budget.py",
+        "test/test_interleaved_panels.py"
+      ]
+    }
+  },
+  "target": {
+    "rtl_revision": "0079c0541111197741a231c002e3843fa6f545b2",
+    "target_identity": "atlas-rtl-0079c0541111197741a231c002e3843fa6f545b2:movement-mxu01-vpu-pack-tile-v24",
+    "scope": "Compiler-selected RTL contract; simulator measurements do not establish board performance or independent hardware qualification."
+  },
+  "edge_index": {
+    "trials": [
+      [
+        {
+          "policy": "ready",
+          "wall_seconds": 29.16390794700419,
+          "binary_sha256": "2afad3ed6ee88c9675b84a39c78274e2e65d4a4556b2ad95d8361ed29ba13e2d",
+          "machine_sha256": "3380251f19cbeddc2ac49c7d722675e7c0bf2177badf267e56d15875d813aef6",
+          "command": [
+            "out/efficiency/nov22-large-panel-profile/atlas-opt-ready",
+            "--mlir-timing",
+            "--atlas-report-work",
+            "--atlas-compile=enhanced-virtual-scheduling=true",
+            "out/efficiency/nov22-large-panel-profile/panel-cache.mlir",
+            "-o",
+            "out/efficiency/nov22-large-panel-profile/panel-cache-ready-index.mlir"
+          ]
+        },
+        {
+          "policy": "dense",
+          "wall_seconds": 27.3904223349964,
+          "binary_sha256": "2afc6131d4b05f60b01ea422e23cf834a8d0afbc573cb672cfe252fa5ff88050",
+          "machine_sha256": "3380251f19cbeddc2ac49c7d722675e7c0bf2177badf267e56d15875d813aef6",
+          "command": [
+            "out/build-matching/bin/atlas-opt",
+            "--mlir-timing",
+            "--atlas-report-work",
+            "--atlas-compile=enhanced-virtual-scheduling=true",
+            "out/efficiency/nov22-large-panel-profile/panel-cache.mlir",
+            "-o",
+            "out/efficiency/nov22-large-panel-profile/panel-cache-dense-index.mlir"
+          ]
+        }
+      ],
+      [
+        {
+          "policy": "dense",
+          "wall_seconds": 26.74368259300536,
+          "max_rss_kb": 206428,
+          "binary_sha256": "2afc6131d4b05f60b01ea422e23cf834a8d0afbc573cb672cfe252fa5ff88050",
+          "machine_sha256": "3380251f19cbeddc2ac49c7d722675e7c0bf2177badf267e56d15875d813aef6",
+          "command": [
+            "out/build-matching/bin/atlas-opt",
+            "--mlir-timing",
+            "--atlas-report-work",
+            "--atlas-compile=enhanced-virtual-scheduling=true",
+            "out/efficiency/nov22-large-panel-profile/panel-cache.mlir",
+            "-o",
+            "out/efficiency/nov22-large-panel-profile/panel-cache-dense-repeat.mlir"
+          ]
+        },
+        {
+          "policy": "ready",
+          "wall_seconds": 28.938891396988765,
+          "max_rss_kb": 207216,
+          "binary_sha256": "2afad3ed6ee88c9675b84a39c78274e2e65d4a4556b2ad95d8361ed29ba13e2d",
+          "machine_sha256": "3380251f19cbeddc2ac49c7d722675e7c0bf2177badf267e56d15875d813aef6",
+          "command": [
+            "out/efficiency/nov22-large-panel-profile/atlas-opt-ready",
+            "--mlir-timing",
+            "--atlas-report-work",
+            "--atlas-compile=enhanced-virtual-scheduling=true",
+            "out/efficiency/nov22-large-panel-profile/panel-cache.mlir",
+            "-o",
+            "out/efficiency/nov22-large-panel-profile/panel-cache-ready-repeat.mlir"
+          ]
+        }
+      ]
+    ],
+    "exact_machine_ir_match": true,
+    "exact_work_report_match": true,
+    "total_work": 215929508,
+    "note": "Only dependency edge lookup changed; edge vector insertion order and hazard rules are unchanged. Local compilation timings, not device cycle or board latency measurements."
+  }
+}

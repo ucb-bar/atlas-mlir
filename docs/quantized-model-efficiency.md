@@ -6,6 +6,151 @@ and Merlin `4a039544d309afbec4066cc8c99dbee881e7a6f1`. Execution uses the separa
 cloned `Jeremy-Ryan-Mills/npu_model_rs`; record its exact revision and binary hash
 with measurements. Historical performance numbers are context, not this branch's baseline.
 
+The current branches have been rebased onto the November 22 integration snapshot:
+Atlas `fafd5d5244cfcfc1dc38442d36014669311b8d3d`, Merlin
+`b9077b094b29307a0de37e65aed317eef1629b47`. Atlas's package dependency pins that exact
+Merlin WIP tip from `reed-nicolas/merlin`, as requested. To exercise the additional
+Merlin affine-view optimization, use the matching `perf/quantized-model-efficiency`
+checkout as an editable override. The original worktrees are preserved, and both
+repositories retain `backup/quantized-efficiency-before-nov22-20261122`.
+Merlin `origin/main` was fetched; Atlas has no remote `main` (its default branch
+is `handwritten-implementation`). No WIP branch was rewritten.
+
+## November 22 measurements
+
+[Machine-readable evidence](measurements/quantized-efficiency-nov22.json) records
+the exact source/input/output hashes, compiler binaries, options, and revisions.
+The unchanged lifted quantized-linear capture was independently rebuilt on the
+WIP base and on this branch. The WIP build needed only the existing CMake fix
+that splits LLVM definitions correctly for the selected conda toolchain.
+
+| Measurement | WIP base | This branch, batching enabled |
+|---|---:|---:|
+| Device launches | 33 | 2 |
+| Device cycles | 66,684 | 41,528 |
+| Device read bytes | 10,240 | 4,352 |
+| Device write bytes | 6,144 | 3,232 |
+| Host upload bytes | 8,192 | 4,352 |
+| Host download bytes | 4,100 | 3,204 |
+
+The public output SHA256 is identical:
+`912221867948cc98cec7a08073e070a211ee268cd7d5c31011c846afc685a3ce`.
+On this branch alone, turning batching off gives 33 launches and 51,536 cycles;
+host transfer callbacks fall from 36 writes/66 reads to 5 writes/4 reads when
+batching is enabled. These are simulator measurements for this capture, not
+full-model, board, or end-to-end latency measurements.
+
+The authored 128 × 128 × 768 panel comparison also replays on the new base:
+`batch-panel-cache` takes 231,629 cycles and 198,784 read bytes;
+`interleaved-panel-cache` takes 208,761 cycles and 197,248 read bytes.
+Both use one launch, write 32,800 bytes, and produce identical protected memory.
+
+The shared C runtime now reads only occupied BF16 register halves for partial
+output tiles, including final row/column tails. Full tiles retain bulk reads.
+Examples of total host download bytes, including status:
+
+| M × N × K; batch | Previous prefix read | Occupied-half read |
+|---|---:|---:|
+| 35 × 37 × 65; 2 | 16,388 | 6,636 |
+| 3 × 35 × 65; 2 | 4,484 | 528 |
+| 3 × 5 × 65; 2 | 196 | 152 |
+| 35 × 3 × 65; 2 | 4,100 | 2,140 |
+| 1 × 17 × 33; 1 | 1,060 | 38 |
+| 32 × 32 × 32; 1 | 2,052 | 2,052 |
+
+Generated-C/Rust tests check every output and transfer count against independent
+logical-word indexing in both pipelines. Streamed and full-frame host packing
+preserve public outputs when the last read fails. Device work is unchanged by
+this host-only change. Partial tiles can require two callbacks; host latency has
+not been measured. Hoisted tensor/batch exponent loads were also ported to the
+128-byte payload after the rebase exposed one remaining 2-KiB load path.
+
+Machine scheduling now visits only graph-ready instructions, retaining original
+index order for priority ties. The 225 × 35 × 3073 panel probe emits identical
+machine IR before and after. Counted machine-scheduling work falls from
+240,189,729 to 15,640,033 units; total compile work falls from 440,479,204 to
+215,929,508. Single-run compilation profiles were 43.26 and 28.29 seconds.
+Wall time varies: the existing 30-second test still timed out under load.
+No work allowance or test timeout was increased. Exact work-boundary refusal
+and the scheduler/slot/DMA/timing suites pass.
+
+Dependency-edge merging now uses a hash lookup while retaining the original
+ordered edge vector. Two local comparisons after the ready-set change measured
+29.16 → 27.39 seconds and, with run order reversed, 28.94 → 26.74 seconds.
+Both emitted identical machine IR and identical work-budget reports. These are
+local compilation timings, not device-cycle savings. The affected scheduler,
+delay, DMA, work-budget, and Rust panel suites pass 61 tests and 46 subtests.
+
+## November 22 validation and reproduction
+
+The rebased native tools build successfully. The selected WIP deployment,
+quantized-loop, panel, residency, and independent reference suites finish with
+**422 passed, 5 skipped, 284 subtests passed, and 8 failures**. The eight failures
+(including three failed subtests) reproduce on the WIP base with the same
+reference environment: the external `functional_runtime` module is absent,
+two RISC-V compilation fixtures fail, archive byte reproducibility fails, and
+resident ELF fixtures omit the required `inputs` field. These gates remain
+unresolved. The large-panel test passed in this run, but the earlier timeout
+under load remains a compile-latency concern.
+
+Focused transport, independent Rust-output, late rejection, scheduler, and work
+budget suites pass; their individual counts and log hashes are in the measurement
+record. The Rust model uses RTL numerics with explicit `register_rows` packing.
+Python numerical qualification uses the pinned `npu_model` revision
+`b97b2f5a97e432141c4ef8504bec396651d77a8f` and the real built Merlin host-math
+supplier. The simulator results do not constitute independent board qualification.
+
+Merlin's focused runtime/placement suite passes **113 tests and 4 subtests**.
+Its artifact-layout check passes. The full structure report matches the WIP
+baseline, including existing package-documentation and dependency/size-ratchet
+issues. The test-budget check reports **278 collected cases against a ceiling
+of 150 on both revisions**. The affine-view coverage was integrated into existing
+placement cases; no test allowance was raised.
+
+To repeat the captured application comparison, select the matching Atlas native
+tools, the Rust executable, and the Merlin efficiency checkout in the environment
+(`ATLAS_OOT_BIN_DIR`, `ATLAS_RUST_NPU_MODEL`, `MERLIN_NATIVE_ROOT`, and Python's
+module path), then run:
+
+```sh
+python tools/profile_quantized_capture.py \
+  --compile-inputs /path/to/unchanged/compile-inputs \
+  --input /path/to/recorded/input.bin \
+  --pipeline optimized --out /path/to/new/comparison
+```
+
+The evaluator refuses mismatched input extents, compiles and verifies both
+applications before reading input bytes, checks public outputs and guard bytes,
+and records tool/source/input/output hashes in `comparison.json`. The receipt
+identifies the source and input hashes required for the table above. Local logs
+and full compiled artifacts remain under `out/efficiency/`; the compact evidence
+and remaining action items are versioned here.
+
+## Next work after this checkpoint
+
+1. Finish qualifying the WIP deployment gates with the external functional
+   evaluator and platform dependencies. Preserve the pinned Python model,
+   explicit numerical declarations, refusal paths, and source/publication checks.
+2. Reduce the remaining all-pairs dependency-graph work in large native blocks;
+   prove equivalent hazards and scheduling ties before changing its traversal.
+   The ready-instruction change removes redundant candidate scans, but does not
+   remove dependency construction or verification costs.
+3. Measure host callback latency for partial-tile reads, including whether
+   coalescing nearby occupied halves beats the byte minimum on the real transport.
+   Then evaluate splitting the matching device output DMA into occupied register
+   halves. For a 1 × 17 BF16 tile, the present 1,056-byte prefix could become two
+   32-byte transfers, with the same frame offsets and status store. This is an
+   unimplemented traffic estimate: the extra DMA setup/wait can offset the byte
+   savings, and a source-offset store needs explicit lowering, replay, and memory
+   contract support before selection. Larger row/column tails must be checked
+   independently, including rejection and preservation of unwritten gaps.
+4. Extend the existing quantizer-to-contraction handoff proof beyond 32 × 32.
+   Larger codes and exponent pages require explicit physical-layout and private
+   ownership proofs before application selection can use the combined image.
+5. Evaluate double-buffered panel loads with measured DMA/MXU overlap and total
+   cycles. Extend the WIP resident layer-loop implementation. Layout-copy
+   composition is being developed elsewhere and is outside this work.
+
 ## Action items
 
 1. **Establish reproducible measurement.** Build the compiler and Rust simulator;
@@ -498,10 +643,11 @@ granularity while reducing quantizer reads, and examine residency and compiler
 register pressure. Investigate the panel scheduling tradeoffs before broadening
 scalar-literal reuse across control-flow boundaries.
 
-Merlin's full structure gate currently reports the pre-existing root-level
-`merlin/tests/test_application_deployment_paging.py`; the no-regex gate reports
+Before the November 22 rebase, Merlin's full structure gate reported the root-level
+`merlin/tests/test_application_deployment_paging.py`; the no-regex gate reported
 four existing call sites in `application_deployment.py` and `baremetal_harness.py`.
-Neither failure is introduced by these changes. Package docs were regenerated.
+Those are historical results from the old layout, not the current WIP gate
+status. Package docs were regenerated for that earlier check.
 
 ## Measurement acceptance
 
