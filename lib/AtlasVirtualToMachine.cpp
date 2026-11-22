@@ -114,6 +114,7 @@ public:
     allocated = true;
     if (failed(allocation.allocate(function)) || failed(allocation.verify()))
       return failure();
+    reusedPrefills = findAtlasReusedDMAPrefills(function, dmaPlacements());
     for (Block &block : function.getBody())
       for (Value argument : block.getArguments())
         if (isa<VirtualFP8Type>(argument.getType()))
@@ -216,7 +217,7 @@ public:
         }
       }
     }
-    auto cfgContract = buildAtlasCFGContract(function, cfgRegisters);
+    auto cfgContract = buildAtlasCFGContract(function, cfgRegisters, dmaAssignments);
     auto dmaContract = buildAtlasDMAContract(function, dmaAssignments);
     auto mxuContract = buildAtlasMXUContract(function, registers, mxuAssignments, fixed());
     auto tileContract = buildAtlasTileContract(function, registers, dmaAssignments, fixed(), allocation.scalarArguments(), scalarRegisters);
@@ -304,7 +305,7 @@ public:
       for (Operation &operation : block)
         for (Value value : operation.getResults()) placement(value);
     }
-    auto contract = buildAtlasCFGContract(function, registers);
+    auto contract = buildAtlasCFGContract(function, registers, dmaPlacements());
     if (failed(contract)) return failure();
     std::string text;
     llvm::raw_string_ostream stream(text);
@@ -336,6 +337,18 @@ public:
   }
 
 private:
+  SmallVector<VirtualDMAAssignment> dmaPlacements() {
+    SmallVector<VirtualDMAAssignment> assignments;
+    for (Block &block : function.getBody())
+      for (Operation &op : block)
+        if (isa<VirtualDMALoadFP8Op, VirtualDMALoadBF16Op,
+                VirtualDMAStoreFP8Op, VirtualDMAStoreBF16Op>(op)) {
+          Value transfer = op.getResult(0);
+          assignments.push_back({transfer, allocation.dma(transfer)});
+        }
+    return assignments;
+  }
+
   bool cfgTracked(Value v) const {
     return registerKindOf(v).has_value() || isVirtualScalarImmediate(v);
   }
@@ -360,6 +373,7 @@ private:
   // expansion order; an atomic DMA reserves its wait and VLOAD commands at the
   // launch and issues them later as `tileCommand`.
   void record(Operation *op, std::optional<unsigned> tileCommand = std::nullopt) {
+    updateZeroTemporary(op);
     state = op->getResult(0);
     planned.push_back(op);
     op->setAttr(kAtlasTagCFGBlock, i32(currentCFGBlock));
@@ -370,6 +384,29 @@ private:
     if (isa<VLoadOp, VStoreOp, DMAOp, DMAWaitOp>(op))
       op->setAttr(kAtlasTagTileCommand,
                   i32(tileCommand ? *tileCommand : nextTileCommand++));
+  }
+
+  // Reuse only a known zero in the reserved tensor pair. Track issued writes,
+  // including helper loads/copies, rather than relying on virtual result types.
+  // Unknown instructions and control-flow boundaries discard the fact.
+  void updateZeroTemporary(Operation *op) {
+    if (auto vli = dyn_cast<VLIOp>(op);
+        vli && vli.getDst() == fixed().tensorTemporary && vli.getMode() == "all") {
+      zeroTemporary = vli.getImmediate() == 0;
+      return;
+    }
+    auto [first, width] = llvm::TypeSwitch<Operation *, std::pair<unsigned, unsigned>>(op)
+        .Case<VLoadOp, XLUTransposeOp>([](auto op) { return std::make_pair(op.getDst(), 1u); })
+        .Case<VPUUnaryOp, VPUBinaryOp, VPUReduceOp>([](auto op) { return std::make_pair(op.getDst(), 2u); })
+        .Case<VPUPackOp>([](auto op) { return std::make_pair(op.getDst(), op.getDirection() == "fp8_to_bf16" ? 2u : 1u); })
+        .Case<MXUPopOp>([](auto op) { return std::make_pair(op.getDst(), op.getFormat() == "bf16" ? 2u : 1u); })
+        .Case<VLIOp>([](auto op) { return std::make_pair(op.getDst(), op.getMode() == "all" || op.getMode() == "row" ? 2u : 1u); })
+        .Case<ALURegOp, ALUImmOp, UpperOp, ScalarLoadOp, ScalarStoreOp,
+              VStoreOp, DMAOp, DMAWaitOp, DMAConfigOp, MXUPushOp, MXUMatmulOp>(
+            [](auto) { return std::make_pair(0u, 0u); })
+        .Default([](auto) { return std::make_pair(0u, unsigned(kAtlasTensorRegisters)); });
+    if (first < fixed().tensorTemporary + 2 && fixed().tensorTemporary < first + width)
+      zeroTemporary = false;
   }
 
   // A mailbox or slot load or store that is a tile command too.
@@ -392,7 +429,10 @@ private:
     blockLabels[block] = label;
     return label;
   }
-  void mark(unsigned label) { labelPC[label] = planned.size(); }
+  void mark(unsigned label) {
+    zeroTemporary = false;
+    labelPC[label] = planned.size();
+  }
 
   std::optional<uint32_t> constantAddress(Value value) {
     auto [entry, inserted] = constantAddresses.try_emplace(value, std::nullopt);
@@ -615,8 +655,11 @@ private:
     // A prefix load defines the complete virtual tile: private staging tail
     // is zeroed by ordinary scheduled vector writes before DMA overlays it.
     unsigned bytes = *provenI32(sizeBytes);
-    if (!src && bytes < placement.halves * kAtlasRegisterBytes) {
-      emit<VLIOp>(loc, "all", fixed().tensorTemporary, 0);
+    unsigned tileBytes = placement.halves * kAtlasRegisterBytes;
+    bool retainedZeros = reusedPrefills.contains(transfer.getDefiningOp());
+    if (!src && bytes < tileBytes && !retainedZeros) {
+      if (!zeroTemporary)
+        emit<VLIOp>(loc, "all", fixed().tensorTemporary, 0);
       for (unsigned half = 0; half < placement.halves; ++half) {
         materializeScalar(placement.stagingReg,
                           placement.stagingWord + half * kAtlasRegisterWords, loc);
@@ -1188,6 +1231,8 @@ private:
   unsigned nextLabel = 0;
   unsigned nextMXUCommand = 0;
   unsigned nextTileCommand = 0;
+  bool zeroTemporary = false;
+  llvm::DenseSet<Operation *> reusedPrefills;
   std::array<std::optional<uint32_t>, 2> scalarSlotBases{};
   llvm::DenseMap<Value, PendingLoad> pendingLoads;
   SmallVector<Value> pendingOrder;

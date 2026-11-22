@@ -157,12 +157,15 @@ LogicalResult checkReferences(ModuleOp module, ArrayRef<Record> records) {
                  (r.vmemByte == predecessor.vmemByte && r.bytes == predecessor.bytes));
       } else if (predecessor.kind == "dma_wait") {
         // Earlier records have already passed their launch-reference check.
+        // A zero prefill may belong to an earlier transfer sharing this
+        // window. The buffer contract checks its surviving word origins,
+        // including intervening writes and control-flow dominance.
         const Record &launch = records[predecessor.after[0]];
         valid = launch.kind == "dma_load" && r.transfer == launch.transfer &&
                 (contains(launch, r) || (r.kind == "vload" && launch.transfer >= 0 &&
                  llvm::any_of(records, [&](const Record &prefill) {
                    return prefill.id < launch.id && prefill.kind == "vstore" &&
-                          prefill.transfer == launch.transfer && contains(prefill, r);
+                          contains(prefill, r);
                  }))) && (r.kind == "vload" || r.kind == "mailbox_load");
       }
     }
@@ -212,6 +215,45 @@ LogicalResult checkDependencies(const AtlasStream &s, ArrayRef<Record> records,
   return success();
 }
 } // namespace
+
+llvm::DenseSet<Operation *> mlir::atlas::findAtlasReusedDMAPrefills(
+    func::FuncOp function, ArrayRef<VirtualDMAAssignment> dmaAssignments) {
+  llvm::DenseMap<Value, const DMATransferPlacement *> placements;
+  for (const auto &assignment : dmaAssignments)
+    placements[assignment.transfer] = &assignment.placement;
+  llvm::DenseSet<Operation *> reused;
+  for (Block &block : function.getBody()) {
+    // Each allocator-owned staging window has a fixed, disjoint 2 KiB span.
+    // Track its tile width and the prefix most recently overwritten by DMA.
+    llvm::DenseMap<uint32_t, std::pair<unsigned, unsigned>> suffixes;
+    for (Operation &op : block) {
+      if (!isa<VirtualDMALoadFP8Op, VirtualDMALoadBF16Op, VirtualSaveOp,
+               VirtualRestoreOp, VirtualSlotOp>(op) &&
+          op.getName().getDialectNamespace() != "arith")
+        suffixes.clear();
+      if (!isa<VirtualDMALoadFP8Op, VirtualDMALoadBF16Op>(op))
+        continue;
+      auto found = placements.find(op.getResult(0));
+      auto bytes = provenI32(virtualDMATransfer(&op)->size->get());
+      if (found == placements.end() || !bytes) {
+        suffixes.clear();
+        continue;
+      }
+      const auto &placement = *found->second;
+      unsigned tileBytes = placement.halves * kAtlasRegisterBytes;
+      if (*bytes >= tileBytes) {
+        suffixes.erase(placement.stagingWord);
+        continue;
+      }
+      auto suffix = suffixes.find(placement.stagingWord);
+      if (suffix != suffixes.end() && suffix->second.first == tileBytes &&
+          suffix->second.second <= *bytes)
+        reused.insert(&op);
+      suffixes[placement.stagingWord] = {tileBytes, *bytes};
+    }
+  }
+  return reused;
+}
 
 AtlasTileExpansion mlir::atlas::atlasTileExpansion(StringRef sourceOp) {
   return llvm::StringSwitch<AtlasTileExpansion>(sourceOp)
@@ -341,6 +383,7 @@ FailureOr<ArrayAttr> mlir::atlas::buildAtlasTileContract(
           return function.emitOpError("tile contract has invalid scalar argument placement");
   }
   llvm::DenseMap<Value, SmallVector<int32_t, 2>> spillStores;
+  auto reusedPrefills = findAtlasReusedDMAPrefills(function, dmaAssignments);
   for (Block &block : function.getBody()) {
     for (Operation &op : block) {
       auto tensorReg = [&](Value value) -> FailureOr<unsigned> {
@@ -390,7 +433,8 @@ FailureOr<ArrayAttr> mlir::atlas::buildAtlasTileContract(
         DictionaryAttr source = dmaRecords.find(p.id)->second;
         bool store = isa<VirtualDMAStoreFP8Op, VirtualDMAStoreBF16Op>(op);
         SmallVector<int32_t, 2> after;
-        if (!store && uint32_t(source.getAs<IntegerAttr>("size_bytes").getInt()) < p.halves * kAtlasRegisterBytes) {
+        if (!store && !reusedPrefills.contains(&op) &&
+            uint32_t(source.getAs<IntegerAttr>("size_bytes").getInt()) < p.halves * kAtlasRegisterBytes) {
           for (unsigned half = 0; half < p.halves; ++half)
             if (failed(add("vstore", fixed.tensorTemporary + half,
                 (uint64_t(p.stagingWord) + half * kAtlasRegisterWords) * 4,

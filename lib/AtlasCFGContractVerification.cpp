@@ -209,9 +209,12 @@ bool merge(State &to, const State &from) {
 }
 }
 
-FailureOr<DictionaryAttr> mlir::atlas::buildAtlasCFGContract(func::FuncOp function, ArrayRef<VirtualRegisterAssignment> registers) {
+FailureOr<DictionaryAttr> mlir::atlas::buildAtlasCFGContract(
+    func::FuncOp function, ArrayRef<VirtualRegisterAssignment> registers,
+    ArrayRef<VirtualDMAAssignment> dmaAssignments) {
   AtlasWorkBudget budget(function, "cfg-contract-liveness");
   Builder b(function.getContext());
+  auto reusedPrefills = findAtlasReusedDMAPrefills(function, dmaAssignments);
   DenseMap<Value, int32_t> ids, regs;
   DenseMap<Block *, int32_t> blocks;
   DenseMap<Operation *, int32_t> operations;
@@ -272,6 +275,8 @@ FailureOr<DictionaryAttr> mlir::atlas::buildAtlasCFGContract(func::FuncOp functi
         // Source format and lifecycle determine command expansion counts;
         // neither planned instructions nor issued tags supply these facts.
         unsigned tileCount = atlasTileExpansion(&op).commands;
+        if (reusedPrefills.contains(&op))
+          tileCount -= isa<VirtualDMALoadBF16Op>(op) ? 2 : 1;
         unsigned mxuCount = isa<VirtualMXUMatmulOp>(op) ? 3 :
             isa<VirtualMXULoadWeightOp,VirtualMXULoadAccFP8Op,VirtualMXULoadAccBF16Op,
                 VirtualMXUResetOp,VirtualMXUAccumulateOp,VirtualMXUReadoutBF16Op,

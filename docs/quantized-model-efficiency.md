@@ -342,10 +342,46 @@ installing the provider into isolated `out/efficiency/provider-site` resolves
 that setup issue (six looped-CLI tests and 21 subtests pass; the additional
 reuse/interleaving/prefix suite passes 29 tests).
 
-Next: extend the handoff proof to useful larger physical layouts before changing
-application selection. Reduce padded host transfers and repeated zero-fill
-setup, preserve exceptional scan granularity while reducing quantizer reads,
-and examine residency and compiler register pressure.
+Partial DMA now reuses its reserved zero tensor until a physical write or
+control-flow boundary invalidates it. It also reuses an already cleared staging
+suffix for nonshrinking prefixes of the same tile width within one source block.
+Slot saves/restores preserve that fact because their checked allocations are
+disjoint from staging; other source operations conservatively discard it.
+Lowering, CFG expansion and tile records derive the decision from source and
+checked placements. The final buffer proof still verifies every word's origin
+and rejects an intervening scalar write or a nonzero prefill.
+
+Matched interleaved/row-cache measurements against the preceding operand-prefix
+compiler, with complete memory equality, unchanged DMA bytes and one dispatch:
+
+| Shape | Pipeline | Cycles before → after | Image bytes before → after |
+| --- | --- | ---: | ---: |
+| 3 × 65 × 257 | mandatory | 39,796 → 39,181 | 3,520 → 3,324 |
+| 3 × 65 × 257 | optimized | 36,721 → 36,484 | 3,560 → 3,348 |
+| 128 × 128 × 768 | mandatory | 260,946 → 260,626 | 16,304 → 16,196 |
+| 128 × 128 × 768 | optimized | 219,156 → 219,022 | 16,528 → 16,420 |
+| 1 × 5632 × 2048 | mandatory | 9,532,728 → 9,528,146 | 12,072 → 10,560 |
+| 1 × 5632 × 2048 | optimized | 9,122,116 → 9,119,905 | 13,508 → 11,736 |
+
+Tensor reuse alone slightly regressed the optimized 128 × 128 × 768 case by 76
+cycles; the combined staging-tail change removes that regression. The captured
+batched fixture changes **43,949 → 43,844 cycles**, with 10,615 executed
+instructions, the same two launches, traffic and public output hash. Artifacts:
+`out/efficiency/zero-reuse-experiment`,
+`out/efficiency/staging-zero-reuse-experiment` and
+`out/efficiency/captured-linear-staging-zero-reuse`. The measured combined
+`atlas-opt` SHA256 is
+`4ef8f4d0a0bbe4757aab5b6aedc45f5f7e05727c36581552af48fc7446727243`.
+The broader DMA, scheduling, CFG, tile, source-memory, buffer and quantized-prefix
+suites pass **182 tests and 1,881 subtests** (three separately gated tests).
+Four additional focused cases cover full BF16 writes and corrupted reused tails.
+
+Next: eliminate repeated scalar address/size materialization where physical
+register contents are provably unchanged; measure scheduling effects before
+retaining it. Extend the handoff proof to useful larger physical layouts before
+changing application selection. Reduce padded host transfers, preserve
+exceptional scan granularity while reducing quantizer reads, and examine
+residency and compiler register pressure.
 
 Merlin's full structure gate currently reports the pre-existing root-level
 `merlin/tests/test_application_deployment_paging.py`; the no-regex gate reports
