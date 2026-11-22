@@ -130,7 +130,7 @@ def build(source: Path | None = None, *, out: Path, precision_policy: Path,
           already_quantized=False, application_parameters="external",
           application_name="application", application_memory_bytes=None, application_state=None,
           io_memory_bytes=None, recipe=None, board="sophialake", application_residency=False,
-          application_region_loop=False, application_deployment=None, host_clock_hz=None, measured_host_bytes=None,
+          application_deployment=None, host_clock_hz=None, measured_host_bytes=None,
           force=False, timeout=1800) -> BuildResult:
     """Compile a live loader or a materialized Merlin capture, then replay verification.
 
@@ -254,8 +254,6 @@ def build(source: Path | None = None, *, out: Path, precision_policy: Path,
         compile_options = ["--application-name", application_name, "--abi", "auto", "--deterministic-receipts"]
         if application_memory_bytes is not None:
             compile_options += ["--application-memory-bytes", str(application_memory_bytes)]
-        if application_region_loop:
-            compile_options += ["--application-region-loop"]
         application = out / "application"
         run("native-compile", ["native-compile", *common, *compile_options, "--out", application])
         verification = out / "verification.json"

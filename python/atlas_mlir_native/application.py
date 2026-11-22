@@ -186,7 +186,88 @@ class AtlasApplicationAdapter:
     region_loop_parameters = ("static_exp", "tag")
     # Provider capability only. Both caller reuse options default to False.
     supports_materialization_cache = True
+    # Deployment sharing admits host code and proved one-image exact-float
+    # bodies only. Other device routes retain their established compilation.
+    # Off until a staged loop can keep shared bodies: Merlin refuses a loop whose staging is found after binding.
+    supports_deployment_loop_sharing = False
     publication_options = staticmethod(publication_options)
+
+    def bind_loop_region(self, representative, region, alternative, nodes, segments, target_source):
+        """Bind proved host, exact-float, quantizer, or resident counted bodies."""
+        if alternative.placement != 'host':
+            if dict(getattr(alternative, 'metadata', ())).get('kind') in {'exact_float_device', 'activation_quantize_device', 'layout_device'}:
+                from .loop_body_binding import bind_replayed_loop_region
+
+                if (current_codegen_options().application_deployment == 'onchip'
+                        and (len(representative.programs) != 1 or
+                             dict(alternative.metadata)['kind'] != 'exact_float_device')):
+                    return None
+                state = getattr(self, '_loop_body_packages', {}).get(representative.symbol)
+                return bind_replayed_loop_region(self, representative, region, alternative, nodes,
+                    segments, target_source, state=state)
+            if current_codegen_options().application_deployment == 'onchip':
+                return None
+            from dataclasses import replace
+            from .already_quantized import prepare_source
+
+            state = getattr(self, '_resident_loop_packages', {}).get(getattr(representative, 'symbol', None))
+            if (dict(getattr(alternative, 'metadata', ())).get('kind') != 'already_quantized' or state is None
+                    or representative.files is not state['files']):
+                return None
+            try:
+                bound = state['image'].bind(region)
+                state['image'].verify_binding(region, bound)
+            except ValueError:
+                # Structural candidates may still have different source policies,
+                # resident layouts, or native options. They keep separate bodies.
+                return None
+            index = len(state['bindings'])
+            state['bindings'].append(bound)
+            state['sources'].append(region)
+            precision = prepare_source(region)
+            description = dict(representative.description,
+                precision_plan=precision.record(), input_node_ids=list(precision.input_ids),
+                output_node_ids=list(region.outputs), resident_bindings=bound.execution_plan['resident_bindings'],
+                source_binding_index=index)
+            return replace(representative, inputs=precision.input_ids, outputs=region.outputs,
+                           description=description)
+        if representative.programs:
+            return None
+        package = self.export_region(region, alternative, representative.symbol, segments, target_source)
+        if (package.files != representative.files or package.symbol != representative.symbol
+                or package.header != representative.header or package.shared_files != representative.shared_files
+                or package.programs):
+            return None
+        return package
+
+    def finalize_loop_regions(self, compiled, *, target_source):
+        """Freeze pending resident tables after every trip has been authenticated."""
+        from dataclasses import replace
+        from .quantized_loop_c import finalize_resident_c_package
+
+        states = getattr(self, '_resident_loop_packages', {})
+        finalized = {}
+        for package in compiled:
+            state = states.get(package.symbol)
+            if state is None or package.files is not state['files']:
+                continue
+            if package.symbol not in finalized:
+                finalized[package.symbol] = finalize_resident_c_package(state, target_source=target_source)
+        result = []
+        for package in compiled:
+            state = states.get(package.symbol)
+            if state is None or package.files is not state['files']:
+                result.append(package)
+                continue
+            files, receipt = finalized[package.symbol]
+            index = package.description['source_binding_index']
+            if not 0 <= index < len(receipt['trip_bindings']):
+                raise ValueError('resident runtime context binding index differs')
+            result.append(replace(package, files=files,
+                                  description=dict(package.description, resident_loop_runtime=receipt)))
+        self._resident_loop_packages = {}
+        self._loop_body_packages = {}
+        return tuple(result)
 
     @staticmethod
     def resident_memory_geometry(*, soc=None):
@@ -317,7 +398,8 @@ class AtlasApplicationAdapter:
                 port["buffer"] = names.get(port["buffer"], port["buffer"])
         for side in ("resident_inputs", "resident_outputs"):
             choice[side] = [names.get(name, name) for name in choice[side]]
-        policy = {key: value for key, value in vars(self).items() if key != "original_source_sha256"}
+        policy = {key: value for key, value in vars(self).items()
+                  if key not in {"original_source_sha256", "_resident_loop_packages", "_loop_body_packages"}}
         tools = Path(os.environ.get("ATLAS_OOT_BIN_DIR", Path(__file__).resolve().parents[2] / "build/bin"))
         tool_identities = {}
         for tool in (tools / "atlas-opt", tools / "atlas-emit"):
@@ -1831,7 +1913,20 @@ class AtlasApplicationAdapter:
             from . import vector_quantize, exact_float_application
 
             module = vector_quantize if kind == "vector_quantize" else exact_float_application
-            return module.prepare_c_package(region, segments / name, name, target_source=target_source)
+            package = module.prepare_c_package(region, segments / name, name, target_source=target_source)
+            if kind == "exact_float_device" and not package.description.get("resident_bindings"):
+                from dataclasses import asdict
+
+                options = asdict(current_codegen_options())
+                options.pop("resident_bindings", None)
+                if not hasattr(self, "_loop_body_packages"):
+                    self._loop_body_packages = {}
+                self._loop_body_packages[package.symbol] = {
+                    "files": package.files, "options": options, "root": (segments / name).resolve(),
+                    "source_digest": region.digest(),
+                    "native_manifest_sha256": package.description["native_manifest_sha256"],
+                }
+            return package
         if kind == "layout_device":
             from .layout_device import prepare_c_package
 
@@ -1839,13 +1934,38 @@ class AtlasApplicationAdapter:
             paths = record.get("native_program_paths")
             programs = (("segments/" + name,) if paths is None else
                         tuple("segments/" + name + "/" + path for path in paths))
-            return CompiledCRegion(name + "_source_dispatch", name + ".h",
+            package = CompiledCRegion(name + "_source_dispatch", name + ".h",
                 tuple(record["input_node_ids"]), region.outputs, files, RUNTIME_SHARED_FILES,
                 programs, record)
+            if not record.get("resident_bindings"):
+                from dataclasses import asdict
+
+                options = asdict(current_codegen_options())
+                options.pop("resident_bindings", None)
+                if not hasattr(self, "_loop_body_packages"):
+                    self._loop_body_packages = {}
+                self._loop_body_packages[package.symbol] = {
+                    "files": package.files, "options": options, "root": (segments / name).resolve(),
+                    "source_digest": region.digest(),
+                    "native_manifest_sha256": record["native_manifest_sha256"],
+                }
+            return package
         if kind == "activation_quantize_device":
             from .activation_quantize_application import prepare_c_package
 
-            return prepare_c_package(region, segments / name, name, target_source=target_source)
+            package = prepare_c_package(region, segments / name, name, target_source=target_source)
+            from dataclasses import asdict
+
+            options = asdict(current_codegen_options())
+            options.pop("resident_bindings", None)
+            if not hasattr(self, "_loop_body_packages"):
+                self._loop_body_packages = {}
+            self._loop_body_packages[package.symbol] = {
+                "files": package.files, "options": options, "root": (segments / name).resolve(),
+                "source_digest": region.digest(),
+                "native_manifest_sha256": package.description["native_manifest_sha256"],
+            }
+            return package
         if kind == "scalar_broadcast":
             from .scalar_broadcast import prepare_c_package
 
@@ -1858,6 +1978,24 @@ class AtlasApplicationAdapter:
             from .quantized_loop_c import prepare_c_package
 
             record, files = prepare_c_package(region, segments / name, name, target_source=target_source)
+            # Existing publication verification above remains mandatory. The
+            # extra ABI owns a single immutable native template and checked
+            # address rows; it never republishes relocated bytes as native output.
+            if (record.get('execution_route') == 'checked_counted_image'
+                    and record.get('resident_bindings')
+                    and current_codegen_options().native_pipeline == 'mandatory'):
+                from .quantized_loop_c import prepare_resident_c_package
+
+                try:
+                    runtime_record, runtime_files, state = prepare_resident_c_package(
+                        region, segments / name, name, target_source=target_source)
+                except ValueError:
+                    pass  # A checked ordinary image can retain its separate body.
+                else:
+                    record, files = runtime_record, runtime_files
+                    if not hasattr(self, '_resident_loop_packages'):
+                        self._resident_loop_packages = {}
+                    self._resident_loop_packages[name+'_source_dispatch'] = state
             paths = record.get("native_program_paths")
             programs = (("segments/" + name,) if paths is None else
                         tuple("segments/" + name + "/" + path for path in paths))

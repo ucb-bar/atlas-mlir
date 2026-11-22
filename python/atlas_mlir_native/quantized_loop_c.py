@@ -156,7 +156,99 @@ static __attribute__((unused)) int atlas_matmul_dispatch(const atlas_matmul_plan
 """)
 
 
-def prepare_c_package(source, compiled, name, *, target_source):
+def _resident_dispatch_helpers():
+    # Keep every ordinary package byte-identical. The separate resident ABI
+    # retains the checked packing/readout routine and changes only image loading.
+    text = '\n'.join(MATMUL_DISPATCH.splitlines()[2:-1])+'\n'
+    text = text.replace('atlas_matmul_', 'atlas_resident_matmul_')
+    text = text.replace('atlas_exponent_pack', 'atlas_resident_exponent_pack').replace('atlas_transfer', 'atlas_resident_transfer')
+    text = text.replace('{region,scratch};', '{region,scratch,0};')
+    text = text.replace('void *const *outputs) {\n',
+        'void *const *outputs,atlas_host_result (*load)(atlas_host *,uint8_t *,uint32_t),uint32_t binding) {\n')
+    text = text.replace('atlas_host_ensure_loaded(region->host,p->words,p->word_count)',
+                        'load(region->host,ctx->workspace,binding)')
+    return guarded('resident_matmul_dispatch', text)
+
+
+RESIDENT_MATMUL_TYPES = guarded('resident_matmul_types',
+    'typedef struct { atlas_region_context *region; uint8_t *workspace; uint32_t binding; } atlas_resident_matmul_source_context;\n')
+
+
+def _resident_runtime_table(state):
+    name = state['name']
+    rows = [state['image'].binding_addresses(bound) for bound in state['bindings']]
+    count = len(rows[0])
+    if not count or any(len(row) != count for row in rows):
+        raise ValueError('resident runtime address table differs')
+    values = ',\n'.join('  {'+','.join(f'{address}u' for address in row)+'}' for row in rows)
+    return f"""
+/* atlas resident binding table begin */
+static const uint32_t {name}_resident_addresses[{len(rows)}][{count}]={{
+{values}
+}};
+static const uint32_t {name}_resident_count={len(rows)}u;
+static atlas_host_result {name}_resident_load(atlas_host *host,uint8_t *workspace,uint32_t index) {{
+  if (index>={name}_resident_count) return ATLAS_HOST_INVALID;
+  return {name}_resident_image_bind(host,(uint32_t *)(void *)(workspace+{state['image_offset']}u),
+    {name.upper()}_RESIDENT_IMAGE_WORD_COUNT,{name}_resident_addresses[index],{count}u);
+}}
+/* atlas resident binding table end */
+"""
+
+
+def _resident_dispatch(state):
+    name = state['name']
+    ports = [row['node_id'] for row in state['bindings'][0].execution_plan['resident_bindings']]
+    overrides = '\n  '.join(f'plan.reads[{i}].address={name}_resident_addresses[ctx->binding][{ports.index(key)}];'
+                            for i, key in enumerate(state['read_ids']) if key in state['resident_ids'])
+    return f"""atlas_resident_matmul_source_context *ctx=context;
+  if (!ctx || ctx->binding>={name}_resident_count) return 1;
+  atlas_resident_matmul_plan plan={name}_plan;
+  {overrides}
+  return atlas_resident_matmul_dispatch(&plan,context,inputs,outputs,{name}_resident_load,ctx->binding);"""
+
+
+def _resident_runtime_receipt(state):
+    rows = [dict(binding=bound.receipt, execution_plan=bound.execution_plan,
+                 addresses=list(state['image'].binding_addresses(bound))) for bound in state['bindings']]
+    record = dict(schema='atlas.resident_loop_c_runtime.v1', image=state['source_receipt'],
+                  trip_bindings=rows, mutable_image_storage='source_context_workspace_tail',
+                  load_convention='forced_load_each_dispatch')
+    record['table_sha256'] = sha256(json.dumps(rows, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+    return record
+
+
+def prepare_resident_c_package(source, compiled, name, *, target_source):
+    """Keep private pending bindings until Merlin finalizes the shared body."""
+    from .resident_loop_image import ResidentLoopImage
+
+    image = ResidentLoopImage(source, compiled, target_source=target_source)
+    state = dict(image=image, bindings=[image.bind(source)], sources=[source],
+                 representative_source=source, compiled_root=Path(compiled), target_source=Path(target_source))
+    record, files = prepare_c_package(source, compiled, name, target_source=target_source,
+                                     _resident_runtime=state)
+    state.update(record=record, files=files)
+    return record, files, state
+
+
+def finalize_resident_c_package(state, *, target_source=None):
+    """Publish one immutable template and the authenticated per-trip address table."""
+    from .resident_loop_publication import verify_resident_loop_runtime
+
+    name = state['name']
+    receipt = _resident_runtime_receipt(state)
+    verify_resident_loop_runtime(state['representative_source'], state['compiled_root'], state['sources'],
+                                 receipt, name=name, target_source=(state['target_source'] if target_source is None
+                                                                  else Path(target_source)))
+    files = dict(state['files'])
+    body = files[name+'.c'].decode()
+    start = body.index('/* atlas resident binding table begin */')
+    end = body.index('/* atlas resident binding table end */', start)+len('/* atlas resident binding table end */')
+    files[name+'.c'] = (body[:start]+_resident_runtime_table(state).strip()+body[end:]).encode()
+    return files, receipt
+
+
+def prepare_c_package(source, compiled, name, *, target_source, _resident_runtime=None):
     """Export one checked contraction image and preserve dense source inputs."""
     if (Path(compiled)/'row-block-manifest.json').is_file():
         from .quantized_row_blocks_c import prepare_c_package as prepare_rows
@@ -250,6 +342,9 @@ def prepare_c_package(source, compiled, name, *, target_source):
         # A uniform pointer type for the shared routine; the encoder keeps its own signature.
         extra_encoder += f"static int {name}_extra(const void *source,uint8_t *output) {{ return {name}_encode_extra(source,output); }}\n"
     raw,converted,count = extra_offset+extra_bytes,output_bytes,len(inputs)
+    image_offset = (converted+3)//4*4
+    if _resident_runtime is not None:
+        converted = image_offset+len(binary)
     # The host image is a copy of the device frame. On chip the host scratch shares the I/O window with the frame, the
     # dense source inputs, the output, its converted copy, and the instruction image, so when they cannot all fit there,
     # each tile is packed and written, or read back and restored, in turn through one tile of host scratch.
@@ -292,35 +387,57 @@ def prepare_c_package(source, compiled, name, *, target_source):
     reads = ",".join(f"{{{address}u,{offset}u,{size}u,{int(node_id in resident_ids)}u}}"
                      for (address, offset, size), node_id in zip(read_spans, read_ids, strict=True))
     from .shared_dispatch_c import CHECKS, REGION_TYPES
-    declarations = REGION_TYPES + MATMUL_TYPES + f"""
+    helper = 'atlas_matmul' if _resident_runtime is None else 'atlas_resident_matmul'
+    declarations = REGION_TYPES + (MATMUL_TYPES if _resident_runtime is None else RESIDENT_MATMUL_TYPES) + f"""
 #define {upper}_WORKSPACE_BYTES {raw}u
 #define {upper}_SOURCE_WORKSPACE_BYTES {converted}u
 #define {upper}_SOURCE_INPUT_COUNT {count}u
 typedef atlas_region_context {name}_context;
-typedef atlas_matmul_source_context {name}_source_context;
+typedef {helper}_source_context {name}_source_context;
 int {name}_bind({name}_context *,atlas_host *,atlas_tile_memory_io,void *,size_t,size_t);
 int {name}_source_bind({name}_source_context *,{name}_context *,void *,size_t);
 int {name}_source_dispatch(void *,const void *const *,void *const *);
 """
-    implementation = extra_encoder + program_array(name + "_words", binary) + CHECKS + MATMUL_DISPATCH + f"""
-static const atlas_matmul_plan {name}_plan={{{name}_words,{len(binary)//4}u,{raw}u,{converted}u,{output_bytes}u,{count}u,
+    runtime_source = ''
+    image_words = name+'_words'
+    if _resident_runtime is not None:
+        image_words = '0'
+        image_c = _resident_runtime['image'].emit_c(name+'_resident_image')
+        # Headers are flattened below with the existing checked runtime headers.
+        public[name+'_resident_image.h'] = image_c.header
+        runtime_source = image_c.source
+        declarations += f"int {name}_source_bind_index({name}_source_context *,{name}_context *,void *,size_t,uint32_t);\n"
+        _resident_runtime.update(name=name, image_offset=image_offset,
+                                 read_ids=read_ids, resident_ids=resident_ids,
+                                 source_receipt=image_c.receipt)
+        runtime_source += _resident_runtime_table(_resident_runtime)
+    implementation = extra_encoder + (program_array(name + "_words", binary) if _resident_runtime is None else '') + CHECKS + (MATMUL_DISPATCH if _resident_runtime is None else _resident_dispatch_helpers()) + f"""
+static const {helper}_plan {name}_plan={{{image_words},{len(binary)//4}u,{raw}u,{converted}u,{output_bytes}u,{count}u,
   {{{','.join(f'{size}u' for size in sizes)}}},{resident_mask}u,{ia}u,{ib}u,{lhs_columns}u,{rhs_columns}u,{int(plan.output_dtype != 'bf16')}u,
   {prod(a.type.shape)}u,{prod(b.type.shape)}u,{batches}u,{rhs_batches}u,{m}u,{n}u,{k}u,{mc}u,{nc}u,{kc}u,{operand_offsets[1]}u,{output_offset}u,
   {{{','.join(exponent_packs)}}},{name + '_extra' if extra_bytes else '0'},{extra_index}u,{extra_offset}u,{extra_bytes}u,
   {len(read_spans)}u,{{{reads}}},
   {execution['status_address']}u,{execution['status_bytes']}u,{status_offset}u,{out}u,{output_offset}u,{device_output_bytes}u,{int(streamed)}u}};
 int {name}_bind({name}_context *ctx,atlas_host *host,atlas_tile_memory_io io,void *scratch,size_t bytes,size_t polls) {{
-  return atlas_matmul_bind(ctx,host,&io,scratch,bytes,polls,&{name}_plan);
+  return {helper}_bind(ctx,host,&io,scratch,bytes,polls,&{name}_plan);
 }}
 int {name}_source_bind({name}_source_context *ctx,{name}_context *region,void *scratch,size_t bytes) {{
-  return atlas_matmul_source_bind(ctx,region,scratch,bytes,&{name}_plan);
+  return {helper}_source_bind(ctx,region,scratch,bytes,&{name}_plan);
 }}
 int {name}_source_dispatch(void *context,const void *const *inputs,void *const *outputs) {{
-  return atlas_matmul_dispatch(&{name}_plan,context,inputs,outputs);
+  {_resident_dispatch(_resident_runtime) if _resident_runtime is not None else f'return atlas_matmul_dispatch(&{name}_plan,context,inputs,outputs);'}
+}}
+"""
+    if _resident_runtime is not None:
+        implementation += f"""
+int {name}_source_bind_index({name}_source_context *ctx,{name}_context *region,void *scratch,size_t bytes,uint32_t index) {{
+  if (index>={name}_resident_count || {name}_source_bind(ctx,region,scratch,bytes)) return 1;
+  ctx->binding=index; return 0;
 }}
 """
     files={key:value.encode() for key,value in c_source_pair(name,public_headers=public,private_headers={},
-        sources={**host_members,"quantized_dispatch.c":implementation},declarations=declarations).items()}
+        sources={**host_members,**({"resident_runtime.c":runtime_source} if runtime_source else {}),
+                 "quantized_dispatch.c":implementation},declarations=declarations).items()}
     files.update(runtime_files)
     record=dict(kind="already_quantized",schema="atlas.already_quantized_c_package.v1",package_name=name,
         execution_route='checked_counted_image',launches_per_invocation=1,restoration_placement='device',
@@ -332,6 +449,9 @@ int {name}_source_dispatch(void *context,const void *const *inputs,void *const *
         source_interface=dict(workspace_bytes=converted,failure_output="unchanged",completion="synchronous"),**runtime_record)
     if resident_ids:
         record['resident_bindings'] = execution['resident_bindings']
+    if _resident_runtime is not None:
+        record.update(source_binding_index_function=name+'_source_bind_index', source_binding_index=0,
+                      resident_loop_runtime=_resident_runtime_receipt(_resident_runtime))
     if plan.epilogue_precision is not None:
         record.update(kind='quantized_epilogue',schema='atlas.quantized_epilogue_c_package.v1',
             epilogue=dict(precision=plan.epilogue_precision.record(),contract_operand=plan.epilogue_contract_operand,

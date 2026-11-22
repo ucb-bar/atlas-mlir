@@ -36,9 +36,12 @@ def application_binding(name, regions, interface):
             continue
         data = row["description"]
         declarations += [f"  {data['context_type']} region_{i};", f"  {data['source_context_type']} source_{i};"]
+        source_bind = (f"{data['source_binding_index_function']}(&ctx->source_{i},&ctx->region_{i},ctx->conversion_scratch,{capacity('conversion_scratch')},{data['source_binding_index']}u)"
+                       if 'source_binding_index_function' in data else
+                       f"{data['source_binding_function']}(&ctx->source_{i},&ctx->region_{i},ctx->conversion_scratch,{capacity('conversion_scratch')})")
         initialization += [
             f"  if ({data['binding_function']}(&ctx->region_{i},host,io,ctx->device_scratch,{capacity('device_scratch')},max_polls)) return -1;",
-            f"  if ({data['source_binding_function']}(&ctx->source_{i},&ctx->region_{i},ctx->conversion_scratch,{capacity('conversion_scratch')})) return -1;",
+            f"  if ({source_bind}) return -1;",
         ]
         pointers.append(f"&ctx->source_{i}")
     fields = "\n".join(declarations)

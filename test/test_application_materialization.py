@@ -88,6 +88,13 @@ def test_materialization_identity_uses_effective_inputs_and_receipt_mode(tmp_pat
     select_codegen_options(capture_postspill=False)
     source, choice = request("bf16_neg", 3), Choice()
     original = adapter.materialization_identity(source, choice)
+    # Invocation-local pending bindings are runtime publication state, not a
+    # source policy. They may include non-JSON image objects after any export.
+    adapter._resident_loop_packages = {"pending": object()}
+    assert adapter.materialization_identity(source, choice) == original
+    json.dumps(adapter.materialization_identity(source, choice), allow_nan=False)
+    adapter._resident_loop_packages = {}
+    assert adapter.materialization_identity(source, choice) == original
     assert set(original["compilation_identity"]) == {
         "schema", "policy", "application_sha256", "binding_sha256", "materialization_sources",
         "tools", "pipeline", "capture_postspill", "deterministic_receipts",
@@ -150,6 +157,12 @@ def test_generic_application_real_compile_count_wall_time_and_full_bytes(tmp_pat
     calls = []
 
     class Adapter(AtlasApplicationAdapter):
+        def bind_loop_region(self, *args, **kwargs):
+            # Exercise the separate materialization-cache fallback. Automatic
+            # runtime body sharing otherwise compiles this tandem only once
+            # under both cache settings, hiding the behavior this gate measures.
+            return None
+
         def plan(self, source):
             plan = plan_for(source, ((0,), (1,), (2,), (3,)))
             return replace(plan, selected=tuple(replace(row, implementation="exact_float_device", placement="accelerator",

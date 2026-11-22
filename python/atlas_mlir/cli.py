@@ -33,7 +33,7 @@ def _build(args):
         application_name=args.application_name, application_memory_bytes=args.application_memory_bytes,
         application_state=args.application_state,
         io_memory_bytes=args.io_memory_bytes, recipe=args.recipe, board=args.board,
-        application_residency=args.application_residency, application_region_loop=args.application_region_loop,
+        application_residency=args.application_residency,
         application_deployment=args.application_deployment, host_clock_hz=args.host_clock_hz,
         measured_host_bytes=args.measured_host_bytes,
         force=args.force, **_capture_kwargs(args))
@@ -96,7 +96,6 @@ def main(argv=None):
     bp.add_argument("--host-clock-hz", type=int, help=argparse.SUPPRESS)
     bp.add_argument("--measured-host-bytes", type=int, help=argparse.SUPPRESS)
     bp.add_argument("--application-residency", action="store_true")
-    bp.add_argument("--application-region-loop", action="store_true")
     bp.add_argument("--timeout", type=float, default=1800)
     bp.add_argument("--force", action="store_true", help="replace only a prior atlasc output directory")
     bp.set_defaults(run=_build)
