@@ -37,6 +37,7 @@ class CodegenOptions(GenericCodegenOptions):
     device_kv_quantizer: bool = False
     # The deploy's host clock when it differs from the declared one, so the provider publishes the clock the image runs.
     host_clock_hz: int | None = None
+    dynamic_quantizer_group_batching: bool = False
 
     def __post_init__(self):
         super().__post_init__()
@@ -55,7 +56,7 @@ class CodegenOptions(GenericCodegenOptions):
         for name in (
             "exponent_page_cache", "exact_binary_lane_groups", "exact_binary_vector_preflight",
             "exact_cast_vector_preflight", "static_quantizer_sizing", "exact_binary_routes",
-            "capture_postspill", "kernel_library",
+            "capture_postspill", "kernel_library", "dynamic_quantizer_group_batching",
         ):
             if type(getattr(self, name)) is not bool:
                 raise ValueError(f"{name} must be Boolean")
@@ -72,7 +73,7 @@ class CodegenOptions(GenericCodegenOptions):
             "native_pipeline", "adjacent_patterns", "exponent_page_cache", "staging_storage",
             "looped_operand_reuse", "quantized_operand_reuse", "exact_binary_lane_groups",
             "exact_binary_vector_preflight", "exact_cast_vector_preflight", "static_quantizer_sizing",
-            "exact_binary_routes", "capture_postspill", "kernel_library",
+            "exact_binary_routes", "capture_postspill", "kernel_library", "dynamic_quantizer_group_batching",
         ):
             if getattr(self, name) == getattr(type(self), name):
                 del record[name]
@@ -171,7 +172,7 @@ def configure_codegen_parser(parser):
     parser.add_argument("--adjacent-patterns", default=None)
     for name in ("exponent_page_cache", "exact_binary_lane_groups", "exact_binary_vector_preflight",
                  "exact_cast_vector_preflight", "static_quantizer_sizing", "exact_binary_routes",
-                 "capture_postspill", "kernel_library", "device_kv_quantizer"):
+                 "capture_postspill", "kernel_library", "device_kv_quantizer", "dynamic_quantizer_group_batching"):
         parser.add_argument("--" + name.replace("_", "-"), action=BooleanOptionalAction, default=None)
     parser.add_argument("--host-clock-hz", type=int, default=None, help=SUPPRESS)
     parser.add_argument("--host-memory-reserved-bytes", type=lambda value: int(value, 0),

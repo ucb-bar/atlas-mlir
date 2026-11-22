@@ -42,6 +42,9 @@ def _static_body_capacity(instruction_limit):
 # measurement is not a worst-case proof. Admission uses the replayed machine
 # instruction bound; do not use this scheduling constant as that proof.
 DYNAMIC_GROUP_WORST_INSTRUCTIONS = 119_525
+DYNAMIC_GROUP_BATCH_LIMIT = 256
+
+
 # Counted full-tile groups scale with their number of 4,096-element blocks.
 # Charge each block the complete measured single-group cost, including fixed
 # exponent and launch work. The selected execution budget sizes this envelope;
@@ -70,6 +73,7 @@ class QuantizerSchedule:
     static_body_capacity: int
     static_quantizer_sizing: bool
     device_kv_quantizer: bool = False
+    dynamic_group_batching: bool = False
 
     @property
     def dynamic_groups_per_launch(self):
@@ -88,7 +92,7 @@ class QuantizerSchedule:
         return 2 if self.x.type.dtype == "bf16" else 4
 
     def record(self):
-        return dict(schema="atlas.activation_quantize_schedule.v1", source_request_digest=self.source.digest(),
+        result = dict(schema="atlas.activation_quantize_schedule.v1", source_request_digest=self.source.digest(),
                     input_node_id=self.x.id, output_node_ids=list(self.source.outputs),
                     mode=self.attrs["mode"], reduce=self.attrs["reduce"],
                     input_bytes=self.count * self.width, code_bytes=self.count,
@@ -112,6 +116,12 @@ class QuantizerSchedule:
                     runtime_arithmetic="none; raw copies, padding, and device dispatch only",
                     dynamic_reduction="counted complete source groups per launch; no split amax",
                     weight_conversion="none")
+        if self.dynamic_group_batching:
+            result.update(dynamic_group_batching=True, lowering_pipeline=self.pipeline,
+                          dynamic_group_batch_candidate_limit=DYNAMIC_GROUP_BATCH_LIMIT,
+                          dynamic_group_batch_admission='complete token groups; selected machine bound; halve refused candidates and reuse admitted batch size',
+                          dynamic_group_estimate_scope='legacy fields bound individual group size; token batch count uses selected machine proof')
+        return result
 
 
 def _body(source, x, codes, exponents, attrs, shape):
@@ -126,12 +136,17 @@ def _body(source, x, codes, exponents, attrs, shape):
     return body
 
 
-def prepare_plan(source, *, limits=None, _pipeline=None, _static_capacity=None, _static_sizing=None, _device_kv_quantizer=None):
+def prepare_plan(source, *, limits=None, _pipeline=None, _static_capacity=None, _static_sizing=None,
+                 _device_kv_quantizer=None, _group_batching=None):
     from .options import current_codegen_options
     from . import dynamic_quantize, static_quantize
 
     device_kv = (current_codegen_options().device_kv_quantizer
                  if _device_kv_quantizer is None else _device_kv_quantizer)
+    group_batching = (current_codegen_options().dynamic_quantizer_group_batching
+                      if _group_batching is None else _group_batching)
+    if type(group_batching) is not bool:
+        raise ValueError('dynamic quantizer group batching must be Boolean')
     instruction_limit = functional_instruction_limit(limits)
     pipeline = _native_pipeline() if _pipeline is None else _pipeline
     if pipeline not in ("mandatory", "optimized"):
@@ -202,6 +217,7 @@ def prepare_plan(source, *, limits=None, _pipeline=None, _static_capacity=None, 
             groups = [(head + first, head + min(first + rows, m))
                       for head in range(0, total_rows, m) for first in range(0, m, rows)]
         group = 0
+        token_batch_capacity = DYNAMIC_GROUP_BATCH_LIMIT
         while group < len(groups):
             first, end = groups[group]
             length = (end - first) * k
@@ -215,16 +231,19 @@ def prepare_plan(source, *, limits=None, _pipeline=None, _static_capacity=None, 
                 raise ValueError(f"indivisible dynamic reduction group above 4096 elements requires complete {tile}-element tiles")
             packed = 1
             bounded_tiles = length % 1024 == 0 or length <= 1024
-            if reduction == "head" and x.type.dtype == "bf16" and length % 32 == 0 and bounded_tiles:
-                capacity = min(instruction_limit // _dynamic_group_instruction_bound(length), 256,
+            if ((reduction == "head" or group_batching and reduction == "token")
+                    and x.type.dtype == "bf16" and length % 32 == 0 and bounded_tiles):
+                group_capacity = (token_batch_capacity if group_batching and reduction == 'token'
+                                  else instruction_limit // _dynamic_group_instruction_bound(length))
+                capacity = min(group_capacity, DYNAMIC_GROUP_BATCH_LIMIT,
                                max(1, (dram_slots() * TILE_BYTES - 1024) // (length * 3)))
                 while (packed < capacity and group + packed < len(groups)
                        and groups[group + packed][1] - groups[group + packed][0] == end - first):
                     packed += 1
             while True:
                 shape = ((length,) if reduction == "tensor" else
-                         (packed, end - first, k) if reduction == "head" else (end - first, k))
-                if not device_kv:
+                         (packed, end - first, k) if reduction == "head" else (packed * (end - first), k))
+                if not (device_kv or group_batching):
                     break
                 if shape not in proven_bodies and shape not in refused_bodies:
                     body = _body(source, x, codes, exponents, attrs, shape)
@@ -237,6 +256,8 @@ def prepare_plan(source, *, limits=None, _pipeline=None, _static_capacity=None, 
                     else:
                         proven_bodies[shape] = body
                 if shape in proven_bodies:
+                    if group_batching and reduction == 'token':
+                        token_batch_capacity = packed
                     break
                 if packed == 1:
                     error = refused_bodies[shape]
@@ -244,22 +265,23 @@ def prepare_plan(source, *, limits=None, _pipeline=None, _static_capacity=None, 
                                      + str(error)) from error
                 # Retry only complete authored groups. The legacy estimate
                 # selects a candidate pack; the machine proof admits it.
-                packed -= 1
-            exp_first, exp_count = ((group, packed) if reduction in ("tensor", "head") else (first, end - first))
+                packed = packed // 2 if group_batching and reduction == 'token' else packed - 1
+            exp_first, exp_count = ((group, packed) if reduction in ("tensor", "head")
+                                    else (first, packed * (end - first)))
             spans.append((first * k, length * packed, exp_first, exp_count, shape))
             group += packed
     bodies, shapes, launches = [], {}, []
     for first, length, exp_first, exp_count, shape in spans:
         if shape not in shapes:
             shapes[shape] = len(bodies)
-            bodies.append(proven_bodies[shape] if mode == "dynamic" and device_kv else
+            bodies.append(proven_bodies[shape] if mode == "dynamic" and (device_kv or group_batching) else
                           _body(source, x, codes, exponents, attrs, shape))
         launches.append(dict(body_index=shapes[shape], input_offset_bytes=first * (2 if x.type.dtype == "bf16" else 4),
                              input_bytes=length * (2 if x.type.dtype == "bf16" else 4),
                              code_offset_bytes=first, code_bytes=length,
                              exponent_offset_bytes=exp_first * 4, exponent_bytes=exp_count * 4))
     return QuantizerSchedule(source, x, codes, exponents, attrs, tuple(bodies), tuple(launches),
-                             instruction_limit, pipeline, static_capacity, static_sizing, device_kv)
+                             instruction_limit, pipeline, static_capacity, static_sizing, device_kv, group_batching)
 
 
 def compile_source(snapshot, region, *, target_source, destination, limits):
@@ -363,7 +385,8 @@ def prepare_c_package(region, compiled, name, *, target_source, runtime_linkage=
         _pipeline=saved.get("lowering_pipeline", "mandatory"),
         _static_sizing="static_instruction_envelope" in saved,
         _static_capacity=saved["static_whole_body_max_elements"],
-        _device_kv_quantizer="dynamic_group_admission" in saved)
+        _device_kv_quantizer="dynamic_group_admission" in saved,
+        _group_batching=saved.get('dynamic_group_batching', False))
     manifest = json.loads((compiled / "quantizer-manifest.json").read_text())
     _verify_publication(compiled, manifest, plan)
     if (json.loads((compiled / "source-request.json").read_text()) != region.record()

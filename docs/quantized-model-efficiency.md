@@ -101,6 +101,15 @@ with measurements. Historical performance numbers are context, not this branch's
   padding in the last beat. Large odd-byte payloads and nested affine rows pass
   exact-output/guard checks; the expanded layout suite passes 58 tests and 74
   subtests. The externally visible element count is unchanged.
+- Added opt-in `--dynamic-quantizer-group-batching`. Complete aligned BF16 token
+  groups share a counted body while retaining separate exponents. Candidates
+  contain at most 256 groups and must pass the selected machine instruction
+  proof; resource refusals halve the candidate, then reuse the admitted size.
+  Compiler work exhaustion propagates without retries. Defaults and presets
+  are unchanged. The quantizer, option, independent host-reference, generated-C,
+  and saved-schedule replay checks pass 250 tests and 32 subtests (one separately
+  gated Python-model test). A 256 × 1024 source uses eight admitted 32-group
+  bodies under the original 1,000,000-instruction limit.
 - Remaining integration work: complete-layer measurements, residency interaction,
   and more useful overlap in the optimized schedule. No complete-layer or board
   speedup is claimed from the kernel experiments below.
@@ -152,6 +161,32 @@ with 55,296 read bytes and 29,696 write bytes. Applying the existing explicit
 and 47,104 read bytes, with unchanged outputs and writes. This measures an
 existing reuse policy on the newly composable graph; it is not a new kernel
 algorithm. Its optimized-pipeline refusal remains in force.
+
+On the existing lifted 32 × 32 quantized-linear capture, token grouping reduces
+actual application launches from **33 to 2**, device cycles from **70,416 to
+60,438** (14.17%), and device writes from **6,144 to 5,248 bytes**. Reads remain
+10,240 bytes and host uploads remain 8,192; host downloads fall from 4,100 to
+3,204 bytes. Both runs use the same input bytes, mandatory pipeline, 1 MiB
+staging window, pinned RTL packing, and 1,000,000-instruction limit. Public
+outputs match exactly. This is a captured small linear fixture, not a complete
+language model. The earlier `captured-linear-baseline`/`captured-linear-batched`
+experiments used the wrong raw PACK layout and are superseded by
+`out/efficiency/captured-linear-batching-final`.
+
+Reproduce a matched application comparison with an existing lifted capture:
+
+```sh
+"$EFFICIENCY_PYTHON" tools/profile_quantized_capture.py \
+  --compile-inputs /path/to/compile-inputs --input /path/to/bf16-input.bin \
+  --out out/efficiency/a-new-capture-run
+```
+
+The evaluator requires one runtime BF16 input, keeps captured parameters and
+source policy, compiles both applications before reading execution samples,
+replays exports, and retains simulator configuration and source/tool hashes.
+Next: remove the second DRAM read of single-tile dynamic quantizer groups by
+retaining the exact input tile through scale selection, then measure its VMEM
+cost and cross-region residency opportunities.
 
 Merlin's full structure gate currently reports the pre-existing root-level
 `merlin/tests/test_application_deployment_paging.py`; the no-regex gate reports
