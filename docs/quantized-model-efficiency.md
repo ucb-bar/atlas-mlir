@@ -80,6 +80,29 @@ ordered edge vector. Two local comparisons after the ready-set change measured
 Both emitted identical machine IR and identical work-budget reports. These are
 local compilation timings, not device-cycle savings. The affected scheduler,
 delay, DMA, work-budget, and Rust panel suites pass 61 tests and 46 subtests.
+The previously timing-sensitive large-panel Rust test also passes with the final
+compiler and its unchanged 30-second per-compilation timeout.
+
+An authored DMA-only probe identifies the next device traffic opportunity. Each
+case includes the same 2,048-byte input load, then writes a physical BF16 tile
+prefix or its two occupied halves. All logical bytes and protected memory are
+checked. This is **not integrated into contraction code generation**.
+
+| Tile rows × columns | Prefix write bytes / cycles | Serial halves bytes / cycles | Queued halves bytes / cycles |
+|---|---:|---:|---:|
+| 1 × 17 | 1,056 / 2,319 | 64 / 1,654 | 64 / 1,621 |
+| 3 × 32 | 1,120 / 2,363 | 192 / 1,748 | 192 / 1,715 |
+| 16 × 17 | 1,536 / 2,644 | 1,024 / 2,330 | 1,024 / 2,298 |
+| 24 × 32 | 1,792 / 2,818 | 1,536 / 2,676 | 1,536 / 2,644 |
+| 31 × 32 | 2,016 / 2,969 | 1,984 / 2,979 | 1,984 / 2,948 |
+| 32 × 32 | 2,048 / 2,991 | 2,048 / 3,023 | 2,048 / 2,991 |
+
+Splitting adds eight executed instructions in this probe. Serial splitting can
+lose cycles despite moving fewer bytes; full tiles should retain bulk transfers.
+Queued results assume both DMA channels are available. Repeat with
+`python tools/profile_partial_output_dma.py --out /path/to/new/probe` under the
+same tool/model environment. The selected model's timing is part of this result;
+contraction integration, application latency, and board measurements remain open.
 
 ## November 22 validation and reproduction
 
@@ -139,11 +162,13 @@ and remaining action items are versioned here.
    coalescing nearby occupied halves beats the byte minimum on the real transport.
    Then evaluate splitting the matching device output DMA into occupied register
    halves. For a 1 × 17 BF16 tile, the present 1,056-byte prefix could become two
-   32-byte transfers, with the same frame offsets and status store. This is an
-   unimplemented traffic estimate: the extra DMA setup/wait can offset the byte
-   savings, and a source-offset store needs explicit lowering, replay, and memory
-   contract support before selection. Larger row/column tails must be checked
-   independently, including rejection and preservation of unwritten gaps.
+   32-byte transfers, with the same frame offsets and status store. The authored
+   probe above measures this transport opportunity and its near-full-tile
+   regression. A source-offset store needs explicit lowering, replay, and memory
+   contract support before application selection. Account for available DMA
+   channels and retain bulk stores where splitting loses. Row/column tails need
+   independent application checks, including rejection and preservation of
+   unwritten gaps.
 4. Extend the existing quantizer-to-contraction handoff proof beyond 32 × 32.
    Larger codes and exponent pages require explicit physical-layout and private
    ownership proofs before application selection can use the combined image.

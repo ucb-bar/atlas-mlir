@@ -421,6 +421,14 @@
         "summary": "61 passed, 46 subtests passed in 176.79s (0:02:56)",
         "failures": [],
         "source_commit": "19802c4ea3154910b2653114aba46949d3543b73"
+      },
+      {
+        "path": "out/efficiency/nov22-final-large-panel-test.log",
+        "sha256": "760f1841985b34d21d0b8a0381f0193a9f268f9cd2094917b50ab69a1d8dd2d3",
+        "summary": "1 passed in 52.64s",
+        "failures": [],
+        "source_commit": "9b548cf6e38735b7f093f279aab84213d02bdf3a",
+        "scope": "Previously timing-sensitive large panel, with the unchanged 30-second per-compilation timeout."
       }
     ],
     "scope": "Focused suites overlap; do not sum their counts. The broad WIP run has unresolved failures. Matching baseline failures were rerun with the same reference environment.",
@@ -568,5 +576,404 @@
     "exact_work_report_match": true,
     "total_work": 215929508,
     "note": "Only dependency edge lookup changed; edge vector insertion order and hazard rules are unchanged. Local compilation timings, not device cycle or board latency measurements."
+  },
+  "partial_output_dma_probe": {
+    "scope": "Measure an authored partial-output DMA hypothesis, without changing codegen.\n\nThe common input load supplies VMEM in the physical BF16 register layout. Compare a prefix\nstore with serial or queued stores of its occupied register halves. This probes\ntransport cost only: no contraction, restoration, publication, or board claim.\n",
+    "measurements": [
+      {
+        "rows": 1,
+        "columns": 17,
+        "policy": "prefix",
+        "spans": [
+          [
+            0,
+            1056
+          ]
+        ],
+        "cycles": 2319,
+        "dispatches": 1,
+        "dram_read_bytes": 2048,
+        "dram_write_bytes": 1056,
+        "total_instructions": 20,
+        "logical_output_sha256": "daacd82ffa9cc52d73df7be2f898044b71840b00c6d355a9c849af84cf4e9ea0",
+        "machine_sha256": "bc0b65f30f486d44c4cf56ced466053fe2ec48ebaf6a9906622eed9492c2beae"
+      },
+      {
+        "rows": 1,
+        "columns": 17,
+        "policy": "serial_halves",
+        "spans": [
+          [
+            0,
+            32
+          ],
+          [
+            1024,
+            32
+          ]
+        ],
+        "cycles": 1654,
+        "dispatches": 1,
+        "dram_read_bytes": 2048,
+        "dram_write_bytes": 64,
+        "total_instructions": 28,
+        "logical_output_sha256": "daacd82ffa9cc52d73df7be2f898044b71840b00c6d355a9c849af84cf4e9ea0",
+        "machine_sha256": "7b9661c716d3aa7ff7bdea8c8d24908500a7be85fbf073ef795ce90c22cad92b"
+      },
+      {
+        "rows": 1,
+        "columns": 17,
+        "policy": "queued_halves",
+        "spans": [
+          [
+            0,
+            32
+          ],
+          [
+            1024,
+            32
+          ]
+        ],
+        "cycles": 1621,
+        "dispatches": 1,
+        "dram_read_bytes": 2048,
+        "dram_write_bytes": 64,
+        "total_instructions": 28,
+        "logical_output_sha256": "daacd82ffa9cc52d73df7be2f898044b71840b00c6d355a9c849af84cf4e9ea0",
+        "machine_sha256": "04694184b803d6ccca525edd6b1bdc59e049610407b35a201b3a4b713f9fb0b4"
+      },
+      {
+        "rows": 3,
+        "columns": 32,
+        "policy": "prefix",
+        "spans": [
+          [
+            0,
+            1120
+          ]
+        ],
+        "cycles": 2363,
+        "dispatches": 1,
+        "dram_read_bytes": 2048,
+        "dram_write_bytes": 1120,
+        "total_instructions": 20,
+        "logical_output_sha256": "d1d45e3bdfe65509aea2b5c1f16467345dc19c2c329d10175e359598d6a6ccf2",
+        "machine_sha256": "f523eaa0e0f39f437f0ac6c065a78c6ecc4adab8df51a1bbec31e57644550725"
+      },
+      {
+        "rows": 3,
+        "columns": 32,
+        "policy": "serial_halves",
+        "spans": [
+          [
+            0,
+            96
+          ],
+          [
+            1024,
+            96
+          ]
+        ],
+        "cycles": 1748,
+        "dispatches": 1,
+        "dram_read_bytes": 2048,
+        "dram_write_bytes": 192,
+        "total_instructions": 28,
+        "logical_output_sha256": "d1d45e3bdfe65509aea2b5c1f16467345dc19c2c329d10175e359598d6a6ccf2",
+        "machine_sha256": "84419d44788e8a76e0da2fb95b3ae756a0793cd7843c0f014a3dd0b8358e4e7c"
+      },
+      {
+        "rows": 3,
+        "columns": 32,
+        "policy": "queued_halves",
+        "spans": [
+          [
+            0,
+            96
+          ],
+          [
+            1024,
+            96
+          ]
+        ],
+        "cycles": 1715,
+        "dispatches": 1,
+        "dram_read_bytes": 2048,
+        "dram_write_bytes": 192,
+        "total_instructions": 28,
+        "logical_output_sha256": "d1d45e3bdfe65509aea2b5c1f16467345dc19c2c329d10175e359598d6a6ccf2",
+        "machine_sha256": "a3209b92078b754347b71aca62b9a8f36549212548278df27dc5082d29124fda"
+      },
+      {
+        "rows": 16,
+        "columns": 17,
+        "policy": "prefix",
+        "spans": [
+          [
+            0,
+            1536
+          ]
+        ],
+        "cycles": 2644,
+        "dispatches": 1,
+        "dram_read_bytes": 2048,
+        "dram_write_bytes": 1536,
+        "total_instructions": 20,
+        "logical_output_sha256": "f09d0cb6973b6ed1f54556409cae6d3facc2d86e3f381637214714dab9493d9d",
+        "machine_sha256": "b86c971302ab3d61af2ae26c271e81eeef4a52ac4ff99dfd9d939d5900cdee6f"
+      },
+      {
+        "rows": 16,
+        "columns": 17,
+        "policy": "serial_halves",
+        "spans": [
+          [
+            0,
+            512
+          ],
+          [
+            1024,
+            512
+          ]
+        ],
+        "cycles": 2330,
+        "dispatches": 1,
+        "dram_read_bytes": 2048,
+        "dram_write_bytes": 1024,
+        "total_instructions": 28,
+        "logical_output_sha256": "f09d0cb6973b6ed1f54556409cae6d3facc2d86e3f381637214714dab9493d9d",
+        "machine_sha256": "268aca763b32642b558e2bf4b8b955c0e1aefc028e4aff25355a51050c889a09"
+      },
+      {
+        "rows": 16,
+        "columns": 17,
+        "policy": "queued_halves",
+        "spans": [
+          [
+            0,
+            512
+          ],
+          [
+            1024,
+            512
+          ]
+        ],
+        "cycles": 2298,
+        "dispatches": 1,
+        "dram_read_bytes": 2048,
+        "dram_write_bytes": 1024,
+        "total_instructions": 28,
+        "logical_output_sha256": "f09d0cb6973b6ed1f54556409cae6d3facc2d86e3f381637214714dab9493d9d",
+        "machine_sha256": "f2fec9659c17f78772347c69ce2ed3ab802f364f1713a328aa56baea37d80201"
+      },
+      {
+        "rows": 24,
+        "columns": 32,
+        "policy": "prefix",
+        "spans": [
+          [
+            0,
+            1792
+          ]
+        ],
+        "cycles": 2818,
+        "dispatches": 1,
+        "dram_read_bytes": 2048,
+        "dram_write_bytes": 1792,
+        "total_instructions": 20,
+        "logical_output_sha256": "4547ed907a05f6cf6c886369985cf641b5d7a04071b23321f4a2dc4b6231d9c9",
+        "machine_sha256": "af798487b5e1a9cb88e3488d926a03f8850a79cb69d3d69fca4bd9145556014d"
+      },
+      {
+        "rows": 24,
+        "columns": 32,
+        "policy": "serial_halves",
+        "spans": [
+          [
+            0,
+            768
+          ],
+          [
+            1024,
+            768
+          ]
+        ],
+        "cycles": 2676,
+        "dispatches": 1,
+        "dram_read_bytes": 2048,
+        "dram_write_bytes": 1536,
+        "total_instructions": 28,
+        "logical_output_sha256": "4547ed907a05f6cf6c886369985cf641b5d7a04071b23321f4a2dc4b6231d9c9",
+        "machine_sha256": "685c396298bd62273f29ba3ac05b6b487ff6d628c73154ed45a7131c71421723"
+      },
+      {
+        "rows": 24,
+        "columns": 32,
+        "policy": "queued_halves",
+        "spans": [
+          [
+            0,
+            768
+          ],
+          [
+            1024,
+            768
+          ]
+        ],
+        "cycles": 2644,
+        "dispatches": 1,
+        "dram_read_bytes": 2048,
+        "dram_write_bytes": 1536,
+        "total_instructions": 28,
+        "logical_output_sha256": "4547ed907a05f6cf6c886369985cf641b5d7a04071b23321f4a2dc4b6231d9c9",
+        "machine_sha256": "bcaa145c76cd7683338836a8469c9fa18947e07eb99736f2126f30d22bf28d36"
+      },
+      {
+        "rows": 31,
+        "columns": 32,
+        "policy": "prefix",
+        "spans": [
+          [
+            0,
+            2016
+          ]
+        ],
+        "cycles": 2969,
+        "dispatches": 1,
+        "dram_read_bytes": 2048,
+        "dram_write_bytes": 2016,
+        "total_instructions": 20,
+        "logical_output_sha256": "5256f0880fefd36d68fe264e90dbd5f2f2c5e36829339a0169a6fbe59abec9b6",
+        "machine_sha256": "d9598ce8e0af75395dc1c2da1e82a22898415723c21820c4a965f3c3277048a3"
+      },
+      {
+        "rows": 31,
+        "columns": 32,
+        "policy": "serial_halves",
+        "spans": [
+          [
+            0,
+            992
+          ],
+          [
+            1024,
+            992
+          ]
+        ],
+        "cycles": 2979,
+        "dispatches": 1,
+        "dram_read_bytes": 2048,
+        "dram_write_bytes": 1984,
+        "total_instructions": 28,
+        "logical_output_sha256": "5256f0880fefd36d68fe264e90dbd5f2f2c5e36829339a0169a6fbe59abec9b6",
+        "machine_sha256": "438f44a469eb03aa16ad4dcd28639924a1f0a79a909645d00afbe6e60885290e"
+      },
+      {
+        "rows": 31,
+        "columns": 32,
+        "policy": "queued_halves",
+        "spans": [
+          [
+            0,
+            992
+          ],
+          [
+            1024,
+            992
+          ]
+        ],
+        "cycles": 2948,
+        "dispatches": 1,
+        "dram_read_bytes": 2048,
+        "dram_write_bytes": 1984,
+        "total_instructions": 28,
+        "logical_output_sha256": "5256f0880fefd36d68fe264e90dbd5f2f2c5e36829339a0169a6fbe59abec9b6",
+        "machine_sha256": "ee48665be408706aa0108e023c384933ffdbd03ae571e31f26a9c0517ebe048a"
+      },
+      {
+        "rows": 32,
+        "columns": 32,
+        "policy": "prefix",
+        "spans": [
+          [
+            0,
+            2048
+          ]
+        ],
+        "cycles": 2991,
+        "dispatches": 1,
+        "dram_read_bytes": 2048,
+        "dram_write_bytes": 2048,
+        "total_instructions": 20,
+        "logical_output_sha256": "3498f5a420016a7245baf2d37e561a4d01ff11a0dfc1cb4c03786ec033b8f7f7",
+        "machine_sha256": "b3bdc51c09013d67f99b88e9e2fb7dd1e460fbabfb65f744533f52a7d056440b"
+      },
+      {
+        "rows": 32,
+        "columns": 32,
+        "policy": "serial_halves",
+        "spans": [
+          [
+            0,
+            1024
+          ],
+          [
+            1024,
+            1024
+          ]
+        ],
+        "cycles": 3023,
+        "dispatches": 1,
+        "dram_read_bytes": 2048,
+        "dram_write_bytes": 2048,
+        "total_instructions": 28,
+        "logical_output_sha256": "3498f5a420016a7245baf2d37e561a4d01ff11a0dfc1cb4c03786ec033b8f7f7",
+        "machine_sha256": "226bf42cd27e624131ffc9054193c5d8cc6ba8704ae85151cd677f5296c88616"
+      },
+      {
+        "rows": 32,
+        "columns": 32,
+        "policy": "queued_halves",
+        "spans": [
+          [
+            0,
+            1024
+          ],
+          [
+            1024,
+            1024
+          ]
+        ],
+        "cycles": 2991,
+        "dispatches": 1,
+        "dram_read_bytes": 2048,
+        "dram_write_bytes": 2048,
+        "total_instructions": 28,
+        "logical_output_sha256": "3498f5a420016a7245baf2d37e561a4d01ff11a0dfc1cb4c03786ec033b8f7f7",
+        "machine_sha256": "07aad707d7c38a5d8c46543d4412ecfbd4fd1e8373f93041c6f1f6d56f519f58"
+      }
+    ],
+    "input_sha256": "308cc01dfaa0e9ef5dc2a6c97e36c4254c5d80fdc3014b740cfe40b77bab0c8d",
+    "numerics": "rtl",
+    "pack_layout": "register_rows",
+    "rtl_revision": "0079c0541111197741a231c002e3843fa6f545b2",
+    "exact_transport_and_guard_match": true,
+    "provenance": {
+      "atlas": {
+        "commit": "9b548cf6e38735b7f093f279aab84213d02bdf3a",
+        "tracked_diff_sha256": "29dbedc818fd47657467d145e5aaef03582416c95de44de3276be6a788b4accb",
+        "tracked_diff_note": "Worklist documentation and evaluator docstring only; production compiler sources were unchanged."
+      },
+      "simulator": {
+        "commit": "a231973e36a1b202e767a9ed33b295f0bb1cafcd",
+        "tracked_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "simulator_binary_sha256": "1d141164229004be150bd89c436b5edd15453089ef369edf1506201af29f890a",
+      "compiler_tools": {
+        "atlas-opt": "2afc6131d4b05f60b01ea422e23cf834a8d0afbc573cb672cfe252fa5ff88050",
+        "atlas-emit": "50e84d0d7aed3133b17b05d4599d5f2a4cf830161da3541f67047d47b82f13b9"
+      },
+      "evaluator_sha256": "f7a958fe9a689bad441d6721e373dbdaaab727206fc756ab530dfda03bd37529"
+    }
   }
 }

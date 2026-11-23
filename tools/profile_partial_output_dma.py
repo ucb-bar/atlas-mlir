@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Measure an authored partial-output DMA hypothesis, without changing codegen.
 
-The common input load supplies a physical BF16 register tile. Compare a prefix
+The common input load supplies VMEM in the physical BF16 register layout. Compare a prefix
 store with serial or queued stores of its occupied register halves. This probes
 transport cost only: no contraction, restoration, publication, or board claim.
 """
