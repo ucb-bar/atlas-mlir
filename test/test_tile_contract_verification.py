@@ -62,6 +62,26 @@ class TileContractVerificationTest(BoundaryChecks, unittest.TestCase):
             self.assertEqual(facts[-1]["after"], (2 + 2 * halves,))
             self.accepted(machine)
 
+        # A store prefix needs only the register halves it actually observes.
+        # Keep the input complete so the second loaded half is nonzero/live.
+        for size in (32, 96, 1024, 1056, 2048):
+            with self.subTest(store_bytes=size):
+                source = copy("bf16").replace(
+                    '%io4 = "atlas.virtual_dma_store_bf16"',
+                    f'%store_size = arith.constant {size} : i32\n'
+                    '    %io4 = "atlas.virtual_dma_store_bf16"').replace(
+                        '(%io2, %tile, %addr, %size)',
+                        '(%io2, %tile, %addr, %store_size)')
+                machine = lower(source)
+                facts = records(machine)
+                stores = [r for r in facts if r['kind'] == 'vstore']
+                self.assertEqual(len(stores), (size + 1023) // 1024)
+                self.assertEqual(facts[-2]['bytes'], size)
+                self.assertEqual(facts[-2]['after'], tuple(r['id'] for r in stores))
+                self.accepted(machine)
+                self.rejected(mutate(machine, stores[-1]['id'], 'offset = 0', 'offset = 8'),
+                              'captured vector VMEM byte address mismatch')
+
     def test_vector_endpoint_fields_and_tags_are_checked(self) -> None:
         machine = lower(copy("bf16"))
         ops = operations(machine)

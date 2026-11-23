@@ -688,14 +688,17 @@ private:
       materializeScalar(placement.stagingReg, placement.stagingWord, loc);
     }
     if (src) {
-      for (unsigned half = 0; half < placement.halves; ++half) {
+      // DMA observes only this prefix; the remaining register half need not
+      // be copied into private staging for a short store.
+      unsigned storeHalves = (bytes + kAtlasRegisterBytes - 1) / kAtlasRegisterBytes;
+      for (unsigned half = 0; half < storeHalves; ++half) {
         if (half)
           materializeScalar(placement.stagingReg,
                             placement.stagingWord + half * kAtlasRegisterWords, loc);
         emit<VStoreOp>(loc, /*src=*/*src + half, /*base=*/placement.stagingReg,
             /*offset=*/0, "raw");
       }
-      if (placement.halves > 1)
+      if (storeHalves > 1)
         materializeScalar(placement.stagingReg, placement.stagingWord, loc);
     }
     emit<DMAOp>(loc, src ? "store" : "load", /*channel=*/placement.channel,

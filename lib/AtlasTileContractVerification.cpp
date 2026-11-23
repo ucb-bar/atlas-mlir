@@ -276,6 +276,10 @@ AtlasTileExpansion mlir::atlas::atlasTileExpansion(StringRef sourceOp) {
 
 AtlasTileExpansion mlir::atlas::atlasTileExpansion(Operation *op) {
   if (isa<VirtualControlOp, VirtualSlotLoadOp, VirtualSlotStoreOp>(op)) return {1, 0};
+  if (auto transfer = virtualDMATransfer(op); transfer && transfer->store) {
+    if (auto bytes = provenI32(transfer->size->get()))
+      return {2 + (*bytes + kAtlasRegisterBytes - 1) / kAtlasRegisterBytes, 1};
+  }
   if (auto transfer = virtualDMATransfer(op); transfer && !transfer->store) {
     auto expansion = atlasTileExpansion(op->getName().getStringRef());
     unsigned halves = isa<VirtualBF16Type>(transfer->tile.getType()) ? 2 : 1;
@@ -444,7 +448,9 @@ FailureOr<ArrayAttr> mlir::atlas::buildAtlasTileContract(
           auto reg = tensorReg(virtualDMATransfer(&op)->tile);
           if (failed(reg))
             return failure();
-          for (unsigned half = 0; half < p.halves; ++half) {
+          unsigned bytes = source.getAs<IntegerAttr>("size_bytes").getInt();
+          unsigned storeHalves = (bytes + kAtlasRegisterBytes - 1) / kAtlasRegisterBytes;
+          for (unsigned half = 0; half < storeHalves; ++half) {
             auto id = add("vstore", *reg + half,
                           (uint64_t(p.stagingWord) + half * kAtlasRegisterWords) * 4,
                           0, kAtlasRegisterBytes, -1, p.id);
