@@ -75,21 +75,25 @@ class NativeWorkBudgetTest(unittest.TestCase):
                     self.assertGreater(allocation["exhaustions"], 0)
 
     def test_scheduler_exact_boundary_preserves_output_and_repeats(self):
-        source = pressure(count=2)
-        baseline = run(source, 100_000_000, "--schedule-atlas-virtual")
-        self.assertEqual(baseline.returncode, 0, baseline.stderr)
-        count = work_report(baseline)["algorithms"]["virtual-scheduling"]["maximum_used"]
-        self.assertGreater(count, 1)
-        exact = run(source, count, "--schedule-atlas-virtual")
-        repeated = run(source, count, "--schedule-atlas-virtual")
-        for result in (exact, repeated):
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual(result.stdout, baseline.stdout)
-        self.assertEqual(work_report(exact), work_report(repeated))
-        refused = run(source, count - 1, "--schedule-atlas-virtual")
-        self.assertNotEqual(refused.returncode, 0)
-        self.assertIn("Atlas work budget exhausted: virtual-scheduling", refused.stderr)
-        self.assertEqual(work_report(refused)["algorithms"]["virtual-scheduling"]["exhaustions"], 1)
+        from test_virtual_scheduling import OVERLAP
+
+        # Explicit transfers exercise both pending and completed DMA work.
+        for source in (pressure(count=2), OVERLAP.read_text()):
+            with self.subTest(explicit_dma="virtual_dma_load" in source):
+                baseline = run(source, 100_000_000, "--schedule-atlas-virtual")
+                self.assertEqual(baseline.returncode, 0, baseline.stderr)
+                count = work_report(baseline)["algorithms"]["virtual-scheduling"]["maximum_used"]
+                self.assertGreater(count, 1)
+                exact = run(source, count, "--schedule-atlas-virtual")
+                repeated = run(source, count, "--schedule-atlas-virtual")
+                for result in (exact, repeated):
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(result.stdout, baseline.stdout)
+                self.assertEqual(work_report(exact), work_report(repeated))
+                refused = run(source, count - 1, "--schedule-atlas-virtual")
+                self.assertNotEqual(refused.returncode, 0)
+                self.assertIn("Atlas work budget exhausted: virtual-scheduling", refused.stderr)
+                self.assertEqual(work_report(refused)["algorithms"]["virtual-scheduling"]["exhaustions"], 1)
 
     def test_legacy_spill_cap_has_named_limit_and_usage(self):
         result = run(pressure(), 100_000_000, "--spill-atlas-virtual=max-spills=0")

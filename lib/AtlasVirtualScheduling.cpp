@@ -769,6 +769,11 @@ public:
       transfers.push_back(work + cost.busy);
     frontend = frontendAfter(node, cycle);
     makespan = std::max(makespan, finished[node]);
+    // Every later candidate starts at or after this monotone frontend time.
+    // Completed transfers cannot delay a drain or occupy a DMA channel, so
+    // retaining them only makes every subsequent candidate rescan history.
+    if (failed(this->work.charge(transfers.size()))) return;
+    llvm::erase_if(transfers, [&](int end) { return end <= frontend; });
   }
 
   int makespan = 0;
@@ -783,7 +788,7 @@ private:
   ArrayRef<Cost> costs;
   std::vector<int> finished;
   std::array<int, kUnits> unitFree{};
-  // When each explicit transfer placed so far completes.
+  // Completion times of explicit transfers still in flight at the frontend.
   SmallVector<int> transfers;
   int frontend = 0;
 };
