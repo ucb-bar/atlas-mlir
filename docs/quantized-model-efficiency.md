@@ -27,7 +27,7 @@ that splits LLVM definitions correctly for the selected conda toolchain.
 | Measurement | WIP base | This branch, batching enabled |
 |---|---:|---:|
 | Device launches | 33 | 2 |
-| Device cycles | 66,684 | 41,528 |
+| Device cycles | 66,684 | 41,491 |
 | Device read bytes | 10,240 | 4,352 |
 | Device write bytes | 6,144 | 3,232 |
 | Host upload bytes | 8,192 | 4,352 |
@@ -35,10 +35,12 @@ that splits LLVM definitions correctly for the selected conda toolchain.
 
 The public output SHA256 is identical:
 `912221867948cc98cec7a08073e070a211ee268cd7d5c31011c846afc685a3ce`.
-On this branch alone, turning batching off gives 33 launches and 51,536 cycles;
+On this branch alone, turning batching off gives 33 launches and 51,499 cycles;
 host transfer callbacks fall from 36 writes/66 reads to 5 writes/4 reads when
 batching is enabled. These are simulator measurements for this capture, not
 full-model, board, or end-to-end latency measurements.
+The latest replay at `b7fc180d` includes the short-store staging improvement;
+the earlier rebased receipt remains in the evidence file for comparison.
 
 The authored 128 × 128 × 768 panel comparison also replays on the new base:
 `batch-panel-cache` takes 231,629 cycles and 198,784 read bytes;
@@ -82,6 +84,24 @@ local compilation timings, not device-cycle savings. The affected scheduler,
 delay, DMA, work-budget, and Rust panel suites pass 61 tests and 46 subtests.
 The previously timing-sensitive large-panel Rust test also passes with the final
 compiler and its unchanged 30-second per-compilation timeout.
+
+Dependency construction now indexes prior readers and writers by conservative
+resource buckets. Bitsets combine candidates in source order; the original
+dependence calculation still decides every edge, distance and diagnostic.
+Unknown addresses use aggregate histories, while known addresses consult both
+their buckets and the unknown history. DMA, MXU and barrier ordering remain
+explicit. Allocation, bitmap words, bucket visits and candidate comparisons
+are charged to the existing work budget.
+
+On the same 225 × 35 × 3073 source after short-store staging, machine-scheduling
+work falls **15,639,893 → 10,678,853** units and total work falls
+**108,092,666 → 103,131,626**. Machine IR is byte-identical. An independent
+all-pairs oracle matches every ordered edge across 96 mixed streams, including
+unknown addresses, bucket/bank boundaries, incoming DMA and release barriers.
+The affected Python suites pass 58 tests and 125 subtests; all 12 selected native
+suites pass. Wall times were 24.33 and 24.15 seconds alongside other tests, so no
+stable wall-time improvement is claimed. The initial vector-history index
+increased counted work and was replaced by the bitset implementation.
 
 An authored DMA-only probe identifies the next device traffic opportunity. Each
 case includes the same 2,048-byte input load, then writes a physical BF16 tile
@@ -239,10 +259,11 @@ and remaining action items are versioned here.
 1. Finish qualifying the WIP deployment gates with the external functional
    evaluator and platform dependencies. Preserve the pinned Python model,
    explicit numerical declarations, refusal paths, and source/publication checks.
-2. Reduce the remaining all-pairs dependency-graph work in large native blocks;
-   prove equivalent hazards and scheduling ties before changing its traversal.
-   The ready-instruction change removes redundant candidate scans, but does not
-   remove dependency construction or verification costs.
+2. Profile the remaining dependency verification and DMA completion scans in
+   large native blocks. Candidate construction is now indexed with exact graph
+   equivalence; retain independent verifier semantics and refusal behavior before
+   changing any additional traversal. Compiler work savings do not imply fewer
+   device cycles.
 3. Measure host callback latency for partial-tile reads, including whether
    coalescing nearby occupied halves beats the byte minimum on the real transport.
    Then evaluate splitting the matching device output DMA into occupied register

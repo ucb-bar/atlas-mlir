@@ -3468,5 +3468,615 @@
       }
     },
     "validation_note": "Initial broad run: 69 passed/1 skipped/28 subtests. Final expanded group suite: 11 passed; 4 new cases refused a too-small test host arena, then all 4 passed after deriving host storage from public tensor sizes. Device, instruction, work and timeout limits unchanged."
+  },
+  "resumed_capture": {
+    "source_digest": "bf00560a71db7e4851f8e923eab7a05f7c191ab09a5d4c0ded80b36c7bb16b5e",
+    "input_sha256": "c78121bfbc8e29f3daa8e644ec7d87407f8c82cd8d51dfbcba4d8b1f5f728001",
+    "exact_public_output_match": true,
+    "measurements": [
+      {
+        "policy": "baseline",
+        "dispatches": 33,
+        "upload_bytes": 4352,
+        "download_bytes": 3204,
+        "upload_calls": 36,
+        "download_calls": 66,
+        "output_sha256": [
+          "912221867948cc98cec7a08073e070a211ee268cd7d5c31011c846afc685a3ce"
+        ],
+        "cycles": 51499,
+        "total_instructions": 11715,
+        "dram_read_bytes": 4352,
+        "dram_write_bytes": 4128
+      },
+      {
+        "policy": "batched",
+        "dispatches": 2,
+        "upload_bytes": 4352,
+        "download_bytes": 3204,
+        "upload_calls": 5,
+        "download_calls": 4,
+        "output_sha256": [
+          "912221867948cc98cec7a08073e070a211ee268cd7d5c31011c846afc685a3ce"
+        ],
+        "cycles": 41491,
+        "total_instructions": 10444,
+        "dram_read_bytes": 4352,
+        "dram_write_bytes": 3232
+      }
+    ],
+    "options": {
+      "reduction_unroll": "auto",
+      "program_size_limit_bytes": null,
+      "tuning_profile": null,
+      "io_memory_bytes": 1048576,
+      "execution_instruction_limit": 1000000,
+      "native_pipeline": "optimized",
+      "device_kv_quantizer": true
+    },
+    "instruction_limit": 1000000,
+    "pack_layout": "register_rows",
+    "provenance": {
+      "atlas": {
+        "commit": "b7fc180d4ab3fd12f59df9b34d7048e6c8e73371",
+        "tracked_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "merlin": {
+        "commit": "5e33268d134946665f7be032e12071324884da61",
+        "tracked_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "simulator": {
+        "commit": "a231973e36a1b202e767a9ed33b295f0bb1cafcd",
+        "tracked_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "simulator_binary_sha256": "1d141164229004be150bd89c436b5edd15453089ef369edf1506201af29f890a",
+      "compiler_tools": {
+        "atlas-opt": "e47558bf7f23d5e359a7ed0239c1cb9a941124b01197b58e2f2a8ab59729e144",
+        "atlas-emit": "50e84d0d7aed3133b17b05d4599d5f2a4cf830161da3541f67047d47b82f13b9"
+      },
+      "evaluator_sha256": "ed1a4574b954598271dc01f728bdc3867ea3d643d9dd2f49f4da171555f9a7da"
+    },
+    "scope": "existing lifted capture; matched public bytes; device cycles exclude host and image loading time"
+  },
+  "resumed_dependency_candidate_index": {
+    "exact_machine_match": true,
+    "measurements": [
+      {
+        "variant": "before",
+        "wall_seconds": 24.32875274500111,
+        "work": {
+          "algorithms": {
+            "allocation-verification-helpers": {
+              "exhaustions": 0,
+              "invocations": 4,
+              "maximum_used": 28276,
+              "used": 104272
+            },
+            "allocation-verification-liveness": {
+              "exhaustions": 0,
+              "invocations": 4,
+              "maximum_used": 50381,
+              "used": 186804
+            },
+            "branch-relaxation": {
+              "exhaustions": 0,
+              "invocations": 2,
+              "maximum_used": 21030,
+              "used": 37023
+            },
+            "buffer-contract-dataflow": {
+              "exhaustions": 0,
+              "invocations": 6,
+              "maximum_used": 82341,
+              "used": 429910
+            },
+            "captured-address-proof": {
+              "exhaustions": 0,
+              "invocations": 6,
+              "maximum_used": 34558,
+              "used": 207348
+            },
+            "cfg-contract-liveness": {
+              "exhaustions": 0,
+              "invocations": 1,
+              "maximum_used": 1416,
+              "used": 1416
+            },
+            "cfg-contract-verification": {
+              "exhaustions": 0,
+              "invocations": 6,
+              "maximum_used": 63029,
+              "used": 329386
+            },
+            "dma-cfg-dataflow": {
+              "exhaustions": 0,
+              "invocations": 2,
+              "maximum_used": 50963,
+              "used": 101926
+            },
+            "machine-scheduling": {
+              "exhaustions": 0,
+              "invocations": 62,
+              "maximum_used": 1874485,
+              "used": 15639893
+            },
+            "mxu-contract-dataflow": {
+              "exhaustions": 0,
+              "invocations": 6,
+              "maximum_used": 21092,
+              "used": 110208
+            },
+            "register-allocation": {
+              "exhaustions": 0,
+              "invocations": 15,
+              "maximum_used": 520294,
+              "used": 3481406
+            },
+            "source-memory-contract-dataflow": {
+              "exhaustions": 0,
+              "invocations": 6,
+              "maximum_used": 21092,
+              "used": 110208
+            },
+            "source-memory-initialization": {
+              "exhaustions": 0,
+              "invocations": 20,
+              "maximum_used": 6686,
+              "used": 133510
+            },
+            "spill-slot-placement": {
+              "exhaustions": 0,
+              "invocations": 6,
+              "maximum_used": 1352804,
+              "used": 7998018
+            },
+            "stream-dma-preflight": {
+              "exhaustions": 0,
+              "invocations": 1,
+              "maximum_used": 16944,
+              "used": 16944
+            },
+            "stream-scalar-dataflow": {
+              "exhaustions": 0,
+              "invocations": 8,
+              "maximum_used": 61638,
+              "used": 418406
+            },
+            "stream-timing-verification": {
+              "exhaustions": 0,
+              "invocations": 2,
+              "maximum_used": 21501889,
+              "used": 43003778
+            },
+            "tile-contract-dataflow": {
+              "exhaustions": 0,
+              "invocations": 6,
+              "maximum_used": 21104,
+              "used": 110280
+            },
+            "virtual-scheduling": {
+              "exhaustions": 0,
+              "invocations": 76,
+              "maximum_used": 2487757,
+              "used": 35671930
+            }
+          },
+          "limit": 100000000,
+          "schema": "atlas-work-budget-v1",
+          "total_limit": 1000000000,
+          "total_used": 108092666,
+          "units": "record, candidate, edge, fixed-point and reservation probe visits"
+        },
+        "input_sha256": "2b26edb62c1f4b72773b0109b2c9c6797c1d0a5565f60976cab1397ef19329cd",
+        "binary_sha256": "e47558bf7f23d5e359a7ed0239c1cb9a941124b01197b58e2f2a8ab59729e144",
+        "machine_sha256": "e20a79964144b0c39a90fa1488326469242982bd696de699e7a19f8468ecb3fd"
+      },
+      {
+        "variant": "indexed",
+        "wall_seconds": 24.147364388001733,
+        "work": {
+          "algorithms": {
+            "allocation-verification-helpers": {
+              "exhaustions": 0,
+              "invocations": 4,
+              "maximum_used": 28276,
+              "used": 104272
+            },
+            "allocation-verification-liveness": {
+              "exhaustions": 0,
+              "invocations": 4,
+              "maximum_used": 50381,
+              "used": 186804
+            },
+            "branch-relaxation": {
+              "exhaustions": 0,
+              "invocations": 2,
+              "maximum_used": 21030,
+              "used": 37023
+            },
+            "buffer-contract-dataflow": {
+              "exhaustions": 0,
+              "invocations": 6,
+              "maximum_used": 82341,
+              "used": 429910
+            },
+            "captured-address-proof": {
+              "exhaustions": 0,
+              "invocations": 6,
+              "maximum_used": 34558,
+              "used": 207348
+            },
+            "cfg-contract-liveness": {
+              "exhaustions": 0,
+              "invocations": 1,
+              "maximum_used": 1416,
+              "used": 1416
+            },
+            "cfg-contract-verification": {
+              "exhaustions": 0,
+              "invocations": 6,
+              "maximum_used": 63029,
+              "used": 329386
+            },
+            "dma-cfg-dataflow": {
+              "exhaustions": 0,
+              "invocations": 2,
+              "maximum_used": 50963,
+              "used": 101926
+            },
+            "machine-scheduling": {
+              "exhaustions": 0,
+              "invocations": 62,
+              "maximum_used": 1218158,
+              "used": 10678853
+            },
+            "mxu-contract-dataflow": {
+              "exhaustions": 0,
+              "invocations": 6,
+              "maximum_used": 21092,
+              "used": 110208
+            },
+            "register-allocation": {
+              "exhaustions": 0,
+              "invocations": 15,
+              "maximum_used": 520294,
+              "used": 3481406
+            },
+            "source-memory-contract-dataflow": {
+              "exhaustions": 0,
+              "invocations": 6,
+              "maximum_used": 21092,
+              "used": 110208
+            },
+            "source-memory-initialization": {
+              "exhaustions": 0,
+              "invocations": 20,
+              "maximum_used": 6686,
+              "used": 133510
+            },
+            "spill-slot-placement": {
+              "exhaustions": 0,
+              "invocations": 6,
+              "maximum_used": 1352804,
+              "used": 7998018
+            },
+            "stream-dma-preflight": {
+              "exhaustions": 0,
+              "invocations": 1,
+              "maximum_used": 16944,
+              "used": 16944
+            },
+            "stream-scalar-dataflow": {
+              "exhaustions": 0,
+              "invocations": 8,
+              "maximum_used": 61638,
+              "used": 418406
+            },
+            "stream-timing-verification": {
+              "exhaustions": 0,
+              "invocations": 2,
+              "maximum_used": 21501889,
+              "used": 43003778
+            },
+            "tile-contract-dataflow": {
+              "exhaustions": 0,
+              "invocations": 6,
+              "maximum_used": 21104,
+              "used": 110280
+            },
+            "virtual-scheduling": {
+              "exhaustions": 0,
+              "invocations": 76,
+              "maximum_used": 2487757,
+              "used": 35671930
+            }
+          },
+          "limit": 100000000,
+          "schema": "atlas-work-budget-v1",
+          "total_limit": 1000000000,
+          "total_used": 103131626,
+          "units": "record, candidate, edge, fixed-point and reservation probe visits"
+        },
+        "input_sha256": "2b26edb62c1f4b72773b0109b2c9c6797c1d0a5565f60976cab1397ef19329cd",
+        "binary_sha256": "d19084c8bce877f517aadcf08fb0bb639d61d18efc2df7b60274af9b1d40b10e",
+        "machine_sha256": "e20a79964144b0c39a90fa1488326469242982bd696de699e7a19f8468ecb3fd"
+      }
+    ],
+    "scope": "Compiler dependency candidate index only; exact machine IR; no device cycle or stable wall-time improvement claimed.",
+    "source_base": "b7fc180d4ab3fd12f59df9b34d7048e6c8e73371",
+    "implementation_diff_sha256": "216cc4f04ddc94b0229b7be99e37fd61209e292ae3cdaffefdc234e842b39009",
+    "oracle_source_sha256": "f8541a5279e4d59f4c2780e89bb00b3028d5a6f8ea3dbe8da487e9016792b760",
+    "validation": {
+      "oracle_graph_comparisons": 96,
+      "python_tests_passed": 58,
+      "python_subtests_passed": 125,
+      "native_suites_passed": 12,
+      "budget_and_timeout_increased": false
+    },
+    "rejected_vector_history_trial": {
+      "exact_machine_match": true,
+      "measurements": [
+        {
+          "variant": "before",
+          "wall_seconds": 25.136509454998304,
+          "work": {
+            "algorithms": {
+              "allocation-verification-helpers": {
+                "exhaustions": 0,
+                "invocations": 4,
+                "maximum_used": 28276,
+                "used": 104272
+              },
+              "allocation-verification-liveness": {
+                "exhaustions": 0,
+                "invocations": 4,
+                "maximum_used": 50381,
+                "used": 186804
+              },
+              "branch-relaxation": {
+                "exhaustions": 0,
+                "invocations": 2,
+                "maximum_used": 21030,
+                "used": 37023
+              },
+              "buffer-contract-dataflow": {
+                "exhaustions": 0,
+                "invocations": 6,
+                "maximum_used": 82341,
+                "used": 429910
+              },
+              "captured-address-proof": {
+                "exhaustions": 0,
+                "invocations": 6,
+                "maximum_used": 34558,
+                "used": 207348
+              },
+              "cfg-contract-liveness": {
+                "exhaustions": 0,
+                "invocations": 1,
+                "maximum_used": 1416,
+                "used": 1416
+              },
+              "cfg-contract-verification": {
+                "exhaustions": 0,
+                "invocations": 6,
+                "maximum_used": 63029,
+                "used": 329386
+              },
+              "dma-cfg-dataflow": {
+                "exhaustions": 0,
+                "invocations": 2,
+                "maximum_used": 50963,
+                "used": 101926
+              },
+              "machine-scheduling": {
+                "exhaustions": 0,
+                "invocations": 62,
+                "maximum_used": 1874485,
+                "used": 15639893
+              },
+              "mxu-contract-dataflow": {
+                "exhaustions": 0,
+                "invocations": 6,
+                "maximum_used": 21092,
+                "used": 110208
+              },
+              "register-allocation": {
+                "exhaustions": 0,
+                "invocations": 15,
+                "maximum_used": 520294,
+                "used": 3481406
+              },
+              "source-memory-contract-dataflow": {
+                "exhaustions": 0,
+                "invocations": 6,
+                "maximum_used": 21092,
+                "used": 110208
+              },
+              "source-memory-initialization": {
+                "exhaustions": 0,
+                "invocations": 20,
+                "maximum_used": 6686,
+                "used": 133510
+              },
+              "spill-slot-placement": {
+                "exhaustions": 0,
+                "invocations": 6,
+                "maximum_used": 1352804,
+                "used": 7998018
+              },
+              "stream-dma-preflight": {
+                "exhaustions": 0,
+                "invocations": 1,
+                "maximum_used": 16944,
+                "used": 16944
+              },
+              "stream-scalar-dataflow": {
+                "exhaustions": 0,
+                "invocations": 8,
+                "maximum_used": 61638,
+                "used": 418406
+              },
+              "stream-timing-verification": {
+                "exhaustions": 0,
+                "invocations": 2,
+                "maximum_used": 21501889,
+                "used": 43003778
+              },
+              "tile-contract-dataflow": {
+                "exhaustions": 0,
+                "invocations": 6,
+                "maximum_used": 21104,
+                "used": 110280
+              },
+              "virtual-scheduling": {
+                "exhaustions": 0,
+                "invocations": 76,
+                "maximum_used": 2487757,
+                "used": 35671930
+              }
+            },
+            "limit": 100000000,
+            "schema": "atlas-work-budget-v1",
+            "total_limit": 1000000000,
+            "total_used": 108092666,
+            "units": "record, candidate, edge, fixed-point and reservation probe visits"
+          },
+          "input_sha256": "2b26edb62c1f4b72773b0109b2c9c6797c1d0a5565f60976cab1397ef19329cd",
+          "binary_sha256": "e47558bf7f23d5e359a7ed0239c1cb9a941124b01197b58e2f2a8ab59729e144",
+          "machine_sha256": "e20a79964144b0c39a90fa1488326469242982bd696de699e7a19f8468ecb3fd"
+        },
+        {
+          "variant": "indexed",
+          "wall_seconds": 24.265185162003036,
+          "work": {
+            "algorithms": {
+              "allocation-verification-helpers": {
+                "exhaustions": 0,
+                "invocations": 4,
+                "maximum_used": 28276,
+                "used": 104272
+              },
+              "allocation-verification-liveness": {
+                "exhaustions": 0,
+                "invocations": 4,
+                "maximum_used": 50381,
+                "used": 186804
+              },
+              "branch-relaxation": {
+                "exhaustions": 0,
+                "invocations": 2,
+                "maximum_used": 21030,
+                "used": 37023
+              },
+              "buffer-contract-dataflow": {
+                "exhaustions": 0,
+                "invocations": 6,
+                "maximum_used": 82341,
+                "used": 429910
+              },
+              "captured-address-proof": {
+                "exhaustions": 0,
+                "invocations": 6,
+                "maximum_used": 34558,
+                "used": 207348
+              },
+              "cfg-contract-liveness": {
+                "exhaustions": 0,
+                "invocations": 1,
+                "maximum_used": 1416,
+                "used": 1416
+              },
+              "cfg-contract-verification": {
+                "exhaustions": 0,
+                "invocations": 6,
+                "maximum_used": 63029,
+                "used": 329386
+              },
+              "dma-cfg-dataflow": {
+                "exhaustions": 0,
+                "invocations": 2,
+                "maximum_used": 50963,
+                "used": 101926
+              },
+              "machine-scheduling": {
+                "exhaustions": 0,
+                "invocations": 62,
+                "maximum_used": 1964299,
+                "used": 16335436
+              },
+              "mxu-contract-dataflow": {
+                "exhaustions": 0,
+                "invocations": 6,
+                "maximum_used": 21092,
+                "used": 110208
+              },
+              "register-allocation": {
+                "exhaustions": 0,
+                "invocations": 15,
+                "maximum_used": 520294,
+                "used": 3481406
+              },
+              "source-memory-contract-dataflow": {
+                "exhaustions": 0,
+                "invocations": 6,
+                "maximum_used": 21092,
+                "used": 110208
+              },
+              "source-memory-initialization": {
+                "exhaustions": 0,
+                "invocations": 20,
+                "maximum_used": 6686,
+                "used": 133510
+              },
+              "spill-slot-placement": {
+                "exhaustions": 0,
+                "invocations": 6,
+                "maximum_used": 1352804,
+                "used": 7998018
+              },
+              "stream-dma-preflight": {
+                "exhaustions": 0,
+                "invocations": 1,
+                "maximum_used": 16944,
+                "used": 16944
+              },
+              "stream-scalar-dataflow": {
+                "exhaustions": 0,
+                "invocations": 8,
+                "maximum_used": 61638,
+                "used": 418406
+              },
+              "stream-timing-verification": {
+                "exhaustions": 0,
+                "invocations": 2,
+                "maximum_used": 21501889,
+                "used": 43003778
+              },
+              "tile-contract-dataflow": {
+                "exhaustions": 0,
+                "invocations": 6,
+                "maximum_used": 21104,
+                "used": 110280
+              },
+              "virtual-scheduling": {
+                "exhaustions": 0,
+                "invocations": 76,
+                "maximum_used": 2487757,
+                "used": 35671930
+              }
+            },
+            "limit": 100000000,
+            "schema": "atlas-work-budget-v1",
+            "total_limit": 1000000000,
+            "total_used": 108788209,
+            "units": "record, candidate, edge, fixed-point and reservation probe visits"
+          },
+          "input_sha256": "2b26edb62c1f4b72773b0109b2c9c6797c1d0a5565f60976cab1397ef19329cd",
+          "binary_sha256": "4a751c7a830f735e6946ec82eea36e142a49d1f052e1c321f672e5c265352421",
+          "machine_sha256": "e20a79964144b0c39a90fa1488326469242982bd696de699e7a19f8468ecb3fd"
+        }
+      ]
+    }
   }
 }
