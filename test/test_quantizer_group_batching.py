@@ -2,6 +2,7 @@
 import ctypes
 from dataclasses import replace
 import json
+from math import prod
 import os
 from unittest.mock import patch
 
@@ -40,12 +41,47 @@ def test_failed_resource_proofs_reduce_group_count_but_other_errors_propagate():
         calls.append(plan.count)
         if plan.count > 96:
             raise NativeCompilationError('resource_limit', 'selected image exceeds its bound')
+        return None, None, None, {'instruction_bound': plan.count * 10000}, 'mandatory'
 
     with codegen_options(replace(current_codegen_options(), dynamic_quantizer_group_batching=True)):
         with patch('atlas_mlir_native.activation_quantize_device.prove_plan', side_effect=prove):
             selected = prepare_plan(source)
-        assert [row['code_bytes'] for row in selected.launches] == [64]*5
+        assert [row['code_bytes'] for row in selected.launches] == [96]*3 + [32]
+        assert calls == [320,160,64,96,32]
+        calls.clear()
+        with patch('atlas_mlir_native.activation_quantize_device.prove_plan', side_effect=prove):
+            legacy = prepare_plan(source, _batch_refinement=False)
+        assert [row['code_bytes'] for row in legacy.launches] == [64]*5
         assert calls == [320,160,64]
+        assert 'dynamic_group_batch_refinement' not in legacy.record()
+        assert selected.record()['dynamic_group_batch_refinement'] is True
+        # A larger proposed body's changed machine cost can still refuse. It
+        # must not replace the previously admitted body or cause more retries.
+        def refuse_growth(plan, **kwargs):
+            if plan.count == 96:
+                calls.append(plan.count)
+                raise NativeCompilationError('resource_limit', 'growth exceeds selected image bound')
+            return prove(plan, **kwargs)
+        calls.clear()
+        with patch('atlas_mlir_native.activation_quantize_device.prove_plan', side_effect=refuse_growth):
+            fallback = prepare_plan(source)
+        assert fallback.launches == legacy.launches
+        assert calls == [320,160,64,96]
+        calls.clear()
+        with patch('atlas_mlir_native.activation_quantize_device.prove_plan', side_effect=prove):
+            unchanged = prepare_plan(dynamic_source(shape=(4,32), reduce='token'))
+        assert [row['code_bytes'] for row in unchanged.launches] == [64,64]
+        assert calls == [128,64]  # Three groups would still need two launches.
+        for error in (NativeCompilationError('compile_error', 'growth proof failed'),
+                      CountedWorkExhausted('growth proof work limit')):
+            def fail_growth(plan, **kwargs):
+                if plan.count == 96:
+                    raise error
+                return prove(plan, **kwargs)
+            with patch('atlas_mlir_native.activation_quantize_device.prove_plan', side_effect=fail_growth):
+                with pytest.raises(type(error)) as caught:
+                    prepare_plan(source)
+                assert caught.value is error
         with patch('atlas_mlir_native.activation_quantize_device.prove_plan',
                    side_effect=NativeCompilationError('compile_error', 'bad dependency proof')):
             with pytest.raises(NativeCompilationError, match='bad dependency'):
@@ -76,7 +112,7 @@ def test_real_instruction_bound_reuses_an_admitted_batch():
                     reason='select Rust simulator and Atlas tools')
 @pytest.mark.parametrize('pipeline', ['mandatory', 'optimized'])
 @pytest.mark.parametrize('rule', ['ref', 'nc'])
-@pytest.mark.parametrize('shape,launches', [((259,32),2), ((2,17,96),1)])
+@pytest.mark.parametrize('shape,launches', [((259,32),2), ((2,17,96),1), ((256,256),3)])
 def test_exported_application_keeps_group_exponents_special_values_and_tails(tmp_path, pipeline, rule, shape, launches):
     from atlas_mlir_native.application import AtlasApplicationAdapter
     from atlas_mlir_native.binding import DRAM_BASE
@@ -95,8 +131,13 @@ def test_exported_application_keeps_group_exponents_special_values_and_tails(tmp
         assert len(schedule.launches) == launches
         snapshot = build_snapshot(tmp_path)
         artifact = tmp_path / 'application'
+        # The host owns both region outputs and atomic-publication staging.
+        # Size this new larger fixture's host buffers from its public tensors;
+        # device memory and the one-million-instruction admission are unchanged.
+        public_bytes = schedule.count + 4 * prod(schedule.exponents.type.shape)
         manifest = compile_semantic_application(source, adapter=adapter, snapshot=snapshot,
-            target_source=ROOT, destination=artifact, limits=SearchLimits(), name='group_quant', capacity=65536)
+            target_source=ROOT, destination=artifact, limits=SearchLimits(), name='group_quant',
+            capacity=max(65536, 2 * public_bytes))
         assert len(manifest['regions']) == 1
         assert verify_semantic_application(source, adapter=adapter, snapshot=snapshot,
             target_source=ROOT, artifact=artifact)['status'] == 'checked'

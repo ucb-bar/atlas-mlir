@@ -158,6 +158,39 @@ Future scheduling work must explain the panel ordering regression; a more
 accurate individual transfer estimate is not sufficient evidence of a better
 final schedule.
 
+Token quantizer batching now tries one larger body after halving reaches an
+admitted size. Its proved instruction bound proposes the candidate; the larger
+body must pass its own complete machine proof. Refinement only proceeds when
+the proposed size reduces the remaining launch count. It prefers eight-group
+alignment when that preserves the launch reduction, avoiding padded exponent
+DMA beats. A resource-refused growth candidate retains the smaller admitted
+body; proof errors and compile-work exhaustion propagate. Old saved schedules
+explicitly replay the previous halving policy.
+
+| Authored token quantizer | Launches before → after | Optimized finite cycles before → after |
+|---|---:|---:|
+| 256 rows × 256 elements | 4 → 3 | 384,948 → 384,628 |
+| 400 rows × 128 elements | 4 → 2 | 493,148 → 492,498 |
+
+Both cases retain their DRAM byte counts and exact code/exponent bytes. Inputs
+containing NaNs, infinities, signed zeros and subnormals have the same cycle
+savings and match the separate host bit implementation. The 400 × 128 mandatory
+case also improves, 509,156 → 508,503 cycles. All launches retain the original
+1,000,000-instruction limit. These savings exclude host callback and image-load
+time. Refinement adds at most one proof attempt per halving sequence and can
+select another tail-body image.
+
+The expanded group-batching suite passes all 15 cases across the final checks;
+the earlier broader planning/export/budget run passed 69 tests and 28 subtests,
+with one optional integration skipped. Four new generated-C cases initially
+refused because their 65,536-byte host arena could not hold their larger public
+outputs and atomic staging. The fixture now derives the needed host allocation
+(133,120 bytes for 256 × 256) from the tensors; all four pass. Device memory,
+instruction/work limits, and timeouts are unchanged. A saved pre-refinement
+quantizer package also exports successfully with its original launch count.
+Reproduce the matched device comparison with
+`python tools/profile_quantizer_batching.py --rows 256 --columns 256 --pipeline optimized --out /path/to/new/probe`.
+
 The rebased native tools build successfully. The selected WIP deployment,
 quantized-loop, panel, residency, and independent reference suites finish with
 **422 passed, 5 skipped, 284 subtests passed, and 8 failures**. The eight failures

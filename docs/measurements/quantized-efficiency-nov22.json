@@ -2710,5 +2710,763 @@
         }
       ]
     }
-  ]
+  ],
+  "resumed_quantizer_batch_refinement": {
+    "measurements": [
+      {
+        "scope": "Compare independently admitted token-group batches on the selected Rust model.\n\nThis authored quantizer probe checks complete device memory against a separate\nhost bit implementation. It reports device cycles, not host callback latency.\n",
+        "rows": 256,
+        "columns": 256,
+        "pipeline": "optimized",
+        "measurements": [
+          {
+            "case": "finite",
+            "policy": "halving",
+            "dispatches": 4,
+            "input_sha256": "84cc7627088c5fed2597d135c317e4208a506f0da96804b16d78a19fe6649aa1",
+            "codes_sha256": "1775b82144e367b104d15df12d1258d76d8eda2c55e681c2256e6e180bda39c9",
+            "exponents_sha256": "6ae7a70ea97ff0fbe80c7efc2fbeae4a90f95e057d323a5a6103d1f60499eef8",
+            "cycles": 384948,
+            "total_instructions": 56476,
+            "dram_read_bytes": 131072,
+            "dram_write_bytes": 66560
+          },
+          {
+            "case": "finite",
+            "policy": "refined",
+            "dispatches": 3,
+            "input_sha256": "84cc7627088c5fed2597d135c317e4208a506f0da96804b16d78a19fe6649aa1",
+            "codes_sha256": "1775b82144e367b104d15df12d1258d76d8eda2c55e681c2256e6e180bda39c9",
+            "exponents_sha256": "6ae7a70ea97ff0fbe80c7efc2fbeae4a90f95e057d323a5a6103d1f60499eef8",
+            "cycles": 384628,
+            "total_instructions": 56439,
+            "dram_read_bytes": 131072,
+            "dram_write_bytes": 66560
+          },
+          {
+            "case": "exceptional",
+            "policy": "halving",
+            "dispatches": 4,
+            "input_sha256": "c1e3e554be33cf2e2b9f91d576b0a32110e74c515061f6801343f97d1268733d",
+            "codes_sha256": "5e7b4eeb46886e5f891a73bda924e4e80491bdb7d62fc4a2c493bdd00268cedf",
+            "exponents_sha256": "6ae7a70ea97ff0fbe80c7efc2fbeae4a90f95e057d323a5a6103d1f60499eef8",
+            "cycles": 671883,
+            "total_instructions": 341228,
+            "dram_read_bytes": 131072,
+            "dram_write_bytes": 66560
+          },
+          {
+            "case": "exceptional",
+            "policy": "refined",
+            "dispatches": 3,
+            "input_sha256": "c1e3e554be33cf2e2b9f91d576b0a32110e74c515061f6801343f97d1268733d",
+            "codes_sha256": "5e7b4eeb46886e5f891a73bda924e4e80491bdb7d62fc4a2c493bdd00268cedf",
+            "exponents_sha256": "6ae7a70ea97ff0fbe80c7efc2fbeae4a90f95e057d323a5a6103d1f60499eef8",
+            "cycles": 671563,
+            "total_instructions": 341191,
+            "dram_read_bytes": 131072,
+            "dram_write_bytes": 66560
+          }
+        ],
+        "exact_complete_memory_match": true,
+        "numerics": "rtl",
+        "pack_layout": "register_rows",
+        "instruction_limit": 1000000,
+        "rtl_revision": "0079c0541111197741a231c002e3843fa6f545b2",
+        "provenance": {
+          "atlas": {
+            "commit": "5962e06b7fa02375e6fdf3b248054bd017e1605e",
+            "tracked_diff_sha256": "c48378f534aff8a1e93c338facb7223947dca565978675779a588d19d04aee15"
+          },
+          "merlin": {
+            "commit": "5e33268d134946665f7be032e12071324884da61",
+            "tracked_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "simulator": {
+            "commit": "a231973e36a1b202e767a9ed33b295f0bb1cafcd",
+            "tracked_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "simulator_binary_sha256": "1d141164229004be150bd89c436b5edd15453089ef369edf1506201af29f890a",
+          "compiler_tools": {
+            "atlas-opt": "e47558bf7f23d5e359a7ed0239c1cb9a941124b01197b58e2f2a8ab59729e144",
+            "atlas-emit": "50e84d0d7aed3133b17b05d4599d5f2a4cf830161da3541f67047d47b82f13b9"
+          },
+          "evaluator_sha256": "65fca1240423e079893e8c91406b1d86db328e95994a39178851380f70047b15"
+        },
+        "schedules": {
+          "halving": {
+            "schema": "atlas.activation_quantize_schedule.v1",
+            "source_request_digest": "ccf818bb5323250809a12a0f94a0a2d319d0e67a56cf3ba1bafcaf41bc43216e",
+            "input_node_id": "x",
+            "output_node_ids": [
+              "codes",
+              "exponent"
+            ],
+            "mode": "dynamic",
+            "reduce": "token",
+            "input_bytes": 131072,
+            "code_bytes": 65536,
+            "exponent_bytes": 1024,
+            "static_chunk_elements": 2048,
+            "static_whole_body_max_elements": 524288,
+            "max_dynamic_group_elements": 32768,
+            "dynamic_groups_per_launch": 8,
+            "dynamic_group_worst_instructions": 119525,
+            "dynamic_group_bound_block_elements": 4096,
+            "dynamic_group_bound_rule": "119525 * ceil(group_elements / 4096)",
+            "functional_instruction_limit": 1000000,
+            "bodies": [
+              {
+                "index": 0,
+                "path": "segments/body_000",
+                "request_digest": "02eb346c551ae5a6545146440af282b7085f23bde7487baf97b8eb7a220816a9",
+                "shape": [
+                  64,
+                  256
+                ]
+              }
+            ],
+            "launches": [
+              {
+                "body_index": 0,
+                "input_offset_bytes": 0,
+                "input_bytes": 32768,
+                "code_offset_bytes": 0,
+                "code_bytes": 16384,
+                "exponent_offset_bytes": 0,
+                "exponent_bytes": 256
+              },
+              {
+                "body_index": 0,
+                "input_offset_bytes": 32768,
+                "input_bytes": 32768,
+                "code_offset_bytes": 16384,
+                "code_bytes": 16384,
+                "exponent_offset_bytes": 256,
+                "exponent_bytes": 256
+              },
+              {
+                "body_index": 0,
+                "input_offset_bytes": 65536,
+                "input_bytes": 32768,
+                "code_offset_bytes": 32768,
+                "code_bytes": 16384,
+                "exponent_offset_bytes": 512,
+                "exponent_bytes": 256
+              },
+              {
+                "body_index": 0,
+                "input_offset_bytes": 98304,
+                "input_bytes": 32768,
+                "code_offset_bytes": 49152,
+                "code_bytes": 16384,
+                "exponent_offset_bytes": 768,
+                "exponent_bytes": 256
+              }
+            ],
+            "launches_per_invocation": 4,
+            "runtime_arithmetic": "none; raw copies, padding, and device dispatch only",
+            "dynamic_reduction": "counted complete source groups per launch; no split amax",
+            "weight_conversion": "none",
+            "dynamic_group_batching": true,
+            "lowering_pipeline": "optimized",
+            "dynamic_group_batch_candidate_limit": 256,
+            "dynamic_group_batch_admission": "complete token groups; selected machine bound; halve refused candidates and reuse admitted batch size",
+            "dynamic_group_estimate_scope": "legacy fields bound individual group size; token batch count uses selected machine proof"
+          },
+          "refined": {
+            "schema": "atlas.activation_quantize_schedule.v1",
+            "source_request_digest": "ccf818bb5323250809a12a0f94a0a2d319d0e67a56cf3ba1bafcaf41bc43216e",
+            "input_node_id": "x",
+            "output_node_ids": [
+              "codes",
+              "exponent"
+            ],
+            "mode": "dynamic",
+            "reduce": "token",
+            "input_bytes": 131072,
+            "code_bytes": 65536,
+            "exponent_bytes": 1024,
+            "static_chunk_elements": 2048,
+            "static_whole_body_max_elements": 524288,
+            "max_dynamic_group_elements": 32768,
+            "dynamic_groups_per_launch": 8,
+            "dynamic_group_worst_instructions": 119525,
+            "dynamic_group_bound_block_elements": 4096,
+            "dynamic_group_bound_rule": "119525 * ceil(group_elements / 4096)",
+            "functional_instruction_limit": 1000000,
+            "bodies": [
+              {
+                "index": 0,
+                "path": "segments/body_000",
+                "request_digest": "c5afd9c373bd8a438eba9d3bc4c68612048ad9028b1ace922306cf3793529262",
+                "shape": [
+                  120,
+                  256
+                ]
+              },
+              {
+                "index": 1,
+                "path": "segments/body_001",
+                "request_digest": "56cb76f3925afaaf49bd3bccbee3abc6877140bf72fae91bb84555b94122e8af",
+                "shape": [
+                  16,
+                  256
+                ]
+              }
+            ],
+            "launches": [
+              {
+                "body_index": 0,
+                "input_offset_bytes": 0,
+                "input_bytes": 61440,
+                "code_offset_bytes": 0,
+                "code_bytes": 30720,
+                "exponent_offset_bytes": 0,
+                "exponent_bytes": 480
+              },
+              {
+                "body_index": 0,
+                "input_offset_bytes": 61440,
+                "input_bytes": 61440,
+                "code_offset_bytes": 30720,
+                "code_bytes": 30720,
+                "exponent_offset_bytes": 480,
+                "exponent_bytes": 480
+              },
+              {
+                "body_index": 1,
+                "input_offset_bytes": 122880,
+                "input_bytes": 8192,
+                "code_offset_bytes": 61440,
+                "code_bytes": 4096,
+                "exponent_offset_bytes": 960,
+                "exponent_bytes": 64
+              }
+            ],
+            "launches_per_invocation": 3,
+            "runtime_arithmetic": "none; raw copies, padding, and device dispatch only",
+            "dynamic_reduction": "counted complete source groups per launch; no split amax",
+            "weight_conversion": "none",
+            "dynamic_group_batching": true,
+            "lowering_pipeline": "optimized",
+            "dynamic_group_batch_candidate_limit": 256,
+            "dynamic_group_batch_admission": "complete token groups; halve refused candidates; one instruction-ratio growth probe; retain only independently admitted batches",
+            "dynamic_group_estimate_scope": "legacy fields bound individual group size; token batch count uses selected machine proof",
+            "dynamic_group_batch_refinement": true
+          }
+        },
+        "maximum_body_instruction_bound": 950201
+      },
+      {
+        "scope": "Compare independently admitted token-group batches on the selected Rust model.\n\nThis authored quantizer probe checks complete device memory against a separate\nhost bit implementation. It reports device cycles, not host callback latency.\n",
+        "rows": 400,
+        "columns": 128,
+        "pipeline": "mandatory",
+        "measurements": [
+          {
+            "case": "finite",
+            "policy": "halving",
+            "dispatches": 4,
+            "input_sha256": "df84b08ce041a7c94e80fbfb3604cd11274c9f03af73ec9ab8dea492f2fc42cd",
+            "codes_sha256": "a69ec93db3209f51fb0c4fa9650783eabbfcaaac814059f66a5033134620017a",
+            "exponents_sha256": "dd0eaae16a60ccaa80b9805ff1b96d5b6714dbd599588a08135fc2cf9357c1f5",
+            "cycles": 509156,
+            "total_instructions": 88965,
+            "dram_read_bytes": 102400,
+            "dram_write_bytes": 52800
+          },
+          {
+            "case": "finite",
+            "policy": "refined",
+            "dispatches": 2,
+            "input_sha256": "df84b08ce041a7c94e80fbfb3604cd11274c9f03af73ec9ab8dea492f2fc42cd",
+            "codes_sha256": "a69ec93db3209f51fb0c4fa9650783eabbfcaaac814059f66a5033134620017a",
+            "exponents_sha256": "dd0eaae16a60ccaa80b9805ff1b96d5b6714dbd599588a08135fc2cf9357c1f5",
+            "cycles": 508503,
+            "total_instructions": 88882,
+            "dram_read_bytes": 102400,
+            "dram_write_bytes": 52800
+          },
+          {
+            "case": "exceptional",
+            "policy": "halving",
+            "dispatches": 4,
+            "input_sha256": "772a5bc34b8baed085d7d5d4e8a96de9e74a8d5428b25343c3b6a6b432deb2b9",
+            "codes_sha256": "e09db37b3362eaea6e2de4f2b2ce33bea5ed8bde4ed519d26b80255442da79df",
+            "exponents_sha256": "dd0eaae16a60ccaa80b9805ff1b96d5b6714dbd599588a08135fc2cf9357c1f5",
+            "cycles": 736168,
+            "total_instructions": 312613,
+            "dram_read_bytes": 102400,
+            "dram_write_bytes": 52800
+          },
+          {
+            "case": "exceptional",
+            "policy": "refined",
+            "dispatches": 2,
+            "input_sha256": "772a5bc34b8baed085d7d5d4e8a96de9e74a8d5428b25343c3b6a6b432deb2b9",
+            "codes_sha256": "e09db37b3362eaea6e2de4f2b2ce33bea5ed8bde4ed519d26b80255442da79df",
+            "exponents_sha256": "dd0eaae16a60ccaa80b9805ff1b96d5b6714dbd599588a08135fc2cf9357c1f5",
+            "cycles": 735515,
+            "total_instructions": 312530,
+            "dram_read_bytes": 102400,
+            "dram_write_bytes": 52800
+          }
+        ],
+        "exact_complete_memory_match": true,
+        "numerics": "rtl",
+        "pack_layout": "register_rows",
+        "instruction_limit": 1000000,
+        "rtl_revision": "0079c0541111197741a231c002e3843fa6f545b2",
+        "provenance": {
+          "atlas": {
+            "commit": "5962e06b7fa02375e6fdf3b248054bd017e1605e",
+            "tracked_diff_sha256": "c48378f534aff8a1e93c338facb7223947dca565978675779a588d19d04aee15"
+          },
+          "merlin": {
+            "commit": "5e33268d134946665f7be032e12071324884da61",
+            "tracked_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "simulator": {
+            "commit": "a231973e36a1b202e767a9ed33b295f0bb1cafcd",
+            "tracked_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "simulator_binary_sha256": "1d141164229004be150bd89c436b5edd15453089ef369edf1506201af29f890a",
+          "compiler_tools": {
+            "atlas-opt": "e47558bf7f23d5e359a7ed0239c1cb9a941124b01197b58e2f2a8ab59729e144",
+            "atlas-emit": "50e84d0d7aed3133b17b05d4599d5f2a4cf830161da3541f67047d47b82f13b9"
+          },
+          "evaluator_sha256": "65fca1240423e079893e8c91406b1d86db328e95994a39178851380f70047b15"
+        },
+        "schedules": {
+          "halving": {
+            "schema": "atlas.activation_quantize_schedule.v1",
+            "source_request_digest": "0631723db24dd3ce2a964fe23a29a4f62eee2dbf37184cbe3f46fc6dce98afe8",
+            "input_node_id": "x",
+            "output_node_ids": [
+              "codes",
+              "exponent"
+            ],
+            "mode": "dynamic",
+            "reduce": "token",
+            "input_bytes": 102400,
+            "code_bytes": 51200,
+            "exponent_bytes": 1600,
+            "static_chunk_elements": 2048,
+            "static_whole_body_max_elements": 524288,
+            "max_dynamic_group_elements": 32768,
+            "dynamic_groups_per_launch": 8,
+            "dynamic_group_worst_instructions": 119525,
+            "dynamic_group_bound_block_elements": 4096,
+            "dynamic_group_bound_rule": "119525 * ceil(group_elements / 4096)",
+            "functional_instruction_limit": 1000000,
+            "bodies": [
+              {
+                "index": 0,
+                "path": "segments/body_000",
+                "request_digest": "686a8877b108a991505c36a1691f68e1e7a6ffc0405b9b15ac7ce9e82626bd64",
+                "shape": [
+                  128,
+                  128
+                ]
+              },
+              {
+                "index": 1,
+                "path": "segments/body_001",
+                "request_digest": "d8a31dcd2025de9306d16603791b13c7886b390a6bba1020ba050bdd2183c55d",
+                "shape": [
+                  16,
+                  128
+                ]
+              }
+            ],
+            "launches": [
+              {
+                "body_index": 0,
+                "input_offset_bytes": 0,
+                "input_bytes": 32768,
+                "code_offset_bytes": 0,
+                "code_bytes": 16384,
+                "exponent_offset_bytes": 0,
+                "exponent_bytes": 512
+              },
+              {
+                "body_index": 0,
+                "input_offset_bytes": 32768,
+                "input_bytes": 32768,
+                "code_offset_bytes": 16384,
+                "code_bytes": 16384,
+                "exponent_offset_bytes": 512,
+                "exponent_bytes": 512
+              },
+              {
+                "body_index": 0,
+                "input_offset_bytes": 65536,
+                "input_bytes": 32768,
+                "code_offset_bytes": 32768,
+                "code_bytes": 16384,
+                "exponent_offset_bytes": 1024,
+                "exponent_bytes": 512
+              },
+              {
+                "body_index": 1,
+                "input_offset_bytes": 98304,
+                "input_bytes": 4096,
+                "code_offset_bytes": 49152,
+                "code_bytes": 2048,
+                "exponent_offset_bytes": 1536,
+                "exponent_bytes": 64
+              }
+            ],
+            "launches_per_invocation": 4,
+            "runtime_arithmetic": "none; raw copies, padding, and device dispatch only",
+            "dynamic_reduction": "counted complete source groups per launch; no split amax",
+            "weight_conversion": "none",
+            "dynamic_group_batching": true,
+            "lowering_pipeline": "mandatory",
+            "dynamic_group_batch_candidate_limit": 256,
+            "dynamic_group_batch_admission": "complete token groups; selected machine bound; halve refused candidates and reuse admitted batch size",
+            "dynamic_group_estimate_scope": "legacy fields bound individual group size; token batch count uses selected machine proof"
+          },
+          "refined": {
+            "schema": "atlas.activation_quantize_schedule.v1",
+            "source_request_digest": "0631723db24dd3ce2a964fe23a29a4f62eee2dbf37184cbe3f46fc6dce98afe8",
+            "input_node_id": "x",
+            "output_node_ids": [
+              "codes",
+              "exponent"
+            ],
+            "mode": "dynamic",
+            "reduce": "token",
+            "input_bytes": 102400,
+            "code_bytes": 51200,
+            "exponent_bytes": 1600,
+            "static_chunk_elements": 2048,
+            "static_whole_body_max_elements": 524288,
+            "max_dynamic_group_elements": 32768,
+            "dynamic_groups_per_launch": 8,
+            "dynamic_group_worst_instructions": 119525,
+            "dynamic_group_bound_block_elements": 4096,
+            "dynamic_group_bound_rule": "119525 * ceil(group_elements / 4096)",
+            "functional_instruction_limit": 1000000,
+            "bodies": [
+              {
+                "index": 0,
+                "path": "segments/body_000",
+                "request_digest": "c819b054cb3825d64a0776320c41452dc5625af86e769a68f48607c6764c0b49",
+                "shape": [
+                  240,
+                  128
+                ]
+              },
+              {
+                "index": 1,
+                "path": "segments/body_001",
+                "request_digest": "3333d19dcc1c2e6383e7136cea2edd759009297cd59370edf85a03added0110a",
+                "shape": [
+                  160,
+                  128
+                ]
+              }
+            ],
+            "launches": [
+              {
+                "body_index": 0,
+                "input_offset_bytes": 0,
+                "input_bytes": 61440,
+                "code_offset_bytes": 0,
+                "code_bytes": 30720,
+                "exponent_offset_bytes": 0,
+                "exponent_bytes": 960
+              },
+              {
+                "body_index": 1,
+                "input_offset_bytes": 61440,
+                "input_bytes": 40960,
+                "code_offset_bytes": 30720,
+                "code_bytes": 20480,
+                "exponent_offset_bytes": 960,
+                "exponent_bytes": 640
+              }
+            ],
+            "launches_per_invocation": 2,
+            "runtime_arithmetic": "none; raw copies, padding, and device dispatch only",
+            "dynamic_reduction": "counted complete source groups per launch; no split amax",
+            "weight_conversion": "none",
+            "dynamic_group_batching": true,
+            "lowering_pipeline": "mandatory",
+            "dynamic_group_batch_candidate_limit": 256,
+            "dynamic_group_batch_admission": "complete token groups; halve refused candidates; one instruction-ratio growth probe; retain only independently admitted batches",
+            "dynamic_group_estimate_scope": "legacy fields bound individual group size; token batch count uses selected machine proof",
+            "dynamic_group_batch_refinement": true
+          }
+        },
+        "maximum_body_instruction_bound": 979482
+      },
+      {
+        "scope": "Compare independently admitted token-group batches on the selected Rust model.\n\nThis authored quantizer probe checks complete device memory against a separate\nhost bit implementation. It reports device cycles, not host callback latency.\n",
+        "rows": 400,
+        "columns": 128,
+        "pipeline": "optimized",
+        "measurements": [
+          {
+            "case": "finite",
+            "policy": "halving",
+            "dispatches": 4,
+            "input_sha256": "df84b08ce041a7c94e80fbfb3604cd11274c9f03af73ec9ab8dea492f2fc42cd",
+            "codes_sha256": "a69ec93db3209f51fb0c4fa9650783eabbfcaaac814059f66a5033134620017a",
+            "exponents_sha256": "dd0eaae16a60ccaa80b9805ff1b96d5b6714dbd599588a08135fc2cf9357c1f5",
+            "cycles": 493148,
+            "total_instructions": 88157,
+            "dram_read_bytes": 102400,
+            "dram_write_bytes": 52800
+          },
+          {
+            "case": "finite",
+            "policy": "refined",
+            "dispatches": 2,
+            "input_sha256": "df84b08ce041a7c94e80fbfb3604cd11274c9f03af73ec9ab8dea492f2fc42cd",
+            "codes_sha256": "a69ec93db3209f51fb0c4fa9650783eabbfcaaac814059f66a5033134620017a",
+            "exponents_sha256": "dd0eaae16a60ccaa80b9805ff1b96d5b6714dbd599588a08135fc2cf9357c1f5",
+            "cycles": 492498,
+            "total_instructions": 88078,
+            "dram_read_bytes": 102400,
+            "dram_write_bytes": 52800
+          },
+          {
+            "case": "exceptional",
+            "policy": "halving",
+            "dispatches": 4,
+            "input_sha256": "772a5bc34b8baed085d7d5d4e8a96de9e74a8d5428b25343c3b6a6b432deb2b9",
+            "codes_sha256": "e09db37b3362eaea6e2de4f2b2ce33bea5ed8bde4ed519d26b80255442da79df",
+            "exponents_sha256": "dd0eaae16a60ccaa80b9805ff1b96d5b6714dbd599588a08135fc2cf9357c1f5",
+            "cycles": 720218,
+            "total_instructions": 311805,
+            "dram_read_bytes": 102400,
+            "dram_write_bytes": 52800
+          },
+          {
+            "case": "exceptional",
+            "policy": "refined",
+            "dispatches": 2,
+            "input_sha256": "772a5bc34b8baed085d7d5d4e8a96de9e74a8d5428b25343c3b6a6b432deb2b9",
+            "codes_sha256": "e09db37b3362eaea6e2de4f2b2ce33bea5ed8bde4ed519d26b80255442da79df",
+            "exponents_sha256": "dd0eaae16a60ccaa80b9805ff1b96d5b6714dbd599588a08135fc2cf9357c1f5",
+            "cycles": 719568,
+            "total_instructions": 311726,
+            "dram_read_bytes": 102400,
+            "dram_write_bytes": 52800
+          }
+        ],
+        "exact_complete_memory_match": true,
+        "numerics": "rtl",
+        "pack_layout": "register_rows",
+        "instruction_limit": 1000000,
+        "rtl_revision": "0079c0541111197741a231c002e3843fa6f545b2",
+        "provenance": {
+          "atlas": {
+            "commit": "5962e06b7fa02375e6fdf3b248054bd017e1605e",
+            "tracked_diff_sha256": "d40d1bed9c7751026c108c4e12cce8ef393870cb5bbe2e01352f14c6cd539cfa"
+          },
+          "merlin": {
+            "commit": "5e33268d134946665f7be032e12071324884da61",
+            "tracked_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "simulator": {
+            "commit": "a231973e36a1b202e767a9ed33b295f0bb1cafcd",
+            "tracked_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "simulator_binary_sha256": "1d141164229004be150bd89c436b5edd15453089ef369edf1506201af29f890a",
+          "compiler_tools": {
+            "atlas-opt": "e47558bf7f23d5e359a7ed0239c1cb9a941124b01197b58e2f2a8ab59729e144",
+            "atlas-emit": "50e84d0d7aed3133b17b05d4599d5f2a4cf830161da3541f67047d47b82f13b9"
+          },
+          "evaluator_sha256": "65fca1240423e079893e8c91406b1d86db328e95994a39178851380f70047b15"
+        },
+        "schedules": {
+          "halving": {
+            "schema": "atlas.activation_quantize_schedule.v1",
+            "source_request_digest": "0631723db24dd3ce2a964fe23a29a4f62eee2dbf37184cbe3f46fc6dce98afe8",
+            "input_node_id": "x",
+            "output_node_ids": [
+              "codes",
+              "exponent"
+            ],
+            "mode": "dynamic",
+            "reduce": "token",
+            "input_bytes": 102400,
+            "code_bytes": 51200,
+            "exponent_bytes": 1600,
+            "static_chunk_elements": 2048,
+            "static_whole_body_max_elements": 524288,
+            "max_dynamic_group_elements": 32768,
+            "dynamic_groups_per_launch": 8,
+            "dynamic_group_worst_instructions": 119525,
+            "dynamic_group_bound_block_elements": 4096,
+            "dynamic_group_bound_rule": "119525 * ceil(group_elements / 4096)",
+            "functional_instruction_limit": 1000000,
+            "bodies": [
+              {
+                "index": 0,
+                "path": "segments/body_000",
+                "request_digest": "686a8877b108a991505c36a1691f68e1e7a6ffc0405b9b15ac7ce9e82626bd64",
+                "shape": [
+                  128,
+                  128
+                ]
+              },
+              {
+                "index": 1,
+                "path": "segments/body_001",
+                "request_digest": "d8a31dcd2025de9306d16603791b13c7886b390a6bba1020ba050bdd2183c55d",
+                "shape": [
+                  16,
+                  128
+                ]
+              }
+            ],
+            "launches": [
+              {
+                "body_index": 0,
+                "input_offset_bytes": 0,
+                "input_bytes": 32768,
+                "code_offset_bytes": 0,
+                "code_bytes": 16384,
+                "exponent_offset_bytes": 0,
+                "exponent_bytes": 512
+              },
+              {
+                "body_index": 0,
+                "input_offset_bytes": 32768,
+                "input_bytes": 32768,
+                "code_offset_bytes": 16384,
+                "code_bytes": 16384,
+                "exponent_offset_bytes": 512,
+                "exponent_bytes": 512
+              },
+              {
+                "body_index": 0,
+                "input_offset_bytes": 65536,
+                "input_bytes": 32768,
+                "code_offset_bytes": 32768,
+                "code_bytes": 16384,
+                "exponent_offset_bytes": 1024,
+                "exponent_bytes": 512
+              },
+              {
+                "body_index": 1,
+                "input_offset_bytes": 98304,
+                "input_bytes": 4096,
+                "code_offset_bytes": 49152,
+                "code_bytes": 2048,
+                "exponent_offset_bytes": 1536,
+                "exponent_bytes": 64
+              }
+            ],
+            "launches_per_invocation": 4,
+            "runtime_arithmetic": "none; raw copies, padding, and device dispatch only",
+            "dynamic_reduction": "counted complete source groups per launch; no split amax",
+            "weight_conversion": "none",
+            "dynamic_group_batching": true,
+            "lowering_pipeline": "optimized",
+            "dynamic_group_batch_candidate_limit": 256,
+            "dynamic_group_batch_admission": "complete token groups; selected machine bound; halve refused candidates and reuse admitted batch size",
+            "dynamic_group_estimate_scope": "legacy fields bound individual group size; token batch count uses selected machine proof"
+          },
+          "refined": {
+            "schema": "atlas.activation_quantize_schedule.v1",
+            "source_request_digest": "0631723db24dd3ce2a964fe23a29a4f62eee2dbf37184cbe3f46fc6dce98afe8",
+            "input_node_id": "x",
+            "output_node_ids": [
+              "codes",
+              "exponent"
+            ],
+            "mode": "dynamic",
+            "reduce": "token",
+            "input_bytes": 102400,
+            "code_bytes": 51200,
+            "exponent_bytes": 1600,
+            "static_chunk_elements": 2048,
+            "static_whole_body_max_elements": 524288,
+            "max_dynamic_group_elements": 32768,
+            "dynamic_groups_per_launch": 8,
+            "dynamic_group_worst_instructions": 119525,
+            "dynamic_group_bound_block_elements": 4096,
+            "dynamic_group_bound_rule": "119525 * ceil(group_elements / 4096)",
+            "functional_instruction_limit": 1000000,
+            "bodies": [
+              {
+                "index": 0,
+                "path": "segments/body_000",
+                "request_digest": "c819b054cb3825d64a0776320c41452dc5625af86e769a68f48607c6764c0b49",
+                "shape": [
+                  240,
+                  128
+                ]
+              },
+              {
+                "index": 1,
+                "path": "segments/body_001",
+                "request_digest": "3333d19dcc1c2e6383e7136cea2edd759009297cd59370edf85a03added0110a",
+                "shape": [
+                  160,
+                  128
+                ]
+              }
+            ],
+            "launches": [
+              {
+                "body_index": 0,
+                "input_offset_bytes": 0,
+                "input_bytes": 61440,
+                "code_offset_bytes": 0,
+                "code_bytes": 30720,
+                "exponent_offset_bytes": 0,
+                "exponent_bytes": 960
+              },
+              {
+                "body_index": 1,
+                "input_offset_bytes": 61440,
+                "input_bytes": 40960,
+                "code_offset_bytes": 30720,
+                "code_bytes": 20480,
+                "exponent_offset_bytes": 960,
+                "exponent_bytes": 640
+              }
+            ],
+            "launches_per_invocation": 2,
+            "runtime_arithmetic": "none; raw copies, padding, and device dispatch only",
+            "dynamic_reduction": "counted complete source groups per launch; no split amax",
+            "weight_conversion": "none",
+            "dynamic_group_batching": true,
+            "lowering_pipeline": "optimized",
+            "dynamic_group_batch_candidate_limit": 256,
+            "dynamic_group_batch_admission": "complete token groups; halve refused candidates; one instruction-ratio growth probe; retain only independently admitted batches",
+            "dynamic_group_estimate_scope": "legacy fields bound individual group size; token batch count uses selected machine proof",
+            "dynamic_group_batch_refinement": true
+          }
+        },
+        "maximum_body_instruction_bound": 978760
+      }
+    ],
+    "validation": {
+      "batch-refinement-tests.log": {
+        "sha256": "eeb0013aaa886bff647327e0d4ed0980bfb6459ba1a4b4510b307fb18b08f9ee",
+        "tail": "69 passed, 1 skipped, 28 subtests passed in 320.87s (0:05:20)"
+      },
+      "batch-refinement-final-tests.log": {
+        "sha256": "68e435684bd42e77483891e32b66ae138c9c00ed61fb1e7d07bf895d01c84777",
+        "tail": "4 failed, 11 passed in 283.24s (0:04:43)"
+      },
+      "batch-refinement-large-c-tests.log": {
+        "sha256": "4892161b585c9f3965b6211c4491507a1482318bbc91747c67781d7cfeeba235",
+        "tail": "4 passed, 11 deselected in 343.12s (0:05:43)"
+      },
+      "batch-refinement-old-replay.log": {
+        "sha256": "e3f9806babebd9a185891a3c1ecb92b82af684c358a824aefa767045536a32d3",
+        "tail": "{\"legacy_record_replayed\": true, \"launches\": 1}"
+      }
+    },
+    "validation_note": "Initial broad run: 69 passed/1 skipped/28 subtests. Final expanded group suite: 11 passed; 4 new cases refused a too-small test host arena, then all 4 passed after deriving host storage from public tensor sizes. Device, instruction, work and timeout limits unchanged."
+  }
 }

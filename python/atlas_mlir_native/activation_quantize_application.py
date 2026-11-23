@@ -74,6 +74,7 @@ class QuantizerSchedule:
     static_quantizer_sizing: bool
     device_kv_quantizer: bool = False
     dynamic_group_batching: bool = False
+    dynamic_group_batch_refinement: bool = False
 
     @property
     def dynamic_groups_per_launch(self):
@@ -121,6 +122,9 @@ class QuantizerSchedule:
                           dynamic_group_batch_candidate_limit=DYNAMIC_GROUP_BATCH_LIMIT,
                           dynamic_group_batch_admission='complete token groups; selected machine bound; halve refused candidates and reuse admitted batch size',
                           dynamic_group_estimate_scope='legacy fields bound individual group size; token batch count uses selected machine proof')
+            if self.dynamic_group_batch_refinement:
+                result.update(dynamic_group_batch_refinement=True,
+                    dynamic_group_batch_admission='complete token groups; halve refused candidates; one instruction-ratio growth probe; retain only independently admitted batches')
         return result
 
 
@@ -137,7 +141,7 @@ def _body(source, x, codes, exponents, attrs, shape):
 
 
 def prepare_plan(source, *, limits=None, _pipeline=None, _static_capacity=None, _static_sizing=None,
-                 _device_kv_quantizer=None, _group_batching=None):
+                 _device_kv_quantizer=None, _group_batching=None, _batch_refinement=True):
     from .options import current_codegen_options
     from . import dynamic_quantize, static_quantize
 
@@ -147,6 +151,9 @@ def prepare_plan(source, *, limits=None, _pipeline=None, _static_capacity=None, 
                       if _group_batching is None else _group_batching)
     if type(group_batching) is not bool:
         raise ValueError('dynamic quantizer group batching must be Boolean')
+    if type(_batch_refinement) is not bool:
+        raise ValueError('dynamic quantizer batch refinement must be Boolean')
+    batch_refinement = group_batching and _batch_refinement
     instruction_limit = functional_instruction_limit(limits)
     pipeline = _native_pipeline() if _pipeline is None else _pipeline
     if pipeline not in ("mandatory", "optimized"):
@@ -180,7 +187,7 @@ def prepare_plan(source, *, limits=None, _pipeline=None, _static_capacity=None, 
     count = prod(x.type.shape)
     if not 0 < count < 1 << 28:
         raise ValueError("scheduled quantizer extent exceeds bounded addressing")
-    spans, proven_bodies, refused_bodies = [], {}, {}
+    spans, proven_bodies, refused_bodies, proven_bounds = [], {}, {}, {}
     if mode == "static":
         chunk = STATIC_CHUNK_ELEMENTS
         if not static_sizing:
@@ -240,6 +247,7 @@ def prepare_plan(source, *, limits=None, _pipeline=None, _static_capacity=None, 
                 while (packed < capacity and group + packed < len(groups)
                        and groups[group + packed][1] - groups[group + packed][0] == end - first):
                     packed += 1
+            refused_above, growth_fallback, growth_attempted = None, None, False
             while True:
                 shape = ((length,) if reduction == "tensor" else
                          (packed, end - first, k) if reduction == "head" else (packed * (end - first), k))
@@ -248,23 +256,48 @@ def prepare_plan(source, *, limits=None, _pipeline=None, _static_capacity=None, 
                 if shape not in proven_bodies and shape not in refused_bodies:
                     body = _body(source, x, codes, exponents, attrs, shape)
                     try:
-                        prove_plan(device.prepare_plan(body), limits=limits, _pipeline=pipeline)
+                        proof = prove_plan(device.prepare_plan(body), limits=limits, _pipeline=pipeline)
                     except NativeCompilationError as error:
                         if error.status != "resource_limit" or isinstance(error, CountedWorkExhausted):
                             raise
                         refused_bodies[shape] = error
                     else:
                         proven_bodies[shape] = body
+                        if batch_refinement and reduction == 'token' and refused_above is not None:
+                            proven_bounds[shape] = proof[3]['instruction_bound']
                 if shape in proven_bodies:
+                    if (batch_refinement and reduction == 'token' and
+                            refused_above is not None and not growth_attempted):
+                        # The ratio proposes one larger complete-group body;
+                        # it is not an admission proof. Code/address changes can
+                        # make its actual bound differ, so reprove or retain the
+                        # admitted smaller body. Never retry work exhaustion.
+                        bound = proven_bounds[shape]
+                        trial = min(refused_above - 1, packed * instruction_limit // bound)
+                        remaining = len(groups) - group
+                        launches_for = lambda count: (remaining + count - 1) // count
+                        # Eight i32 exponents fill one 32-byte DMA beat. Prefer
+                        # an aligned body when it needs the same launch count.
+                        aligned = trial // 8 * 8
+                        if aligned > packed and launches_for(aligned) == launches_for(trial):
+                            trial = aligned
+                        growth_attempted = True
+                        if trial > packed and launches_for(trial) < launches_for(packed):
+                            growth_fallback, packed = packed, trial
+                            continue
                     if group_batching and reduction == 'token':
                         token_batch_capacity = packed
                     break
+                if growth_fallback is not None:
+                    packed, growth_fallback = growth_fallback, None
+                    continue
                 if packed == 1:
                     error = refused_bodies[shape]
                     raise ValueError("indivisible dynamic reduction group exceeds the selected device instruction bound: "
                                      + str(error)) from error
                 # Retry only complete authored groups. The legacy estimate
                 # selects a candidate pack; the machine proof admits it.
+                refused_above = packed
                 packed = packed // 2 if group_batching and reduction == 'token' else packed - 1
             exp_first, exp_count = ((group, packed) if reduction in ("tensor", "head")
                                     else (first, packed * (end - first)))
@@ -281,7 +314,8 @@ def prepare_plan(source, *, limits=None, _pipeline=None, _static_capacity=None, 
                              code_offset_bytes=first, code_bytes=length,
                              exponent_offset_bytes=exp_first * 4, exponent_bytes=exp_count * 4))
     return QuantizerSchedule(source, x, codes, exponents, attrs, tuple(bodies), tuple(launches),
-                             instruction_limit, pipeline, static_capacity, static_sizing, device_kv, group_batching)
+                             instruction_limit, pipeline, static_capacity, static_sizing, device_kv, group_batching,
+                             batch_refinement)
 
 
 def compile_source(snapshot, region, *, target_source, destination, limits):
@@ -386,7 +420,8 @@ def prepare_c_package(region, compiled, name, *, target_source, runtime_linkage=
         _static_sizing="static_instruction_envelope" in saved,
         _static_capacity=saved["static_whole_body_max_elements"],
         _device_kv_quantizer="dynamic_group_admission" in saved,
-        _group_batching=saved.get('dynamic_group_batching', False))
+        _group_batching=saved.get('dynamic_group_batching', False),
+        _batch_refinement=saved.get('dynamic_group_batch_refinement', False))
     manifest = json.loads((compiled / "quantizer-manifest.json").read_text())
     _verify_publication(compiled, manifest, plan)
     if (json.loads((compiled / "source-request.json").read_text()) != region.record()
