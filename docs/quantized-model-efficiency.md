@@ -173,7 +173,13 @@ and remaining action items are versioned here.
    Larger codes and exponent pages require explicit physical-layout and private
    ownership proofs before application selection can use the combined image.
 5. Evaluate double-buffered panel loads with measured DMA/MXU overlap and total
-   cycles. Extend the WIP resident layer-loop implementation. Layout-copy
+   cycles. First qualify the virtual scheduler's DMA cost estimates: `costOf`
+   in `lib/AtlasVirtualScheduling.cpp` currently prices explicit transfers as
+   complete FP8/BF16 tiles even when their proven byte count is a short prefix.
+   Derive known transfer extents, retain conservative handling of dynamic sizes,
+   and include partial-load zero-fill and staging costs. Compare final Rust cycles
+   and spills before changing the heuristic; fewer estimated cycles alone are
+   insufficient. Extend the WIP resident layer-loop implementation. Layout-copy
    composition is being developed elsewhere and is outside this work.
 
 ## Action items
