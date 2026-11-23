@@ -143,6 +143,21 @@ Receipts are in `out/efficiency/resume-nov22`; compact hashes and measurements
 are retained in the linked evidence JSON. Next, evaluate transfer-prefix sizes
 in virtual scheduling costs against final emitted programs and Rust cycles.
 
+Three subsequent scheduler-cost experiments used proven DMA sizes, then added
+conservative partial-load zero-fill costs, then kept the previous store cost.
+All compared programs preserve complete memory, and the scheduler/overlap/work
+budget/prefix suite passes 53 tests and 408 subtests for each of the first two
+variants. The more complete load estimate saves 408 cycles on batched
+35 × 3 × 65, 672 on ordered 1 × 65 × 257, and 281 on cached 1 × 65 × 2048.
+However, the row-exponent 128 × 128 × 768 batch panel regresses
+241,902 → 242,630 cycles, and the interleaved panel regresses
+219,183 → 219,267. Changing only load estimates has the same tradeoff.
+**These cost changes are not retained in the compiler.** Source patches, binaries
+and matched receipts remain under `out/efficiency/resume-nov22/prefix-*`.
+Future scheduling work must explain the panel ordering regression; a more
+accurate individual transfer estimate is not sufficient evidence of a better
+final schedule.
+
 The rebased native tools build successfully. The selected WIP deployment,
 quantized-loop, panel, residency, and independent reference suites finish with
 **422 passed, 5 skipped, 284 subtests passed, and 8 failures**. The eight failures
