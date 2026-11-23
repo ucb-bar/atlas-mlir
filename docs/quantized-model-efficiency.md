@@ -256,6 +256,15 @@ and remaining action items are versioned here.
 
 ## Next work after this checkpoint
 
+The validated implementation checkpoint is Atlas `7c44a727` and Merlin
+`5e33268d`. The unfinished source-offset output-store prototype is preserved
+separately on
+[`wip/quantized-output-slices`](https://github.com/ucb-bar/atlas-mlir/tree/wip/quantized-output-slices)
+at `eb5dac48`; its draft notes enumerate missing tests and sizing/replay work.
+It is not part of this branch's validated implementation. A distinct slice
+operation makes old compilers reject unsupported source-offset semantics;
+adding an attribute to the old operation could be silently miscompiled.
+
 1. Finish qualifying the WIP deployment gates with the external functional
    evaluator and platform dependencies. Preserve the pinned Python model,
    explicit numerical declarations, refusal paths, and source/publication checks.
