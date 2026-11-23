@@ -106,6 +106,43 @@ contraction integration, application latency, and board measurements remain open
 
 ## November 22 validation and reproduction
 
+The resumed pass removes completed DMA transfers from the virtual scheduler's
+timing history. Future candidates start at or after the monotonically advancing
+frontend, so those entries cannot delay a drain or occupy a channel. The
+225 × 35 × 3073 panel's machine IR remains byte-identical. Virtual scheduling
+work falls **143,508,160 → 35,671,930** units and total work falls
+**215,929,508 → 108,093,278**. Pruning visits are charged to the existing budget.
+The scheduler, overlap and exact-budget suites pass 46 tests and 408 subtests.
+Single-run wall times of 28.77 and 27.13 seconds were collected alongside other
+tests and should not be interpreted as a stable compilation-speed estimate.
+
+Short explicit BF16 stores now stage only the register halves their DMA prefix
+reads. A transfer of at most 1,024 bytes needs one VSTORE; larger transfers still
+need two. Source-derived tile/CFG contracts account for the reduced command
+sequence. Full staging allocation and partial-load zero filling are preserved.
+Matched Rust runs check exact complete DRAM contents for both pipelines, with
+independent expected bytes for the authored copy cases. Optimized cycle results:
+
+| Case | Before | Occupied-half staging |
+|---|---:|---:|
+| Copy 32 bytes | 1,752 | 1,715 |
+| Copy 1,024 bytes | 2,453 | 2,388 |
+| Copy 1,056 bytes (two halves) | 2,472 | 2,472 |
+| Copy 2,048 bytes (full tile) | 3,116 | 3,116 |
+| 3 × 5 × 65 contraction; batch 2 | 10,891 | 10,776 |
+| 35 × 3 × 65 contraction; batch 2 | 29,456 | 29,167 |
+| 1 × 17 × 33 contraction | 7,112 | 7,075 |
+| 32 × 32 × 33 contraction | 10,038 | 10,001 |
+
+The full contraction still saves the short status store. DRAM bytes and launch
+counts are unchanged; savings are on-chip staging and executed instructions.
+All 18 matched cases improve or remain equal, including the mandatory pipeline.
+The tile-contract, DMA-lowering, buffer, zero-fill and quantized-prefix suites
+pass **97 tests and 833 subtests**, with three optional integrations skipped.
+Receipts are in `out/efficiency/resume-nov22`; compact hashes and measurements
+are retained in the linked evidence JSON. Next, evaluate transfer-prefix sizes
+in virtual scheduling costs against final emitted programs and Rust cycles.
+
 The rebased native tools build successfully. The selected WIP deployment,
 quantized-loop, panel, residency, and independent reference suites finish with
 **422 passed, 5 skipped, 284 subtests passed, and 8 failures**. The eight failures
