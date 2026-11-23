@@ -93,7 +93,7 @@ FailureOr<ArrayAttr> mlir::atlas::buildAtlasDMAContract(
   for (const VirtualDMAAssignment &assignment : assignments) {
     Operation *source = assignment.transfer.getDefiningOp();
     bool load = isa<VirtualDMALoadFP8Op, VirtualDMALoadBF16Op>(source);
-    bool bf16 = isa<VirtualDMALoadBF16Op, VirtualDMAStoreBF16Op>(source);
+    bool bf16 = isa<VirtualDMALoadBF16Op, VirtualDMAStoreBF16Op, VirtualDMAStoreBF16SliceOp>(source);
     // Proven from source SSA only, never planned commands; additions wrap in RV32.
     auto transfer = virtualDMATransfer(source);
     Value addressValue = transfer->dram->get();
@@ -104,7 +104,10 @@ FailureOr<ArrayAttr> mlir::atlas::buildAtlasDMAContract(
     const DMATransferPlacement &p = assignment.placement;
     Record r{p.id, p.channel, p.stagingWord, address->first, *size,
              p.stagingReg, p.dramReg, p.sizeReg, load ? "load" : "store"};
-    if (!*size || *size > (bf16 ? kAtlasBF16TileBytes : kAtlasRegisterBytes) || *size % 32 || !validGeometry(r))
+    bool slice = isa<VirtualDMAStoreBF16SliceOp>(source);
+    if (slice && (transfer->tileByteOffset != 0 && transfer->tileByteOffset != kAtlasRegisterBytes))
+      return source->emitOpError("DMA contract source offset must select a BF16 register half");
+    if (!*size || *size > (bf16 && !slice ? kAtlasBF16TileBytes : kAtlasRegisterBytes) || *size % 32 || !validGeometry(r))
       return source->emitOpError("DMA contract source must describe an aligned bounded tile prefix in the supported 32-bit address range");
     if (!provenI32(addressValue)) {
       auto id = atlasCFGValueID(addressValue);

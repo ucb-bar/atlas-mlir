@@ -81,12 +81,15 @@ def _execution_geometry(plan):
                 status_address=status, status_bytes=2048, **extra), end
 
 
-def execution_layout(plan, *, operand_reuse=None, exponent_page_cache=None, output_prefix=True):
+def execution_layout(plan, *, operand_reuse=None, exponent_page_cache=None, output_prefix=True,
+                     output_halves=False):
     from .quantized_operand_reuse import schedule_record
     from .exponent_page_cache import record as page_cache_record, panel_record, row_record
     from .quantized_resident import bind_geometry
     if type(output_prefix) is not bool:
         raise ValueError('output prefix selection must be boolean')
+    if type(output_halves) is not bool:
+        raise ValueError('output half selection must be boolean')
     geometry, end = _execution_geometry(plan)
     if end > selected_io_memory_base() + dram_slots()*TILE_BYTES:
         raise NativeCompilationError("resource_limit", "quantized loop buffers exceed selected DRAM window")
@@ -102,6 +105,8 @@ def execution_layout(plan, *, operand_reuse=None, exponent_page_cache=None, outp
                 )
     if output_prefix and output_tile_prefix_bytes(plan) < 2048:
         layout['output_tile_store_bytes'] = output_tile_prefix_bytes(plan)
+        if output_halves and plan.m < 32 and plan.n > 16:
+            layout['output_tile_store_half_bytes'] = plan.m * 32
     return {**layout, **panel_record(plan, layout), **row_record(plan, layout)}
 
 

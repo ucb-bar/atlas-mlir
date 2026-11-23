@@ -289,6 +289,13 @@ def _store_completed(e, tile, plan, layout, output_address, output_state, output
         product = e.name('epilogue_product')
         e.emit(f'%{product} = "atlas.virtual_vpu_binary"(%{operands[0]}, %{operands[1]}) {{kind = "mul"}} : ({BF16}, {BF16}) -> {BF16}')
         tile = product
+    if 'output_tile_store_half_bytes' in layout:
+        size = e.const(layout['output_tile_store_half_bytes'])
+        first = e.name('store_first_half')
+        e.emit(f'%{first} = "atlas.virtual_dma_store_bf16"(%{e.state}, %{tile}, %{output_address}, %{size}) : ({STATE}, {BF16}, i32, i32) -> {STATE}')
+        second_address = e.binary('addi', output_address, e.const(1024))
+        e.emit(f'%{output_state} = "atlas.virtual_dma_store_bf16_slice"(%{first}, %{tile}, %{second_address}, %{size}) {{tile_byte_offset = 1024 : i32}} : ({STATE}, {BF16}, i32, i32) -> {STATE}')
+        return
     if 'output_tile_store_bytes' in layout:
         output_bytes = e.const(layout['output_tile_store_bytes'])
     e.emit(f'%{output_state} = "atlas.virtual_dma_store_bf16"(%{e.state}, %{tile}, %{output_address}, %{output_bytes}) : ({STATE}, {BF16}, i32, i32) -> {STATE}')
@@ -449,6 +456,11 @@ class Restoration:
             size = layout['output_tile_store_bytes']
             if type(size) is not int or size != output_tile_prefix_bytes(plan):
                 raise ValueError('output tile prefix differs from the source layout')
+        if 'output_tile_store_half_bytes' in layout:
+            size = layout['output_tile_store_half_bytes']
+            if (type(size) is not int or not 0 < plan.m < 32 or plan.n <= 16
+                    or size != plan.m * 32 or layout.get('output_tile_store_bytes') != 1024 + size):
+                raise ValueError('output tile halves differ from the source layout')
         self.plan, self.layout = plan, layout
         self.vector, self.logical_rows = vector, logical_rows
         self.scalar_fallback = scalar_fallback

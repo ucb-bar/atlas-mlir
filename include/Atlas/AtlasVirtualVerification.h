@@ -18,6 +18,7 @@ struct VirtualDMATransfer {
   OpOperand *dram, *size;
   Value tile;
   bool store;
+  unsigned tileByteOffset = 0;
 };
 // Null for any other operation.
 std::optional<VirtualDMATransfer> virtualDMATransfer(Operation *op);

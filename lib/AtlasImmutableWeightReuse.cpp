@@ -73,7 +73,7 @@ SmallVector<Input> candidates(func::FuncOp function) {
     abi = *read;
   }
   for (Operation &op : function.front()) {
-    if (isa<VirtualDMAStoreFP8Op, VirtualDMAStoreBF16Op>(op)) {
+    if (isa<VirtualDMAStoreFP8Op, VirtualDMAStoreBF16Op, VirtualDMAStoreBF16SliceOp>(op)) {
       auto span = dmaSpan(&op);
       if (!span)
         return {};

@@ -211,7 +211,7 @@ public:
       for (Operation &op : block) {
         for (Value result : op.getResults())
           recordPlacement(result);
-        if (isa<VirtualDMALoadFP8Op, VirtualDMALoadBF16Op, VirtualDMAStoreFP8Op, VirtualDMAStoreBF16Op>(op)) {
+        if (isa<VirtualDMALoadFP8Op, VirtualDMALoadBF16Op, VirtualDMAStoreFP8Op, VirtualDMAStoreBF16Op, VirtualDMAStoreBF16SliceOp>(op)) {
           Value transfer = op.getResult(0);
           dmaAssignments.push_back({transfer, allocation.dma(transfer)});
         }
@@ -342,7 +342,7 @@ private:
     for (Block &block : function.getBody())
       for (Operation &op : block)
         if (isa<VirtualDMALoadFP8Op, VirtualDMALoadBF16Op,
-                VirtualDMAStoreFP8Op, VirtualDMAStoreBF16Op>(op)) {
+                VirtualDMAStoreFP8Op, VirtualDMAStoreBF16Op, VirtualDMAStoreBF16SliceOp>(op)) {
           Value transfer = op.getResult(0);
           assignments.push_back({transfer, allocation.dma(transfer)});
         }
@@ -754,7 +754,7 @@ private:
 
   // placeDMA gives a launch an unread load's window only when all are taken.
   void flushReusedWindow(Operation &op) {
-    if (!isa<VirtualDMALoadFP8Op, VirtualDMALoadBF16Op, VirtualDMAStoreFP8Op, VirtualDMAStoreBF16Op>(op))
+    if (!isa<VirtualDMALoadFP8Op, VirtualDMALoadBF16Op, VirtualDMAStoreFP8Op, VirtualDMAStoreBF16Op, VirtualDMAStoreBF16SliceOp>(op))
       return;
     uint32_t window = allocation.dma(op.getResult(0)).stagingWord;
     for (Value tile : SmallVector<Value>(pendingOrder))
@@ -971,15 +971,11 @@ private:
       launchLoad(op, load.getValue(), tile(load.getValue()));
       return success();
     }
-    if (auto store = dyn_cast<VirtualDMAStoreFP8Op>(op)) {
-      launchDMA(store.getNext(), store.getDramByte(), store.getSizeBytes(),
-                fp8(store.getSrc()), loc);
-      ++nextTileCommand; // its DMA.WAIT, which insert-atlas-dma-waits issues
-      return success();
-    }
-    if (auto store = dyn_cast<VirtualDMAStoreBF16Op>(op)) {
-      launchDMA(store.getNext(), store.getDramByte(), store.getSizeBytes(),
-                tile(store.getSrc()), loc);
+    if (auto store = virtualDMATransfer(&op); store && store->store) {
+      unsigned source = isa<VirtualFP8Type>(store->tile.getType())
+                            ? fp8(store->tile) : tile(store->tile);
+      launchDMA(op.getResult(0), store->dram->get(), store->size->get(),
+                source + store->tileByteOffset / kAtlasRegisterBytes, loc);
       ++nextTileCommand; // its DMA.WAIT, which insert-atlas-dma-waits issues
       return success();
     }

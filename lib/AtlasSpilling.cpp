@@ -462,7 +462,7 @@ llvm::DenseSet<Value> addressProofScalars(func::FuncOp function) {
       protect(index);
     }
     if (!isa<VirtualDMALoadFP8Op, VirtualDMALoadBF16Op,
-             VirtualDMAStoreFP8Op, VirtualDMAStoreBF16Op>(op)) return;
+             VirtualDMAStoreFP8Op, VirtualDMAStoreBF16Op, VirtualDMAStoreBF16SliceOp>(op)) return;
     accesses.push_back(op);
     bool load = isa<VirtualDMALoadFP8Op, VirtualDMALoadBF16Op>(op);
     protect(op->getOperand(load ? 1 : 2));

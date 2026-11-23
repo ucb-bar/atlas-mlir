@@ -71,6 +71,8 @@ def pack_store(op, exponent):
     from xdsl.dialects.builtin import UnregisteredAttr, UnregisteredOp, i32
 
     validate_exponent(exponent)
+    if 'tile_byte_offset' in op.attributes or 'tile_byte_offset' in op.properties:
+        raise ValueError('row output quantization requires a complete BF16 tile without a source offset')
     state, tile, address, size = op.operands
     if not isinstance(size.owner, arith.ConstantOp) or size.owner.value.value.data != 2048:
         raise ValueError('row output quantization requires a complete BF16 tile')

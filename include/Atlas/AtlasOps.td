@@ -71,6 +71,16 @@ def Atlas_VirtualDMAStoreBF16Op : Atlas_VirtualDMAOp<"virtual_dma_store_bf16"> {
   let results = (outs Atlas_VirtualStateType:$next);
 }
 
+// A distinct operation makes older compilers refuse rather than silently
+// treating a newly introduced source offset as an ignorable attribute.
+def Atlas_VirtualDMAStoreBF16SliceOp : Atlas_VirtualDMAOp<"virtual_dma_store_bf16_slice"> {
+  let summary = "Store a prefix of either BF16 register half to DRAM";
+  let arguments = (ins Atlas_VirtualStateType:$state, Atlas_VirtualBF16Type:$src,
+                       I32:$dram_byte, I32:$size_bytes,
+                       I32Attr:$tile_byte_offset);
+  let results = (outs Atlas_VirtualStateType:$next);
+}
+
 // Stores return an SSA identity so a reload names its exact reaching writer.
 // slot_word uses the same four-byte VMEM word unit as VLOAD/VSTORE bases.
 class Atlas_VirtualSpillStore<string mnemonic, Type tile> :

@@ -62,6 +62,7 @@ ATLAS_MACHINE_EFFECTS(VirtualDMALoadFP8Op)
 ATLAS_MACHINE_EFFECTS(VirtualDMALoadBF16Op)
 ATLAS_MACHINE_EFFECTS(VirtualDMAStoreFP8Op)
 ATLAS_MACHINE_EFFECTS(VirtualDMAStoreBF16Op)
+ATLAS_MACHINE_EFFECTS(VirtualDMAStoreBF16SliceOp)
 ATLAS_MACHINE_EFFECTS(VirtualSpillBF16Op)
 ATLAS_MACHINE_EFFECTS(VirtualSpillFP8Op)
 ATLAS_MACHINE_EFFECTS(VirtualReloadBF16Op)
@@ -215,6 +216,8 @@ std::optional<uint32_t> mlir::atlas::provenI32(Value value) {
 static LogicalResult verifyVirtualDMAAttributes(Operation *op) {
   if (op->hasAttr("channel"))
     return op->emitOpError("virtual DMA does not select a physical channel");
+  if (op->hasAttr("tile_byte_offset") && !isa<VirtualDMAStoreBF16SliceOp>(op))
+    return op->emitOpError("tile byte offset requires a BF16 DMA slice store");
   return success();
 }
 
@@ -257,6 +260,14 @@ LogicalResult VirtualDMAStoreFP8Op::verify() {
 
 LogicalResult VirtualDMAStoreBF16Op::verify() {
   return verifyVirtualDMATransfer(getOperation(), getDramByte(), getSizeBytes(), kAtlasBF16TileBytes);
+}
+
+LogicalResult VirtualDMAStoreBF16SliceOp::verify() {
+  int64_t first = getTileByteOffsetAttr().getValue().getSExtValue();
+  if (first != 0 && first != kAtlasRegisterBytes)
+    return emitOpError("tile byte offset must select register half 0 or 1024");
+  return verifyVirtualDMATransfer(getOperation(), getDramByte(), getSizeBytes(),
+                                  kAtlasRegisterBytes);
 }
 
 

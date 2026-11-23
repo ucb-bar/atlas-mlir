@@ -299,11 +299,11 @@ LogicalResult verifyVirtualBlock(Block &block, bool entry, bool cfg,
     // Atomic: a load returns its tile and a store completes in place, in
     // state order. Physical waits come after lowering.
     if (isa<VirtualDMALoadFP8Op, VirtualDMALoadBF16Op,
-            VirtualDMAStoreFP8Op, VirtualDMAStoreBF16Op>(operation)) {
+            VirtualDMAStoreFP8Op, VirtualDMAStoreBF16Op, VirtualDMAStoreBF16SliceOp>(operation)) {
       if (!state || operation.getOperand(0) != state)
         return operation.emitOpError("nonlinear virtual state chain");
       state = operation.getResult(0);
-      if (isa<VirtualDMAStoreFP8Op, VirtualDMAStoreBF16Op>(operation))
+      if (isa<VirtualDMAStoreFP8Op, VirtualDMAStoreBF16Op, VirtualDMAStoreBF16SliceOp>(operation))
         ++outputs;
       continue;
     }
@@ -437,7 +437,7 @@ LogicalResult verifyVirtualFunction(func::FuncOp function,
   for (Block &block : function.getBody())
     for (Operation &op : block)
       if (isa<VirtualOutputBF16Op, VirtualDMAStoreFP8Op,
-              VirtualDMAStoreBF16Op>(op) &&
+              VirtualDMAStoreBF16Op, VirtualDMAStoreBF16SliceOp>(op) &&
           &block != returnBlock && !explicitBuffer) {
         op.emitOpError("virtual CFG outputs must be in the return block");
         return failure();
@@ -523,6 +523,11 @@ mlir::atlas::virtualDMATransfer(Operation *op) {
         return VirtualDMATransfer{&store.getDramByteMutable(),
                                   &store.getSizeBytesMutable(), store.getSrc(),
                                   true};
+      })
+      .Case<VirtualDMAStoreBF16SliceOp>([](auto store) {
+        return VirtualDMATransfer{&store.getDramByteMutable(),
+                                  &store.getSizeBytesMutable(), store.getSrc(),
+                                  true, store.getTileByteOffset()};
       })
       .Default([](Operation *) { return std::nullopt; });
 }

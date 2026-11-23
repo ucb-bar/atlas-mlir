@@ -153,7 +153,7 @@ LogicalResult mlir::atlas::verifyAtlasOutputInitialization(Operation *operation,
       if (!remaining--) return op.emitOpError("output initialization proof exceeded its scalar work limit");
       atlasProofRecord(AtlasProofKind::SourceInitialization);
       bool load = isa<VirtualDMALoadFP8Op, VirtualDMALoadBF16Op>(op);
-      bool store = isa<VirtualDMAStoreFP8Op, VirtualDMAStoreBF16Op>(op);
+      bool store = isa<VirtualDMAStoreFP8Op, VirtualDMAStoreBF16Op, VirtualDMAStoreBF16SliceOp>(op);
       if (load || store) {
         require(op.getOperand(load ? 1 : 2));
         require(op.getOperand(load ? 2 : 3));
@@ -175,7 +175,7 @@ LogicalResult mlir::atlas::verifyAtlasOutputInitialization(Operation *operation,
     for (Operation &op : body)
       if (op.hasTrait<OpTrait::IsTerminator>() ||
           isa<VirtualDMALoadFP8Op, VirtualDMALoadBF16Op,
-              VirtualDMAStoreFP8Op, VirtualDMAStoreBF16Op>(op) ||
+              VirtualDMAStoreFP8Op, VirtualDMAStoreBF16Op, VirtualDMAStoreBF16SliceOp>(op) ||
           llvm::any_of(op.getResults(), [&](Value value) { return needed.contains(value); }))
         selected.push_back(&op);
   }
@@ -278,7 +278,7 @@ LogicalResult mlir::atlas::verifyAtlasOutputInitialization(Operation *operation,
           values[cmp.getResult()] = result;
         }
       } else if (isa<VirtualDMALoadFP8Op, VirtualDMALoadBF16Op,
-                     VirtualDMAStoreFP8Op, VirtualDMAStoreBF16Op>(op)) {
+                     VirtualDMAStoreFP8Op, VirtualDMAStoreBF16Op, VirtualDMAStoreBF16SliceOp>(op)) {
         bool load = isa<VirtualDMALoadFP8Op, VirtualDMALoadBF16Op>(op);
         auto address = get(op.getOperand(load ? 1 : 2));
         auto bytes = get(op.getOperand(load ? 2 : 3));

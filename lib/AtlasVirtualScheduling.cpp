@@ -60,7 +60,7 @@ unsigned unitOf(Type type) {
 // Atomic virtual DMA: a load returns its tile, a store completes in place.
 bool isDMA(Operation *op) {
   return isa<VirtualDMALoadFP8Op, VirtualDMALoadBF16Op, VirtualDMAStoreFP8Op,
-             VirtualDMAStoreBF16Op>(op);
+             VirtualDMAStoreBF16Op, VirtualDMAStoreBF16SliceOp>(op);
 }
 
 // Boundary tiles move memory through helper DMA, beside which the generated
@@ -469,7 +469,7 @@ Cost costOf(Operation *op, bool enhancedVirtualScheduling) {
     cost.queuedDMA = true;
     return cost;
   }
-  if (isa<VirtualDMAStoreBF16Op, VirtualDMAStoreFP8Op>(op)) {
+  if (isa<VirtualDMAStoreBF16Op, VirtualDMAStoreBF16SliceOp, VirtualDMAStoreFP8Op>(op)) {
     // VSTOREs into the staging window, then the transfer once they land.
     int registers = registersOf(isa<VirtualDMAStoreFP8Op>(op));
     int staged = (registers - 1) * vstore.interval + vstore.latency;
@@ -815,7 +815,7 @@ public:
         index[g.nodes[i]] = i;
     for (unsigned i = n; i-- > 0;) {
       Operation *op = g.nodes[i];
-      if (isa<VirtualDMAStoreFP8Op, VirtualDMAStoreBF16Op,
+      if (isa<VirtualDMAStoreFP8Op, VirtualDMAStoreBF16Op, VirtualDMAStoreBF16SliceOp,
               VirtualOutputBF16Op>(op))
         firstOutput[i] = i;
       if (enhancedVirtualScheduling) {

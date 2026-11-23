@@ -32,6 +32,8 @@ def _access(op):
             raise ValueError('private staging requires only complete BF16 DMA accesses')
         return None
     load = name.endswith('load_bf16')
+    if 'tile_byte_offset' in op.attributes or 'tile_byte_offset' in op.properties:
+        raise ValueError('private staging requires a complete tile without a source offset')
     pointer, size = op.operands[1 if load else 2], op.operands[-1]
     if (not isinstance(pointer.owner, arith.ConstantOp)
             or not isinstance(size.owner, arith.ConstantOp)

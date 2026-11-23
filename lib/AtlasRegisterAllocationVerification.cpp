@@ -34,7 +34,7 @@ DMALaunch dmaLaunch(Operation &op) {
   DMALaunch launch;
   llvm::TypeSwitch<Operation *>(&op)
       .Case<VirtualDMALoadFP8Op, VirtualDMALoadBF16Op, VirtualDMAStoreFP8Op,
-            VirtualDMAStoreBF16Op>([&](auto x) {
+            VirtualDMAStoreBF16Op, VirtualDMAStoreBF16SliceOp>([&](auto x) {
         launch = {x.getNext(), x.getDramByte(), x.getSizeBytes()};
       });
   return launch;
@@ -337,7 +337,7 @@ private:
           pending.clear();
           continue;
         }
-        bool launch = isa<VirtualDMALoadFP8Op, VirtualDMALoadBF16Op, VirtualDMAStoreFP8Op, VirtualDMAStoreBF16Op>(op);
+        bool launch = isa<VirtualDMALoadFP8Op, VirtualDMALoadBF16Op, VirtualDMAStoreFP8Op, VirtualDMAStoreBF16Op, VirtualDMAStoreBF16SliceOp>(op);
         if (launch && dmaPlacements.contains(op.getResult(0))) {
           uint32_t window = dmaPlacements.lookup(op.getResult(0))->stagingWord;
           for (auto it = pending.begin(); it != pending.end();) {

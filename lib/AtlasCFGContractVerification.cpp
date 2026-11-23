@@ -287,6 +287,8 @@ FailureOr<DictionaryAttr> mlir::atlas::buildAtlasCFGContract(
         SmallVector<NamedAttribute> record{field("id",i(operations.lookup(&op))),field("block",i(id)),field("name",b.getStringAttr(op.getName().getStringRef())),field("operands",b.getDenseI32ArrayAttr(operands)),field("results",b.getDenseI32ArrayAttr(results)),field("tile_commands",b.getDenseI32ArrayAttr(tileCommands)),field("mxu_commands",b.getDenseI32ArrayAttr(mxuCommands))};
         if (auto roundtrip = dyn_cast<VirtualPackRoundTripBF16Op>(op))
           record.push_back(field("scale_code", roundtrip.getScaleCodeAttr()));
+        if (auto store = dyn_cast<VirtualDMAStoreBF16SliceOp>(op))
+          record.push_back(field("tile_byte_offset", store.getTileByteOffsetAttr()));
         if (isAtlasSlotAccess(&op)) {
           auto slot = atlasAccessedSlot(&op).getDefiningOp<VirtualSlotOp>();
           record.push_back(field("slot_word", slot.getSlotWordAttr()));
@@ -414,7 +416,8 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedCFGContract(
     atlasProofRecord(AtlasProofKind::CFG);
     auto d = dyn_cast<DictionaryAttr>(raw); if (!d) return bad();
     StringRef sourceName = contractString(d,"name");
-    unsigned fields = sourceName == "atlas.virtual_pack_roundtrip_bf16" ? 8 :
+    unsigned fields = sourceName == "atlas.virtual_pack_roundtrip_bf16" ||
+                              sourceName == "atlas.virtual_dma_store_bf16_slice" ? 8 :
         sourceName == "atlas.virtual_slot_copy" ? 11 :
         sourceName == "atlas.virtual_slot_load" || sourceName == "atlas.virtual_slot_store" ? 12 :
         sourceName == "atlas.virtual_save" || sourceName == "atlas.virtual_restore" ? 10 : 7;
@@ -707,6 +710,23 @@ LogicalResult mlir::atlas::verifyAtlasGeneratedCFGContract(
           else if (!operands.empty()) expected = operands[0];
           if (name != "atlas.virtual_slot_copy" && !StringRef(name).starts_with("atlas.virtual_dma_load_") &&
               (expected < 0 || store.getSrc() >= kAtlasTensorRegisters || before.tensor[store.getSrc()] != expected)) return error("memory store read lost its source tensor origin");
+          if (name == "atlas.virtual_dma_store_bf16" || name == "atlas.virtual_dma_store_bf16_slice") {
+            auto offset = contractI32(record, "tile_byte_offset");
+            bool slice = name == "atlas.virtual_dma_store_bf16_slice";
+            if (slice ? !offset : bool(record.get("tile_byte_offset")))
+              return error("BF16 slice store source offset requires an i32 on its slice operation");
+            int32_t first = offset.value_or(0);
+            auto commands = contractI32Array(record, "tile_commands");
+            auto command = contractTag(op, kAtlasTagTileCommand);
+            if ((first != 0 && first != kAtlasRegisterBytes) ||
+                (slice && commands.size() != 3) ||
+                commands.size() < 3 || commands.size() > unsigned(4 - first / kAtlasRegisterBytes) ||
+                !command || *command < commands.front() ||
+                *command - commands.front() >= int32_t(commands.size()) - 2 ||
+                store.getSrc() != unsigned(values[expected].reg + first / kAtlasRegisterBytes +
+                                           *command - commands.front()))
+              return error("BF16 store register half differs from its source offset");
+          }
         }
         if (auto store = dyn_cast<ScalarStoreOp>(op); store && (name == "atlas.virtual_save" || name == "atlas.virtual_slot_store"))
           if ((operands.size() != 1 && !(name == "atlas.virtual_slot_store" && operands.size() == 2)) || values[operands[0]].reg != int32_t(store.getSrc()) ||

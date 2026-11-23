@@ -169,6 +169,28 @@ class VirtualDMATest(unittest.TestCase):
                     rejected = run("atlas-opt", changed, "--verify-atlas-generated-schedule")
                     self.assertNotEqual(rejected.returncode, 0)
 
+    def test_bf16_store_offsets_are_register_aligned_and_bounded(self) -> None:
+        for size in (32, 96, 1024):
+            text = copy('bf16', size=size).replace(
+                dma_store('bf16'), dma_store('bf16').replace('virtual_dma_store_bf16', 'virtual_dma_store_bf16_slice').replace(
+                    ') :', ') {tile_byte_offset = 1024 : i32} :'))
+            self.accepted(text)
+            for offset in (-1024, 1, 32, 512, 2048):
+                self.rejected(text.replace('tile_byte_offset = 1024',
+                                           f'tile_byte_offset = {offset}'),
+                              'tile byte offset must select register half')
+        text = copy('bf16', size=1056).replace(
+            dma_store('bf16'), dma_store('bf16').replace('virtual_dma_store_bf16', 'virtual_dma_store_bf16_slice').replace(
+                ') :', ') {tile_byte_offset = 1024 : i32} :'))
+        self.rejected(text, 'byte length must be a positive 32-byte multiple no larger than tile size 1024')
+        for fmt in ('bf16', 'fp8'):
+            self.rejected(copy(fmt).replace(dma_load(fmt), dma_load(fmt).replace(
+                ') :', ') {tile_byte_offset = 1024 : i32} :')),
+                'tile byte offset requires a BF16 DMA slice store')
+        self.rejected(copy('fp8').replace(dma_store('fp8'), dma_store('fp8').replace(
+            ') :', ') {tile_byte_offset = 1024 : i32} :')),
+            'tile byte offset requires a BF16 DMA slice store')
+
     def test_dynamic_values_and_non_additive_proofs_fail(self) -> None:
         for operand in ("addr", "size"):
             source = copy().replace("@dma()", "@dma(%dynamic: i32)")

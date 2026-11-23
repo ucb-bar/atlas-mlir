@@ -358,7 +358,7 @@ LogicalResult VirtualAllocationPlan::placeDMA(Block &block,
       for (InFlight &t : inFlight)
         completeDMA(t);
     bool load = isa<VirtualDMALoadFP8Op, VirtualDMALoadBF16Op>(op);
-    if (!load && !isa<VirtualDMAStoreFP8Op, VirtualDMAStoreBF16Op>(op)) {
+    if (!load && !isa<VirtualDMAStoreFP8Op, VirtualDMAStoreBF16Op, VirtualDMAStoreBF16SliceOp>(op)) {
       release();
       continue;
     }
@@ -394,7 +394,7 @@ LogicalResult VirtualAllocationPlan::placeDMA(Block &block,
     }
     release();
     unsigned halves =
-        isa<VirtualDMALoadBF16Op, VirtualDMAStoreBF16Op>(op) ? 2 : 1;
+        isa<VirtualDMALoadBF16Op, VirtualDMAStoreBF16Op, VirtualDMAStoreBF16SliceOp>(op) ? 2 : 1;
     uint32_t stagingWord =
         fixedResources.stagingWord + window * kStagingWindowWords;
     dmaTransfers[op.getResult(0)] = {channel,
@@ -433,7 +433,7 @@ void VirtualAllocationPlan::stageLoads() {
         continue;
       }
       if (isa<VirtualDMALoadFP8Op, VirtualDMALoadBF16Op, VirtualDMAStoreFP8Op,
-              VirtualDMAStoreBF16Op>(op)) {
+              VirtualDMAStoreBF16Op, VirtualDMAStoreBF16SliceOp>(op)) {
         uint32_t window = dmaTransfers.lookup(op.getResult(0)).stagingWord;
         stage(op, [&](Value tile) {
           return dmaTransfers.lookup(tile.getDefiningOp()->getResult(0)).stagingWord == window;

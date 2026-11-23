@@ -322,7 +322,7 @@ LogicalResult mlir::atlas::verifyAtlasOutputBuffer(Operation *operation) {
       return WalkResult::interrupt();
     }
     bool load = isa<VirtualDMALoadFP8Op, VirtualDMALoadBF16Op>(op);
-    bool store = isa<VirtualDMAStoreFP8Op, VirtualDMAStoreBF16Op>(op);
+    bool store = isa<VirtualDMAStoreFP8Op, VirtualDMAStoreBF16Op, VirtualDMAStoreBF16SliceOp>(op);
     if (load || store) {
       auto address = provenI32AddressSpan(op->getOperand(load ? 1 : 2),op);
       auto bytes = provenI32(op->getOperand(load ? 2 : 3));

@@ -265,6 +265,7 @@ AtlasTileExpansion mlir::atlas::atlasTileExpansion(StringRef sourceOp) {
       .Case(VirtualDMALoadBF16Op::getOperationName(), {4, 1})
       .Case(VirtualDMAStoreFP8Op::getOperationName(), {3, 1})
       .Case(VirtualDMAStoreBF16Op::getOperationName(), {4, 1})
+      .Case(VirtualDMAStoreBF16SliceOp::getOperationName(), {3, 1})
       .Case(VirtualSpillBF16Op::getOperationName(), {2, 0})
       .Case(VirtualReloadBF16Op::getOperationName(), {2, 0})
       .Case(VirtualSpillFP8Op::getOperationName(), {1, 0})
@@ -430,12 +431,12 @@ FailureOr<ArrayAttr> mlir::atlas::buildAtlasTileContract(
           }
         }
       } else if (isa<VirtualDMALoadFP8Op, VirtualDMALoadBF16Op,
-                     VirtualDMAStoreFP8Op, VirtualDMAStoreBF16Op>(op)) {
+                     VirtualDMAStoreFP8Op, VirtualDMAStoreBF16Op, VirtualDMAStoreBF16SliceOp>(op)) {
         // A transfer is keyed by its operation's state result.
         Value handle = op.getResult(0);
         const auto &p = transfers.find(handle)->second->placement;
         DictionaryAttr source = dmaRecords.find(p.id)->second;
-        bool store = isa<VirtualDMAStoreFP8Op, VirtualDMAStoreBF16Op>(op);
+        bool store = isa<VirtualDMAStoreFP8Op, VirtualDMAStoreBF16Op, VirtualDMAStoreBF16SliceOp>(op);
         SmallVector<int32_t, 2> after;
         if (!store && !reusedPrefills.contains(&op) &&
             uint32_t(source.getAs<IntegerAttr>("size_bytes").getInt()) < p.halves * kAtlasRegisterBytes) {
@@ -450,8 +451,9 @@ FailureOr<ArrayAttr> mlir::atlas::buildAtlasTileContract(
             return failure();
           unsigned bytes = source.getAs<IntegerAttr>("size_bytes").getInt();
           unsigned storeHalves = (bytes + kAtlasRegisterBytes - 1) / kAtlasRegisterBytes;
+          unsigned firstHalf = virtualDMATransfer(&op)->tileByteOffset / kAtlasRegisterBytes;
           for (unsigned half = 0; half < storeHalves; ++half) {
-            auto id = add("vstore", *reg + half,
+            auto id = add("vstore", *reg + firstHalf + half,
                           (uint64_t(p.stagingWord) + half * kAtlasRegisterWords) * 4,
                           0, kAtlasRegisterBytes, -1, p.id);
             if (failed(id))
