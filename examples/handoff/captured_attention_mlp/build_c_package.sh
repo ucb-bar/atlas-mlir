@@ -26,7 +26,7 @@ for tool in atlas-opt atlas-emit; do
 done
 export PYTHONPATH="$merlin_root/src:$root/python${PYTHONPATH:+:$PYTHONPATH}"
 export ATLAS_OOT_BIN_DIR="$atlas_bin"
-export ATLAS_NATIVE_PIPELINE="$pipeline"
+recipe_args=(--native-pipeline "$pipeline")
 export CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-2}
 mkdir -p "$out"
 source_ir="$root/test/examples/captured_attention_mlp32_two_outputs_linalg.mlir"
@@ -40,10 +40,11 @@ if [[ $# -eq 6 ]]; then
   parameter_args=(--compile-inputs "$compile_inputs")
 fi
 abi=${ATLAS_GRAPH_ABI:-$abi}
-"$python" -m merlin.targetgen.cli native-build --engine merlin_native --support atlas \
+"$python" -m merlin.development.targetgen.cli native-build --engine merlin_native --support atlas \
   --cargo-target-dir "${CARGO_TARGET_DIR:-$out/cargo}" \
   --source-revision "$(git -C "$merlin_root" rev-parse HEAD)" --out "$out/snapshot"
-"$python" -m merlin.targetgen.cli native-compile --engine merlin_native --support atlas \
+"$python" -m merlin.development.targetgen.cli native-compile --engine merlin_native --support atlas \
+  "${recipe_args[@]}" \
   --snapshot "$out/snapshot" --linalg "$source_ir" --linalg-entry forward \
   --diagnostic-graph-policy "$policy" \
   --abi "$abi" \
@@ -58,11 +59,12 @@ with open(sys.argv[1]) as source:
 if status.get("status") != "emitted" or status.get("artifact_kind") != "program":
     raise SystemExit("this example requires one device program; segmented output is not accepted")
 PY
-"$python" -m merlin.targetgen.cli native-verify --engine merlin_native --support atlas \
+"$python" -m merlin.development.targetgen.cli native-verify --engine merlin_native --support atlas \
+  "${recipe_args[@]}" \
   --snapshot "$out/snapshot" --linalg "$source_ir" --linalg-entry forward \
   --diagnostic-graph-policy "$policy" --mode diagnostic \
   --artifact "$out/compiled" --out "$out/verification.json"
-"$python" -m merlin.targetgen.cli native-bridge-graph --linalg "$source_ir" \
+"$python" -m merlin.development.targetgen.cli native-bridge-graph --linalg "$source_ir" \
   --entry forward --compiled "$out/compiled" --device-symbol merlin_native_graph --out "$out/host-bridge"
 "$python" "$root/tools/atlas_graph_model_bridge.py" --linalg "$source_ir" \
   --host-bridge "$out/host-bridge" --compiled "$out/compiled" \

@@ -59,15 +59,22 @@ else
 fi
 compile_defs+=("-DATLAS_MAX_POLLS=$max_polls")
 
-"$python_bin" -m merlin.targetgen.cli native-bridge-graph \
+"$python_bin" -m merlin.development.targetgen.cli native-bridge-graph \
   --linalg "$source_linalg" --entry forward \
   --compiled "$compiled_native" --device-symbol merlin_native_graph \
   --out "$out/host-bridge"
 "$python_bin" "$repo_root/tools/atlas_graph_model_bridge.py" \
   --linalg "$source_linalg" --host-bridge "$out/host-bridge" \
   --compiled "$compiled_native" --out "$out/graph-wrapper"
-"$python_bin" -m merlin.llvmlower.cli \
-  "$out/host-bridge/host-bridge.mlir" --target riscv --out "$out/host-lowered"
+"$python_bin" - "$out/host-bridge/host-bridge.mlir" "$out/host-lowered" <<'PY'
+import sys
+from pathlib import Path
+from merlin.compiler.lower.model.lower import lower_model_file
+
+output = Path(sys.argv[2])
+output.mkdir()
+lower_model_file(sys.argv[1], output, targets=("riscv",))
+PY
 
 "$llvm_bin/clang" --target=riscv64-unknown-elf -march=rv64gcv \
   -mabi=lp64d -mcmodel=medany -std=c11 -O2 \
@@ -76,7 +83,7 @@ compile_defs+=("-DATLAS_MAX_POLLS=$max_polls")
   -nostdlib -fuse-ld=lld \
   "${compile_defs[@]}" \
   -I "$out/graph-wrapper" -I "$repo_root/runtime" \
-  -I "$merlin_root/merlin/runtime/c" \
+  -I "$merlin_root/src/merlin/runtime/native/c" \
   "$repo_root/examples/handoff/captured_attention_mlp/start.S" \
   "$repo_root/examples/handoff/captured_attention_mlp/host_graph_mailbox.c" \
   "$out/graph-wrapper/atlas_graph_model_wrapper.c" \

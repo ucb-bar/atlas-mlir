@@ -56,7 +56,7 @@ class GraphModelBridgeTest(unittest.TestCase):
                 compiler, "-std=c11", "-O2", "-Wall", "-Wextra", "-Werror",
                 "-DATLAS_DIAGNOSTIC_GRAPH_PRECISION=1",
                 "-I", str(directory), "-I", str(ROOT / "runtime"),
-                "-I", str(Path(os.environ["MERLIN_NATIVE_ROOT"]) / "merlin/runtime/c"),
+                "-I", str(Path(os.environ["MERLIN_NATIVE_ROOT"]) / "src/merlin/runtime/native/c"),
                 "-c", str(directory / "atlas_graph_model_wrapper.c"),
                 "-o", str(output),
             ]
@@ -68,7 +68,7 @@ class GraphModelBridgeTest(unittest.TestCase):
             subprocess.run([
                 compiler, "-std=c11", "-O2", "-Wall", "-Wextra", "-Werror",
                 "-I", str(directory), "-I", str(ROOT / "runtime"),
-                "-I", str(Path(os.environ["MERLIN_NATIVE_ROOT"]) / "merlin/runtime/c"),
+                "-I", str(Path(os.environ["MERLIN_NATIVE_ROOT"]) / "src/merlin/runtime/native/c"),
                 "-c", str(directory / "atlas_graph_host_entry.c"),
                 "-o", str(host_entry),
             ], check=True, capture_output=True, text=True)
@@ -116,7 +116,7 @@ class GraphModelBridgeTest(unittest.TestCase):
                 "-Werror", "-fsanitize=address,undefined", "-fno-omit-frame-pointer",
                 "-DATLAS_DIAGNOSTIC_GRAPH_PRECISION=1",
                 "-I", str(directory), "-I", str(ROOT / "runtime"),
-                "-I", str(Path(os.environ["MERLIN_NATIVE_ROOT"]) / "merlin/runtime/c"),
+                "-I", str(Path(os.environ["MERLIN_NATIVE_ROOT"]) / "src/merlin/runtime/native/c"),
                 str(model_object), str(directory / "atlas_graph_model_wrapper.c"),
                 str(directory / "atlas_graph_host_entry.c"),
                 str(ROOT / "runtime/atlas_graph_memref.c"),
