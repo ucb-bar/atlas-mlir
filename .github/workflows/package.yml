@@ -1,0 +1,133 @@
+name: Package
+on:
+  push:
+  pull_request:
+  merge_group:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: package-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        shell: bash -el {0}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: ucb-ee194-tapeout/npu_model
+          ref: b97b2f5a97e432141c4ef8504bec396651d77a8f
+          path: out/package-model
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+      - name: Read compiler pins from the package requirements
+        id: pins
+        shell: bash
+        run: |
+          python - <<'PYCODE' >> "$GITHUB_OUTPUT"
+          import re, tomllib
+          from pathlib import Path
+          project = tomllib.loads(Path('pyproject.toml').read_text())['project']
+          merlin = next(r for r in project['dependencies'] if r.startswith('merlin['))
+          m2m = next(r for r in project['optional-dependencies']['capture'] if r.startswith('m2m '))
+          print('merlin_sha=' + re.search(r'[0-9a-f]{40}', merlin).group())
+          print('m2m_requirement=' + m2m)
+          PYCODE
+      - uses: actions/checkout@v4
+        with:
+          repository: ucb-bar/merlin
+          ref: ${{ steps.pins.outputs.merlin_sha }}
+          path: out/package-merlin
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+      - name: Save numerical interpreter
+        shell: bash
+        run: echo "MODEL_PYTHON=$(command -v python)" >> "$GITHUB_ENV"
+      - uses: mamba-org/setup-micromamba@v2
+        with:
+          environment-file: ci/environment.yml
+          cache-environment: true
+      - name: Build sdist and wheel from sdist
+        env:
+          CMAKE_BUILD_PARALLEL_LEVEL: '2'
+        run: |
+          export CMAKE_ARGS="-DMLIR_DIR=$CONDA_PREFIX/lib/cmake/mlir -DLLVM_DIR=$CONDA_PREFIX/lib/cmake/llvm"
+          git diff --exit-code HEAD
+          git rev-parse HEAD > SOURCE_REVISION
+          python -m pip install build
+          python -m build
+      - name: Build and test compiler with the updated numerical model
+        run: |
+          "$MODEL_PYTHON" -m pip install dist/*.whl pytest tabulate
+          "$MODEL_PYTHON" -m pip install torch==2.11.0+cpu --index-url https://download.pytorch.org/whl/cpu
+          "$MODEL_PYTHON" -m pip install --no-deps --editable 'git+https://github.com/ucb-ee194-tapeout/npu_model@b97b2f5a97e432141c4ef8504bec396651d77a8f#egg=npu-model'
+          "$MODEL_PYTHON" -m pip install "${{ steps.pins.outputs.m2m_requirement }}"
+          cmake -S . -B build -G Ninja -DMLIR_DIR="$CONDA_PREFIX/lib/cmake/mlir" -DPython3_EXECUTABLE="$MODEL_PYTHON" -DATLAS_NPU_MODEL_ROOT="$GITHUB_WORKSPACE/out/package-model"
+          cmake --build build --parallel 2
+          PYTHONPATH="$GITHUB_WORKSPACE/out/package-merlin/src:$GITHUB_WORKSPACE/out/package-merlin" ctest --test-dir build --output-on-failure --parallel 2 -E 'atlas-python-test_virtual_evaluator'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: atlas-mlir-linux-x86_64
+          path: dist/*
+          if-no-files-found: error
+  installed-wheel:
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@v4
+        with:
+          name: atlas-mlir-linux-x86_64
+          path: dist
+      - name: Install pinned CPU capture stack and exporter sources
+        run: |
+          python -m pip install dist/*.whl pytest
+          python -m pip install torch==2.11.0+cpu --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install "$(python -c 'import tomllib; from pathlib import Path; p=tomllib.loads(Path("pyproject.toml").read_text()); print(next(r for r in p["project"]["optional-dependencies"]["capture"] if r.startswith("m2m ")))')" ml_dtypes transformers==5.5.4
+          atlascc setup-capture
+      - name: Compile and verify authenticated quantized models outside the checkout
+        run: |
+          export TMPDIR="$RUNNER_TEMP/atlas-work"
+          mkdir -p "$TMPDIR"
+          cd "$RUNNER_TEMP"
+          python "$GITHUB_WORKSPACE/ci/smoke_wheel.py" --capture --quantized
+          python -m pytest "$GITHUB_WORKSPACE/test/test_atlascc_merlin.py" -q --basetemp "$TMPDIR/pytest-driver"
+      - name: Check raw export preservation and adapter rejection cases
+        run: |
+          export TMPDIR="$RUNNER_TEMP/atlas-work"
+          mkdir -p "$TMPDIR"
+          python -c 'from atlas_mlir.torchao import activate; activate(); import pytest; raise SystemExit(pytest.main(["adapter/tests/test_adapter.py", "-q", "--basetemp", "out/pytest-adapter"]))'
+  numerical-evaluator:
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+      - uses: actions/download-artifact@v4
+        with:
+          name: atlas-mlir-linux-x86_64
+          path: dist
+      - name: Install pinned CPU numerical model
+        run: |
+          python -m pip install dist/*.whl pytest tabulate
+          python -m pip install torch==2.11.0+cpu --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install --no-deps --editable 'git+https://github.com/ucb-ee194-tapeout/npu_model@b97b2f5a97e432141c4ef8504bec396651d77a8f#egg=npu-model'
+      - name: Requalify the CPU model with emitted programs
+        env:
+          ATLAS_RUN_NPU_MODEL: '1'
+        run: |
+          export ATLAS_OOT_BIN_DIR="$(python -c 'from atlas_mlir.toolchain import bin_dir; print(bin_dir())')"
+          export TMPDIR="$RUNNER_TEMP/atlas-work"
+          mkdir -p "$TMPDIR"
+          python -m pytest test/test_model_provenance.py test/test_virtual_evaluator*.py test/test_spill_model_execution.py -q --basetemp "$TMPDIR/pytest-numerical"
