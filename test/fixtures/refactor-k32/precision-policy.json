@@ -1,0 +1,74 @@
+{
+  "schema": "atlas.diagnostic_application_precision.v19",
+  "source_sha256": "602c825b0122f5c8bfd9d316323c25c0a935c35f98931754e3649cfd2f3f3b2e",
+  "target_identity": "atlas-rtl-0079c0541111197741a231c002e3843fa6f545b2:movement-mxu01-vpu-pack-tile-v24",
+  "contraction": {
+    "policy": "f32-scaled-e4m3-rne-positive-zero-ordered-bf16-mxu0-v1",
+    "operand_scale_exponents": [
+      0,
+      0
+    ]
+  },
+  "row_softmax": "bf16-tiled-row-softmax-ltr-fp32-rne-chop-rcp-lut-v1",
+  "host_support": [
+    "transpose",
+    "reshape",
+    "copy",
+    "gather",
+    "insert_slice",
+    "concat",
+    "embedding_lookup",
+    "indexed_insert_slice",
+    "identity"
+  ],
+  "already_quantized": "atlas-already-quantized-e4m3-signed-exponents-mxu1-model47-v1",
+  "epilogues": [
+    "relu"
+  ],
+  "pointwise": "f32-to-bf16-bounded-pointwise-rne-chop-v1",
+  "reduction": "bf16-adjacent-fp32-tree-rne-seeded-tile-sum-ltr-chop-v1",
+  "pointwise_math": "f32-to-bf16-positive-denominator-lut-div-rsqrt-v1",
+  "sigmoid": "f32-to-bf16-bounded-sigmoid-exp-recip-v1",
+  "masked_softmax": "bf16-tiled-masked-row-softmax-zero-neginf-v1",
+  "host_predicates": [
+    "f32_nonzero",
+    "mask",
+    "select",
+    "bucketize"
+  ],
+  "host_integer_ops": [
+    "i64_add",
+    "i64_sub",
+    "i64_mul",
+    "i64_reduce_add",
+    "i64_cumsum",
+    "i64_min_value",
+    "i64_first_min_index",
+    "signed_i64_to_f32",
+    "signed_i64_to_f64"
+  ],
+  "guarded_masked_softmax": "bf16-tiled-masked-row-softmax-empty-zero-v1",
+  "gelu": "f32-to-bf16-bounded-tanh-gelu-cube-chop-v1",
+  "host_float_casts": [
+    "bf16_to_f32",
+    "f32_to_bf16",
+    "f32_to_f64",
+    "f64_to_f32"
+  ],
+  "host_float_arithmetic": [
+    "f32_add",
+    "f32_sub",
+    "f32_div",
+    "f32_mul",
+    "f64_mul",
+    "bf16_add",
+    "bf16_sub",
+    "bf16_neg",
+    "f32_neg",
+    "f64_neg"
+  ],
+  "bf16_pointwise": "bf16-bounded-pointwise-rne-v1",
+  "source_exp": "f32-to-bf16-bounded32-exp-lut-v1",
+  "host_bf16_linear": "bf16-exact-product-f32-ltr-rne-bf16-rne-v1",
+  "already_quantized_mask": "bf16-minfinite-zero-bounded32-nonempty-v1"
+}

@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from merlin.compile.batched_c import render_batched_contraction_c
-from merlin.compile.c_sources import c_source_pair
+from merlin.compiler.lower.c.batched import render_batched_contraction_c
+from merlin.compiler.lower.c.dispatch import c_source_pair
 
 from .looped_c import prepare_c_package
 

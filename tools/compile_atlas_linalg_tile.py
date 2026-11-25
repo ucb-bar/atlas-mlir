@@ -29,7 +29,6 @@ RTL_REVISION = json.loads((Path(__file__).resolve().parents[1] /
 POLICY_SCHEMA = "atlas.oot.quantized_linalg_policy.v1"
 SCALED_POLICY_SCHEMA = "atlas.oot.quantized_linalg_policy.v2"
 SOURCE_BOUND_POLICY_SCHEMA = "atlas.oot.quantized_linalg_policy.v3"
-_CMPF_OLT = 4  # MLIR arith.CmpFPredicate OLT.
 
 
 class UnsupportedLinalg(ValueError):
@@ -274,33 +273,10 @@ def generic_kind(op: Any) -> str:
                     "ReLU region uses unexpected values")
             require_exact_arithmetic(maximum)
             return "relu"
-        if len(args) == 2 and names == ["arith.constant", "arith.sitofp", "arith.cmpf",
-                                       "arith.select", "linalg.yield"]:
-            zero, cast, compare, select, output = body
-            constant = zero.properties.get("value")
-            predicate = compare.properties.get("predicate")
-            require(
-                len(zero.results) == 1 and str(zero.results[0].type) == "i64" and
-                set(zero.properties) == {"value"} and
-                isinstance(constant, builtin.IntegerAttr) and constant.value.data == 0 and
-                len(cast.operands) == len(cast.results) == 1 and
-                tuple(cast.operands) == (zero.results[0],) and
-                str(cast.results[0].type) == "f32" and not cast.properties and
-                set(compare.properties) <= {"predicate", "fastmath"} and
-                isinstance(predicate, builtin.IntegerAttr) and
-                predicate.value.data == _CMPF_OLT and
-                tuple(compare.operands) == (args[0], cast.results[0]) and
-                tuple(select.operands) == (compare.results[0], cast.results[0], args[0]) and
-                tuple(output.operands) == (select.results[0],) and
-                not select.properties and
-                all(not item.attributes or all(key.startswith("prov.") for key in item.attributes)
-                    for item in body[:-1]),
-                "ReLU compare/select region uses unexpected values",
-            )
-            require_exact_arithmetic(compare)
-            # This source pattern selects its input for -0. Atlas ReLU clears
-            # the sign bit; the difference belongs to the diagnostic policy.
-            return "relu"
+        if "arith.select" in names:
+            # The ordered compare/select keeps -0 and NaN, while Atlas ReLU clears the sign bit.
+            # Its exact route is the Merlin-selected native path's host ReLU, not this device tile.
+            raise UnsupportedLinalg("ordered compare/select ReLU has no exact device lowering")
         raise UnsupportedLinalg("ReLU region is not an admitted scalar pattern")
     raise UnsupportedLinalg("generic indexing maps are outside bias/ReLU admission")
 
@@ -871,7 +847,7 @@ def compile_program(virtual: str, output: Path, atlas: Path,
          "-mattr=-c", "-filetype=obj", "-o", str(obj)],
         input_text=llvm_ir)
     elf = output / "program.elf"
-    run([str(linker), "-m", "elf32lriscv", "--no-relax", "-Ttext=0",
+    run([str(linker), "-m", "elf32lriscv", "--no-relax", "--image-base=0", "-Ttext=0",
          "-e", "atlas_program", "-o", str(elf), str(obj)])
     object_text = output / "program.text.bin"
     run([str(llvm / "llvm-objcopy"), "--dump-section",

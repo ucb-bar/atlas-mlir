@@ -4,13 +4,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 
-from merlin.semantic_compiler.model import (
+from merlin.compiler.semantic.model import (
     KernelRequest,
     SemanticNode,
     TensorType,
     pointwise_identity_maps,
 )
-from merlin.semantic_compiler.pointwise_tiling import PointwiseTiling
+from merlin.compiler.transforms.pointwise import PointwiseTiling
 
 from .binding import (
     BF16_BOUNDED_RECIP_ATTRS,

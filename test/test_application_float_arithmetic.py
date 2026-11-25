@@ -10,9 +10,9 @@ from atlas_mlir_native.pointwise_math import MATH_POLICY
 from atlas_mlir_native.reduction import REDUCTION_POLICY
 from atlas_mlir_native.row_softmax import GUARDED_SOFTMAX_POLICY, MASKED_SOFTMAX_POLICY
 from atlas_mlir_native.sigmoid import SIGMOID_POLICY
-from merlin.compile.c_float_casts import FLOAT_CAST_OPERATIONS
-from merlin.semantic_compiler.target_binding import NativeCompilationError
-from merlin.tests.runtime.test_float_arithmetic_c import request
+from merlin.compiler.lower.c.float_casts import FLOAT_CAST_OPERATIONS
+from merlin.compiler.semantic.target_binding import NativeCompilationError
+from atlas_test_fixtures.float_arithmetic_c import request
 
 
 def policy():
@@ -40,7 +40,7 @@ def test_binary64_multiply_is_selected_before_compilation_and_uses_no_device_pro
     assert region.placement == "host"
     compiled = adapter.compile_region(None, source, region, "host_multiply", None, None, None)
     assert not compiled.programs
-    assert compiled.description["arithmetic"] == "exact-source-f64-multiply"
+    assert compiled.description["arithmetic"] == "exact-source-" + "f64_mul".replace("_", "-")
     assert b"__uint128_t" in compiled.files["host_multiply.c"]
     assert compiled.inputs == ("a", "b")
     # No compiler math helper is selected or needed by this policy.
@@ -60,7 +60,7 @@ def test_unknown_or_duplicate_cpu_arithmetic_selection_fails(operations):
 
 @pytest.mark.parametrize("operation", ["bf16_add", "bf16_sub"])
 def test_bf16_source_rounding_uses_an_explicit_cpu_region(operation):
-    from merlin.tests.runtime.test_bf16_arithmetic_c import request as bf16_request
+    from atlas_test_fixtures.bf16_arithmetic_c import request as bf16_request
 
     selected = policy()
     source = replace(bf16_request((1, 50, 720), operation),

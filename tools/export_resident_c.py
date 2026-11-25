@@ -24,13 +24,14 @@ def prepare(compiled, compile_inputs, policy_path, name, *, target_source):
     )
     from atlas_mlir_native.resident_graph import memory_plan
 
-    from merlin.compile.c_sources import c_source_pair
-    from merlin.frontends.compile_inputs import (
+    from atlas_mlir_native.c_runtime import runtime_headers
+    from merlin.compiler.lower.c.dispatch import c_source_pair
+    from merlin.compiler.frontend.inputs import (
         load_compile_inputs,
         load_lifted_argument_bytes,
     )
-    from merlin.semantic_compiler.model import KernelRequest
-    from merlin.semantic_compiler.target_binding import verify_native_publication
+    from merlin.compiler.semantic.model import KernelRequest
+    from merlin.compiler.semantic.target_binding import verify_native_publication
 
     manifest = json.loads((compiled / "manifest.json").read_text())
     check_io_memory_manifest(manifest)
@@ -211,9 +212,7 @@ extern const atlas_host_buffer {name}_device_buffers[{upper}_DEVICE_BUFFER_COUNT
     )
     rendered = c_source_pair(
         name,
-        public_headers={
-            "atlas_host.h": (target_source / "runtime/atlas_host.h").read_text()
-        },
+        public_headers=runtime_headers(target_source / "runtime"),
         private_headers={},
         sources={"image.c": "\n".join(definitions)},
         declarations=declarations,
@@ -268,7 +267,7 @@ def main():
     args = parser.parse_args()
     if args.out.exists():
         parser.error("fresh C package directory required")
-    from merlin.semantic_compiler.codegen import CodegenOptions, codegen_options
+    from atlas_mlir_native.options import CodegenOptions, codegen_options
 
     with codegen_options(CodegenOptions(io_memory_bytes=args.io_memory_bytes)):
         record, files = prepare(

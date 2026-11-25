@@ -249,8 +249,8 @@ def _check_atlas_operation(op: Operation) -> None:
             raise UnsupportedVirtualMode(f"{name}: supported kinds are {allowed}")
     if short == "vpu_splat":
         _require(0 <= _integer_attribute(op, "bits") <= 65535, f"{name}: bits must be in 0..65535")
-    if short in ("pack_fp8", "pack_roundtrip_bf16") and not 122 <= _integer_attribute(op, "scale_code") <= 128:
-        raise UnsupportedVirtualMode(f"{name}: scale_code must be in the admitted range 122..128")
+    if short in ("pack_fp8", "pack_roundtrip_bf16") and not 0 <= _integer_attribute(op, "scale_code") <= 255:
+        raise UnsupportedVirtualMode(f"{name}: scale_code must be a proven raw scale byte in 0..255")
 
 
 def _check_operation(op: Operation, *, flat: bool) -> None:

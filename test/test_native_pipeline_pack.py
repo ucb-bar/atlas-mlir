@@ -1,6 +1,9 @@
 """Optional native pipeline and exact on-chip PACK relayout regressions."""
-
 from __future__ import annotations
+from atlas_mlir_native.options import codegen_options, current_codegen_options
+
+from dataclasses import replace
+
 
 import copy
 import json
@@ -53,11 +56,10 @@ class NativePipelinePackTest(unittest.TestCase):
         with patch.dict(os.environ, {}, clear=True):
             self.assertEqual(self.binding._native_pipeline(), "mandatory")
         for selected in ("mandatory", "optimized"):
-            with self.subTest(selected=selected), patch.dict(os.environ, ATLAS_NATIVE_PIPELINE=selected):
+            with self.subTest(selected=selected), codegen_options(replace(current_codegen_options(), native_pipeline=selected)):
                 self.assertEqual(self.binding._native_pipeline(), selected)
-        with patch.dict(os.environ, ATLAS_NATIVE_PIPELINE="typo"):
-            with self.assertRaisesRegex(self.binding.NativeCompilationError, "mandatory or optimized"):
-                self.binding._native_pipeline()
+        with self.assertRaises(ValueError), codegen_options(replace(current_codegen_options(), native_pipeline="typo")):
+            self.binding._native_pipeline()
 
     def test_optimized_pipeline_accepts_same_raw_virtual(self) -> None:
         machine = self.binding._run(
@@ -68,6 +70,15 @@ class NativePipelinePackTest(unittest.TestCase):
             [str(Path(ATLAS_BIN) / "atlas-opt"), *self.binding.NATIVE_CHECKS, "-"],
             input_text=machine,
         )
+
+    def test_optimized_pipeline_enforces_selected_program_budget(self) -> None:
+        with codegen_options(replace(current_codegen_options(), program_size_limit_bytes=4)):
+            with self.assertRaises(self.binding.NativeCompilationError):
+                self.binding._run(
+                    [str(Path(ATLAS_BIN) / "atlas-opt"),
+                     *self.binding.NATIVE_PIPELINES["optimized"], "-"],
+                    input_text=PACK_VIRTUAL,
+                )
 
     def test_optimized_pipeline_accepts_mxu_pressure(self) -> None:
         from test_mxu_spilling import mxu_pressure

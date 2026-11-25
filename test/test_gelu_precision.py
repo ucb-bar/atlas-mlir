@@ -14,7 +14,7 @@ from atlas_mlir_native.gelu import SOURCE_ATTRS, input_spec, prepare_plan, prepa
 def source_request(shape=(32, 32)):
     from atlas_mlir_native.binding import TARGET_IDENTITY
 
-    from merlin.semantic_compiler.model import KernelRequest, SemanticNode, TensorType, pointwise_identity_maps
+    from merlin.compiler.semantic.model import KernelRequest, SemanticNode, TensorType, pointwise_identity_maps
 
     tensor = TensorType(shape, "f32", "raw-bit-pattern")
     return KernelRequest((
@@ -48,7 +48,7 @@ class GeluPrecisionTest(unittest.TestCase):
         from atlas_mlir_native.row_softmax import GUARDED_SOFTMAX_POLICY, MASKED_SOFTMAX_POLICY, SOFTMAX_POLICY
         from atlas_mlir_native.sigmoid import SIGMOID_POLICY
 
-        from merlin.semantic_compiler.target_binding import NativeCompilationError
+        from merlin.compiler.semantic.target_binding import NativeCompilationError
 
         policy = {
             "schema": "atlas.diagnostic_application_precision.v16", "source_sha256": "0" * 64,
@@ -96,8 +96,8 @@ class GeluPrecisionTest(unittest.TestCase):
     def test_all_admitted_codes_preserve_every_binary_result_domain(self):
         from atlas_mlir_native.reference import evaluate_gelu
 
-        from merlin.semantic_compiler.model import TensorType
-        from merlin.semantic_compiler.reference import TensorValue
+        from merlin.compiler.semantic.model import TensorType
+        from merlin.compiler.semantic.reference import TensorValue
 
         codes = (0, 0x8000, *(sign | code for sign in (0, 0x8000) for code in range(0x2F80, 0x4F81)))
         precision = prepare_source(source_request((1, len(codes))))
@@ -115,7 +115,7 @@ class GeluPrecisionTest(unittest.TestCase):
         from atlas_mlir_native.pointwise import plan_abi
         from test_looped_mnk import ROOT, build_snapshot
 
-        from merlin.semantic_compiler.search import SearchLimits
+        from merlin.compiler.semantic.search.exploration import SearchLimits
 
         with tempfile.TemporaryDirectory(dir=os.environ.get("TMPDIR")) as directory:
             root = Path(directory)

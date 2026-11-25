@@ -14,6 +14,14 @@ class SourceWrappers:
     implementation: str
     private_headers: dict[str, str]
     packing: str
+    finite_fp8_top: bool = False
+
+
+def fp8_invalid_c(code, *, finite_top=False):
+    """Preserve legacy cap240 admission unless selected source precision opts in."""
+    if finite_top:
+        return f"({code} != 0 && (({code} & 127u) < 8u || ({code} & 127u) > 126u))"
+    return f"({code} != 0 && ((({code} >> 3) & 15u) == 0 || (({code} >> 3) & 15u) == 15u))"
 
 
 def prepare_source_wrappers(
@@ -62,7 +70,7 @@ def prepare_source_wrappers(
         if precision.request.digest() != source.digest() or manifest.get("constant_inputs"):
             raise ValueError("semantic contraction differs from the checked native source")
     elif compile_inputs is not None:
-        from merlin.frontends.compile_inputs import load_compile_inputs
+        from merlin.compiler.frontend.inputs import load_compile_inputs
 
         from .binding import AtlasNativeBinding
 
@@ -85,7 +93,7 @@ def prepare_source_wrappers(
                 raise ValueError("source-bound parameter bytes differ from the looped publication")
     if precision is not None:
         from merlin.common.paths import runtime_dir
-        from merlin.compile.c_conversions import render_f32_operand_c
+        from merlin.compiler.lower.c.conversions import render_f32_operand_c
 
         constants = {item.role: item for item in static}
         arguments, embedded, runtime_inputs, runtime_conversions = [], [], [], []
@@ -188,12 +196,13 @@ _Static_assert(sizeof(float) == 4 && FLT_RADIX == 2 && FLT_MANT_DIG == 24 && FLT
                "source conversion requires binary32 float");
 """ + "\n".join(conversions)
         decode_bits = "((uint32_t)result[2*i] | ((uint32_t)result[2*i+1]<<8))<<16"
-        if precision.output.spec.post_decode_scale_exponent:
-            from merlin.compile.c_conversions import render_bf16_decode_c
+        if precision.output.spec.post_decode_scale_exponent or precision.output.spec.column_scale_exponents:
+            from merlin.compiler.lower.c.conversions import render_bf16_decode_c
 
             decoder = name + "_decode_source_result"
             conversion_source += render_bf16_decode_c(precision.output.spec, decoder)
-            decode_bits = f"{decoder}((uint16_t)result[2*i] | ((uint16_t)result[2*i+1]<<8))"
+            column = f",i%{n}u" if precision.output.spec.column_scale_exponents else ""
+            decode_bits = f"{decoder}((uint16_t)result[2*i] | ((uint16_t)result[2*i+1]<<8){column})"
         region_declarations += f"""
 #define {upper}_SOURCE_INPUT_COUNT {count}u
 #define {upper}_SOURCE_WORKSPACE_BYTES {source_workspace}u
@@ -261,8 +270,9 @@ int {name}_source_dispatch(void *ctx, const void *const *inputs, void *const *ou
             "precision_conversion": True,
             **(
                 {"result_conversion": precision.output.record()}
-                if precision.output.spec.post_decode_scale_exponent
+                if precision.output.spec.post_decode_scale_exponent or precision.output.spec.column_scale_exponents
                 else {}
             ),
         }
-    return SourceWrappers(region, region_declarations, region_source, private_headers, conversion_source)
+    finite_top = precision is not None and all(spec.max_normal_exponent_code == 15 for spec in precision.profile.conversion_specs[:2])
+    return SourceWrappers(region, region_declarations, region_source, private_headers, conversion_source, finite_top)

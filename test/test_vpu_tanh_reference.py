@@ -18,7 +18,7 @@ from atlas_mlir_native.tanh_lane import TANH_LUT_Q1_16, vtanh_bf16_bits
 def source_request():
     from atlas_mlir_native.binding import BF16_TANH_ATTRS, TARGET_IDENTITY
 
-    from merlin.semantic_compiler.model import KernelRequest, SemanticNode, TensorType, pointwise_identity_maps
+    from merlin.compiler.semantic.model import KernelRequest, SemanticNode, TensorType, pointwise_identity_maps
 
     tensor = TensorType((32, 32), "bf16", "raw-bit-pattern")
     return KernelRequest(
@@ -82,9 +82,9 @@ class TanhNativeTest(unittest.TestCase):
         from atlas_mlir_native.binding import AtlasNativeBinding
         from test_looped_mnk import ROOT, build_snapshot
 
-        from merlin.semantic_compiler.model import ConstantBinding
-        from merlin.semantic_compiler.search import SearchLimits
-        from merlin.semantic_compiler.target_binding import NativeCompilationError, verify_native_publication
+        from merlin.compiler.semantic.model import ConstantBinding
+        from merlin.compiler.semantic.search.exploration import SearchLimits
+        from merlin.compiler.semantic.target_binding import NativeCompilationError, verify_native_publication
 
         with tempfile.TemporaryDirectory(dir=os.environ.get("TMPDIR")) as directory:
             root = Path(directory)

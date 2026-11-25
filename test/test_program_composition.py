@@ -140,7 +140,7 @@ class ProgramCompositionTest(unittest.TestCase):
         from tools.check_program_decode import decode_binary
         from tools.model_instructions import model_instruction
 
-        from merlin.semantic_compiler.ordered_mnk_tiling import (
+        from merlin.compiler.transforms.tiling import (
             materialize_looped_mnk_inputs,
         )
 

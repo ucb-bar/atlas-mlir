@@ -1,0 +1,336 @@
+{
+  "arena_bytes": 0,
+  "arena_offsets": {},
+  "cycles": {
+    "hi": null,
+    "lo": null,
+    "missing": [
+      "structural first-valid; no performance claim"
+    ],
+    "provenance": [],
+    "resolved": false
+  },
+  "digest": "c6faca61b635405e41b12c7c745b70f3c3abc0903aba8e05bf6c61227ff7eaec",
+  "notes": [],
+  "required_capabilities": [],
+  "schema": "global_plan_v1",
+  "selected": [
+    {
+      "cycles": {
+        "hi": null,
+        "lo": null,
+        "missing": [
+          "application region costs have not been calibrated"
+        ],
+        "provenance": [],
+        "resolved": false
+      },
+      "demands": [],
+      "id": "region_0",
+      "implementation": "source_activation_quantize_device",
+      "inputs": [
+        {
+          "buffer": "arg3",
+          "representation": {
+            "attributes": {},
+            "dtype": "bf16",
+            "encoding": "plain",
+            "layout": "dense",
+            "placement": "host_memory",
+            "quantization": "none"
+          }
+        }
+      ],
+      "metadata": {
+        "kind": "activation_quantize_device"
+      },
+      "nodes": [
+        0,
+        1
+      ],
+      "occupancy": [],
+      "outputs": [
+        {
+          "buffer": "op0r0",
+          "representation": {
+            "attributes": {},
+            "dtype": "i8",
+            "encoding": "plain",
+            "layout": "dense",
+            "placement": "host_memory",
+            "quantization": "none"
+          }
+        },
+        {
+          "buffer": "op0r1",
+          "representation": {
+            "attributes": {},
+            "dtype": "i32",
+            "encoding": "plain",
+            "layout": "dense",
+            "placement": "host_memory",
+            "quantization": "none"
+          }
+        }
+      ],
+      "placement": "accelerator",
+      "required_capabilities": [],
+      "resident_inputs": [],
+      "resident_outputs": [],
+      "scratch_bytes": 0
+    },
+    {
+      "cycles": {
+        "hi": null,
+        "lo": null,
+        "missing": [
+          "application region costs have not been calibrated"
+        ],
+        "provenance": [],
+        "resolved": false
+      },
+      "demands": [],
+      "id": "region_2",
+      "implementation": "source_already_quantized",
+      "inputs": [
+        {
+          "buffer": "arg1",
+          "representation": {
+            "attributes": {},
+            "dtype": "i8",
+            "encoding": "plain",
+            "layout": "dense",
+            "placement": "host_memory",
+            "quantization": "none"
+          }
+        },
+        {
+          "buffer": "arg2",
+          "representation": {
+            "attributes": {},
+            "dtype": "i32",
+            "encoding": "plain",
+            "layout": "dense",
+            "placement": "host_memory",
+            "quantization": "none"
+          }
+        },
+        {
+          "buffer": "op0r0",
+          "representation": {
+            "attributes": {},
+            "dtype": "i8",
+            "encoding": "plain",
+            "layout": "dense",
+            "placement": "host_memory",
+            "quantization": "none"
+          }
+        },
+        {
+          "buffer": "op0r1",
+          "representation": {
+            "attributes": {},
+            "dtype": "i32",
+            "encoding": "plain",
+            "layout": "dense",
+            "placement": "host_memory",
+            "quantization": "none"
+          }
+        }
+      ],
+      "metadata": {
+        "kind": "already_quantized"
+      },
+      "nodes": [
+        2
+      ],
+      "occupancy": [],
+      "outputs": [
+        {
+          "buffer": "op1r0.readout",
+          "representation": {
+            "attributes": {},
+            "dtype": "bf16",
+            "encoding": "plain",
+            "layout": "dense",
+            "placement": "host_memory",
+            "quantization": "none"
+          }
+        }
+      ],
+      "placement": "accelerator",
+      "required_capabilities": [],
+      "resident_inputs": [],
+      "resident_outputs": [],
+      "scratch_bytes": 0
+    },
+    {
+      "cycles": {
+        "hi": null,
+        "lo": null,
+        "missing": [
+          "application region costs have not been calibrated"
+        ],
+        "provenance": [],
+        "resolved": false
+      },
+      "demands": [],
+      "id": "region_3",
+      "implementation": "source_layout",
+      "inputs": [
+        {
+          "buffer": "arg0",
+          "representation": {
+            "attributes": {},
+            "dtype": "bf16",
+            "encoding": "plain",
+            "layout": "dense",
+            "placement": "host_memory",
+            "quantization": "none"
+          }
+        }
+      ],
+      "metadata": {
+        "kind": "layout"
+      },
+      "nodes": [
+        3
+      ],
+      "occupancy": [],
+      "outputs": [
+        {
+          "buffer": "op1r0.bias",
+          "representation": {
+            "attributes": {},
+            "dtype": "bf16",
+            "encoding": "plain",
+            "layout": "dense",
+            "placement": "host_memory",
+            "quantization": "none"
+          }
+        }
+      ],
+      "placement": "host",
+      "required_capabilities": [],
+      "resident_inputs": [],
+      "resident_outputs": [],
+      "scratch_bytes": 0
+    },
+    {
+      "cycles": {
+        "hi": null,
+        "lo": null,
+        "missing": [
+          "application region costs have not been calibrated"
+        ],
+        "provenance": [],
+        "resolved": false
+      },
+      "demands": [],
+      "id": "region_4",
+      "implementation": "source_float_arithmetic",
+      "inputs": [
+        {
+          "buffer": "op1r0.readout",
+          "representation": {
+            "attributes": {},
+            "dtype": "bf16",
+            "encoding": "plain",
+            "layout": "dense",
+            "placement": "host_memory",
+            "quantization": "none"
+          }
+        },
+        {
+          "buffer": "op1r0.bias",
+          "representation": {
+            "attributes": {},
+            "dtype": "bf16",
+            "encoding": "plain",
+            "layout": "dense",
+            "placement": "host_memory",
+            "quantization": "none"
+          }
+        }
+      ],
+      "metadata": {
+        "kind": "float_arithmetic"
+      },
+      "nodes": [
+        4
+      ],
+      "occupancy": [],
+      "outputs": [
+        {
+          "buffer": "op1r0",
+          "representation": {
+            "attributes": {},
+            "dtype": "bf16",
+            "encoding": "plain",
+            "layout": "dense",
+            "placement": "host_memory",
+            "quantization": "none"
+          }
+        }
+      ],
+      "placement": "host",
+      "required_capabilities": [],
+      "resident_inputs": [],
+      "resident_outputs": [],
+      "scratch_bytes": 0
+    },
+    {
+      "cycles": {
+        "hi": null,
+        "lo": null,
+        "missing": [
+          "application region costs have not been calibrated"
+        ],
+        "provenance": [],
+        "resolved": false
+      },
+      "demands": [],
+      "id": "region_5",
+      "implementation": "source_host_ordered_relu",
+      "inputs": [
+        {
+          "buffer": "op1r0",
+          "representation": {
+            "attributes": {},
+            "dtype": "bf16",
+            "encoding": "plain",
+            "layout": "dense",
+            "placement": "host_memory",
+            "quantization": "none"
+          }
+        }
+      ],
+      "metadata": {
+        "kind": "host_ordered_relu"
+      },
+      "nodes": [
+        5
+      ],
+      "occupancy": [],
+      "outputs": [
+        {
+          "buffer": "op3r0",
+          "representation": {
+            "attributes": {},
+            "dtype": "bf16",
+            "encoding": "plain",
+            "layout": "dense",
+            "placement": "host_memory",
+            "quantization": "none"
+          }
+        }
+      ],
+      "placement": "host",
+      "required_capabilities": [],
+      "resident_inputs": [],
+      "resident_outputs": [],
+      "scratch_bytes": 0
+    }
+  ],
+  "transitions": []
+}

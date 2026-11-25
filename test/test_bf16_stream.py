@@ -5,7 +5,7 @@ import unittest
 from atlas_mlir_native.bf16_stream import loaded_bf16_pairs, trace_bf16_data
 from atlas_mlir_native.binding import _check_atomic_dma_schedule
 
-from merlin.semantic_compiler.target_binding import NativeCompilationError
+from merlin.compiler.semantic.target_binding import NativeCompilationError
 
 
 def load(address, pair, scratch=0):

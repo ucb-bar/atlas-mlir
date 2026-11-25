@@ -32,7 +32,7 @@ def main():
         command = [
             sys.executable,
             "-m",
-            "merlin.targetgen.cli",
+            "merlin.development.targetgen.cli",
             "native-compile",
             "--engine",
             "merlin_native",

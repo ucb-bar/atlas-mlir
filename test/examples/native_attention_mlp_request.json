@@ -1295,62 +1295,6 @@
     },
     {
       "attrs": {
-        "input_domain": "finite-normal-or-zero-bf16",
-        "numeric_semantics": "bf16-sign-clamp-v1"
-      },
-      "effect": "pure",
-      "id": "mlp_relu",
-      "index_maps": [
-        {
-          "coefficients": [
-            [
-              1,
-              0
-            ],
-            [
-              0,
-              1
-            ]
-          ],
-          "loop_rank": 2,
-          "offsets": [
-            0,
-            0
-          ]
-        },
-        {
-          "coefficients": [
-            [
-              1,
-              0
-            ],
-            [
-              0,
-              1
-            ]
-          ],
-          "loop_rank": 2,
-          "offsets": [
-            0,
-            0
-          ]
-        }
-      ],
-      "inputs": [
-        "mlp_hidden"
-      ],
-      "op": "relu",
-      "type": {
-        "dtype": "bf16",
-        "numerical_policy": "raw-bit-pattern",
-        "shape": [
-          32,
-          32
-        ]
-      }
-    },
-    {
-      "attrs": {
         "input_domain": "bf16-positive-zero-or-exact-normal-under-scale-122-128-v1",
         "scale_code": 127
       },
@@ -1393,7 +1337,7 @@
         }
       ],
       "inputs": [
-        "mlp_relu"
+        "mlp_hidden"
       ],
       "op": "pack_fp8",
       "type": {
@@ -1488,7 +1432,7 @@
     "external"
   ],
   "outputs": [
-    "mlp_relu",
+    "mlp_hidden",
     "mlp_output"
   ],
   "schema": "merlin.semantic_kernel.v2",

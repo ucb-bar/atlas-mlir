@@ -287,6 +287,27 @@ class VirtualDMALoweringTest(unittest.TestCase):
                 self.wait_checked(queued_transfers(12, shared_output=True),
                                   f"--schedule-atlas-virtual=random-seed={seed}")
 
+    def test_ring_wrap_waits_for_the_slot_owner_after_out_of_order_completions(self) -> None:
+        _, entries = self.wait_checked(queued_transfers(9))
+        # ch1 and ch2 have already retired, but the twelfth launch wraps onto
+        # the fourth command's still-live slot. Its ch3 wait must precede it.
+        twelfth = next(i for i, entry in enumerate(entries)
+                       if entry["operation"] == "atlas.dma" and entry["fields"].get(MARKER) == 11)
+        self.assert_wait_before(entries, twelfth, 3)
+        _, randomized = self.wait_checked(queued_transfers(9), "--schedule-atlas-virtual=random-seed=3")
+        for trace in (entries, randomized):
+            next_slot, occupied = 0, {}
+            for entry in trace:
+                fields = entry["fields"]
+                if entry["operation"] == "atlas.dma":
+                    self.assertNotIn(next_slot, occupied, "launch overwrites a pending command slot")
+                    occupied[next_slot] = fields["channel"]
+                    next_slot = (next_slot + 1) % 8
+                elif entry["operation"] == "atlas.dma_wait":
+                    occupied = {slot: channel for slot, channel in occupied.items()
+                                if channel != fields["channel"]}
+            self.assertFalse(occupied)
+
     def test_pending_stream_is_rejected_by_physical_consumers(self) -> None:
         lowered = run("atlas-opt", copy(), "--lower-atlas-virtual-to-machine")
         self.assertEqual(lowered.returncode, 0, lowered.stderr)
@@ -631,7 +652,17 @@ class VirtualDMALoweringTest(unittest.TestCase):
                 self.assertFalse(pending)
 
     def test_generated_pending_intervals_reject_missing_wrong_wait_and_unsafe_work(self) -> None:
+        from verification_support import insert_after
+
         machine, _ = self.checked(independent_work())
+        lines = machine.splitlines()
+        launch = next(i for i, line in enumerate(lines) if '"atlas.dma"' in line and MARKER in line)
+        # Supply an inert mutation site explicitly: lowering may reuse captured
+        # scalar literals and need no setup instruction inside this interval.
+        machine = insert_after(machine,launch,[('alu_imm',
+            'dst = 0 : i32, src = 0 : i32, immediate = 0 : i32, kind = "addi"')])
+        accepted = run('atlas-opt',machine,'--verify-atlas-generated-schedule','--verify-atlas-timing')
+        self.assertEqual(accepted.returncode,0,accepted.stderr)
         lines = machine.splitlines()
         launch = next(i for i, line in enumerate(lines) if '"atlas.dma"' in line and MARKER in line)
         wait = next(i for i in range(launch + 1, len(lines)) if '"atlas.dma_wait"' in lines[i])

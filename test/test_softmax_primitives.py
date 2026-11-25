@@ -21,7 +21,7 @@ def request_for(operation):
         TARGET_IDENTITY,
     )
 
-    from merlin.semantic_compiler.model import (
+    from merlin.compiler.semantic.model import (
         KernelRequest,
         SemanticNode,
         TensorType,
@@ -131,8 +131,8 @@ def build_cases(root):
     from atlas_mlir_native.binding import AtlasNativeBinding
     from atlas_mlir_native.layout import pack_bf16_pair_halves
 
-    from merlin.semantic_compiler.search import SearchLimits
-    from merlin.semantic_compiler.target_binding import verify_native_publication
+    from merlin.compiler.semantic.search.exploration import SearchLimits
+    from merlin.compiler.semantic.target_binding import verify_native_publication
 
     snapshot = build_snapshot(root)
     compiled = {}
@@ -203,7 +203,7 @@ class SoftmaxPrimitivesTest(unittest.TestCase):
             evaluate_bf16_recip,
         )
 
-        from merlin.semantic_compiler.reference import TensorValue, evaluate_graph
+        from merlin.compiler.semantic.reference import TensorValue, evaluate_graph
 
         callbacks = {
             ("max_bf16", "raw-bit-pattern"): evaluate_bf16_max,

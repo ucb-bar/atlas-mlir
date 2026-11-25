@@ -3,6 +3,7 @@
 #include "Atlas/AtlasOps.h"
 #include "Atlas/AtlasVirtualAllocation.h"
 #include "Atlas/AtlasVirtualVerification.h"
+#include "Atlas/AtlasWorkBudget.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/IR/Diagnostics.h"
 #include "mlir/Pass/Pass.h"
@@ -72,7 +73,7 @@ SmallVector<Input> candidates(func::FuncOp function) {
     abi = *read;
   }
   for (Operation &op : function.front()) {
-    if (isa<VirtualDMAStoreFP8Op, VirtualDMAStoreBF16Op>(op)) {
+    if (isa<VirtualDMAStoreFP8Op, VirtualDMAStoreBF16Op, VirtualDMAStoreBF16SliceOp>(op)) {
       auto span = dmaSpan(&op);
       if (!span)
         return {};
@@ -149,27 +150,36 @@ struct ReuseAtlasImmutableWeightsPass
     if (failed(verifyAtlasVirtualModule(module)))
       return signalPassFailure();
     for (func::FuncOp function : module.getOps<func::FuncOp>())
-      reuseAtlasImmutableWeights(function);
+      if (failed(reuseAtlasImmutableWeights(function)))
+        return signalPassFailure();
     if (failed(verifyAtlasVirtualModule(module)))
       signalPassFailure();
   }
 };
 } // namespace
 
-void mlir::atlas::reuseAtlasImmutableWeights(func::FuncOp function) {
+LogicalResult mlir::atlas::reuseAtlasImmutableWeights(func::FuncOp function) {
   if (!llvm::hasSingleElement(function.getBody()) || !hasRepeat(candidates(function)))
-    return;
+    return success();
   OwningOpRef<func::FuncOp> trial(cast<func::FuncOp>(function->clone()));
   rewrite(candidates(*trial));
   // Reuse extends register lifetimes. Trial the actual greedy allocator and
   // its independent checks rather than assuming a cached-weight count fits.
-  ScopedDiagnosticHandler suppress(function.getContext(), [](Diagnostic &) {
-    return success();
-  });
   VirtualAllocationPlan plan;
-  if (failed(plan.allocate(*trial)) || failed(plan.verify()))
-    return;
+  LogicalResult fits = failure();
+  {
+    ScopedDiagnosticHandler suppress(function.getContext(), [](Diagnostic &) {
+      return success();
+    });
+    if (succeeded(plan.allocate(*trial)))
+      fits = plan.verify();
+  }
+  if (plan.workBudgetExhausted() || AtlasWorkBudget::anyExhausted())
+    return function.emitOpError("register-allocation work budget exhausted during immutable reuse trial");
+  if (failed(fits))
+    return success();
   function.getBody().takeBody(trial->getBody());
+  return success();
 }
 
 void mlir::atlas::registerReuseAtlasImmutableWeightsPass() {

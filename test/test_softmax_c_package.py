@@ -43,7 +43,7 @@ class SoftmaxCPackageTest(unittest.TestCase):
         from atlas_mlir_native.row_loop import compile_row_loop, prepare_plan
         from test_tiled_softmax import source_request
 
-        from merlin.semantic_compiler.search import SearchLimits
+        from merlin.compiler.semantic.search.exploration import SearchLimits
 
         root = cls.root / "case-row-loop"
         request = source_request((33, 163))
@@ -62,7 +62,7 @@ class SoftmaxCPackageTest(unittest.TestCase):
             from atlas_mlir_native.row_softmax import prepare_row_softmax
             from atlas_mlir_native.softmax_c_source import prepare_source_c_package
 
-            from merlin.frontends.compile_inputs import load_compile_inputs
+            from merlin.compiler.frontend.inputs import load_compile_inputs
 
             root = cls.root / "source-case"
             root.mkdir()
@@ -240,7 +240,7 @@ class SoftmaxCPackageTest(unittest.TestCase):
         command = [
             os.sys.executable,
             "-m",
-            "merlin.targetgen.cli",
+            "merlin.development.targetgen.cli",
             "native-compile",
             *common,
             "--target-source",
@@ -257,7 +257,7 @@ class SoftmaxCPackageTest(unittest.TestCase):
         verify = [
             os.sys.executable,
             "-m",
-            "merlin.targetgen.cli",
+            "merlin.development.targetgen.cli",
             "native-verify",
             *common,
             "--artifact",
@@ -282,12 +282,15 @@ class SoftmaxCPackageTest(unittest.TestCase):
         from test_spill_model_execution import MODEL_REVISION, model_instruction
         from tools.check_program_decode import decode_binary
 
-        from merlin.semantic_compiler.tiled_softmax import assemble_row_softmax_outputs
+        from merlin.compiler.semantic.tiled_softmax import assemble_row_softmax_outputs
 
-        origin = json.loads(importlib.metadata.distribution("npu-model").read_text("direct_url.json") or "{}")
-        self.assertTrue(
-            MODEL_REVISION in origin.get("url", "") or origin.get("vcs_info", {}).get("commit_id") == MODEL_REVISION
-        )
+        if hasattr(self, "authenticate_model_source"):
+            self.authenticate_model_source()
+        else:
+            origin = json.loads(importlib.metadata.distribution("npu-model").read_text("direct_url.json") or "{}")
+            self.assertTrue(
+                MODEL_REVISION in origin.get("url", "") or origin.get("vcs_info", {}).get("commit_id") == MODEL_REVISION
+            )
         compiler = shutil.which("cc")
         self.assertIsNotNone(compiler, "host C compiler required")
         torch.set_num_threads(1)
@@ -656,19 +659,19 @@ const void *source_workspace(void) { return source_scratch; }
         from atlas_mlir_native.row_softmax import prepare_row_softmax
         from atlas_mlir_native.softmax_c import prepare_c_package
 
-        from merlin.compile.dispatch_c import DispatchCall, emit_program_c
-        from merlin.compile.semantic_regions import outline_semantic_regions
-        from merlin.runtime.program import build_program
-        from merlin.semantic_compiler.search import SearchLimits
-        from merlin.xdsl_dialects.lowering.arena_plan import ArenaRequirements
-        from merlin.xdsl_dialects.lowering.global_plan import (
+        from merlin.compiler.lower.c.dispatch import DispatchCall, emit_program_c
+        from merlin.compiler.partition.semantic_regions import outline_semantic_regions
+        from merlin.compiler.lower.c.dispatch import build_program
+        from merlin.compiler.semantic.search.exploration import SearchLimits
+        from merlin.compiler.schedule.storage.arena import ArenaRequirements
+        from merlin.compiler.partition.global_plan import (
             BufferRepresentation,
             CycleInterval,
             GlobalPlan,
             RegionAlternative,
             ValueRepresentation,
         )
-        from merlin.xdsl_dialects.lowering.global_plan_emission import dispatch_digest
+        from merlin.compiler.partition.global_plan_emission import dispatch_digest
 
         # Both consumers read one source tensor; all their results remain visible.
         second = dataclasses.replace(plan.source.nodes[1], id="second_probabilities")

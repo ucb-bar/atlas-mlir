@@ -68,8 +68,8 @@ class CubeReferenceTest(unittest.TestCase):
         from atlas_mlir_native.binding import AtlasNativeBinding
         from test_looped_mnk import ROOT, build_snapshot
 
-        from merlin.semantic_compiler.search import SearchLimits
-        from merlin.semantic_compiler.target_binding import NativeCompilationError, verify_native_publication
+        from merlin.compiler.semantic.search.exploration import SearchLimits
+        from merlin.compiler.semantic.target_binding import NativeCompilationError, verify_native_publication
 
         with tempfile.TemporaryDirectory(dir=os.environ.get("TMPDIR")) as directory:
             root = Path(directory)

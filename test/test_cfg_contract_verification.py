@@ -23,14 +23,54 @@ class CFGContractVerificationTest(unittest.TestCase):
     def check(self, text: str, rejects: str | None = None) -> None:
         assert_boundaries(self, text, TIMED_FINAL[:2] if TIMED in text else UNTIMED, rejects=rejects)
 
+    def test_mutable_slot_load_cannot_move_after_its_following_store(self) -> None:
+        source = r'''module {
+  func.func @slot_order() -> !atlas.virtual_state attributes {
+    atlas.input_dram_base = 2415919104 : i64,
+    atlas.output_dram_base = 2415923200 : i64,
+    atlas.output_dram_bytes = 2048 : i64} {
+    %start = "atlas.virtual_start"() : () -> !atlas.virtual_state
+    %slot = "atlas.virtual_slot"() {kind = "bf16", words = 512 : i32, slot_word = -1 : i32, purpose = "scratch"} : () -> !atlas.virtual_spill
+    %zero = "atlas.virtual_vpu_splat"() {bits = 0 : i32} : () -> !atlas.virtual_bf16
+    %one = arith.constant 11 : i32
+    %two = arith.constant 22 : i32
+    %out = arith.constant -1879044096 : i32
+    %bytes = arith.constant 2048 : i32
+    %saved = "atlas.virtual_save"(%start, %slot, %zero) : (!atlas.virtual_state, !atlas.virtual_spill, !atlas.virtual_bf16) -> !atlas.virtual_state
+    %written = "atlas.virtual_slot_store"(%saved, %slot, %one) {kind = "sw", byte_offset = 0 : i32} : (!atlas.virtual_state, !atlas.virtual_spill, i32) -> !atlas.virtual_state
+    %read, %value = "atlas.virtual_slot_load"(%written, %slot) {kind = "lw", byte_offset = 0 : i32} : (!atlas.virtual_state, !atlas.virtual_spill) -> (!atlas.virtual_state, i32)
+    %replaced = "atlas.virtual_slot_store"(%read, %slot, %two) {kind = "sw", byte_offset = 0 : i32} : (!atlas.virtual_state, !atlas.virtual_spill, i32) -> !atlas.virtual_state
+    %result = "atlas.virtual_slot_store"(%replaced, %slot, %value) {kind = "sw", byte_offset = 4 : i32} : (!atlas.virtual_state, !atlas.virtual_spill, i32) -> !atlas.virtual_state
+    %restored, %tile = "atlas.virtual_restore"(%result, %slot) : (!atlas.virtual_state, !atlas.virtual_spill) -> (!atlas.virtual_state, !atlas.virtual_bf16)
+    %stored = "atlas.virtual_dma_store_bf16"(%restored, %tile, %out, %bytes) : (!atlas.virtual_state, !atlas.virtual_bf16, i32, i32) -> !atlas.virtual_state
+    return %stored : !atlas.virtual_state
+  }
+}
+'''
+        compiled = run("atlas-opt", source, "--atlas-compile-unscheduled")
+        self.assertEqual(compiled.returncode, 0, compiled.stderr)
+        good = run("atlas-opt", compiled.stdout, "--verify-atlas-generated-schedule")
+        self.assertEqual(good.returncode, 0, good.stderr)
+        issued = operations(compiled.stdout)
+        load = next(n for n, line in enumerate(issued) if '"atlas.scalar_load"' in line)
+        store = next(n for n in range(load + 1, len(issued)) if '"atlas.scalar_store"' in issued[n])
+        # Keep both operations' source identities and scalar operands; only
+        # their actual VMEM effect order changes. Source value origin checks
+        # alone cannot distinguish the stale slot value from the current one.
+        issued[load], issued[store] = issued[store], issued[load]
+        changed = run("atlas-opt", reorder(compiled.stdout, issued), "--verify-atlas-generated-schedule")
+        self.assertNotEqual(changed.returncode, 0)
+        self.assertIn("mutable slot access changes source memory order", changed.stderr)
+
     def test_issued_branch_and_scalar_corruption_fails(self) -> None:
         dynamic, loop, branch = example("dynamic_branch"), example("loop"), example("branch")
-        comparison = next(line for line in loop.splitlines() if "atlas.virtual_scalar_result" in line and 'kind = "slt"' in line)
+        comparison = next(line for line in loop.splitlines() if "atlas.virtual_scalar_result" in line and any(f'kind = "{kind}"' in line for kind in ("slt", "slti")))
         source_id = re.search(r"atlas.virtual_cfg_source = (\d+) : i32", comparison)[1]
         ops = operations(branch)
         branch_pc = next(n for n, line in enumerate(ops) if '"atlas.branch"' in line)
         target_pc = next(n for n, line in enumerate(ops) if "atlas.virtual_cfg_block = 3 : i32" in line)
-        scalar = lambda kind: lambda line: '"atlas.alu_reg"' in line and f'kind = "{kind}"' in line and "atlas.virtual_scalar_result" in line
+        scalar = lambda *kinds: lambda line: any(f'kind = "{kind}"' in line for kind in kinds) and "atlas.virtual_scalar_result" in line and 'src = 0 : i32' not in line
+        corrupt = lambda line: line.replace('kind = "addi"', 'kind = "ori"').replace('kind = "add"', 'kind = "sub"').replace('kind = "slti"', 'kind = "sltiu"').replace('kind = "slt"', 'kind = "sltu"')
         mutations = [
             (dynamic, CFG_BRANCH, lambda line: line.replace('kind = "bne"', 'kind = "beq"'), BRANCH),
             (dynamic, CFG_BRANCH, lambda line: re.sub(r"lhs = \d+ : i32", "lhs = 0 : i32", line), BRANCH),
@@ -40,8 +80,8 @@ class CFGContractVerificationTest(unittest.TestCase):
              "CFG contract PACK helper requires an actual source PACK operation"),
             (branch, lambda line: '"atlas.branch"' in line,
              lambda line: re.sub(r"offset_bytes = -?\d+ : i32", f"offset_bytes = {2 * (target_pc - branch_pc)} : i32", line), BRANCH),
-            (loop, scalar("add"), lambda line: line.replace('kind = "add"', 'kind = "sub"'), SCALAR),
-            (loop, scalar("slt"), lambda line: line.replace('kind = "slt"', 'kind = "sltu"'), SCALAR),
+            (loop, scalar("add", "addi"), corrupt, SCALAR),
+            (loop, scalar("slt", "slti"), corrupt, SCALAR),
             (loop, lambda line: "atlas.virtual_cfg_branch = 1 : i32" in line,
              lambda line: line.replace("atlas.virtual_cfg_branch = 1 : i32", "atlas.virtual_cfg_branch = 1 : i64"), "CFG contract tags require nonnegative i32 identities"),
         ]
@@ -112,8 +152,8 @@ class CFGContractVerificationTest(unittest.TestCase):
         self.assertIn("atlas.virtual_cfg_contract", structured.stdout)
         good = run("atlas-opt", structured.stdout, "--finalize-atlas-llvm-calls")
         self.assertEqual(good.returncode, 0, good.stderr)
-        changed = rewrite_line(structured.stdout, lambda line: 'atlas.source_op = "atlas.alu_reg"' in line and 'kind = "slt"' in line
-                               and "atlas.virtual_scalar_result" in line, lambda line: line.replace('kind = "slt"', 'kind = "sltu"'))
+        changed = rewrite_line(structured.stdout, lambda line: any(f'kind = "{kind}"' in line for kind in ("slt", "slti"))
+                               and "atlas.virtual_scalar_result" in line, lambda line: line.replace('kind = "slti"', 'kind = "sltiu"').replace('kind = "slt"', 'kind = "sltu"'))
         finalize_rejects(self, changed, SCALAR)
 
 

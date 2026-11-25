@@ -25,7 +25,7 @@ def _member(root: Path, name: str) -> bytes:
 
 
 def _float_spec(raw: dict):
-    from merlin.semantic_compiler.precision_values import FloatBoundarySpec
+    from merlin.compiler.quantization.contraction.values import FloatBoundarySpec
 
     if not isinstance(raw, dict) or raw.get("direction") != "encode":
         raise ValueError("graph input has no selected encode boundary")
@@ -50,13 +50,13 @@ def _render_bytes(name: str, payload: bytes) -> list[str]:
 
 
 def prepare(source_path: Path, bridge_root: Path, compiled: Path) -> tuple[dict, dict[str, str]]:
-    from merlin.frontends.linalg_mlir import parse_mlir_text
-    from merlin.semantic_compiler.precision_codegen import (
+    from merlin.compiler.frontend.linalg_mlir import parse_mlir_text
+    from merlin.compiler.quantization.contraction.codegen import (
         finite_f32_codebook,
         render_finite_f32_codebook_c,
     )
-    from merlin.semantic_compiler.target_binding import verify_native_publication
-    from merlin.targetgen.contract.model_host_bridge import (
+    from merlin.compiler.semantic.target_binding import verify_native_publication
+    from merlin.compiler.build.host_bridge import (
         diagnostic_whole_graph_host_bridge,
     )
     from xdsl.dialects import func
@@ -335,14 +335,15 @@ void atlas_graph_invoke_host(const atlas_f32_memref2 *inputs,
 def prepare_c_package(record: dict, generated: dict[str, str], compiled: Path,
                       name: str, *, compile_inputs: Path | None = None) -> tuple[dict, dict[str, bytes]]:
     """Package the existing checked callback and runtime without a host main."""
-    from merlin.common.paths import merlin_dir
-    from merlin.compile.c_sources import c_source_pair
+    from merlin.common.paths import runtime_dir
+    from merlin.compiler.lower.c.dispatch import c_source_pair
 
     runtime = Path(__file__).resolve().parents[1] / "runtime"
-    public = {member: _member(runtime, member).decode()
-              for member in ("atlas_host.h", "atlas_model_tile.h")}
+    from atlas_mlir_native.c_runtime import runtime_headers
+
+    public = {**runtime_headers(runtime), "atlas_model_tile.h": _member(runtime, "atlas_model_tile.h").decode()}
     private = {
-        "finite_float_boundary.h": (Path(merlin_dir()) / "runtime/c/finite_float_boundary.h").read_text(),
+        "finite_float_boundary.h": (runtime_dir() / "c/finite_float_boundary.h").read_text(),
         "atlas_graph_memref.h": _member(runtime, "atlas_graph_memref.h").decode(),
         **{member: generated[member] for member in (
             "atlas_graph_data.h", "atlas_graph_model_wrapper.h")},
@@ -423,8 +424,8 @@ int {name}_dispatch(void *context, const void *const *inputs, void *const *outpu
     frozen = None
     if compile_inputs is not None:
         import numpy as np
-        from merlin.compile.c_parameters import freeze_c_arguments
-        from merlin.frontends.compile_inputs import (
+        from merlin.compiler.lower.c.parameters import freeze_c_arguments
+        from merlin.compiler.frontend.inputs import (
             load_compile_inputs,
             load_lifted_argument_bytes,
         )
@@ -610,7 +611,7 @@ def main(argv: list[str] | None = None) -> int:
         elif args.request is not None:
             if not args.c_package_name or args.host_bridge is not None:
                 raise ValueError("--request requires --c-package-name and no graph bridge")
-            from merlin.semantic_compiler.model import KernelRequest
+            from merlin.compiler.semantic.model import KernelRequest
 
             request = KernelRequest.from_record(json.loads(args.request.read_text()))
             target_source = Path(__file__).resolve().parents[1]

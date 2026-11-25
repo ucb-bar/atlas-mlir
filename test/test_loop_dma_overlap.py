@@ -32,7 +32,12 @@ def loop_program(*, limit=7, source=4096, destination=8192,
             ("scalar_store", 'kind = "sw", src = 5 : i32, base = 2 : i32, offset = 0 : i32'),
             addi(1, 1, stride), addi(2, 2, 20), addi(3, 3, 1)]
     if dma_inside:
-        body.append(("dma_wait", 'channel = 0 : i32'))
+        # Complete the entry transfer, then launch a new one and read its
+        # destination before waiting. A wait alone inside the loop is safe.
+        body.extend([("dma_wait", 'channel = 0 : i32'),
+                     next(op for op in setup if op[0] == "dma"),
+                     *constant(9, 0x80000),
+                     ("scalar_load", 'kind = "lw", dst = 5 : i32, base = 9 : i32, offset = 0 : i32')])
     if extra_entry:
         setup += [("branch", 'kind = "beq", lhs = 0 : i32, rhs = 0 : i32, offset_bytes = 6 : i32'), nop()]
     branch = ("branch", f'kind = "blt", lhs = 3 : i32, rhs = 4 : i32, offset_bytes = {-2 * len(body)} : i32')
@@ -61,18 +66,33 @@ class LoopDMAOverlapTest(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_conflicts_in_later_iterations_are_not_missed(self):
-        # First read is outside staging; the second enters it. Check read/write
-        # direction: a DMA store can overlap loop reads, but not loop writes.
-        for options in ({"source": 0x7fffc, "stride": 4},
-                        {"destination": 0x80000},
-                        {"store": True, "destination": 0x80000}):
-            with self.subTest(options=options):
-                result = run("atlas-opt", loop_program(**options), "--insert-atlas-delays")
-                self.assertNotEqual(result.returncode, 0)
-                self.assertIn("conflict", result.stderr)
+        # These reads/writes first enter staging on the second iteration.
+        later_overlaps = ({"source": 0x7fffc, "stride": 4},
+                          {"destination": 0x7ffec},
+                          {"store": True, "destination": 0x7ffec})
+        for options in later_overlaps:
+            with self.subTest(options=options, limit=1):
+                result = run("atlas-opt", loop_program(limit=1, **options),
+                             "--insert-atlas-delays", "--verify-atlas-timing")
+                self.assertEqual(result.returncode, 0, result.stderr)
+        for options in later_overlaps + ({"destination": 0x80000},
+                                         {"store": True, "destination": 0x80000}):
+            for timing in ("--insert-atlas-delays", "--verify-atlas-timing"):
+                with self.subTest(options=options, timing=timing):
+                    result = run("atlas-opt", loop_program(**options), timing)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("conflict", result.stderr)
+        # A DMA store can overlap loop reads, but not loop writes.
         result = run("atlas-opt", loop_program(store=True, source=0x80000),
                      "--insert-atlas-delays", "--verify-atlas-timing")
         self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_final_verifier_rejects_unknown_addresses_and_dma_inside_loops(self):
+        for options in ({"unknown_address": True}, {"dma_inside": True}):
+            with self.subTest(options=options):
+                result = run("atlas-opt", loop_program(**options), "--verify-atlas-timing")
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("conflict", result.stderr)
 
     def test_unproved_or_unsupported_loops_cannot_carry_pending_dma(self):
         for options in ({"unknown_limit": True}, {"unknown_address": True},

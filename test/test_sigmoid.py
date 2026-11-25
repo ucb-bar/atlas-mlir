@@ -13,7 +13,7 @@ from atlas_mlir_native.sigmoid import (
     prepare_source,
 )
 
-from merlin.semantic_compiler.model import (
+from merlin.compiler.semantic.model import (
     KernelRequest,
     SemanticNode,
     TensorType,
@@ -133,7 +133,7 @@ class SigmoidTest(unittest.TestCase):
         from atlas_mlir_native.reduction import REDUCTION_POLICY
         from test_application_c_package import ApplicationLayoutPolicyTest
 
-        from merlin.semantic_compiler.target_binding import NativeCompilationError
+        from merlin.compiler.semantic.target_binding import NativeCompilationError
 
         old = {
             **ApplicationLayoutPolicyTest().policy(),
@@ -174,7 +174,7 @@ class SigmoidTest(unittest.TestCase):
         from atlas_mlir_native.reference import evaluate_sigmoid
         from npu_model.configs.numerics import RtlNumerics
 
-        from merlin.semantic_compiler.reference import TensorValue
+        from merlin.compiler.semantic.reference import TensorValue
 
         codes = [0, 0x8000, *range(0x2000, 0x4201), *range(0xA000, 0xC201)]
         values = torch.tensor(codes, dtype=torch.int32).to(torch.int16).view(torch.bfloat16)
