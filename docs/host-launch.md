@@ -79,7 +79,17 @@ returns. A C fence is not a cache flush.
 
 The example hosts call this hook when built with `-DATLAS_PLATFORM_CACHE_SYNC=1`.
 
+## Install model2MLIR for capture
+
+Install Atlas with its `capture` extra in the Python environment used for
+PyTorch capture. The extra selects the model2MLIR commit in `pyproject.toml`
+and requires the PyTorch CPU build.
+
 ## Graph mailbox
+
+`build_c_package.sh` stops at `source_f32_softmax_unqualified` when it compiles the
+two-output graph with the example's diagnostic policy, so the mailbox build, which
+needs that compiled graph, does not complete yet.
 
 `host_graph_mailbox.c` initializes the host and graph binding once, then waits
 for requests in a static `atlas_graph_mailbox` (64-byte aligned). Each graph
@@ -191,11 +201,66 @@ and refuses overlap with Atlas regions. It writes `host/platform-map.c`
 run `atlas-host-embed --soc-memmap MEMMAP --require-bitstream`, then
 `--host-elf ELF --check-only` after linking.
 
+## Shape-independent raw launches
+
+`atlas_host_load_raw(host, words, word_count)` loads a reset-entry stream
+directly, with no tensor shape or graph wrapper. The original program must have
+exactly one ECALL at its end, no EBREAK, no writes to DBG0 or DBG1, and all
+control-flow paths must reach that final ECALL after every engine and DMA
+operation has completed. Loading invalidates the previous program before
+checking a replacement; a failed replacement cannot accidentally launch an old
+image. The loader checks the mailbox/trap restrictions but does not prove
+control flow, DMA reachability or arithmetic scheduling.
+
+The loader replaces the final ECALL in place with `NOP; CSRRS x31, DBG1, x0;
+NOP; CSRRW x0, DBG0, x31; NOP; ECALL`, preserving every original instruction PC
+and adding five words. x31 becomes scratch only after the original kernel's work
+has completed. The leading NOP separates a preceding DELAY from the epilogue and
+the final NOP separates marker publication from ECALL.
+
+Raw loading clears retained-image residency and contributes one image load,
+`word_count + 5` IMEM words, and loader clock ticks to the host counters. A later
+`atlas_host_ensure_loaded` restores the original legacy image even when its
+source words equal those supplied to the raw loader.
+
+Use the normal `atlas_host_start`, `atlas_host_poll` and `atlas_host_wait` calls
+after raw loading. Each successful start clears DBG0 and publishes a fresh
+nonzero invocation sequence in DBG1 before the release fence and START; the
+device alone writes DBG0 while executing. Poll reads DBG0 before status and
+succeeds only when the exact expected sequence accompanies halted ECALL. A short
+invocation may complete before its first poll without being missed, and a stale
+ECALL or previous sequence cannot complete a new launch. Sequences never wrap:
+after UINT32_MAX, start refuses another invocation until the caller establishes
+quiescence and reinitializes the runtime.
+
+Raw buffer descriptors accept complete `uintptr_t` ranges, including 0x100000000
+on RV64; checked inclusive end arithmetic rejects wraparound. This does not
+relocate device instructions or infer DMA high halves. The compiled instructions
+must set the appropriate DMA base and keep each low32 transfer within its
+supported address window. The legacy graph/tile wrappers retain their existing
+shape and address admission rules.
+
+The caller must supply known quiescent hardware at initialization. A prelaunch
+cache synchronization failure issues no START and leaves the host inactive. A
+timeout, post-launch cache synchronization error or raw illegal/EBREAK halt
+retains `host->active`, buffer descriptors and device ownership; load/start
+remain busy. A host STOP or scalar fault does not drain engines. Preserve
+descriptors and all memory until success or externally established quiescence,
+then acknowledge a completed platform reset with `atlas_host_reset_completed`
+or reinitialize as part of the platform recovery policy. Reset notification
+invalidates both image modes and preserves the invocation sequence; exhaustion
+still requires reinitialization. MMIO callbacks
+must perform ordered synchronous accesses; direct baremetal callbacks and the
+runtime publication/acquisition points supply full fences. The runtime is
+single-caller and does not provide a queue or allocator.
+
 ## Tests
 
 | Behaviour | Test |
 | --- | --- |
-| Runtime calls, stale ECALL, timeout, cache hooks | [`test/host-launch-test.c`](../test/host-launch-test.c) |
+| Raw shape/address admission, invocation marker, missed-running pulse, retained fault ownership | [`test/raw-host-test.c`](../test/raw-host-test.c) |
+| Legacy runtime calls, stale ECALL, timeout, cache hooks | [`test/host-launch-test.c`](../test/host-launch-test.c) |
+| Raw/resident transitions, counters, clock hooks, fault ownership, reset notification | [`test/host-runtime-merge-test.c`](../test/host-runtime-merge-test.c) |
 | Header and memmap checks | [`test/test_host_embed.py`](../test/test_host_embed.py), [`test/test_graph_platform.py`](../test/test_graph_platform.py) |
 | Capsule, LLVM object entry, mailbox pointers with two starts (RTL core) | [`test/test_boot_capsule.py`](../test/test_boot_capsule.py), [`test/test_elf_entry_reference.py`](../test/test_elf_entry_reference.py), [`test/test_mailbox_call_reference.py`](../test/test_mailbox_call_reference.py) |
 | Dump checkers | [`test/test_graph_mailbox_checker.py`](../test/test_graph_mailbox_checker.py), [`test/test_mailbox_dump_check.py`](../test/test_mailbox_dump_check.py), [`test/test_model_dump_check.py`](../test/test_model_dump_check.py) |
@@ -218,8 +283,7 @@ driver (`add52b0a7c96d72e0079b7938e07ca5080871e82`).
   [`tools/atlas_check_model_dump.py`](../tools/atlas_check_model_dump.py))
   compare reported bytes. A match reports `reported_match_unqualified`: it does
   not show which bitstream ran or that the run was fresh.
-- One synchronous caller; one program in IMEM at a time; fixed DMA addresses
-  chosen at compile time.
+- One synchronous caller; fixed DMA addresses chosen at compile time.
 
 ## Resident images
 
@@ -232,3 +296,33 @@ platform reset, call `atlas_host_reset_completed`; this notification does not re
 hardware or establish that outstanding DMA has drained. A timeout preserves active
 state until completion or reset. Runtime counters report image loads, reuse hits,
 IMEM words written, and launches; they do not estimate platform latency.
+
+`atlas_host_keep_images(host, copy, copy_words, slots, slot_capacity)` keeps several
+images in IMEM at once, each from its own offset after word 1. A start runs the
+selected image through word 0, a `JAL x0` to its offset with a NOP in the delay
+slot, so images must be position independent. `copy` holds the words the host
+wrote to IMEM; a request whose words equal a resident image writes at most the two
+jump words, and a new image of the same length as a resident one rewrites only its
+differing words in the least recently used one. In a loop over repeated layers
+those are the per-trip operand addresses. Both `atlas_host_load` and
+`atlas_host_ensure_loaded` follow this rule while it is enabled; raw loads,
+invalidation, and reset drop every resident image but keep the policy and its
+buffers, which must stay alive until the host is released by
+`atlas_host_keep_images(host, 0, 0, 0, 0)` or given other buffers. Every
+generated application binding with device regions, with or without a
+deployment, sets the policy when it binds: it keeps its own images or releases
+the host, so no application runs with images or buffers another one left.
+
+A board deployment enables it when the provider's replay of both rules over the
+static launch order writes fewer IMEM words and every launched image is
+position independent ([imem_residency.py](../python/atlas_mlir_native/imem_residency.py));
+`deployment.json` then records `provider.imem_residency` with both counts, the
+replay's image loads, each launching call's program per launch, and each
+start's image and entry word. The exactness
+checker requires every launching call's programs, checks them against each
+call's launch schedule and the start list, executes the kit with IMEM as
+persistent memory, and refuses a start
+unless word 0 is the jump to that start's published entry, word 1 is a NOP, and
+the words from the entry equal that start's compiled image; it also refuses
+missing or extra starts and counters that differ from the record. A kit without
+the record keeps the word-0 rule unchanged.
