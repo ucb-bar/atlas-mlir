@@ -51,7 +51,7 @@ def reference_values(request, arguments):
     from rtl.graph_semantic_checker import _raw_bf16
     from test_mxu_numerics import dot
 
-    from merlin.semantic_compiler.reference import TensorValue, evaluate_graph
+    from merlin.compiler.semantic.reference import TensorValue, evaluate_graph
 
     @lru_cache(maxsize=65536)
     def checked_dot(weights, activations):
@@ -197,13 +197,13 @@ def measure(args):
     from tools.check_program_decode import decode_binary
     from tools.model_instructions import model_instruction
 
-    from merlin.frontends.compile_inputs import (
+    from merlin.compiler.frontend.inputs import (
         load_compile_inputs,
         load_lifted_argument_bytes,
     )
-    from merlin.semantic_compiler.model import KernelRequest
-    from merlin.semantic_compiler.reference import TensorValue
-    from merlin.semantic_compiler.target_binding import verify_native_publication
+    from merlin.compiler.semantic.model import KernelRequest
+    from merlin.compiler.semantic.reference import TensorValue
+    from merlin.compiler.semantic.target_binding import verify_native_publication
 
     revision = "337e9f249f938a1dff007ddf8a763e5cd4b3aa2b"
     origin = json.loads(
@@ -444,7 +444,7 @@ def main():
         args.rtl_max_cycles is None or not 1 <= args.rtl_max_cycles <= 10000000
     ):
         parser.error("RTL fixtures require --rtl-max-cycles in [1,10000000]")
-    from merlin.semantic_compiler.codegen import CodegenOptions, codegen_options
+    from merlin.compiler.semantic.codegen import CodegenOptions, codegen_options
 
     with codegen_options(CodegenOptions(io_memory_bytes=args.io_memory_bytes)):
         args.out.write_text(json.dumps(measure(args), indent=2, sort_keys=True) + "\n")

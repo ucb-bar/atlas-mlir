@@ -18,7 +18,7 @@ namespace {
 
 bool isLaunch(Operation *op) {
   return isa<VirtualDMALoadFP8Op, VirtualDMALoadBF16Op,
-             VirtualDMAStoreFP8Op, VirtualDMAStoreBF16Op>(op);
+             VirtualDMAStoreFP8Op, VirtualDMAStoreBF16Op, VirtualDMAStoreBF16SliceOp>(op);
 }
 
 class DMAAllocationVerifier {
@@ -85,7 +85,7 @@ private:
   LogicalResult verifyGeometry(Value transfer,
                                const DMATransferPlacement &placement) {
     Operation *launch = transfer.getDefiningOp();
-    unsigned halves = isa<VirtualDMALoadBF16Op, VirtualDMAStoreBF16Op>(launch) ? 2 : 1;
+    unsigned halves = isa<VirtualDMALoadBF16Op, VirtualDMAStoreBF16Op, VirtualDMAStoreBF16SliceOp>(launch) ? 2 : 1;
     if (placement.halves != halves)
       return assignmentError(transfer, "DMA placement halves do not match the transfer format");
     if (placement.channel >= kAtlasDMAChannels)

@@ -1,5 +1,8 @@
 #include "Atlas/AtlasTiming.h"
+#include "llvm/ADT/BitVector.h"
+#include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/StringSwitch.h"
+#include "llvm/Support/MathExtras.h"
 #include <algorithm>
 #include <cctype>
 #include <climits>
@@ -381,7 +384,7 @@ bool mlir::atlas::timing::vpuCanOverlap(const OpInfo &a, const OpInfo &b) {
 
 namespace {
 
-struct Builder {
+struct FootprintBuilder {
   Footprint f;
 
   void x(int reg, bool write, int age, bool atCompletion = false) {
@@ -470,7 +473,7 @@ std::optional<long long> vectorAddress(const Instr &in, const RegValues &regs) {
   return ((alu >> 3) & 0xFFFF) * kLineBytes;
 }
 
-void scalarRegs(Builder &b, const Instr &in) {
+void scalarRegs(FootprintBuilder &b, const Instr &in) {
   const OpInfo &op = *in.op;
   // csrr*i encodes an immediate in rs1.
   bool immediateCsr = op.opClass == OpClass::Csr && op.name.back() == 'i';
@@ -498,7 +501,7 @@ ScalarAccess mlir::atlas::timing::scalarAccess(const Instr &in, const RegValues 
 
 Footprint mlir::atlas::timing::footprintOf(const Instr &in,
                                            const RegValues &regs) {
-  Builder b;
+  FootprintBuilder b;
   const OpInfo &op = *in.op;
   if (in.release && op.opClass != OpClass::Csr) {
     b.f.error = "atlas.complete is only valid on a CSR instruction";
@@ -757,6 +760,19 @@ Footprint mlir::atlas::timing::footprintOf(const Instr &in,
     if (addr)
       *addr *= 4;
     auto bytes = reg(regs, in.rs2);
+    // RTL captures only 13 size bits and requires complete 32-byte beats.
+    // Zero beats can underflow its last-beat counter, so never model them as
+    // an empty access. Unknown sizes retain the conservative anywhere access.
+    if (bytes && (*bytes == 0 || *bytes % 32 != 0 || *bytes >= 8192)) {
+      b.f.error = "DMA size must be nonzero, a multiple of 32 bytes, and less than 8192 bytes";
+      break;
+    }
+    // Store VMEM reads do not observe the 128-beat queue's enqueue readiness;
+    // TileLink backpressure can fill it before a larger command finishes.
+    if (!load && bytes && *bytes > 4096) {
+      b.f.error = "DMA store size must not exceed 4096 bytes";
+      break;
+    }
     b.x(in.rd, false, 0);
     b.x(in.rs1, false, 0);
     b.x(in.rs2, false, 0);
@@ -987,16 +1003,53 @@ bool mlir::atlas::timing::conflictsAtCompletion(const Footprint &dma,
 }
 
 namespace {
+constexpr unsigned kResourceKinds = unsigned(Res::DmaBase) + 1;
+struct AccessMasks {
+  std::array<uint64_t, kResourceKinds> reads{}, writes{};
+};
+
+// Conservative buckets only select candidate pairs. The ordinary dependence
+// calculation still determines every edge, distance, kind and diagnostic.
+// Register rows share one bucket; VMEM lines share a 1-KiB page bucket. Modulo
+// collisions and unknown addresses may add candidates, but cannot remove one.
+AccessMasks accessMasks(const Footprint &f) {
+  AccessMasks masks;
+  for (const Access &a : f.accesses) {
+    unsigned grain = a.res == Res::MReg || a.res == Res::Acc ||
+                             a.res == Res::Weight || a.res == Res::Vmem
+                         ? kAtlasRegisterBytes / kLineBytes : 1;
+    uint64_t mask = ~uint64_t(0);
+    if (!a.anywhere && a.first >= 0 && a.count > 0) {
+      uint64_t first = uint64_t(a.first) / grain;
+      uint64_t last = (uint64_t(a.first) + a.count - 1) / grain;
+      if (last - first < 63) {
+        mask = (uint64_t(1) << (last - first + 1)) - 1;
+        unsigned shift = first % 64;
+        if (shift) mask = (mask << shift) | (mask >> (64 - shift));
+      }
+    }
+    (a.write ? masks.writes : masks.reads)[unsigned(a.res)] |= mask;
+  }
+  // Whole-register reservations can outlive the individual row accesses.
+  for (int reg : f.mregReads)
+    masks.reads[unsigned(Res::MReg)] |= uint64_t(1) << (unsigned(reg) % 64);
+  for (int reg : f.mregWrites)
+    masks.writes[unsigned(Res::MReg)] |= uint64_t(1) << (unsigned(reg) % 64);
+  return masks;
+}
+
 // Adds an edge, or raises the distance of an existing edge between the nodes.
 struct EdgeSet {
   DepGraph &g;
-  std::map<std::pair<int, int>, int> index;
+  // Only keyed lookup is needed here. Edge traversal follows g.edges, so hash
+  // bucket order cannot affect dependencies or the scheduler's tie order.
+  llvm::DenseMap<std::pair<int, int>, int> index{};
 
   void add(int from, int to, int distance, EdgeKind kind,
            const std::string &reason) {
-    auto it = index.find({from, to});
-    if (it == index.end()) {
-      index[{from, to}] = static_cast<int>(g.edges.size());
+    auto [it, inserted] = index.try_emplace(
+        std::make_pair(from, to), static_cast<int>(g.edges.size()));
+    if (inserted) {
       g.edges.push_back({from, to, distance, kind, reason});
     } else if (distance > g.edges[it->second].distance) {
       g.edges[it->second] = {from, to, distance, kind, reason};
@@ -1007,7 +1060,8 @@ struct EdgeSet {
 
 DepGraph mlir::atlas::timing::buildGraph(const std::vector<Instr> &instrs,
                                          const RegValues &entry,
-                                         const IncomingDma *incomingDma) {
+                                         const IncomingDma *incomingDma,
+                                         AtlasWorkBudget *work) {
   DepGraph g;
   g.nodes = instrs;
   int n = static_cast<int>(instrs.size());
@@ -1017,14 +1071,94 @@ DepGraph mlir::atlas::timing::buildGraph(const std::vector<Instr> &instrs,
     applyScalar(in, regs);
   }
 
-  EdgeSet edges{g, {}};
-  for (int b = 0; b < n; b++)
-    for (int a = 0; a < b; a++) {
+  EdgeSet edges{g};
+  struct History {
+    std::array<llvm::BitVector, 64> buckets;
+    llvm::BitVector all, unknown;
+  };
+  using Histories = std::array<History, kResourceKinds>;
+  Histories readers, writers;
+  llvm::BitVector barriers, dma;
+  std::array<llvm::BitVector, 2> mxu;
+  llvm::BitVector candidates(n);
+  auto collect = [&](const llvm::BitVector &history) {
+    if (work && failed(work->charge(1 + history.getData().size()))) return false;
+    candidates |= history;
+    return true;
+  };
+  auto append = [&](llvm::BitVector &history, int node) {
+    // Allocate only buckets that occur in the block. Charge initialization and
+    // word unions as well as each actual candidate dependence calculation.
+    if (work && failed(work->charge(
+                    1 + (history.empty() ? candidates.getData().size() : 0))))
+      return false;
+    if (history.empty()) {
+      history.resize(n);
+    }
+    history.set(node);
+    return true;
+  };
+  auto visit = [&](uint64_t bits, auto action) {
+    while (bits) {
+      if (work && failed(work->charge())) return false;
+      unsigned bucket = llvm::countr_zero(bits);
+      bits &= bits - 1;
+      if (!action(bucket)) return false;
+    }
+    return true;
+  };
+  auto collectMask = [&](const History &history, uint64_t mask) {
+    if (!mask) return true;
+    // Unknown addresses consult every access once, without duplicating them
+    // across all 64 buckets. Known addresses also consult unknown accesses.
+    if (mask == ~uint64_t(0)) return collect(history.all);
+    return collect(history.unknown) && visit(mask, [&](unsigned bucket) {
+      return collect(history.buckets[bucket]);
+    });
+  };
+  auto appendMask = [&](History &history, uint64_t mask, int node) {
+    if (!mask) return true;
+    if (!append(history.all, node)) return false;
+    if (mask == ~uint64_t(0)) return append(history.unknown, node);
+    return visit(mask, [&](unsigned bucket) {
+      return append(history.buckets[bucket], node);
+    });
+  };
+  for (int b = 0; b < n; ++b) {
+    const Instr &in = g.nodes[b];
+    const Footprint &f = g.footprints[b];
+    if (work && failed(work->charge(kResourceKinds + 2 * candidates.getData().size() +
+                                   f.accesses.size() + f.mregReads.size() + f.mregWrites.size()))) return g;
+    AccessMasks masks = accessMasks(f);
+    candidates.reset();
+    if (isBarrier(in) || in.release) {
+      if (work && failed(work->charge(candidates.getData().size()))) return g;
+      candidates.set(0, b);
+    } else {
+      if (!collect(barriers)) return g;
+      if (in.op->engine == Engine::Dma && !collect(dma)) return g;
+      if (in.op->mxu >= 0 && !collect(mxu[in.op->mxu])) return g;
+      for (unsigned r = 0; r < kResourceKinds; ++r) {
+        if (!collectMask(writers[r], masks.reads[r] | masks.writes[r]) ||
+            !collectMask(readers[r], masks.writes[r])) return g;
+      }
+    }
+    // Preserve the original source-index edge order, including priority ties.
+    for (int a = candidates.find_first(); a >= 0; a = candidates.find_next(a)) {
+      if (work && failed(work->charge())) return g;
       Dependence d =
           dependence(g.nodes[a], g.footprints[a], g.nodes[b], g.footprints[b]);
       if (d.distance > 0)
         edges.add(a, b, d.distance, d.kind, d.reason);
     }
+    for (unsigned r = 0; r < kResourceKinds; ++r) {
+      if (!appendMask(readers[r], masks.reads[r], b) ||
+          !appendMask(writers[r], masks.writes[r], b)) return g;
+    }
+    if (isBarrier(in) && !append(barriers, b)) return g;
+    if (in.op->engine == Engine::Dma && !append(dma, b)) return g;
+    if (in.op->mxu >= 0 && !append(mxu[in.op->mxu], b)) return g;
+  }
 
   // A DMA's completion is known only once its dma.wait issues, so later
   // conflicting accesses wait for that dma.wait.
@@ -1038,6 +1172,7 @@ DepGraph mlir::atlas::timing::buildGraph(const std::vector<Instr> &instrs,
           g.nodes[k].op->channel == op.channel)
         wait = k;
     for (int k = d + 1; k < n; k++) {
+      if (work && failed(work->charge())) return g;
       EdgeKind kind;
       if (k == wait ||
           !conflictsAtCompletion(g.footprints[d], g.footprints[k], kind))
@@ -1067,6 +1202,7 @@ DepGraph mlir::atlas::timing::buildGraph(const std::vector<Instr> &instrs,
     if (local)
       continue;
     for (int k = w + 1; k < n; k++) {
+      if (work && failed(work->charge())) return g;
       bool guarded = g.nodes[k].op->opClass == OpClass::DmaLoad ||
                      g.nodes[k].op->opClass == OpClass::DmaStore;
       if (incomingDma) {

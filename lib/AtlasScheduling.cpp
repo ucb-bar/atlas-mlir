@@ -1,9 +1,11 @@
 #include "Atlas/AtlasScheduling.h"
+#include "Atlas/AtlasWorkBudget.h"
 #include "Atlas/AtlasGeneratedArtifact.h"
 #include "Atlas/AtlasGeneratedSchedule.h"
 #include "Atlas/AtlasStream.h"
 #include "Atlas/AtlasVerificationContext.h"
 #include "mlir/Pass/Pass.h"
+#include "llvm/ADT/BitVector.h"
 #include <algorithm>
 #include <climits>
 #include <numeric>
@@ -39,7 +41,9 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block, bool generated,
   auto op = [&](int i) { return s.ops[begin + i]; };
   auto name = [&](int i) { return op(i)->getName().getStringRef().str(); };
 
-  DepGraph g = buildGraph(nodes, s.entry[block]);
+  AtlasWorkBudget work(s.ops[begin], "machine-scheduling");
+  DepGraph g = buildGraph(nodes, s.entry[block], nullptr, &work);
+  if (work.exhausted()) return failure();
   if (generated) {
     // Preserve the generated DMA interval policy while allowing its permitted
     // compute to overlap. Transfers on several channels may be pending at
@@ -83,6 +87,14 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block, bool generated,
   std::vector<std::string> why(n), reason(n);
   for (const Edge &e : g.edges)
     waitingPreds[e.to]++;
+  // Keep the original index order for every priority tie, but visit only
+  // graph-ready body instructions. Repeatedly scanning already issued nodes
+  // makes large generated blocks quadratic even when very little is ready.
+  llvm::BitVector ready(nb);
+  for (int i = 0; i < nb; ++i) {
+    if (failed(work.charge())) return failure();
+    if (!waitingPreds[i]) ready.set(i);
+  }
 
   // npu_model's DMA timing only decides when to issue a dma.wait; after the
   // wait the schedule assumes nothing.
@@ -96,12 +108,12 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block, bool generated,
   ReservationTable table;
   int cycle = 0, placed = 0, nextFree = 0, lastPlaced = 0;
   while (placed < nb) {
+    if (failed(work.charge())) return failure();
     // Take the ready instruction on the longest path that fits this cycle.
     int best = -1, bestWait = -1;
     bool otherWork = false;
-    for (int i = 0; i < nb; i++) {
-      if (issue[i] >= 0 || waitingPreds[i] > 0)
-        continue;
+    for (int i = ready.find_first(); i >= 0; i = ready.find_next(i)) {
+      if (failed(work.charge())) return failure();
       if (!isWait(i))
         otherWork = true;
       if (earliest[i] > cycle)
@@ -141,8 +153,11 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block, bool generated,
         if (t >= nb || waitingPreds[t] != 1)
           continue;
         int c = std::max(cycle + 1, earliest[t]);
-        while (!table.conflict(nodes[t], g.footprints[t], c).empty())
+        for (;;) {
+          if (failed(work.charge())) return failure();
+          if (table.conflict(nodes[t], g.footprints[t], c).empty()) break;
           c++;
+        }
         if (critical < 0 || height[t] > height[critical] ||
             (height[t] == height[critical] && c < firstUse)) {
           critical = t;
@@ -174,6 +189,7 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block, bool generated,
                                     : "list scheduler priority";
     }
     issue[best] = cycle;
+    ready.reset(best);
     table.reserve(nodes[best], g.footprints[best], cycle);
     if (isWait(best))
       table.extendForWait(cycle);
@@ -190,6 +206,7 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block, bool generated,
         why[ed.to] = ed.reason + " after " + name(best);
       }
       waitingPreds[ed.to]--;
+      if (ed.to < nb && !waitingPreds[ed.to]) ready.set(ed.to);
     }
     nextFree = cycle + naturalGap(nodes[best]);
     lastPlaced = cycle;
@@ -220,6 +237,7 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block, bool generated,
         cycle = std::max(nextFree, earliest[i]);
         reason[i] = cycle > nextFree ? why[i] : "";
         for (;;) {
+          if (failed(work.charge())) return failure();
           std::string busy = table.conflict(nodes[i], g.footprints[i], cycle);
           if (busy.empty())
             break;
@@ -265,6 +283,7 @@ LogicalResult scheduleBlock(const AtlasStream &s, size_t block, bool generated,
     if (slot >= 0)
       raise(earliest[slot] - 1, "delay slot: " + why[slot]);
     for (;;) {
+      if (failed(work.charge())) return failure();
       std::string busy =
           table.conflict(nodes[term], g.footprints[term], termCycle);
       if (busy.empty() && slot >= 0) {
