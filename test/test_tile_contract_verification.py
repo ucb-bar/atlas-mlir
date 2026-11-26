@@ -62,6 +62,44 @@ class TileContractVerificationTest(BoundaryChecks, unittest.TestCase):
             self.assertEqual(facts[-1]["after"], (2 + 2 * halves,))
             self.accepted(machine)
 
+        # A store prefix needs only the register halves it actually observes.
+        # Keep the input complete so the second loaded half is nonzero/live.
+        for size, offset in ((32, 0), (96, 0), (1024, 0), (1056, 0), (2048, 0),
+                             (32, 1024), (96, 1024), (1024, 1024)):
+            with self.subTest(store_bytes=size, source_offset=offset):
+                source = copy("bf16").replace(
+                    '%io4 = "atlas.virtual_dma_store_bf16"',
+                    f'%store_size = arith.constant {size} : i32\n'
+                    '    %io4 = "atlas.virtual_dma_store_bf16"').replace(
+                        '(%io2, %tile, %addr, %size)',
+                        '(%io2, %tile, %addr, %store_size)'
+                        + (f' {{tile_byte_offset = {offset} : i32}}' if offset else ''))
+                if offset:
+                    source = source.replace('virtual_dma_store_bf16"', 'virtual_dma_store_bf16_slice"')
+                machine = lower(source)
+                facts = records(machine)
+                stores = [r for r in facts if r['kind'] == 'vstore']
+                self.assertEqual(len(stores), (size + 1023) // 1024)
+                self.assertEqual(stores[0]['reg'], facts[2]['reg'] + offset // 1024)
+                self.assertEqual(facts[-2]['bytes'], size)
+                self.assertEqual(facts[-2]['after'], tuple(r['id'] for r in stores))
+                self.accepted(machine)
+                self.rejected(mutate(machine, stores[-1]['id'], 'offset = 0', 'offset = 8'),
+                              'captured vector VMEM byte address mismatch')
+                if offset and size == 32:
+                    # Even a coordinated instruction/tile-record edit cannot
+                    # substitute the other half of the same SSA tensor.
+                    wrong = stores[0]['reg'] - 1
+                    changed = mutate(machine, stores[0]['id'],
+                                     f"src = {stores[0]['reg']} : i32", f'src = {wrong} : i32')
+                    contract = re.sub(
+                        rf"\{{[^{{}}]*\bid = {stores[0]['id']} : i32[^{{}}]*\}}",
+                        lambda match: match[0].replace(f"reg = {stores[0]['reg']} : i32",
+                                                       f'reg = {wrong} : i32'),
+                        contract_text(changed, 'tile'))
+                    self.rejected(replace_contract(changed, 'tile', contract),
+                                  'BF16 store register half differs from its source offset')
+
     def test_vector_endpoint_fields_and_tags_are_checked(self) -> None:
         machine = lower(copy("bf16"))
         ops = operations(machine)
@@ -149,9 +187,16 @@ class TileContractVerificationTest(BoundaryChecks, unittest.TestCase):
                               ("branch skips the DMA", insert_after(chain, line_index(chain, tag(0)) - 1, skip))):
             with self.subTest(order=name):
                 self.rejected(changed, "predecessor is not established on every emitted path")
+        # Give both stores a stable base so their independence does not depend
+        # on the number of address-setup instructions emitted around them.
+        vector = insert_after(vector, 2, constant(15, 0x20000))
+        for identity, offset in ((4, 0), (5, 8)):
+            vector = mutate(vector, identity, "base = 4 : i32", "base = 15 : i32")
+            if offset:
+                vector = mutate(vector, identity, "offset = 0 : i32", f"offset = {offset} : i32")
         ops = operations(vector)
         first, second = (next(n for n, line in enumerate(ops) if tag(i) in line) for i in (4, 5))
-        self.accepted(reorder(vector, ops[:first - 2] + ops[first + 1:second + 1] + ops[first - 2:first + 1] + ops[second + 1:]))
+        self.accepted(reorder(vector, ops[:first] + [ops[second]] + ops[first + 1:second] + [ops[first]] + ops[second + 1:]))
 
     def test_pack_endpoints_preserve_source_result_and_scratch_addresses(self) -> None:
         machine = lower(pack_program())

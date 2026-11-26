@@ -12,14 +12,14 @@ from atlas_mlir_native.pointwise import (
     prepare_plan,
     prepare_source,
 )
-from merlin.semantic_compiler.model import (
+from merlin.compiler.semantic.model import (
     KernelRequest,
     SemanticNode,
     TensorType,
     pointwise_identity_maps,
 )
-from merlin.semantic_compiler.target_binding import NativeCompilationError
-from merlin.tests.runtime.test_unary_math_c import policy as math_policy
+from merlin.compiler.semantic.target_binding import NativeCompilationError
+from atlas_test_fixtures.unary_math_c import policy as math_policy
 
 
 def request(shape=(3, 7), *, shared=False):
@@ -66,7 +66,7 @@ def test_bf16_application_admission_is_explicit_and_preserves_old_policies():
 
 
 def test_bf16_source_numerics_and_constant_domain_are_not_relaxed():
-    from merlin.semantic_compiler.model import ConstantBinding
+    from merlin.compiler.semantic.model import ConstantBinding
 
     source = request()
     output = replace(source.nodes[-1], attrs=(("numeric_semantics", "ieee754-bf16-mul-rtz-v1"),))
@@ -82,7 +82,7 @@ def test_bf16_source_numerics_and_constant_domain_are_not_relaxed():
 @pytest.mark.parametrize("shared", [False, True])
 def test_shared_binary_read_does_not_admit_distinct_value_or_result_overlap(shared):
     from atlas_mlir_native.binding import _check_bf16_selection
-    from merlin.semantic_compiler.allocate import CandidateGraph, Value
+    from merlin.compiler.semantic.allocation_types import CandidateGraph, Value
 
     ids = ("x",) if shared else ("x", "y")
     count = len(ids)
@@ -110,11 +110,11 @@ def test_shared_binary_read_does_not_admit_distinct_value_or_result_overlap(shar
 
 @pytest.mark.skipif(not os.environ.get("ATLAS_OOT_BIN_DIR"), reason="select native Atlas tools")
 def test_shared_bf16_producer_compiles_with_two_ordered_outputs(tmp_path):
-    from merlin.compile.semantic_application import (
+    from merlin.compiler.build.regions import (
         compile_semantic_application,
         verify_semantic_application,
     )
-    from merlin.semantic_compiler.search import SearchLimits
+    from merlin.compiler.semantic.search.exploration import SearchLimits
     from test_looped_mnk import ROOT, build_snapshot
 
     source = request()
@@ -142,13 +142,13 @@ def test_exact_cast_broadcast_source_compiles_with_one_device_region(tmp_path):
     import shutil
     import subprocess
 
-    from merlin.compile.semantic_application import (
+    from merlin.compiler.build.regions import (
         compile_semantic_application,
         verify_semantic_application,
     )
-    from merlin.semantic_compiler.search import SearchLimits
-    from merlin.semantic_compiler.source_preparation import prepare_source
-    from merlin.tests.ir.test_affine_views import source as broadcast_source
+    from merlin.compiler.semantic.search.exploration import SearchLimits
+    from merlin.compiler.semantic.source_preparation import prepare_source
+    from atlas_test_fixtures.affine_views import source as broadcast_source
     from test_looped_mnk import ROOT, build_snapshot
 
     policy = fixtures.policy()
@@ -170,3 +170,125 @@ def test_exact_cast_broadcast_source_compiles_with_one_device_region(tmp_path):
     subprocess.run([shutil.which("cc"), "-std=c11", "-O2", "-Wall", "-Wextra", "-Werror",
                     "-fno-fast-math", "-ffp-contract=off", "-c", str(package / manifest["link_sources"][0]),
                     "-o", str(tmp_path / "application.o")], check=True, capture_output=True)
+
+
+def test_bf16_multiply_compiles_and_verifies_through_the_native_device_pointwise_route(tmp_path):
+    """End to end through native compilation with the selected snapshot; a missing prerequisite fails."""
+    from pathlib import Path
+
+    from merlin.compiler.build.regions import compile_semantic_application, verify_semantic_application
+    from merlin.compiler.semantic.search.exploration import SearchLimits
+    from merlin.compiler.semantic.target_binding import open_native_snapshot
+
+    missing = [name for name in ("MERLIN_NATIVE_SNAPSHOT", "ATLAS_OOT_BIN_DIR") if not os.environ.get(name)]
+    assert not missing, "required prerequisite not selected: " + ", ".join(missing)
+    snapshot = open_native_snapshot(Path(os.environ["MERLIN_NATIVE_SNAPSHOT"]))
+    root = Path(__file__).resolve().parents[1]
+    policy = {**fixtures.policy(), "schema": "atlas.diagnostic_application_precision.v21",
+              "host_unary_math": math_policy(), "bf16_pointwise": BF16_POINTWISE_POLICY}
+    adapter = AtlasApplicationAdapter(policy, original_source_sha256=policy["source_sha256"])
+    from atlas_mlir_native.options import CodegenOptions, codegen_options
+    from atlas_mlir_native.provider_deployment import WINDOW_ADDRESS, WINDOW_BYTES
+
+    source, artifact = request(), tmp_path / "application"
+    # The selected snapshot was profiled with the provider's I/O window.
+    with codegen_options(CodegenOptions(io_memory_bytes=WINDOW_BYTES, io_memory_base=WINDOW_ADDRESS,
+                                        io_memory_capacity_base=WINDOW_ADDRESS, io_memory_capacity_bytes=WINDOW_BYTES)):
+        plan = adapter.plan(source)
+        assert [dict(row.metadata)["kind"] for row in plan.selected] == ["pointwise"]
+        compile_semantic_application(
+            source, adapter=adapter, snapshot=snapshot, target_source=root, destination=artifact,
+            limits=SearchLimits(), name="bf16_product", capacity=WINDOW_BYTES)
+        assert verify_semantic_application(source, adapter=adapter, snapshot=snapshot, target_source=root,
+                                           artifact=artifact)["status"] == "checked"
+
+
+def test_a_resident_arena_narrows_the_staging_window_the_snapshot_selects_in(tmp_path):
+    """Residency keeps its arena at the end of the declared window and stages in the rest. A snapshot built for the
+    whole declared window selects in that staging prefix; every other window difference still refuses."""
+    import json
+    from pathlib import Path
+
+    from atlas_mlir_native.binding import TILE_BYTES
+    from atlas_mlir_native.options import CodegenOptions, codegen_options
+    from atlas_mlir_native.provider_deployment import WINDOW_ADDRESS, WINDOW_BYTES
+    from merlin.compiler.build.regions import compile_semantic_application, verify_semantic_application
+    from merlin.compiler.semantic.search.exploration import SearchLimits
+    from merlin.compiler.semantic.target_binding import open_native_snapshot
+
+    missing = [name for name in ("MERLIN_NATIVE_SNAPSHOT", "ATLAS_OOT_BIN_DIR") if not os.environ.get(name)]
+    assert not missing, "required prerequisite not selected: " + ", ".join(missing)
+    snapshot = open_native_snapshot(Path(os.environ["MERLIN_NATIVE_SNAPSHOT"]))
+    root = Path(__file__).resolve().parents[1]
+    policy = {**fixtures.policy(), "schema": "atlas.diagnostic_application_precision.v21",
+              "host_unary_math": math_policy(), "bf16_pointwise": BF16_POINTWISE_POLICY}
+    adapter = AtlasApplicationAdapter(policy, original_source_sha256=policy["source_sha256"])
+    staging = WINDOW_BYTES - 64 * TILE_BYTES
+    # The snapshot was profiled with the provider's whole window, which is also the declared capacity here.
+    resident = CodegenOptions(io_memory_base=WINDOW_ADDRESS, io_memory_bytes=staging, resident_bindings={},
+                              io_memory_capacity_base=WINDOW_ADDRESS, io_memory_capacity_bytes=WINDOW_BYTES)
+    source = request()
+
+    def compile_in(options, name):
+        with codegen_options(options):
+            return compile_semantic_application(
+                source, adapter=adapter, snapshot=snapshot, target_source=root, destination=tmp_path / name,
+                limits=SearchLimits(), name="bf16_product", capacity=WINDOW_BYTES)
+
+    compile_in(resident, "application")
+    with codegen_options(resident):
+        assert verify_semantic_application(source, adapter=adapter, snapshot=snapshot, target_source=root,
+                                           artifact=tmp_path / "application")["status"] == "checked"
+    (manifest,) = (json.loads(path.read_text()) for path in (tmp_path / "application/segments").glob("*/manifest.json"))
+    assert manifest["io_memory_bytes"] == staging
+    for name, options in (("no-residency", replace(resident, resident_bindings=None)),
+                          ("wider-capacity", replace(resident, io_memory_capacity_bytes=2 * WINDOW_BYTES)),
+                          ("moved-base", replace(resident, io_memory_base=WINDOW_ADDRESS + 64 * TILE_BYTES))):
+        with pytest.raises(NativeCompilationError, match="snapshot I/O window differs from selected configuration"):
+            compile_in(options, name)
+
+
+def test_folded_batch_norm_and_residual_adds_compile_with_their_claimed_families(tmp_path):
+    """A trained-CNN-shaped cover: device BF16 multiply, a device-admitted add, and a device-refused add on the host."""
+    from pathlib import Path
+
+    from atlas_mlir_native.generated_policy import adapter_for_claims
+    from atlas_mlir_native.options import CodegenOptions, codegen_options
+    from atlas_mlir_native.provider_deployment import WINDOW_ADDRESS, WINDOW_BYTES
+    from merlin.compiler.build.regions import compile_semantic_application, verify_semantic_application
+    from merlin.compiler.semantic.search.exploration import SearchLimits
+    from merlin.compiler.semantic.target_binding import open_native_snapshot
+
+    missing = [name for name in ("MERLIN_NATIVE_SNAPSHOT", "ATLAS_OOT_BIN_DIR") if not os.environ.get(name)]
+    assert not missing, "required prerequisite not selected: " + ", ".join(missing)
+    snapshot = open_native_snapshot(Path(os.environ["MERLIN_NATIVE_SNAPSHOT"]))
+    root = Path(__file__).resolve().parents[1]
+    type_ = TensorType((1, 4, 8, 8), "bf16", "raw-bit-pattern")
+    inputs = tuple(SemanticNode(key, "input", (), type_, effect="input") for key in ("skip", "x", "scale", "shift"))
+    maps = pointwise_identity_maps(4, 2)
+    mul = SemanticNode("scaled", "bf16_mul", ("x", "scale"), type_,
+                       attrs=(("numeric_semantics", "ieee754-bf16-mul-rne-v1"),), index_maps=maps)
+    # The shift was declared before the product, so this region's inputs are not in operand order.
+    shifted = SemanticNode("shifted", "bf16_add", ("scaled", "shift"), type_,
+                           attrs=(("numeric_semantics", "ieee754-bf16-add-rne-v1"),), index_maps=maps)
+    residual = SemanticNode("residual", "bf16_add", ("skip", "shifted"), type_,
+                            attrs=(("numeric_semantics", "ieee754-bf16-add-rne-v1"),), index_maps=maps)
+    source = KernelRequest((*inputs, mul, shifted, residual), ("residual",), ("external",),
+                           tuple((node.id, "external") for node in inputs), TARGET_IDENTITY, "diagnostic")
+    claims = (("scaled", "atlas.device-bf16-mul"), ("shifted", "atlas.exact-bf16-add"),
+              ("residual", "atlas.exact-bf16-add"))
+    adapter = adapter_for_claims(AtlasApplicationAdapter, source, claims, source_sha256="0" * 64, policy_json="{}")
+    artifact = tmp_path / "application"
+    with codegen_options(CodegenOptions(io_memory_bytes=WINDOW_BYTES, io_memory_base=WINDOW_ADDRESS,
+                                        io_memory_capacity_base=WINDOW_ADDRESS, io_memory_capacity_bytes=WINDOW_BYTES)):
+        plan = adapter.plan(source)
+        assert sorted((row.nodes, dict(row.metadata)["kind"]) for row in plan.selected) == [
+            ((0,), "pointwise"), ((1,), "float_arithmetic"), ((2,), "exact_float_device")]
+        manifest = compile_semantic_application(
+            source, adapter=adapter, snapshot=snapshot, target_source=root, destination=artifact,
+            limits=SearchLimits(), name="folded_norm", capacity=WINDOW_BYTES)
+        assert verify_semantic_application(source, adapter=adapter, snapshot=snapshot, target_source=root,
+                                           artifact=artifact)["status"] == "checked"
+    recipes = [row["description"]["compiler_recipe"] for row in manifest["regions"]]
+    assert [dict(map(tuple, recipe["guards"]))["selected-kind"] for recipe in recipes] == [
+        "pointwise", "float_arithmetic", "exact_float_device"]

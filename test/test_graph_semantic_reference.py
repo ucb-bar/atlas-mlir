@@ -74,7 +74,7 @@ class GraphSemanticReferenceTest(unittest.TestCase):
             evaluate_selected_graph,
         )
         from make_graph_source_fixture import _source_outputs, _tokens
-        from merlin.semantic_compiler.reference import TensorValue
+        from merlin.compiler.semantic.reference import TensorValue
 
         source = (
             ROOT / "test/examples/captured_attention_mlp32_two_outputs_linalg.mlir"

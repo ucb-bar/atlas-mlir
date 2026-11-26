@@ -91,6 +91,13 @@ outputs, use `two-output-layout.json` and the `--two-output` build.
 
 ## Mailbox host ELF
 
+`build_c_package.sh` stops at `source_f32_softmax_unqualified` when it compiles the
+two-output graph with the example's diagnostic policy, so the mailbox build, which
+needs that compiled graph, does not complete yet.
+
+The commands below use the checked-in Linalg capture. To capture a new
+PyTorch export, see [capture setup](../../../docs/host-launch.md#install-model2mlir-for-capture).
+
 This ELF takes six runtime f32 tiles per request through a mailbox. It needs a
 Merlin-native compilation of the two-output source (see
 [native Merlin binding](../../../docs/native-merlin-binding.md)), for example

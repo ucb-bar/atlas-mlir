@@ -1,6 +1,7 @@
 #ifndef ATLAS_HOST_H
 #define ATLAS_HOST_H
 
+#include "atlas_host_layout.h"
 #include <stddef.h>
 #include <stdint.h>
 
@@ -24,11 +25,7 @@ typedef struct {
   void *context;
 } atlas_host_mmio;
 
-typedef enum {
-  ATLAS_HOST_DEVICE_READ,
-  ATLAS_HOST_DEVICE_WRITE,
-  ATLAS_HOST_DEVICE_READ_WRITE
-} atlas_host_access;
+typedef enum { ATLAS_HOST_DEVICE_READ, ATLAS_HOST_DEVICE_WRITE, ATLAS_HOST_DEVICE_READ_WRITE } atlas_host_access;
 
 typedef struct {
   uintptr_t address;
@@ -38,8 +35,7 @@ typedef struct {
 
 /* The platform owns cache maintenance. For a coherent system, set coherent=1.
  * Otherwise each hook must complete its work before it returns. */
-typedef int (*atlas_host_cache_sync)(void *context, const atlas_host_buffer *buffer,
-                                      int before_launch);
+typedef int (*atlas_host_cache_sync)(void *context, const atlas_host_buffer *buffer, int before_launch);
 typedef struct {
   int coherent;
   atlas_host_cache_sync sync;
@@ -77,6 +73,12 @@ typedef struct {
 } atlas_tile_memory_io;
 
 
+/* One image kept resident in IMEM by atlas_host_keep_images. */
+typedef struct {
+  size_t offset, word_count;
+  uint64_t last_use;
+} atlas_host_image_slot;
+
 typedef struct {
   atlas_host_map map;
   atlas_host_mmio mmio;
@@ -87,7 +89,7 @@ typedef struct {
   /* Immutable host copy, valid until invalidation; one context per device. */
   const uint32_t *resident_words;
   size_t resident_word_count;
-  /* Cumulative counters; timings are measured by the platform's clock. */
+  /* Cumulative counters include raw epilogue writes; timings use the platform clock. */
   uint64_t image_loads, image_reuses, imem_words_written, launches;
   atlas_host_read_clock clock;
   void *clock_context;
@@ -95,6 +97,13 @@ typedef struct {
   int active;
   int launch_acknowledged;
   uint32_t start_retired;
+  int raw_completion;
+  uint32_t invocation_sequence;
+  /* Resident images (atlas_host_keep_images); null keeps one image at word 0. */
+  uint32_t *imem_copy;
+  size_t imem_copy_words;
+  atlas_host_image_slot *image_slots;
+  size_t image_slot_capacity, image_slot_count, image_slot_end, image_selected;
 } atlas_host;
 
 /* These calls only manage a reset-entry Atlas instruction stream. The stream
@@ -112,19 +121,65 @@ atlas_host_result atlas_host_load(atlas_host *host, const uint32_t *words,
  * words, so separately exported identical arrays can share residency. */
 atlas_host_result atlas_host_ensure_loaded(atlas_host *host,
                                          const uint32_t *words, size_t word_count);
+/* Keep several images resident in IMEM, each at its own offset from word 2, and
+ * start the selected one through word 0: JAL x0 to its offset, with a NOP in the
+ * delay slot. Images must be position independent (branches relative and inside
+ * the image, no JALR or AUIPC); the provider checks this before it enables the
+ * mode. copy holds what the host wrote to the first copy_words IMEM words, and
+ * slots describes the resident images; both stay owned by the caller and must
+ * stay alive until this host is released or given other buffers by a later
+ * call. Passing null buffers and zero sizes releases the host: its resident
+ * images are dropped and it returns to one image at word 0; releasing a host
+ * that keeps no images changes nothing. Every generated application binding
+ * with device regions sets its policy on the host this way when it binds, so no
+ * application runs under another one's policy or buffers; other callers that
+ * share a host must do the same. load and ensure_loaded then reuse a resident image whose
+ * words equal the request, else rewrite only the differing words of the least
+ * recently used resident image of the same length, else place the image after
+ * the others, starting again at word 2 when IMEM or the table is full. Raw
+ * loads, invalidation, and reset drop all resident images but keep the policy
+ * and its buffers. atlas_slots_init refuses a host that keeps images. */
+atlas_host_result atlas_host_keep_images(atlas_host *host, uint32_t *copy, size_t copy_words,
+                                         atlas_host_image_slot *slots, size_t slot_capacity);
+/* The reset-entry word that jumps to entry_word (instruction-index PC). */
+uint32_t atlas_host_entry_jump(size_t entry_word);
 /* Call before external IMEM writes, while idle. A platform reset that has
  * drained DMA must instead be acknowledged with atlas_host_reset_completed. */
 atlas_host_result atlas_host_invalidate_program(atlas_host *host);
 atlas_host_result atlas_host_reset_completed(atlas_host *host);
+/* Raw reset-entry streams have no graph shape restriction. The original stream
+ * must end at its only ECALL, drain every engine before that ECALL, and never
+ * write DBG0/DBG1. The loader replaces the final ECALL with a mailbox epilogue;
+ * x31 is clobbered only after original work finishes. Capacity needs five extra
+ * instruction words. All control-flow paths must reach that terminal epilogue.
+ * DBG1 is host-owned during execution; DBG0 is device-owned. The caller supplies
+ * known quiescent hardware before init: STOP alone does not establish this.
+ *
+ * Raw starts accept complete uintptr_t buffer ranges. This does not relocate
+ * instructions: their DMA high-half/base and low32 ranges must match buffers. */
+atlas_host_result atlas_host_load_raw(atlas_host *host, const uint32_t *words, size_t word_count);
+
 atlas_host_result atlas_host_start(atlas_host *host,
                                    const atlas_host_buffer *buffers,
                                    size_t buffer_count);
+/* Descriptors remain alive and unchanged until successful completion. Timeout,
+ * post-launch cache failure, and raw bad halt retain ownership. Recovery needs
+ * externally established quiescence, then atlas_host_reset_completed or init.
+ * Raw launches
+ * use nonwrapping invocation sequences; exhaustion requires known quiescence
+ * and reinitialization. A marker is sampled before status, so successful
+ * completion never depends on observing a running pulse. */
 atlas_host_result atlas_host_poll(atlas_host *host);
 atlas_host_result atlas_host_wait(atlas_host *host, size_t max_polls);
 
 /* MMIO callbacks for a bare-metal host with directly mapped Atlas registers. */
 uint32_t atlas_host_direct_read32(void *context, uintptr_t address);
 void atlas_host_direct_write32(void *context, uintptr_t address, uint32_t word);
+
+/* Coherent directly mapped DRAM only. Noncoherent platforms supply callbacks
+ * with their own cache maintenance. Source and destination must not overlap. */
+int atlas_host_direct_memory_write(void *, uintptr_t, const uint8_t *, size_t);
+int atlas_host_direct_memory_read(void *, uintptr_t, uint8_t *, size_t);
 
 #ifdef __cplusplus
 }

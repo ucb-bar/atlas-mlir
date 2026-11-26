@@ -7,9 +7,8 @@ platform callbacks, and the final host ELF.
 
 ## Build the compiler
 
-Use the matching `feat/atlas-model-compilation` branches in
-[Merlin](https://github.com/ucb-bar/merlin/tree/feat/atlas-model-compilation)
-and [Atlas MLIR](https://github.com/ucb-bar/atlas-mlir/tree/feat/atlas-model-compilation).
+Use the [Merlin](https://github.com/ucb-bar/merlin) commit that this
+repository's `pyproject.toml` pins.
 For layer programs with one image and one launch, start with the
 [single-image examples](../examples/handoff/resident_layers/README.md).
 
@@ -123,8 +122,9 @@ for the supported matrix shapes, model checks and RTL fixture generation.
 ### Explicitly partitioned applications
 
 To embed model parameters and accept only runtime tensors, capture and stage
-`examples/workloads/attention_mlp/loader.py` using Merlin's
-[workload instructions](https://github.com/ucb-bar/merlin/blob/feat/atlas-model-compilation/examples/workloads/attention_mlp/README.md).
+an attention + MLP loader such as `examples/workloads/attention_mlp/loader.py`.
+The pinned Merlin commit does not include that workload; it came from an earlier
+Merlin branch.
 Capture needs a compatible PyTorch/Model2MLIR environment; the native compiler
 and the frontend may use separate interpreters.
 
@@ -132,7 +132,6 @@ For the projected attention + MLP application, select its explicit diagnostic
 precision settings and run:
 
 ```sh
-ATLAS_NATIVE_PIPELINE=optimized \
 ATLAS_OPERAND_SCALE_EXPONENTS='[0,0]' \
 ATLAS_CONTRACTION_EPILOGUES='["relu"]' \
 ATLAS_POINTWISE_POLICY=f32-to-bf16-bounded-pointwise-rne-chop-v1 \
@@ -140,6 +139,10 @@ MERLIN_APPLICATION_NAME=attention \
 examples/handoff/captured_attention_core/build_c_package.sh \
   "$MERLIN_ROOT" "$COMPILER_PYTHON" "$ATLAS_BIN" "$CAPTURE" out/attention-application
 ```
+
+`--native-pipeline optimized` selects optimized scheduling on direct
+`merlin-targetgen native-compile` invocations. The script above uses the default
+mandatory pipeline.
 
 `CAPTURE` is the completed frontend bundle, not a runtime input directory.
 The script stages compiler-only inputs before compilation. The policy selects

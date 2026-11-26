@@ -1,0 +1,48 @@
+"""Contiguous affine spans use bounded aligned bursts of arbitrary beat count."""
+import os
+
+import pytest
+
+from atlas_mlir_native.layout_device import prepare_source, virtual_program
+from atlas_mlir_native.restoration_budget import instruction_bound
+from merlin.compiler.semantic.model import IndexMap
+from test_exponent_restoration import compile_fixture
+from test_layout_device import reference, request
+
+
+@pytest.mark.skipif(not (os.environ.get('ATLAS_RUST_NPU_MODEL') and os.environ.get('ATLAS_OOT_BIN_DIR')),
+                    reason='select Rust simulator and Atlas tools')
+@pytest.mark.parametrize('pipeline', ['mandatory', 'optimized'])
+@pytest.mark.parametrize('source', [
+    request('copy', ((192,),), (192,), dtype='i8'),
+    request('copy', ((320,),), (320,), dtype='i8'),
+    request('copy', ((1536,),), (1536,), dtype='i8'),
+    request('copy', ((8480,),), (8480,), dtype='i8'),
+    request('copy', ((8224,),), (8224,), dtype='i8'),
+    request('copy', ((8193,),), (8193,), dtype='i8'),
+    request('reshape', ((3,7),), (21,), dtype='bf16'),
+    request('transpose', ((1,3,7),), (3,7,1), dtype='bf16',
+            mapping=IndexMap(3, ((0,0,1),(1,0,0),(0,1,0)), (0,0,0))),
+    request('transpose', ((2,3,96),), (3,2,96), dtype='i8',
+            mapping=IndexMap(3, ((0,1,0),(1,0,0),(0,0,1)), (0,0,0))),
+    request('transpose', ((2,3,4128),), (3,2,4128), dtype='i8',
+            mapping=IndexMap(3, ((0,1,0),(1,0,0),(0,0,1)), (0,0,0))),
+])
+def test_bursts_execute_every_byte_with_affine_rows_and_outer_guards(tmp_path, pipeline, source):
+    from rust_model import execute
+
+    plan = prepare_source(source)
+    virtual = virtual_program(plan)
+    machine, program = compile_fixture(virtual, pipeline=pipeline)
+    assert instruction_bound(virtual, machine, program)['admitted']
+    base = plan.io_memory_base-64
+    memory = bytearray([0xa5])*(plan.workspace_bytes+128)
+    raw = bytes((i*37+i//64*11) % 256 for i in range(plan.input_bytes[0]))
+    memory[64:64+len(raw)] = raw
+    actual, stats = execute(program, memory, base, tmp_path / 'model')
+    output = plan.output_address-base
+    assert actual[output:output+plan.output_bytes] == reference(source, [raw])
+    assert actual[:output] == memory[:output]
+    assert actual[output+plan.physical_bytes:] == memory[output+plan.physical_bytes:]
+    if 'dram_read_bytes' in stats:
+        assert stats['dram_read_bytes'] == stats['dram_write_bytes'] == plan.physical_bytes

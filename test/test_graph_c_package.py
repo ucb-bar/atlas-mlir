@@ -159,7 +159,7 @@ class GraphCPackageTest(unittest.TestCase):
     def one_code(self):
         import numpy as np
 
-        from merlin.semantic_compiler.precision_values import FloatBoundarySpec
+        from merlin.compiler.quantization.contraction.values import FloatBoundarySpec
 
         precision = json.loads((self.compiled / "precision-plan.json").read_text())
         fields = precision["boundary_conversions"][0]["conversion_spec"]
@@ -172,11 +172,11 @@ class GraphCPackageTest(unittest.TestCase):
     def test_model_entry_embeds_parameters_and_accepts_only_runtime_inputs(self):
         import numpy as np
 
-        from merlin.frontends.compile_inputs import (
+        from merlin.compiler.frontend.inputs import (
             load_compile_inputs,
             load_lifted_argument_bytes,
         )
-        from merlin.semantic_compiler.precision_values import FloatBoundarySpec
+        from merlin.compiler.quantization.contraction.values import FloatBoundarySpec
 
         stage = Path(os.environ["ATLAS_GRAPH_COMPILE_INPUTS"])
         selected = load_compile_inputs(stage)
@@ -366,16 +366,16 @@ int main(void) {{
             self.assertEqual(struct.unpack_from("<I", elf, 48)[0] & 6, 4)  # double-float ABI
 
     def test_package_runs_between_compiled_host_operations(self):
-        from merlin.compile.c_sources import c_source_pair
-        from merlin.compile.dispatch_c import DispatchCall, emit_program_c
-        from merlin.runtime.program import build_program
-        from merlin.xdsl_dialects.lowering.arena_plan import ArenaRequirements
-        from merlin.xdsl_dialects.lowering.dispatch_program import (
+        from merlin.compiler.lower.c.dispatch import c_source_pair
+        from merlin.compiler.lower.c.dispatch import DispatchCall, emit_program_c
+        from merlin.compiler.lower.c.dispatch import build_program
+        from merlin.compiler.schedule.storage.arena import ArenaRequirements
+        from merlin.compiler.partition.dispatch_program import (
             Buffer,
             DispatchProgram,
             Node,
         )
-        from merlin.xdsl_dialects.lowering.global_plan_emission import dispatch_digest
+        from merlin.compiler.partition.global_plan_emission import dispatch_digest
 
         compiler = shutil.which("cc")
         if not compiler:

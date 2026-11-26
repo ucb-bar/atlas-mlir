@@ -5,14 +5,14 @@ from __future__ import annotations
 import hashlib
 import json
 
-from merlin.semantic_compiler.guarded_softmax_source import recognize_guarded_masked_row_softmax
-from merlin.semantic_compiler.linalg_bridge import (
+from merlin.compiler.semantic.linalg.guarded_softmax_source import recognize_guarded_masked_row_softmax
+from merlin.compiler.semantic.linalg.linalg_bridge import (
     LinalgBridgeError,
     translate_linalg_text,
 )
-from merlin.semantic_compiler.model import KernelRequest, SemanticNode, TensorType
-from merlin.semantic_compiler.precision_values import FloatBoundarySpec
-from merlin.semantic_compiler.softmax_source import (
+from merlin.compiler.semantic.model import KernelRequest, SemanticNode, TensorType
+from merlin.compiler.quantization.contraction.values import FloatBoundarySpec
+from merlin.compiler.semantic.linalg.softmax_source import (
     MaskedRowSoftmaxSource,
     recognize_masked_row_softmax,
     recognize_row_softmax,
@@ -20,27 +20,32 @@ from merlin.semantic_compiler.softmax_source import (
 
 from .binding import TARGET_IDENTITY
 from .graph_precision import DiagnosticGraphPrecision
-from .row_softmax import GUARDED_SOFTMAX_POLICY, MASKED_SOFTMAX_POLICY, SOFTMAX_DOMAIN, SOFTMAX_POLICY
+from .row_softmax import GUARDED_SOFTMAX_POLICY, MASKED_SOFTMAX_POLICY, SOFTMAX_DOMAIN, SOFTMAX_POLICY, ROWSPAN80_DOMAIN, ROWSPAN80_MAX_COLUMNS, ROWSPAN96_DOMAIN, row_span_limit
 
 INPUT_POLICY = "f32-to-bf16-rne-bounded-row-scores-v1"
+ROWSPAN80_INPUT_POLICY = "f32-to-bf16-rne-row-relative-span80-pad32-v1"
+ROWSPAN96_INPUT_POLICY = "f32-to-bf16-rne-row-relative-span96-pad32-v1"
 
 
-def input_spec():
+def input_spec(score_domain=SOFTMAX_DOMAIN):
     """RNE, then require signed zero or a score admitted by the target policy.
 
     The ranges are encoded BF16 words, not source f32 clipping thresholds.
     Values that round outside them are rejected. No small-normal flushing is
     introduced; f32 values that naturally round to BF16 signed zero stay zero.
     """
+    if score_domain not in {SOFTMAX_DOMAIN, ROWSPAN80_DOMAIN, ROWSPAN96_DOMAIN}:
+        raise ValueError("unsupported row-softmax score domain")
+    relative = row_span_limit(score_domain) is not None
     return FloatBoundarySpec(
-        INPUT_POLICY,
+        {ROWSPAN80_DOMAIN: ROWSPAN80_INPUT_POLICY, ROWSPAN96_DOMAIN: ROWSPAN96_INPUT_POLICY}.get(score_domain, INPUT_POLICY),
         "bf16",
         "encode",
         admitted_code_ranges=(
             (0, 0),
-            (0x0400, 0x4200),
+            (0x0400, 0x4300 if relative else 0x4200),
             (0x8000, 0x8000),
-            (0x8400, 0xC200),
+            (0x8400, 0xC300 if relative else 0xC200),
         ),
     )
 
@@ -71,19 +76,20 @@ def lower_source_softmax(
 
 
 def lower_semantic_softmax(
-    graph: KernelRequest, *, allow_masked=False, allow_guarded=False
+    graph: KernelRequest, *, allow_masked=False, allow_guarded=False, score_domain=SOFTMAX_DOMAIN
 ) -> DiagnosticGraphPrecision:
     """Bind a closed parsed semantic slice without regenerating or recapturing IR."""
     if graph.target_identity != TARGET_IDENTITY or graph.lowering_policy != "diagnostic":
         raise LinalgBridgeError("semantic softmax needs the selected diagnostic target")
     selected = {
-        "input_conversion": INPUT_POLICY,
+        "input_conversion": input_spec(score_domain).policy,
         "row_softmax": GUARDED_SOFTMAX_POLICY
         if allow_guarded
         else MASKED_SOFTMAX_POLICY
         if allow_masked
         else SOFTMAX_POLICY,
         "output_conversion": "bf16-to-f32-exact-v1",
+        **({"maximum_columns": ROWSPAN80_MAX_COLUMNS} if row_span_limit(score_domain) is not None else {}),
     }
     policy_sha = hashlib.sha256(json.dumps(selected, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
     return _lower_graph(
@@ -94,11 +100,13 @@ def lower_semantic_softmax(
         "semantic_graph",
         allow_masked=allow_masked,
         allow_guarded=allow_guarded,
+        score_domain=score_domain,
     )
 
 
 def _lower_graph(
-    graph, source_sha, policy_sha, source_operations, source_kind=None, *, allow_masked=False, allow_guarded=False
+    graph, source_sha, policy_sha, source_operations, source_kind=None, *, allow_masked=False, allow_guarded=False,
+    score_domain=SOFTMAX_DOMAIN
 ):
     if len(graph.outputs) != 1:
         raise LinalgBridgeError("source row-softmax entry needs one accounted result")
@@ -114,6 +122,8 @@ def _lower_graph(
     except (ValueError, KeyError) as error:
         raise LinalgBridgeError(str(error)) from error
     score = graph.node(region.scores)
+    if row_span_limit(score_domain) is not None and region.matrix_shape[1] > ROWSPAN80_MAX_COLUMNS:
+        raise LinalgBridgeError(f"row-relative span{row_span_limit(score_domain)} domain supports at most 1024 columns")
     masked = isinstance(region, MaskedRowSoftmaxSource)
     boundaries = (region.scores, region.mask) if masked else (region.scores,)
     accounted = {*boundaries, *region.computations, *region.initializers}
@@ -134,7 +144,7 @@ def _lower_graph(
                 "input",
                 (),
                 TensorType(region.matrix_shape, "bf16", "raw-bit-pattern"),
-                (("input_domain", SOFTMAX_DOMAIN),),
+                (("input_domain", score_domain),),
                 "input",
             ),
             *(
@@ -170,7 +180,7 @@ def _lower_graph(
         lowering_policy="diagnostic",
         source_identity=source_sha + ":" + policy_sha,
     )
-    spec = input_spec()
+    spec = input_spec(score_domain)
     return DiagnosticGraphPrecision(
         request,
         source_sha,

@@ -406,13 +406,13 @@ class VirtualSchedulingTest(unittest.TestCase):
 
     def test_unverified_input_is_rejected(self) -> None:
         source = function("bad", [
-            start(), const("addr", -1879048192), const("size", 1024), const("short", 32),
+            start(), const("addr", -1879048192), const("size", 1024), const("short", 33),
             dma_load("io0", "io1", "x", "addr", "size", "fp8"),
             dma_load("io1", "io2", "y", "addr", "short", "fp8"),
             f"return %io2 : {S}"])
         result = schedule(source)
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("byte length must equal the complete tile size", result.stderr)
+        self.assertIn("byte length must be a positive 32-byte multiple", result.stderr)
 
     def test_random_legal_orders_always_verify(self) -> None:
         sources = {p.name: p.read_text() for p in EXAMPLES.glob("virtual_*.mlir")}

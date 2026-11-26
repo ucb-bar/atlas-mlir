@@ -9,7 +9,8 @@ struct AtlasVerificationContext;
 // Builds the CFG/SSA correspondence contract from live source and scalar/tensor
 // register placements, never from planned words.
 FailureOr<DictionaryAttr> buildAtlasCFGContract(
-    func::FuncOp function, llvm::ArrayRef<VirtualRegisterAssignment> registers);
+    func::FuncOp function, llvm::ArrayRef<VirtualRegisterAssignment> registers,
+    llvm::ArrayRef<VirtualDMAAssignment> dmaAssignments = {});
 
 // Checks a generated artifact's emitted paths against its CFG contract.
 // See docs/dialect-reference.md.

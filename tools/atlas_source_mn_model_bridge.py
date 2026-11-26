@@ -113,7 +113,7 @@ void {callback}({descriptor} *result, const {descriptor} *lhs,
 
 
 def prepare(probe: Path, region_id: str, host_bundle: Path) -> dict:
-    from merlin.frontends.linalg_mlir import parse_mlir_file
+    from merlin.compiler.frontend.linalg_mlir import parse_mlir_file
     from xdsl.dialects import func
 
     probe_manifest = json.loads((probe / "manifest.json").read_text())

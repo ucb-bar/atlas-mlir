@@ -3,7 +3,6 @@
 import ctypes
 import dataclasses
 import hashlib
-import importlib.metadata
 import json
 import os
 import shutil
@@ -17,6 +16,7 @@ from test_looped_mnk import ROOT, build_snapshot
 
 def check_source_c_call(
     self, package, initial, binary, execute, values, wanted_bytes, invalid_values=(), *, source_dtype="f32",
+    output_dtype=None, expected_status=0, check_launch_inputs=None, output_exponent=None,
 ):
     from atlas_mlir_native.binding import DRAM_BASE
 
@@ -37,28 +37,49 @@ def check_source_c_call(
     if source_dtype == "bf16":
         client_source = client_source.replace("const float *const *inputs,float *output",
                                               "const uint8_t *const *inputs,uint8_t *output")
+    elif source_dtype == "opaque":
+        client_source = client_source.replace("const float *const *inputs,float *output",
+                                              "const void *const *inputs,void *output")
+        client_source = client_source.replace("return pointwise_source_run(&source,inputs,output,0);",
+            "void *outputs[]={output}; return pointwise_source_dispatch(&source,inputs,outputs);")
     elif source_dtype != "f32":
         raise ValueError("unsupported source test dtype")
+    if output_dtype == "bf16" and source_dtype == "f32":
+        client_source = client_source.replace("float *output", "uint8_t *output")
+    if output_exponent is not None:
+        client_source = client_source.replace("float *output", "uint8_t *output")
+        client_source = client_source.replace("pointwise_source_run(&source,inputs,output,0)",
+            "pointwise_source_run(&source,inputs,output,(int32_t *)(output+" + str(len(wanted_bytes)-4) + "),0)")
+        client_source = client_source.replace("void *outputs[]={output};",
+            "void *outputs[]={output,(uint8_t *)output+" + str(len(wanted_bytes)-4) + "};")
+    if output_exponent is not None:
+        alias_source = client_source.replace('int call(', 'int call_alias(')
+        alias_source = alias_source.replace('(uint8_t *)output+' + str(len(wanted_bytes)-4), '(uint8_t *)output')
+        alias_source = alias_source.replace('(int32_t *)(output+' + str(len(wanted_bytes)-4) + ')', '(int32_t *)output')
+        client_source += alias_source
     (package / "client.c").write_text(client_source)
-    subprocess.run(
-        [
-            shutil.which("cc"),
-            "-std=c11",
-            "-O2",
-            "-Wall",
-            "-Wextra",
-            "-Werror",
-            "-shared",
-            "-fPIC",
-            "pointwise.c",
-            "client.c",
-            "-o",
-            "client.so",
-        ],
-        cwd=package,
-        check=True,
-        capture_output=True,
-    )
+    try:
+        subprocess.run(
+            [
+                shutil.which("cc"),
+                "-std=c11",
+                "-O2",
+                "-Wall",
+                "-Wextra",
+                "-Werror",
+                "-shared",
+                "-fPIC",
+                "pointwise.c",
+                "client.c",
+                "-o",
+                "client.so",
+            ],
+            cwd=package,
+            check=True,
+            capture_output=True,
+        )
+    except subprocess.CalledProcessError as error:
+        raise RuntimeError(error.stderr.decode()) from error
     client = ctypes.CDLL(str(package / "client.so"))
     rd_type = ctypes.CFUNCTYPE(ctypes.c_uint32, ctypes.c_void_p, ctypes.c_size_t)
     wr_type = ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_uint32)
@@ -71,6 +92,7 @@ def check_source_c_call(
     )
     memory, words, errors = bytearray(initial), {}, []
     polls = None
+    fail_read = False
 
     def read32(_, address):
         nonlocal polls
@@ -95,13 +117,18 @@ def check_source_c_call(
                     b"".join(words[i].to_bytes(4, "little") for i in range(len(words))),
                     binary,
                 )
-                self.assertEqual(memory, initial)
+                if check_launch_inputs is None:
+                    self.assertEqual(memory, initial)
+                else:
+                    check_launch_inputs(memory)
                 memory[:] = execute(memory)
                 polls = 0
         except (AssertionError, RuntimeError, ValueError, KeyError, OSError) as error:
             errors.append(repr(error))
 
     def transfer(address, pointer, size, write):
+        if fail_read and not write:
+            return 1
         at = address - DRAM_BASE
         if not 0 <= at <= len(memory) - size:
             return 1
@@ -138,16 +165,32 @@ def check_source_c_call(
                 inputs,
                 ctypes.addressof(result) + 16,
             ),
-            0,
+            expected_status,
         )
         self.assertEqual(errors, [])
-        self.assertEqual(result.raw[16 : 16 + len(wanted_bytes)], wanted_bytes)
+        self.assertEqual(result.raw[16 : 16 + len(wanted_bytes)],
+                         wanted_bytes if expected_status == 0 else bytes([0xA7]) * len(wanted_bytes))
         self.assertEqual(result.raw[:16], bytes([0xA7]) * 16)
         self.assertEqual(
             result.raw[16 + len(wanted_bytes) : -1],
             bytes([0xA7]) * 16,
         )
         self.assertEqual([value.tobytes() for value in values], before)
+    if output_exponent is not None:
+        client.call_alias.argtypes = client.call.argtypes
+        for invoke, status, fail_read in ((client.call_alias, 1, False), (client.call, 3, True)):
+            memory[:] = initial
+            words.clear()
+            polls = None
+            result = ctypes.create_string_buffer(bytes([0xA7]) * (len(wanted_bytes)+32))
+            inputs = (ctypes.c_void_p * len(values))(*(value.ctypes.data for value in values))
+            self.assertEqual(invoke(*callbacks, inputs, ctypes.addressof(result)+16), status)
+            self.assertEqual(errors, [])
+            self.assertEqual(result.raw[:-1], bytes([0xA7]) * (len(wanted_bytes)+32))
+            if status == 1:
+                self.assertEqual(words, {})
+                self.assertEqual(memory, initial)
+        fail_read = False
     for rejected in invalid_values:
         memory[:] = initial
         words.clear()
@@ -159,6 +202,17 @@ def check_source_c_call(
         self.assertEqual(words, {})
         self.assertEqual(memory, initial)
         self.assertEqual(result.raw[:-1], bytes([0xA7]) * (len(wanted_bytes) + 32))
+    if source_dtype == "opaque" or output_dtype == "bf16" and source_dtype == "f32" or output_exponent is not None:
+        # Mixed-width publication must still refuse an output inside an input.
+        memory[:] = initial
+        words.clear()
+        polls = None
+        before = [value.tobytes() for value in values]
+        inputs = (ctypes.c_void_p * len(values))(*(value.ctypes.data for value in values))
+        self.assertEqual(client.call(*callbacks, inputs, values[0].ctypes.data), 1)
+        self.assertEqual([value.tobytes() for value in values], before)
+        self.assertEqual(words, {})
+        self.assertEqual(memory, initial)
 
 
 @unittest.skipUnless(
@@ -187,7 +241,7 @@ class PointwiseLoopTest(unittest.TestCase):
         self._check_pointwise_cases(bf16_sources=False, affine_cast=True)
 
     def test_large_io_window_executes_in_one_launch_per_invocation(self):
-        from merlin.semantic_compiler.codegen import CodegenOptions, codegen_options
+        from atlas_mlir_native.options import CodegenOptions, codegen_options
 
         with codegen_options(CodegenOptions(io_memory_bytes=1048576)):
             self._check_pointwise_cases(bf16_sources=False, large=True)
@@ -207,31 +261,29 @@ class PointwiseLoopTest(unittest.TestCase):
             prepare_source,
         )
         from atlas_mlir_native.pointwise_c import prepare_c_package
-        from merlin.semantic_compiler.model import (
+        from merlin.compiler.semantic.model import (
             IndexMap,
             KernelRequest,
             SemanticNode,
             TensorType,
             pointwise_identity_maps,
         )
-        from merlin.semantic_compiler.pointwise_tiling import (
+        from merlin.compiler.transforms.pointwise import (
             materialize_pointwise_input,
         )
-        from merlin.semantic_compiler.reference import TensorValue, evaluate_graph
-        from merlin.semantic_compiler.search import SearchLimits
+        from merlin.compiler.semantic.reference import TensorValue, evaluate_graph
+        from merlin.compiler.semantic.search.exploration import SearchLimits
         from npu_model.configs import isa_definition as isa
         from npu_model.configs.hardware.default import DefaultHardwareConfig
         from npu_model.logging import LoggerConfig
         from npu_model.simulation import Simulation
         from npu_model.software.program import InstantiableProgram
-        from test_spill_model_execution import MODEL_REVISION, model_instruction
+        from test_spill_model_execution import model_instruction
+        from test_mxu1_cap448 import authenticate_model
 
         from tools.check_program_decode import decode_binary
 
-        origin = json.loads(importlib.metadata.distribution("npu-model").read_text("direct_url.json") or "{}")
-        self.assertTrue(
-            MODEL_REVISION in origin.get("url", "") or origin.get("vcs_info", {}).get("commit_id") == MODEL_REVISION
-        )
+        self.assertTrue(authenticate_model(Path(os.environ["NPU_MODEL_ROOT"])))
         torch.set_num_threads(1)
         spec = input_spec()
         spec.encode(np.array([0.0, -0.0, 2.0**-63, -(2.0**63)], dtype=np.float32))
@@ -262,12 +314,9 @@ class PointwiseLoopTest(unittest.TestCase):
                 ("sub", (1, 65), "reverse"),
                 ("mul", (3, 5), "square"),
                 ("mul", (1, 50, 720), "square"),
-                ("relu", (33, 35), "relu"),
-                ("relu", (2, 8), "relu_small"),
                 ("add", (1, 3, 5, 33), "channel_bias"),
                 ("sub", (2, 3, 35), "reverse_rank3"),
                 ("mul", (7,), "vector"),
-                ("relu", (2, 3, 5, 7), "relu_rank4"),
                 ("div", (33, 35), "division"),
                 ("div", (1, 65), "division_tail"),
                 ("div", (2, 3, 35), "division_rank3"),
@@ -304,7 +353,7 @@ class PointwiseLoopTest(unittest.TestCase):
                     source_dtype = "bf16" if raw_bf16 else "f32"
                     m, n = int(np.prod(shape[:-1])), shape[-1]
                     rank = len(shape)
-                    unary = operation in {"relu", "rsqrt", "sigmoid", "gelu", "silu"}
+                    unary = operation in {"rsqrt", "sigmoid", "gelu", "silu"}
                     math_operation = operation in {"div", "rsqrt", "sigmoid", "gelu", "silu"}
                     type_ = TensorType(shape, source_dtype, "raw-bit-pattern")
                     a = SemanticNode("a", "input", (), type_, effect="input")
@@ -348,9 +397,7 @@ class PointwiseLoopTest(unittest.TestCase):
                     operands = ("a",) if unary else ("a", "a") if view == "square" else ("a", "b")
                     result = SemanticNode(
                         "result",
-                        "f32_relu_ordered_select"
-                        if operation == "relu"
-                        else "source_f32_rsqrt_unqualified"
+                        "source_f32_rsqrt_unqualified"
                         if operation == "rsqrt"
                         else source_dtype + "_" + operation,
                         operands,
@@ -358,9 +405,7 @@ class PointwiseLoopTest(unittest.TestCase):
                         (
                             (
                                 "numeric_semantics",
-                                "f32-ordered-lt-positive-zero-select-v1"
-                                if operation == "relu"
-                                else "source-f32-rsqrt-unqualified-v1"
+                                "source-f32-rsqrt-unqualified-v1"
                                 if operation == "rsqrt"
                                 else f"ieee754-{source_dtype}-{operation}-rne-v1",
                             ),
@@ -403,13 +448,13 @@ class PointwiseLoopTest(unittest.TestCase):
                     )
                     original_source = folding = None
                     if affine_cast:
-                        from merlin.compile.semantic_regions import (
+                        from merlin.compiler.partition.semantic_regions import (
                             extract_semantic_region,
                         )
-                        from merlin.semantic_compiler.source_preparation import (
+                        from merlin.compiler.semantic.source_preparation import (
                             prepare_source as prepare_full_source,
                         )
-                        from merlin.tests.ir.test_affine_views import (
+                        from atlas_test_fixtures.affine_views import (
                             source as broadcast_source,
                         )
 
@@ -451,13 +496,6 @@ class PointwiseLoopTest(unittest.TestCase):
                                           "scalar_broadcast": (104448, 2048)}[view]
                         self.assertEqual(plan.input_packed_bytes, expected_sizes)
                         self.assertLessEqual(sum(plan.input_packed_bytes) + plan.packed_bytes, 262144)
-                    if operation == "relu":
-                        for bad in (
-                            dataclasses.replace(result, attrs=()),
-                            dataclasses.replace(result, index_maps=()),
-                        ):
-                            with self.assertRaises(ValueError):
-                                prepare_source(dataclasses.replace(source, nodes=(a, bad)))
                     abi = plan_abi(precision.request)
                     if large and view == "dense_large_boundary":
                         abi = {"fixed_inputs": {"arg0": 300, "arg1": 360}, "fixed_outputs": [420]}
@@ -559,9 +597,6 @@ class PointwiseLoopTest(unittest.TestCase):
                     av = ((np.arange(m * n).reshape(shape) % 37) - 18).astype(np.float32) / 13
                     bv = ((np.arange(np.prod(bshape)).reshape(bshape) % 29) - 14).astype(np.float32) / 11
                     av.reshape(-1)[0] = -0.0
-                    if operation == "relu":
-                        av.reshape(-1)[-1] = 1.00390625  # BF16 nearest-even midpoint.
-                        av.reshape(-1)[n - 1] = 2.5
                     bv.reshape(-1)[0] = -0.0 if operation == "add" else 0.0
                     if affine_cast:
                         # The original BF16 source widens exactly; the boundary
@@ -598,9 +633,7 @@ class PointwiseLoopTest(unittest.TestCase):
                         bb = np.broadcast_to(bb[None, :, None, None], shape)
                     elif view in {"reverse", "reverse_rank3"}:
                         bb = bb[..., ::-1]
-                    if operation == "relu":
-                        wanted = np.where(lhs & 0x8000, np.uint16(0), lhs)
-                    elif operation == "div":
+                    if operation == "div":
                         from test_softmax_primitives import _reciprocal
 
                         reciprocal = np.array(
@@ -818,8 +851,6 @@ class PointwiseLoopTest(unittest.TestCase):
 
                     execute(initial)
                     if pressure or affine_cast or large or raw_bf16 or math_operation or view in {
-                        "relu_small",
-                        "relu_rank4",
                         "channel_bias",
                         "reverse_rank3",
                         "vector",

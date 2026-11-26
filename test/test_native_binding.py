@@ -1,6 +1,6 @@
-"""Optional Merlin-native raw movement integration; no ACT compiler is used."""
-
+"""Merlin-native raw movement integration; required tools must be configured."""
 from __future__ import annotations
+
 
 import copy
 import ctypes
@@ -13,24 +13,32 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
+from atlas_mlir_native.options import codegen_options, current_codegen_options
 
 ROOT = Path(__file__).resolve().parents[1]
 MERLIN = os.environ.get("MERLIN_NATIVE_ROOT")
 ATLAS_BIN = os.environ.get("ATLAS_OOT_BIN_DIR")
 
 
-@unittest.skipUnless(MERLIN and ATLAS_BIN, "set MERLIN_NATIVE_ROOT and ATLAS_OOT_BIN_DIR")
 class NativeBindingTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
+        if not MERLIN or not ATLAS_BIN:
+            raise RuntimeError("native binding tests require MERLIN_NATIVE_ROOT and ATLAS_OOT_BIN_DIR")
+        if shutil.which("cargo") is None:
+            raise RuntimeError("native binding tests require cargo on PATH")
+        for tool in ("atlas-opt", "atlas-emit"):
+            if not (Path(ATLAS_BIN) / tool).is_file():
+                raise RuntimeError(f"native binding tests require {tool} in ATLAS_OOT_BIN_DIR")
         sys.path.insert(0, str(ROOT))
         sys.path.insert(0, str(ROOT / "python"))
         sys.path.insert(0, str(ROOT / "test"))
         sys.path.insert(0, str(Path(MERLIN) / "src"))
         from atlas_mlir_native.binding import AtlasNativeBinding
-        from merlin.semantic_compiler.snapshot import (
+        from merlin.compiler.semantic.target_binding import (
             build_native_snapshot,
             packaged_egg_bridge_path,
         )
@@ -62,7 +70,7 @@ class NativeBindingTest(unittest.TestCase):
     def compile_verified(
         self, request, *, fixed_inputs, fixed_outputs, destination, limits,
     ):
-        from merlin.semantic_compiler.target_binding import verify_native_publication
+        from merlin.compiler.semantic.target_binding import verify_native_publication
 
         manifest = self.binding.compile(
             self.snapshot, request, fixed_inputs=fixed_inputs, fixed_outputs=fixed_outputs,
@@ -75,7 +83,7 @@ class NativeBindingTest(unittest.TestCase):
         return manifest
 
     def request(self, *, shape: tuple[int, int] = (32, 32), mode: str = "diagnostic"):
-        from merlin.semantic_compiler.model import (
+        from merlin.compiler.semantic.model import (
             KernelRequest,
             SemanticNode,
             TensorType,
@@ -91,7 +99,7 @@ class NativeBindingTest(unittest.TestCase):
 
     def transpose_request(self, *, policy: str = "raw-bit-pattern", maps=None):
         from atlas_mlir_native.binding import _transpose_maps
-        from merlin.semantic_compiler.model import (
+        from merlin.compiler.semantic.model import (
             KernelRequest,
             SemanticNode,
             TensorType,
@@ -106,29 +114,10 @@ class NativeBindingTest(unittest.TestCase):
             self.binding.profile().target_identity, lowering_policy="diagnostic",
         )
 
-    def relu_request(self):
-        from atlas_mlir_native.binding import BF16_RELU_ATTRS
-        from merlin.semantic_compiler.model import (
-            KernelRequest,
-            SemanticNode,
-            TensorType,
-            pointwise_identity_maps,
-        )
-
-        tensor = TensorType((32, 32), "bf16", "raw-bit-pattern")
-        return KernelRequest(
-            (
-                SemanticNode("x", "input", (), tensor, effect="input"),
-                SemanticNode("y", "relu", ("x",), tensor, attrs=BF16_RELU_ATTRS,
-                             index_maps=pointwise_identity_maps(2, 1)),
-            ),
-            ("y",), ("external",), (("x", "external"),),
-            self.binding.profile().target_identity, lowering_policy="diagnostic",
-        )
 
     def add_request(self):
         from atlas_mlir_native.binding import BF16_ADD_ATTRS
-        from merlin.semantic_compiler.model import (
+        from merlin.compiler.semantic.model import (
             KernelRequest,
             SemanticNode,
             TensorType,
@@ -149,7 +138,7 @@ class NativeBindingTest(unittest.TestCase):
 
     def mul_request(self):
         from atlas_mlir_native.binding import BF16_MUL_ATTRS
-        from merlin.semantic_compiler.model import (
+        from merlin.compiler.semantic.model import (
             KernelRequest,
             SemanticNode,
             TensorType,
@@ -169,9 +158,9 @@ class NativeBindingTest(unittest.TestCase):
         )
 
     def test_native_optimized_pipeline_compiles_and_tracks_qualification(self) -> None:
-        from merlin.semantic_compiler.search import SearchLimits
+        from merlin.compiler.semantic.search.exploration import SearchLimits
 
-        with patch.dict(os.environ, ATLAS_NATIVE_PIPELINE="optimized"):
+        with codegen_options(replace(current_codegen_options(), native_pipeline="optimized")):
             manifest = self.compile_verified(
                 self.request(), fixed_inputs={"x": 3}, fixed_outputs=(35,),
                 destination=self.work / "optimized", limits=SearchLimits(),
@@ -181,12 +170,58 @@ class NativeBindingTest(unittest.TestCase):
         self.assertIn("mandatory-qualification-machine.mlir", manifest["stage_artifacts"])
         self.assertIn("mandatory-qualification-program.json", manifest["stage_artifacts"])
 
+    def test_each_wall_clock_limit_that_fires_leaves_a_line(self) -> None:
+        import contextlib
+        import io
+
+        from atlas_mlir_native import binding
+        from merlin.compiler.semantic.search import exploration
+        from merlin.compiler.semantic.search.allocation import AllocationResult
+        from merlin.compiler.semantic.target_binding import NativeCompilationError
+
+        request = self.mul_request()
+
+        def select():
+            stream = io.StringIO()
+            with contextlib.redirect_stderr(stream):
+                result = self.snapshot.select(request, fixed_inputs={"a": 3, "b": 4}, fixed_outputs=(35,))
+            return result, stream.getvalue()
+
+        plain, log = select()
+        self.assertEqual((plain.status, log), ("selected", ""))
+        explore, allocate, calls = exploration.explore, exploration.allocate, []
+
+        def first_query_times_out(graph, order, *args, **kwargs):
+            calls.append(order)
+            if len(calls) == 1:
+                return AllocationResult("search_timeout", order, {}, "solver returned unknown: timeout")
+            return allocate(graph, order, *args, **kwargs)
+
+        with patch.object(exploration, "explore", lambda *a, **k: replace(explore(*a, **k), stop_reason="time_limit")), \
+                patch.object(exploration, "allocate", first_query_times_out):
+            _, log = select()
+        self.assertIn("merlin search: wall-clock limit fired: e-graph runner time limit after ", log)
+        self.assertIn("merlin search: wall-clock limit fired: candidate 1 order 1 allocation solver: "
+                      "solver returned unknown: timeout; the search tries the next order or candidate\n", log)
+        clock = iter((0.0,))
+        with patch.object(exploration, "monotonic", lambda: next(clock, 1e9)):
+            expired, log = select()
+        self.assertEqual(expired.status, "search_timeout")
+        self.assertEqual(log, "merlin search: wall-clock limit fired: search deadline of 60 s: "
+                              "native search deadline expired during exploration\n")
+        stream = io.StringIO()
+        hang = subprocess.TimeoutExpired(["atlas-opt"], 600)
+        with patch.object(binding.subprocess, "run", side_effect=hang), contextlib.redirect_stderr(stream), \
+                self.assertRaisesRegex(NativeCompilationError, "hang detector exceeded 600 seconds"):
+            binding._run([str(Path(ATLAS_BIN) / "atlas-opt")], input_text="")
+        self.assertEqual(stream.getvalue(), "atlas tool: wall-clock limit fired: hang detector of 600 s on atlas-opt\n")
+
     def test_native_bf16_mul_selects_checks_and_emits(self) -> None:
         from atlas_mlir_native.binding import check_bf16_tile_stream
         from atlas_mlir_native.reference import evaluate_bf16_mul
-        from merlin.semantic_compiler.reference import TensorValue, evaluate_graph
-        from merlin.semantic_compiler.search import SearchLimits
-        from merlin.semantic_compiler.target_binding import (
+        from merlin.compiler.semantic.reference import TensorValue, evaluate_graph
+        from merlin.compiler.semantic.search.exploration import SearchLimits
+        from merlin.compiler.semantic.target_binding import (
             NativeCompilationError,
         )
 
@@ -252,11 +287,11 @@ class NativeBindingTest(unittest.TestCase):
             )
 
     def test_parsed_bf16_mul_uses_the_generated_native_rule(self) -> None:
-        from merlin.semantic_compiler.linalg_bridge import (
+        from merlin.compiler.semantic.linalg.linalg_bridge import (
             LinalgBridgeError,
             translate_linalg_text,
         )
-        from merlin.semantic_compiler.search import SearchLimits
+        from merlin.compiler.semantic.search.exploration import SearchLimits
 
         from tools.check_program_decode import audit_program
         from tools.check_variant_inventory import load_inventory
@@ -287,10 +322,10 @@ class NativeBindingTest(unittest.TestCase):
     def test_parsed_bf16_mul_chain_shares_producer_and_preserves_both_outputs(self) -> None:
         from atlas_mlir_native.binding import check_bf16_tile_stream
         from atlas_mlir_native.reference import evaluate_bf16_mul
-        from merlin.semantic_compiler.linalg_bridge import translate_linalg_text
-        from merlin.semantic_compiler.reference import TensorValue, evaluate_graph
-        from merlin.semantic_compiler.search import SearchLimits
-        from merlin.semantic_compiler.target_binding import (
+        from merlin.compiler.semantic.linalg.linalg_bridge import translate_linalg_text
+        from merlin.compiler.semantic.reference import TensorValue, evaluate_graph
+        from merlin.compiler.semantic.search.exploration import SearchLimits
+        from merlin.compiler.semantic.target_binding import (
             NativeCompilationError,
         )
         from test_vpu_mul_reference import _panel, _product_rne
@@ -365,14 +400,14 @@ class NativeBindingTest(unittest.TestCase):
     def test_three_input_bf16_chain_uses_one_native_dag(self) -> None:
         from atlas_mlir_native.binding import BF16_MUL_ATTRS
         from atlas_mlir_native.reference import evaluate_bf16_mul
-        from merlin.semantic_compiler.model import (
+        from merlin.compiler.semantic.model import (
             KernelRequest,
             SemanticNode,
             TensorType,
             pointwise_identity_maps,
         )
-        from merlin.semantic_compiler.reference import TensorValue, evaluate_graph
-        from merlin.semantic_compiler.search import SearchLimits
+        from merlin.compiler.semantic.reference import TensorValue, evaluate_graph
+        from merlin.compiler.semantic.search.exploration import SearchLimits
         from test_vpu_mul_reference import _panel, _product_rne
 
         from tools.check_program_decode import audit_program
@@ -442,9 +477,9 @@ class NativeBindingTest(unittest.TestCase):
 
     def test_mixed_bf16_add_then_mul_preserves_shared_result(self) -> None:
         from atlas_mlir_native.reference import evaluate_bf16_add, evaluate_bf16_mul
-        from merlin.semantic_compiler.linalg_bridge import translate_linalg_text
-        from merlin.semantic_compiler.reference import TensorValue, evaluate_graph
-        from merlin.semantic_compiler.search import SearchLimits
+        from merlin.compiler.semantic.linalg.linalg_bridge import translate_linalg_text
+        from merlin.compiler.semantic.reference import TensorValue, evaluate_graph
+        from merlin.compiler.semantic.search.exploration import SearchLimits
 
         from tools.check_program_decode import audit_program
         from tools.check_variant_inventory import load_inventory
@@ -503,14 +538,14 @@ class NativeBindingTest(unittest.TestCase):
     def test_mixed_bf16_mul_then_add_uses_same_generated_rules(self) -> None:
         from atlas_mlir_native.binding import BF16_ADD_ATTRS, BF16_MUL_ATTRS
         from atlas_mlir_native.reference import evaluate_bf16_add, evaluate_bf16_mul
-        from merlin.semantic_compiler.model import (
+        from merlin.compiler.semantic.model import (
             KernelRequest,
             SemanticNode,
             TensorType,
             pointwise_identity_maps,
         )
-        from merlin.semantic_compiler.reference import TensorValue, evaluate_graph
-        from merlin.semantic_compiler.search import SearchLimits
+        from merlin.compiler.semantic.reference import TensorValue, evaluate_graph
+        from merlin.compiler.semantic.search.exploration import SearchLimits
 
         from tools.check_program_decode import audit_program
         from tools.check_variant_inventory import load_inventory
@@ -555,186 +590,13 @@ class NativeBindingTest(unittest.TestCase):
         self.assertEqual((plan["operation"], plan["output_numerical_policies"]),
                          ("bf16_mixed", ["bf16-product-rne-v1", "selected-f32-rne-bf16-chop-v1"]))
 
-    def test_native_bf16_relu_result_feeds_binary_ops(self) -> None:
-        from dataclasses import replace
-
-        from atlas_mlir_native.binding import (
-            BF16_ADD_ATTRS,
-            BF16_MUL_ATTRS,
-            BF16_RELU_ATTRS,
-        )
-        from atlas_mlir_native.reference import evaluate_bf16_add, evaluate_bf16_mul
-        from merlin.semantic_compiler.linalg_bridge import translate_linalg_text
-        from merlin.semantic_compiler.model import (
-            KernelRequest,
-            SemanticNode,
-            TensorType,
-            pointwise_identity_maps,
-        )
-        from merlin.semantic_compiler.reference import TensorValue, evaluate_graph
-        from merlin.semantic_compiler.search import SearchLimits
-        from merlin.semantic_compiler.target_binding import verify_native_publication
-
-        from tools.atlas_virtual_evaluator import (
-            MemoryRegion,
-            RuntimeInputs,
-            evaluate,
-            parse_program,
-        )
-        from tools.check_program_decode import audit_program
-        from tools.check_variant_inventory import load_inventory
-
-        tensor = TensorType((32, 32), "bf16", "raw-bit-pattern")
-        request = KernelRequest(
-            (
-                SemanticNode("a", "input", (), tensor, attrs=(BF16_ADD_ATTRS[0],), effect="input"),
-                SemanticNode("b", "input", (), tensor, attrs=(BF16_ADD_ATTRS[0],), effect="input"),
-                SemanticNode("positive", "relu", ("a",), tensor,
-                             attrs=BF16_RELU_ATTRS, index_maps=pointwise_identity_maps(2, 1)),
-                SemanticNode("sum", "add_bf16", ("positive", "b"), tensor,
-                             attrs=BF16_ADD_ATTRS, index_maps=pointwise_identity_maps(2, 2)),
-            ),
-            ("positive", "sum"), ("external", "external"),
-            (("a", "external"), ("b", "external")),
-            self.binding.profile().target_identity, lowering_policy="diagnostic",
-        )
-        values = {
-            "a": TensorValue(tensor, (0x3F80, 0x4000) * 512),
-            "b": TensorValue(tensor, (0x3F00,) * 1024),
-        }
-        expected = evaluate_graph(
-            request, values,
-            primitives={("add_bf16", "raw-bit-pattern"): evaluate_bf16_add},
-        )
-        self.assertEqual(tuple(value.elements[:2] for value in expected),
-                         ((0x3F80, 0x4000), (0x3FC0, 0x4020)))
-        # ReLU can also produce zero, outside this add rule's admitted normal
-        # operand domain. The diagnostic request does not install a runtime guard.
-        with self.assertRaises(ValueError):
-            evaluate_graph(
-                request,
-                {"a": TensorValue(tensor, (0xBF80,) * 1024), "b": values["b"]},
-                primitives={("add_bf16", "raw-bit-pattern"): evaluate_bf16_add},
-            )
-
-        destination = self.work / "relu-then-add"
-        manifest = self.binding.compile(
-            self.snapshot, request, fixed_inputs={"a": 3, "b": 5},
-            fixed_outputs=(35, 37), target_source=ROOT, destination=destination,
-            limits=SearchLimits(),
-        )
-        plan = json.loads((destination / "execution_plan.json").read_text())
-        self.assertFalse(plan["runtime_domain_guard"])
-        self.assertEqual(plan["producer_domain_obligations"], [{
-            "producer": "positive", "consumer": "sum",
-            "required_domain": BF16_ADD_ATTRS[0][1],
-            "status": "caller_premise_unchecked",
-        }])
-        verify_native_publication(
-            destination, manifest, engine="merlin_native",
-            request_digest=request.digest(), target_identity=request.target_identity,
-        )
-        program = json.loads((destination / "physical-program.json").read_text())
-        self.assertEqual(
-            audit_program(load_inventory(), program, (destination / "program.bin").read_bytes())["status"],
-            "PASS",
-        )
-        operations = [row["operation"] for row in program["instructions"]]
-        self.assertEqual(operations.count("atlas.vpu_unary"), 1)
-        self.assertEqual(operations.count("atlas.vpu_binary"), 1)
-        self.assertEqual(operations.count("atlas.dma"), 4)
-        source_memory = (
-            MemoryRegion(0x90001800, struct.pack("<1024H", *values["a"].elements)),
-            MemoryRegion(0x90002800, struct.pack("<1024H", *values["b"].elements)),
-            MemoryRegion(0x900117F0, b"L" * 16 + b"?" * 2048 + b"R" * 16),
-            MemoryRegion(0x90012010, b"G" * 2016),
-            MemoryRegion(0x900127F0, b"X" * 16 + b"?" * 2048 + b"Y" * 16),
-        )
-        virtual = parse_program((destination / "atlas-virtual.mlir").read_text(),
-                                function="native_tile")
-        result = evaluate(virtual, RuntimeInputs(memory=source_memory))
-        observed = {region.address: region.data for region in result.memory}
-        self.assertEqual(observed[0x900117F0],
-                         b"L" * 16 + struct.pack("<1024H", *expected[0].elements) + b"R" * 16)
-        self.assertEqual(observed[0x900127F0],
-                         b"X" * 16 + struct.pack("<1024H", *expected[1].elements) + b"Y" * 16)
-        self.assertEqual(observed[0x90012010], b"G" * 2016)
-        self.assertEqual(observed[0x90001800], source_memory[0].data)
-        self.assertEqual(observed[0x90002800], source_memory[1].data)
-        # The physical model can execute a zero-producing ReLU, but that
-        # observation does not discharge the selected-core add premise.
-        negative = struct.pack("<1024H", *((0xBF80, 0x8000) * 512))
-        zero_case = evaluate(virtual, RuntimeInputs(memory=(
-            MemoryRegion(0x90001800, negative), source_memory[1],
-            source_memory[2], source_memory[3], source_memory[4],
-        )))
-        zero_memory = {region.address: region.data for region in zero_case.memory}
-        self.assertEqual(zero_memory[0x900117F0], b"L" * 16 + b"\x00" * 2048 + b"R" * 16)
-        self.assertEqual(zero_memory[0x900127F0],
-                         b"X" * 16 + source_memory[1].data + b"Y" * 16)
-        self.assertEqual(zero_memory[0x90001800], negative)
-        self.assertEqual(zero_memory[0x90012010], b"G" * 2016)
-        translated = translate_linalg_text(
-            (ROOT / "test/examples/native_bf16_relu_add_linalg.mlir").read_text(),
-            entry="relu_then_add", target_identity=request.target_identity,
-            lowering_policy="diagnostic",
-        )
-        self.assertEqual(tuple(node.op for node in translated.request.nodes),
-                         ("input", "input", "relu", "add_bf16"))
-        parsed_destination = self.work / "parsed-relu-then-add"
-        parsed_manifest = self.binding.compile(
-            self.snapshot, translated.request, fixed_inputs={"arg0": 3, "arg1": 5},
-            fixed_outputs=(35, 37), target_source=ROOT, destination=parsed_destination,
-            limits=SearchLimits(),
-        )
-        verify_native_publication(
-            parsed_destination, parsed_manifest, engine="merlin_native",
-            request_digest=translated.request.digest(), target_identity=request.target_identity,
-        )
-        self.assertEqual((parsed_destination / "program.bin").read_bytes(),
-                         (destination / "program.bin").read_bytes())
-
-        multiply = replace(
-            request,
-            nodes=(request.nodes[0],
-                   replace(request.nodes[1], attrs=(BF16_MUL_ATTRS[0],)),
-                   request.nodes[2],
-                   replace(request.nodes[3], op="mul_bf16", attrs=BF16_MUL_ATTRS)),
-        )
-        product = evaluate_graph(
-            multiply, values,
-            primitives={("mul_bf16", "raw-bit-pattern"): evaluate_bf16_mul},
-        )
-        self.assertEqual(tuple(value.elements[:2] for value in product),
-                         ((0x3F80, 0x4000), (0x3F00, 0x3F80)))
-        mul_destination = self.work / "relu-then-mul"
-        mul_manifest = self.binding.compile(
-            self.snapshot, multiply, fixed_inputs={"a": 3, "b": 5},
-            fixed_outputs=(35, 37), target_source=ROOT, destination=mul_destination,
-            limits=SearchLimits(),
-        )
-        verify_native_publication(
-            mul_destination, mul_manifest, engine="merlin_native",
-            request_digest=multiply.digest(), target_identity=request.target_identity,
-        )
-        mul_program = json.loads((mul_destination / "physical-program.json").read_text())
-        mul_plan = json.loads((mul_destination / "execution_plan.json").read_text())
-        self.assertEqual(mul_plan["producer_domain_obligations"], [{
-            "producer": "positive", "consumer": "sum",
-            "required_domain": BF16_MUL_ATTRS[0][1],
-            "status": "caller_premise_unchecked",
-        }])
-        mul_audit = audit_program(load_inventory(), mul_program,
-                                  (mul_destination / "program.bin").read_bytes())
-        self.assertEqual((mul_audit["status"], mul_audit["modes"]["VMUL_BF16"]),
-                         ("PASS", 1))
 
     def test_native_bf16_add_selects_checks_and_emits(self) -> None:
         from atlas_mlir_native.binding import check_bf16_tile_stream
         from atlas_mlir_native.reference import evaluate_bf16_add
-        from merlin.semantic_compiler.reference import TensorValue, evaluate_graph
-        from merlin.semantic_compiler.search import SearchLimits
-        from merlin.semantic_compiler.target_binding import (
+        from merlin.compiler.semantic.reference import TensorValue, evaluate_graph
+        from merlin.compiler.semantic.search.exploration import SearchLimits
+        from merlin.compiler.semantic.target_binding import (
             NativeCompilationError,
         )
 
@@ -794,10 +656,10 @@ class NativeBindingTest(unittest.TestCase):
     def test_parsed_bf16_sub_selects_checks_and_emits(self) -> None:
         from atlas_mlir_native.binding import BF16_SUB_ATTRS, check_bf16_tile_stream
         from atlas_mlir_native.reference import evaluate_bf16_sub
-        from merlin.semantic_compiler.linalg_bridge import translate_linalg_text
-        from merlin.semantic_compiler.reference import TensorValue, evaluate_graph
-        from merlin.semantic_compiler.search import SearchLimits
-        from merlin.semantic_compiler.target_binding import (
+        from merlin.compiler.semantic.linalg.linalg_bridge import translate_linalg_text
+        from merlin.compiler.semantic.reference import TensorValue, evaluate_graph
+        from merlin.compiler.semantic.search.exploration import SearchLimits
+        from merlin.compiler.semantic.target_binding import (
             NativeCompilationError,
         )
 
@@ -869,14 +731,14 @@ class NativeBindingTest(unittest.TestCase):
             check_bf16_tile_stream,
         )
         from atlas_mlir_native.reference import evaluate_bf16_row_max
-        from merlin.semantic_compiler.model import (
+        from merlin.compiler.semantic.model import (
             KernelRequest,
             SemanticNode,
             TensorType,
         )
-        from merlin.semantic_compiler.reference import TensorValue, evaluate_graph
-        from merlin.semantic_compiler.search import SearchLimits
-        from merlin.semantic_compiler.target_binding import (
+        from merlin.compiler.semantic.reference import TensorValue, evaluate_graph
+        from merlin.compiler.semantic.search.exploration import SearchLimits
+        from merlin.compiler.semantic.target_binding import (
             NativeCompilationError,
         )
 
@@ -966,14 +828,14 @@ class NativeBindingTest(unittest.TestCase):
             check_bf16_tile_stream,
         )
         from atlas_mlir_native.reference import evaluate_bf16_row_sum
-        from merlin.semantic_compiler.model import (
+        from merlin.compiler.semantic.model import (
             KernelRequest,
             SemanticNode,
             TensorType,
         )
-        from merlin.semantic_compiler.reference import TensorValue, evaluate_graph
-        from merlin.semantic_compiler.search import SearchLimits
-        from merlin.semantic_compiler.target_binding import (
+        from merlin.compiler.semantic.reference import TensorValue, evaluate_graph
+        from merlin.compiler.semantic.search.exploration import SearchLimits
+        from merlin.compiler.semantic.target_binding import (
             NativeCompilationError,
         )
         from test_vpu_row_sum_reference import _panel
@@ -1067,15 +929,15 @@ class NativeBindingTest(unittest.TestCase):
         from atlas_mlir_native.binding import BF16_EXP_ATTRS, check_bf16_tile_stream
         from atlas_mlir_native.exp_lane import vexp_bf16_bits
         from atlas_mlir_native.reference import evaluate_bf16_exp
-        from merlin.semantic_compiler.model import (
+        from merlin.compiler.semantic.model import (
             KernelRequest,
             SemanticNode,
             TensorType,
             pointwise_identity_maps,
         )
-        from merlin.semantic_compiler.reference import TensorValue, evaluate_graph
-        from merlin.semantic_compiler.search import SearchLimits
-        from merlin.semantic_compiler.target_binding import (
+        from merlin.compiler.semantic.reference import TensorValue, evaluate_graph
+        from merlin.compiler.semantic.search.exploration import SearchLimits
+        from merlin.compiler.semantic.target_binding import (
             NativeCompilationError,
         )
 
@@ -1168,10 +1030,10 @@ class NativeBindingTest(unittest.TestCase):
         from atlas_mlir_native.binding import BF16_RECIP_ATTRS, check_bf16_tile_stream
         from atlas_mlir_native.recip_lane import vrecip_bf16_bits
         from atlas_mlir_native.reference import evaluate_bf16_recip
-        from merlin.semantic_compiler.model import KernelRequest
-        from merlin.semantic_compiler.reference import TensorValue, evaluate_graph
-        from merlin.semantic_compiler.search import SearchLimits
-        from merlin.semantic_compiler.target_binding import (
+        from merlin.compiler.semantic.model import KernelRequest
+        from merlin.compiler.semantic.reference import TensorValue, evaluate_graph
+        from merlin.compiler.semantic.search.exploration import SearchLimits
+        from merlin.compiler.semantic.target_binding import (
             NativeCompilationError,
         )
 
@@ -1251,12 +1113,12 @@ class NativeBindingTest(unittest.TestCase):
 
     def test_parsed_bf16_add_lowers_to_the_same_checked_tile(self) -> None:
         from atlas_mlir_native.reference import evaluate_bf16_add
-        from merlin.semantic_compiler.linalg_bridge import (
+        from merlin.compiler.semantic.linalg.linalg_bridge import (
             LinalgBridgeError,
             translate_linalg_text,
         )
-        from merlin.semantic_compiler.reference import TensorValue, evaluate_graph
-        from merlin.semantic_compiler.search import SearchLimits
+        from merlin.compiler.semantic.reference import TensorValue, evaluate_graph
+        from merlin.compiler.semantic.search.exploration import SearchLimits
 
         source = (ROOT / "test/examples/native_bf16_add_linalg.mlir").read_text()
         request = translate_linalg_text(
@@ -1287,106 +1149,6 @@ class NativeBindingTest(unittest.TestCase):
                 lowering_policy="diagnostic",
             )
 
-    def test_parsed_bf16_add_then_relu_rechecks_physical_pairs(self) -> None:
-        from atlas_mlir_native.binding import (
-            BF16_ADD_ATTRS,
-            _realized_bf16_assignment,
-            check_bf16_tile_stream,
-        )
-        from atlas_mlir_native.reference import evaluate_bf16_add
-        from merlin.semantic_compiler.linalg_bridge import translate_linalg_text
-        from merlin.semantic_compiler.reference import TensorValue, evaluate_graph
-        from merlin.semantic_compiler.search import SearchLimits
-        from merlin.semantic_compiler.target_binding import (
-            NativeCompilationError,
-            verify_native_publication,
-        )
-
-        source = (ROOT / "test/examples/native_bf16_add_relu_linalg.mlir").read_text()
-        request = translate_linalg_text(
-            source, entry="add_and_relu", target_identity=self.binding.profile().target_identity,
-            lowering_policy="diagnostic",
-        ).request
-        self.assertEqual(tuple(node.op for node in request.nodes),
-                         ("input", "input", "add_bf16", "relu"))
-        self.assertEqual(len(request.outputs), 2)
-        left = tuple((0x3F80, 0xBF80)[index % 2] for index in range(1024))
-        right = tuple((0x3BC0, 0x3F00)[index % 2] for index in range(1024))
-        raw, relu = evaluate_graph(
-            request,
-            {"arg0": TensorValue(request.nodes[0].type, left),
-             "arg1": TensorValue(request.nodes[1].type, right)},
-            primitives={("add_bf16", "raw-bit-pattern"): evaluate_bf16_add},
-        )
-        self.assertEqual(raw.elements, tuple((0x3F80, 0xBF00)[index % 2] for index in range(1024)))
-        self.assertEqual(relu.elements, tuple((0x3F80, 0)[index % 2] for index in range(1024)))
-
-        destination = self.work / "parsed-bf16-add-relu"
-        manifest = self.compile_verified(
-            request, fixed_inputs={"arg0": 3, "arg1": 4},
-            fixed_outputs=(35, 36),
-            destination=destination, limits=SearchLimits(),
-        )
-        program = json.loads((destination / "physical-program.json").read_text())
-        self.assertEqual((program["word_count"], len(manifest["selected_registers"])), (66, 6))
-        self.assertEqual(sum(row["operation"] == "atlas.vpu_binary" for row in program["instructions"]), 1)
-        self.assertEqual(sum(row["operation"] == "atlas.vpu_unary" for row in program["instructions"]), 1)
-        plan = json.loads((destination / "execution_plan.json").read_text())
-        self.assertEqual((plan["operation"], plan["numerical_policy"], plan["input_domain"]),
-                         ("bf16_add_relu", "per-output", "finite-normal-exact-fp32-sum-v1"))
-        self.assertEqual(plan["output_numerical_policies"],
-                         [BF16_ADD_ATTRS[1][1], "bf16-sign-clamp-v1"])
-
-        selected = self.snapshot.select(request, fixed_inputs={"arg0": 3, "arg1": 4}, fixed_outputs=(35, 36))
-        self.assertEqual(selected.status, "selected")
-        assert selected.graph and selected.allocation and selected.rules
-        names = [selected.rules.symbols[value.symbol].get("descriptor", {}).get("name")
-                 for value in selected.graph.values]
-        physical = _realized_bf16_assignment(
-            program, graph=selected.graph, order=selected.allocation.order,
-            names=names, selected=selected.allocation.addresses,
-        )
-        self.assertNotEqual(physical, selected.allocation.addresses)
-        check_bf16_tile_stream(
-            program, graph=selected.graph, order=selected.allocation.order,
-            names=names, assignment=physical, source_ids=("arg0", "arg1"),
-            input_slots=(3, 4), output_slots=(35, 36),
-        )
-        changed = copy.deepcopy(program)
-        next(row for row in changed["instructions"] if row["operation"] == "atlas.vpu_binary")["fields"]["rhs"] = 0
-        with self.assertRaisesRegex(NativeCompilationError, "different source pairs"):
-            _realized_bf16_assignment(
-                changed, graph=selected.graph, order=selected.allocation.order,
-                names=names, selected=selected.allocation.addresses,
-            )
-        selection_path = destination / "native-selection.json"
-        selection = json.loads(selection_path.read_text())
-        self.assertEqual(selection["check_fingerprint"], manifest["native_check_fingerprint"])
-        self.assertEqual(selection["graph_outputs"], list(selected.graph.outputs))
-        self.assertEqual(
-            {row["id"]: row["address"] for row in selection["values"]}, physical
-        )
-        selection_bytes = selection_path.read_bytes()
-        selection_path.write_bytes(selection_bytes + b" ")
-        with self.assertRaisesRegex(ValueError, "native stage artifact changed"):
-            verify_native_publication(
-                destination, manifest, engine="merlin_native",
-                request_digest=request.digest(), target_identity=request.target_identity,
-            )
-        selection_path.write_bytes(selection_bytes)
-        machine_path = destination / "atlas-machine.mlir"
-        machine_bytes = machine_path.read_bytes()
-        machine_path.write_bytes(machine_bytes + b" ")
-        with self.assertRaisesRegex(ValueError, "native stage artifact changed"):
-            verify_native_publication(
-                destination, manifest, engine="merlin_native",
-                request_digest=request.digest(), target_identity=request.target_identity,
-            )
-        machine_path.write_bytes(machine_bytes)
-        verify_native_publication(
-            destination, manifest, engine="merlin_native",
-            request_digest=request.digest(), target_identity=request.target_identity,
-        )
 
     def pack_request(self, *, scale_code: int = 127, policy: str | None = None):
         from atlas_mlir_native.binding import (
@@ -1397,7 +1159,7 @@ class NativeBindingTest(unittest.TestCase):
             SCALED_PACK_DOMAIN,
             SCALED_PACK_POLICY,
         )
-        from merlin.semantic_compiler.model import (
+        from merlin.compiler.semantic.model import (
             KernelRequest,
             SemanticNode,
             TensorType,
@@ -1433,10 +1195,10 @@ class NativeBindingTest(unittest.TestCase):
             check_pack_stream,
         )
         from atlas_mlir_native.reference import evaluate_scaled_pack
-        from merlin.semantic_compiler.linalg_bridge import translate_linalg_text
-        from merlin.semantic_compiler.reference import TensorValue, evaluate_graph
-        from merlin.semantic_compiler.search import SearchLimits
-        from merlin.semantic_compiler.target_binding import (
+        from merlin.compiler.semantic.linalg.linalg_bridge import translate_linalg_text
+        from merlin.compiler.semantic.reference import TensorValue, evaluate_graph
+        from merlin.compiler.semantic.search.exploration import SearchLimits
+        from merlin.compiler.semantic.target_binding import (
             NativeCompilationError,
             verify_native_publication,
         )
@@ -1533,9 +1295,9 @@ class NativeBindingTest(unittest.TestCase):
             check_pack_stream,
         )
         from atlas_mlir_native.reference import evaluate_rounded_scaled_pack
-        from merlin.semantic_compiler.reference import TensorValue, evaluate_graph
-        from merlin.semantic_compiler.search import SearchLimits
-        from merlin.semantic_compiler.target_binding import (
+        from merlin.compiler.semantic.reference import TensorValue, evaluate_graph
+        from merlin.compiler.semantic.search.exploration import SearchLimits
+        from merlin.compiler.semantic.target_binding import (
             NativeCompilationError,
         )
 
@@ -1575,13 +1337,46 @@ class NativeBindingTest(unittest.TestCase):
             )
         self.assertEqual(caught.exception.status, "unsupported_semantics")
 
+    def test_native_rounded_pack_accepts_raw_byte_scales_only(self) -> None:
+        from atlas_mlir_native.binding import (
+            ROUNDED_PACK_POLICY, SCALED_PACK_POLICY, _scaled_pack_code, check_pack_stream,
+        )
+        from atlas_mlir_native.reference import evaluate_rounded_scaled_pack
+        from merlin.compiler.semantic.reference import TensorValue
+        from merlin.compiler.semantic.search.exploration import SearchLimits
+
+        for code in (0, 119, 120, 129, 254, 255):
+            with self.subTest(code=code):
+                request = self.pack_request(policy=ROUNDED_PACK_POLICY, scale_code=code)
+                self.assertEqual(_scaled_pack_code(request.nodes[1]), code)
+                expected = evaluate_rounded_scaled_pack(request.nodes[1], (
+                    TensorValue(request.nodes[0].type, (0x3f80,) * 1024),))
+                self.assertEqual(expected.elements, ({0: 0x7e, 119: 0x78, 120: 0x70,
+                                                       129: 0x28, 254: 0, 255: 0}[code],) * 1024)
+                destination = self.work / f"rounded-byte-{code}"
+                self.compile_verified(request, fixed_inputs={"x": 3}, fixed_outputs=(35,),
+                                      destination=destination, limits=SearchLimits())
+                program = json.loads((destination / "physical-program.json").read_text())
+                check_pack_stream(program, input_address=0x90001800,
+                                  output_address=0x90011800, scale_code=code)
+        for code in (-1, 256, True):
+            with self.subTest(invalid=code):
+                request = self.pack_request(policy=ROUNDED_PACK_POLICY, scale_code=code)
+                self.assertIsNone(_scaled_pack_code(request.nodes[1]))
+                with self.assertRaises(ValueError):
+                    evaluate_rounded_scaled_pack(request.nodes[1], (
+                        TensorValue(request.nodes[0].type, (0x3f80,) * 1024),))
+        for code in (119, 120, 129):
+            self.assertIsNone(_scaled_pack_code(
+                self.pack_request(policy=SCALED_PACK_POLICY, scale_code=code).nodes[1]))
+
     def test_native_unit_pack_selects_and_checks_on_chip_relayout(self) -> None:
         from atlas_mlir_native.binding import check_pack_stream
         from atlas_mlir_native.reference import evaluate_unit_pack
-        from merlin.semantic_compiler.model import KernelRequest
-        from merlin.semantic_compiler.reference import TensorValue, evaluate_graph
-        from merlin.semantic_compiler.search import SearchLimits
-        from merlin.semantic_compiler.target_binding import (
+        from merlin.compiler.semantic.model import KernelRequest
+        from merlin.compiler.semantic.reference import TensorValue, evaluate_graph
+        from merlin.compiler.semantic.search.exploration import SearchLimits
+        from merlin.compiler.semantic.target_binding import (
             NativeCompilationError,
         )
 
@@ -1651,10 +1446,10 @@ class NativeBindingTest(unittest.TestCase):
     def test_parsed_bf16_fp8_cast_reaches_native_pack(self) -> None:
         from atlas_mlir_native.binding import PACK_POLICY
         from atlas_mlir_native.reference import evaluate_unit_pack
-        from merlin.semantic_compiler.linalg_bridge import translate_linalg_text
-        from merlin.semantic_compiler.reference import TensorValue, evaluate_graph
-        from merlin.semantic_compiler.search import SearchLimits
-        from merlin.semantic_compiler.target_binding import (
+        from merlin.compiler.semantic.linalg.linalg_bridge import translate_linalg_text
+        from merlin.compiler.semantic.reference import TensorValue, evaluate_graph
+        from merlin.compiler.semantic.search.exploration import SearchLimits
+        from merlin.compiler.semantic.target_binding import (
             NativeCompilationError,
         )
 
@@ -1709,264 +1504,14 @@ class NativeBindingTest(unittest.TestCase):
             )
         self.assertEqual(caught.exception.status, "unsupported_semantics")
 
-    def test_parsed_relu_then_unit_pack_checks_domain_and_selected_stream(self) -> None:
-        from atlas_mlir_native.binding import PACK_POLICY, check_pack_stream
-        from atlas_mlir_native.reference import evaluate_unit_pack
-        from merlin.semantic_compiler.linalg_bridge import translate_linalg_text
-        from merlin.semantic_compiler.reference import TensorValue, evaluate_graph
-        from merlin.semantic_compiler.search import SearchLimits
-        from merlin.semantic_compiler.target_binding import NativeCompilationError
 
-        from tools.check_program_decode import audit_program
-        from tools.check_variant_inventory import load_inventory
 
-        source = (ROOT / "test/examples/native_bf16_relu_unit_pack_linalg.mlir").read_text()
-        translated = translate_linalg_text(
-            source, entry="relu_pack_tile", target_identity=self.binding.profile().target_identity,
-            lowering_policy="diagnostic",
-        )
-        request = translated.request
-        self.assertEqual(tuple(node.op for node in request.nodes), ("input", "relu", "pack_fp8"))
-        codes = (0x0000, 0x3F00, 0x3F80, 0x4000, 0xBF00, 0xBF80, 0xC000)
-        bits = tuple(codes[(row * 5 + col * 3) % len(codes)]
-                     for row in range(32) for col in range(32))
-        expected = {0x0000: 0, 0x3F00: 0x30, 0x3F80: 0x38, 0x4000: 0x40}
-        self.assertEqual(evaluate_graph(
-            request, {"arg0": TensorValue(request.nodes[0].type, bits)},
-            primitives={("pack_fp8", PACK_POLICY): evaluate_unit_pack},
-        )[0].elements, tuple(expected.get(value, 0) for value in bits))
-        destination = self.work / "native-linalg-relu-pack"
-        manifest = self.binding.compile(
-            self.snapshot, request, fixed_inputs={"arg0": 3}, fixed_outputs=(35,),
-            target_source=ROOT, destination=destination, limits=SearchLimits(),
-        )
-        self.assertEqual(manifest["engine"], "merlin_native")
-        self.assertEqual(manifest["selected_registers"], [34, 35, 32, 33, 0])
-        program = json.loads((destination / "physical-program.json").read_text())
-        check_pack_stream(program, input_address=0x90001800,
-                          output_address=0x90011800, source_pair=32, relu_pair=(34, 32))
-        binary = (destination / "program.bin").read_bytes()
-        inventory = load_inventory()
-        audit = audit_program(inventory, program, binary)
-        self.assertEqual(audit["word_count"], 39)
-        self.assertEqual((audit["modes"]["VRELU"], audit["modes"]["VFP8PACK"]), (1, 1))
-        pack_index = next(index for index, row in enumerate(program["instructions"])
-                          if row["operation"] == "atlas.vpu_pack")
-        wrong_mode = copy.deepcopy(program)
-        changed_word = wrong_mode["instructions"][pack_index]["word_u32"] ^ (1 << 25)
-        wrong_mode["instructions"][pack_index]["word_u32"] = changed_word
-        wrong_mode["instructions"][pack_index]["word_hex"] = f"{changed_word:08x}"
-        wrong_binary = bytearray(binary)
-        struct.pack_into("<I", wrong_binary, pack_index * 4, changed_word)
-        with self.assertRaisesRegex(ValueError, "binary and structured stream differ"):
-            audit_program(inventory, program, bytes(wrong_binary))
-        with self.assertRaisesRegex(ValueError, "VFP8UNPACK"):
-            audit_program(inventory, wrong_mode, bytes(wrong_binary))
-        wrong_fields = copy.deepcopy(program)
-        wrong_fields["instructions"][pack_index]["fields"]["direction"] = "fp8_to_bf16"
-        with self.assertRaisesRegex(ValueError, "fields disagree"):
-            audit_program(inventory, wrong_fields, binary)
-        wrong_operand = copy.deepcopy(program)
-        wrong_operand["instructions"][pack_index]["fields"]["src"] = 36
-        with self.assertRaisesRegex(ValueError, "src field differs from binary operand"):
-            audit_program(inventory, wrong_operand, binary)
-        with self.assertRaisesRegex(ValueError, "partial instruction"):
-            audit_program(inventory, program, binary[:-1])
-        wrong_relu = copy.deepcopy(program)
-        next(row for row in wrong_relu["instructions"] if row["operation"] == "atlas.vpu_unary")["fields"]["dst"] = 36
-        with self.assertRaises(NativeCompilationError):
-            check_pack_stream(wrong_relu, input_address=0x90001800,
-                              output_address=0x90011800, source_pair=32, relu_pair=(34, 32))
-        wrong_pack_word = copy.deepcopy(program)
-        next(row for row in wrong_pack_word["instructions"] if row["operation"] == "atlas.vpu_pack")["word_u32"] ^= 1 << 19
-        with self.assertRaises(NativeCompilationError):
-            check_pack_stream(wrong_pack_word, input_address=0x90001800,
-                              output_address=0x90011800, source_pair=32, relu_pair=(34, 32))
-        plan = json.loads((destination / "execution_plan.json").read_text())
-        self.assertEqual(plan["operation"], "bf16_relu_pack")
-        self.assertEqual(plan["producer_domain_obligations"], [{
-            "producer": request.nodes[1].id,
-            "consumer": request.nodes[2].id,
-            "required_domain": dict(request.nodes[2].attrs)["input_domain"],
-            "status": "caller_premise_unchecked",
-        }])
-        altered = source.replace('merlin.input_domain = "bf16-seven-powers-and-zero-v1"',
-                                 'merlin.input_domain = "unqualified-domain"', 1)
-        assert altered != source
-        changed = translate_linalg_text(
-            altered, entry="relu_pack_tile", target_identity=self.binding.profile().target_identity,
-            lowering_policy="diagnostic",
-        )
-        with self.assertRaises(NativeCompilationError) as caught:
-            self.binding.compile(
-                self.snapshot, changed.request, fixed_inputs={"arg0": 3}, fixed_outputs=(35,),
-                target_source=ROOT, destination=self.work / "unqualified-relu-pack",
-                limits=SearchLimits(),
-            )
-        self.assertEqual(caught.exception.status, "unsupported_semantics")
 
-    def test_native_bf16_relu_uses_vpu_and_checks_pair_timing(self) -> None:
-        from dataclasses import replace
 
-        from atlas_mlir_native.binding import check_bf16_tile_stream
-        from merlin.semantic_compiler.model import KernelRequest
-        from merlin.semantic_compiler.reference import TensorValue, evaluate_graph
-        from merlin.semantic_compiler.search import SearchLimits
-        from merlin.semantic_compiler.target_binding import (
-            NativeCompilationError,
-        )
-
-        request = self.relu_request()
-        fixture = KernelRequest.from_record(json.loads(
-            (ROOT / "test/examples/native_bf16_relu_request.json").read_text()
-        ))
-        self.assertEqual(fixture.digest(), request.digest())
-        source = tuple((0x8000, 0, 0xBF80, 0x3F80, 0xC000, 0x4000)[i % 6]
-                       for i in range(1024))
-        expected = tuple(0 if bits & 0x8000 else bits for bits in source)
-        self.assertEqual(evaluate_graph(request, {"x": TensorValue(request.nodes[0].type, source)})[0].elements,
-                         expected)
-        destination = self.work / "native-relu"
-        self.compile_verified(
-            request, fixed_inputs={"x": 3},
-            fixed_outputs=(35,),
-            destination=destination, limits=SearchLimits(),
-        )
-        plan = json.loads((destination / "execution_plan.json").read_text())
-        self.assertEqual((plan["operation"], plan["input_domain"]),
-                         ("bf16_relu", "finite-normal-or-zero-bf16"))
-        program = json.loads((destination / "physical-program.json").read_text())
-        self.assertEqual(sum(row["operation"] == "atlas.vpu_unary" for row in program["instructions"]), 1)
-        selected = self.snapshot.select(
-            request, fixed_inputs={"x": 3}, fixed_outputs=(35,), limits=SearchLimits(),
-        )
-        self.assertEqual(selected.status, "selected")
-        assert selected.graph and selected.allocation and selected.rules
-        names = [selected.rules.symbols[value.symbol].get("descriptor", {}).get("name")
-                 for value in selected.graph.values]
-        kwargs = {
-            "graph": selected.graph, "order": selected.allocation.order,
-            "names": names, "assignment": selected.allocation.addresses,
-            "source_ids": ("x",), "input_slots": (3,), "output_slots": (35,),
-        }
-        check_bf16_tile_stream(program, **kwargs)
-        changed = copy.deepcopy(program)
-        next(row for row in changed["instructions"] if row["operation"] == "atlas.vpu_unary")["fields"]["dst"] += 2
-        with self.assertRaises(NativeCompilationError):
-            check_bf16_tile_stream(changed, **kwargs)
-        invalid = replace(request, nodes=(request.nodes[0], replace(request.nodes[1], attrs=())))
-        refused = self.work / "relu-without-domain"
-        with self.assertRaises(NativeCompilationError) as caught:
-            self.binding.compile(
-                self.snapshot, invalid, fixed_inputs={"x": 3}, fixed_outputs=(35,),
-                target_source=ROOT, destination=refused, limits=SearchLimits(),
-            )
-        self.assertEqual(caught.exception.status, "unsupported_semantics")
-        self.assertFalse(refused.exists())
-        changed = copy.deepcopy(program)
-        for row in changed["instructions"]:
-            if row["operation"] == "atlas.delay":
-                row["fields"]["cycles"] = 0
-        with self.assertRaises(NativeCompilationError):
-            check_bf16_tile_stream(changed, **kwargs)
-
-    def test_native_shared_bf16_input_keeps_raw_and_relu_outputs_distinct(self) -> None:
-        from dataclasses import replace
-
-        from merlin.semantic_compiler.model import SemanticNode
-        from merlin.semantic_compiler.reference import TensorValue, evaluate_graph
-        from merlin.semantic_compiler.search import SearchLimits
-
-        base = self.relu_request()
-        tensor = base.nodes[0].type
-        request = replace(
-            base,
-            nodes=(base.nodes[0], SemanticNode("raw", "identity", ("x",), tensor), base.nodes[1]),
-            outputs=("raw", "y"), output_storages=("external", "external"),
-        )
-        source = tuple((0xBF80, 0x3F80, 0x8000, 0x0000)[i % 4] for i in range(1024))
-        original, clamped = evaluate_graph(request, {"x": TensorValue(tensor, source)})
-        self.assertEqual(original.elements, source)
-        self.assertEqual(clamped.elements, tuple(0 if bits & 0x8000 else bits for bits in source))
-
-        destination = self.work / "native-shared-relu"
-        manifest = self.compile_verified(
-            request, fixed_inputs={"x": 3},
-            fixed_outputs=(35, 36),
-            destination=destination, limits=SearchLimits(),
-        )
-        plan = json.loads((destination / "execution_plan.json").read_text())
-        self.assertEqual(plan["output_numerical_policies"],
-                         ["raw-bit-pattern", "bf16-sign-clamp-v1"])
-        program = json.loads((destination / "physical-program.json").read_text())
-        operations = [row["operation"] for row in program["instructions"]]
-        self.assertEqual(operations.count("atlas.vload"), 2)
-        self.assertEqual(operations.count("atlas.vpu_unary"), 1)
-        self.assertEqual(operations.count("atlas.vstore"), 4)
-        self.assertNotEqual(manifest["selected_registers"], [0, 1])
-
-    def test_parsed_bf16_relu_linalg_reaches_native_vpu(self) -> None:
-        from merlin.semantic_compiler.linalg_bridge import translate_linalg_text
-        from merlin.semantic_compiler.search import SearchLimits
-
-        source = (ROOT / "test/examples/native_bf16_relu_linalg.mlir").read_text()
-        translated = translate_linalg_text(
-            source, entry="relu_tile", target_identity=self.binding.profile().target_identity,
-            lowering_policy="diagnostic",
-        )
-        self.assertEqual(translated.source_operations,
-                         ("tensor.empty", "linalg.generic", "func.return"))
-        self.assertEqual(translated.request.nodes[-1].op, "relu")
-        destination = self.work / "linalg-bf16-relu"
-        self.compile_verified(
-            translated.request, fixed_inputs={"arg0": 3},
-            fixed_outputs=(35,),
-            destination=destination, limits=SearchLimits(),
-        )
-        plan = json.loads((destination / "execution_plan.json").read_text())
-        self.assertEqual(plan["boundary_domain_obligations"], [{
-            "input": translated.request.nodes[0].id,
-            "required_domain": dict(translated.request.nodes[-1].attrs)["input_domain"],
-            "status": "caller_premise_unchecked",
-        }])
-        self.assertEqual(plan["producer_domain_obligations"], [])
-        program = json.loads((destination / "physical-program.json").read_text())
-        self.assertEqual(program["word_count"], 36)
-        self.assertEqual(sum(row["operation"] == "atlas.vpu_unary" for row in program["instructions"]), 1)
-
-    def test_parsed_raw_and_relu_preserves_both_ordered_outputs(self) -> None:
-        from merlin.semantic_compiler.linalg_bridge import translate_linalg_text
-        from merlin.semantic_compiler.reference import TensorValue, evaluate_graph
-        from merlin.semantic_compiler.search import SearchLimits
-
-        source = (ROOT / "test/examples/native_bf16_raw_relu_linalg.mlir").read_text()
-        translated = translate_linalg_text(
-            source, entry="raw_and_relu", target_identity=self.binding.profile().target_identity,
-            lowering_policy="diagnostic",
-        )
-        self.assertEqual(translated.request.outputs, ("op1r0", "op3r0"))
-        tensor = translated.request.nodes[0].type
-        bits = tuple((0xBF80, 0x3F80, 0x8000, 0x0000)[i % 4] for i in range(1024))
-        raw, relu = evaluate_graph(translated.request, {"arg0": TensorValue(tensor, bits)})
-        self.assertEqual(raw.elements, bits)
-        self.assertEqual(relu.elements, tuple(0 if value & 0x8000 else value for value in bits))
-
-        destination = self.work / "linalg-raw-and-relu"
-        self.compile_verified(
-            translated.request, fixed_inputs={"arg0": 3},
-            fixed_outputs=(35, 36),
-            destination=destination, limits=SearchLimits(),
-        )
-        plan = json.loads((destination / "execution_plan.json").read_text())
-        self.assertEqual(plan["output_numerical_policies"],
-                         ["raw-bit-pattern", "bf16-sign-clamp-v1"])
-        program = json.loads((destination / "physical-program.json").read_text())
-        self.assertEqual(program["word_count"], 50)
-        self.assertEqual(sum(row["operation"] == "atlas.vpu_unary" for row in program["instructions"]), 1)
 
     def mxu0_request(self, *, policy: str | None = None, maps=None):
         from atlas_mlir_native.binding import MXU0_INPUT_DOMAIN, MXU0_POLICY, _mxu0_maps
-        from merlin.semantic_compiler.model import (
+        from merlin.compiler.semantic.model import (
             KernelRequest,
             SemanticNode,
             TensorType,
@@ -1992,7 +1537,7 @@ class NativeBindingTest(unittest.TestCase):
             _mxu0_accumulate_maps,
             _mxu0_maps,
         )
-        from merlin.semantic_compiler.model import (
+        from merlin.compiler.semantic.model import (
             KernelRequest,
             SemanticNode,
             TensorType,
@@ -2021,7 +1566,7 @@ class NativeBindingTest(unittest.TestCase):
 
     def test_native_mxu0_k2_keeps_one_accumulator_until_readout(self) -> None:
         from atlas_mlir_native.binding import check_mxu0_k_chain_stream
-        from merlin.semantic_compiler.search import SearchLimits
+        from merlin.compiler.semantic.search.exploration import SearchLimits
 
         request = self.mxu0_k_request(2)
         destination = self.work / "mxu0-k2"
@@ -2046,7 +1591,7 @@ class NativeBindingTest(unittest.TestCase):
             program, input_addresses=(0x90001800, 0x90002000, 0x90002800, 0x90003000),
             output_address=0x90011800, source_registers=(2, 3, 0, 1),
         )
-        from merlin.semantic_compiler.target_binding import NativeCompilationError
+        from merlin.compiler.semantic.target_binding import NativeCompilationError
 
         arguments = {
             "input_addresses": (0x90001800, 0x90002000, 0x90002800, 0x90003000),
@@ -2070,8 +1615,8 @@ class NativeBindingTest(unittest.TestCase):
                 check_mxu0_k_chain_stream(changed, **arguments)
 
     def test_parsed_ordered_k2_linalg_reaches_native_accumulator_chain(self) -> None:
-        from merlin.semantic_compiler.linalg_bridge import translate_linalg_text
-        from merlin.semantic_compiler.search import SearchLimits
+        from merlin.compiler.semantic.linalg.linalg_bridge import translate_linalg_text
+        from merlin.compiler.semantic.search.exploration import SearchLimits
 
         from tools.check_program_decode import audit_program
         from tools.check_variant_inventory import load_inventory
@@ -2100,8 +1645,8 @@ class NativeBindingTest(unittest.TestCase):
         )["status"], "PASS")
 
     def test_parsed_ordered_k3_linalg_retains_both_continuations(self) -> None:
-        from merlin.semantic_compiler.linalg_bridge import translate_linalg_text
-        from merlin.semantic_compiler.search import SearchLimits
+        from merlin.compiler.semantic.linalg.linalg_bridge import translate_linalg_text
+        from merlin.compiler.semantic.search.exploration import SearchLimits
 
         from tools.check_program_decode import audit_program
         from tools.check_variant_inventory import load_inventory
@@ -2136,7 +1681,7 @@ class NativeBindingTest(unittest.TestCase):
         )
 
     def test_generated_ordered_k_chain_uses_resource_bound_instead_of_shape_list(self) -> None:
-        from merlin.semantic_compiler.search import SearchLimits
+        from merlin.compiler.semantic.search.exploration import SearchLimits
 
         from tools.check_program_decode import audit_program, decode_binary
         from tools.check_variant_inventory import load_inventory
@@ -2163,15 +1708,15 @@ class NativeBindingTest(unittest.TestCase):
         self.assertEqual(json.loads((destination / "execution_plan.json").read_text())["operation"], "mxu0_k4")
 
     def test_parsed_m64_n96_k64_linalg_compiles_six_native_tiles(self) -> None:
-        from merlin.semantic_compiler.linalg_bridge import translate_linalg_text
-        from merlin.semantic_compiler.ordered_k_tiling import (
+        from merlin.compiler.semantic.linalg.linalg_bridge import translate_linalg_text
+        from merlin.compiler.transforms.tiling import (
             materialize_row_major_k_slices,
         )
-        from merlin.semantic_compiler.ordered_mn_tiling import (
+        from merlin.compiler.transforms.tiling import (
             materialize_row_major_mn_inputs,
         )
-        from merlin.semantic_compiler.search import SearchLimits
-        from merlin.semantic_compiler.target_binding import verify_native_publication
+        from merlin.compiler.semantic.search.exploration import SearchLimits
+        from merlin.compiler.semantic.target_binding import verify_native_publication
 
         from tools.check_program_decode import audit_program
         from tools.check_variant_inventory import load_inventory
@@ -2214,14 +1759,14 @@ class NativeBindingTest(unittest.TestCase):
 
     def test_parsed_m33_n31_k65_compiles_checked_mnk_tails(self) -> None:
         from atlas_mlir_native.layout import unpack_native_bf16_output
-        from merlin.semantic_compiler.linalg_bridge import translate_linalg_text
-        from merlin.semantic_compiler.ordered_mnk_tiling import (
+        from merlin.compiler.semantic.linalg.linalg_bridge import translate_linalg_text
+        from merlin.compiler.transforms.tiling import (
             OrderedMNKTiling,
             assemble_row_major_mnk_outputs,
             materialize_row_major_mnk_inputs,
         )
-        from merlin.semantic_compiler.search import SearchLimits
-        from merlin.semantic_compiler.target_binding import verify_native_publication
+        from merlin.compiler.semantic.search.exploration import SearchLimits
+        from merlin.compiler.semantic.target_binding import verify_native_publication
 
         from tools.check_program_decode import audit_program
         from tools.check_variant_inventory import load_inventory
@@ -2281,8 +1826,8 @@ class NativeBindingTest(unittest.TestCase):
         )
 
     def test_parsed_m31_n33_k64_uses_checked_outer_tails(self) -> None:
-        from merlin.semantic_compiler.linalg_bridge import translate_linalg_text
-        from merlin.semantic_compiler.ordered_mn_tiling import (
+        from merlin.compiler.semantic.linalg.linalg_bridge import translate_linalg_text
+        from merlin.compiler.transforms.tiling import (
             assemble_row_major_mn_outputs,
             materialize_row_major_mn_inputs,
         )
@@ -2345,7 +1890,7 @@ class NativeBindingTest(unittest.TestCase):
             self.assertNotIn(other, symbols)
 
     def test_mn_k_cli_rechecks_selected_source_tile(self) -> None:
-        from merlin.targetgen.cli import main as targetgen_main
+        from merlin.development.targetgen.cli import main as targetgen_main
 
         from tools.atlas_ordered_mn_host_data import prepare_mn
 
@@ -2412,7 +1957,7 @@ class NativeBindingTest(unittest.TestCase):
         self.assertEqual(json.loads(rejected.read_text())["status"], "compile_error")
 
     def test_mn_k_cli_exports_partial_output_tiles(self) -> None:
-        from merlin.targetgen.cli import main as targetgen_main
+        from merlin.development.targetgen.cli import main as targetgen_main
 
         from tools.atlas_ordered_mn_host_data import prepare_mn
 
@@ -2470,7 +2015,7 @@ class NativeBindingTest(unittest.TestCase):
             )
 
     def test_mn_cli_exports_single_k_window_with_output_tails(self) -> None:
-        from merlin.targetgen.cli import main as targetgen_main
+        from merlin.development.targetgen.cli import main as targetgen_main
 
         from tools.atlas_ordered_mn_host_data import prepare_mn
 
@@ -2513,7 +2058,7 @@ class NativeBindingTest(unittest.TestCase):
         self.assertIn(b"ATLAS_ORDERED_K_PROGRAM_WORD_COUNT 38u", files["atlas_ordered_k_data.h"])
 
     def test_mn_cli_exports_head_padded_k_tails(self) -> None:
-        from merlin.targetgen.cli import main as targetgen_main
+        from merlin.development.targetgen.cli import main as targetgen_main
 
         from tools.atlas_ordered_mn_host_data import prepare_mn
 
@@ -2622,6 +2167,10 @@ class NativeBindingTest(unittest.TestCase):
             environment.get("PYTHONPATH", ""),
         ))
         executable = Path(sys.executable).with_name("merlin-targetgen")
+        if not executable.is_file():
+            selected = shutil.which("merlin-targetgen")
+            if selected:
+                executable = Path(selected)
         self.assertTrue(executable.is_file())
 
         def invoke(*args: str) -> subprocess.CompletedProcess[str]:
@@ -2671,11 +2220,11 @@ class NativeBindingTest(unittest.TestCase):
         self.assertGreaterEqual(len(marker.read_text().splitlines()), 3)
 
     def test_logical_k64_linalg_partitions_into_checked_native_chain(self) -> None:
-        from merlin.semantic_compiler.linalg_bridge import translate_linalg_text
-        from merlin.semantic_compiler.ordered_k_tiling import (
+        from merlin.compiler.semantic.linalg.linalg_bridge import translate_linalg_text
+        from merlin.compiler.transforms.tiling import (
             materialize_row_major_k_slices,
         )
-        from merlin.semantic_compiler.search import SearchLimits
+        from merlin.compiler.semantic.search.exploration import SearchLimits
 
         from tools.check_program_decode import audit_program
         from tools.check_variant_inventory import load_inventory
@@ -2713,7 +2262,7 @@ class NativeBindingTest(unittest.TestCase):
 
     def test_ordered_k_cli_rechecks_source_windows_and_refuses_bad_geometry(self) -> None:
         from atlas_mlir_native.binding import diagnostic_mxu0_f32_profile
-        from merlin.targetgen.cli import main as targetgen_main
+        from merlin.development.targetgen.cli import main as targetgen_main
 
         source = ROOT / "test/examples/native_mxu0_k64_linalg.mlir"
         abi = self.work / "logical-k64-abi.json"
@@ -2862,7 +2411,7 @@ class NativeBindingTest(unittest.TestCase):
         self.assertFalse(wrong_output.exists())
 
     def test_ordered_k_cli_extends_source_and_host_windows(self) -> None:
-        from merlin.targetgen.cli import main as targetgen_main
+        from merlin.development.targetgen.cli import main as targetgen_main
 
         source = (ROOT / "test/examples/native_mxu0_k64_linalg.mlir").read_text()
         generator = ROOT / "tools/atlas_ordered_k_host_data.py"
@@ -2926,7 +2475,7 @@ class NativeBindingTest(unittest.TestCase):
         from dataclasses import replace
 
         from atlas_mlir_native.binding import MXU1_INPUT_DOMAIN, MXU1_POLICY
-        from merlin.semantic_compiler.model import TensorType
+        from merlin.compiler.semantic.model import TensorType
 
         mxu0 = self.mxu0_request()
         return replace(mxu0, nodes=(
@@ -2937,10 +2486,10 @@ class NativeBindingTest(unittest.TestCase):
 
     def test_native_mxu0_tile_from_source_bound_f32_contraction(self) -> None:
         from atlas_mlir_native.binding import diagnostic_mxu0_f32_profile
-        from merlin.semantic_compiler.precision_transform import (
+        from merlin.compiler.quantization.contraction.transform import (
             build_diagnostic_matmul_tile,
         )
-        from merlin.semantic_compiler.search import SearchLimits
+        from merlin.compiler.semantic.search.exploration import SearchLimits
 
         source = (ROOT / "test/examples/captured_attention_mlp32_linalg.mlir").read_text()
         policy_bytes = (ROOT / "test/examples/atlas_attention_mlp_source_bound_policy.json").read_bytes()
@@ -2993,10 +2542,10 @@ class NativeBindingTest(unittest.TestCase):
 
     def test_small_source_bound_matmul_compiles_full_physical_tile(self) -> None:
         from atlas_mlir_native.binding import diagnostic_mxu0_f32_profile
-        from merlin.semantic_compiler.precision_transform import (
+        from merlin.compiler.quantization.contraction.transform import (
             build_diagnostic_matmul_tile,
         )
-        from merlin.semantic_compiler.search import SearchLimits
+        from merlin.compiler.semantic.search.exploration import SearchLimits
 
         source = (ROOT / "test/examples/source_bound_small_matmul.mlir").read_text()
         profile = diagnostic_mxu0_f32_profile()
@@ -3026,11 +2575,11 @@ class NativeBindingTest(unittest.TestCase):
         import numpy as np
         from atlas_mlir_native.binding import diagnostic_mxu0_f32_profile
         from atlas_mlir_native.precision_abi import pack_source_operand
-        from merlin.frontends.compile_inputs import (
+        from merlin.compiler.frontend.inputs import (
             load_compile_inputs,
             stage_compile_inputs,
         )
-        from merlin.targetgen.cli import main as targetgen_main
+        from merlin.development.targetgen.cli import main as targetgen_main
         from safetensors.numpy import save
 
         source = (ROOT / "test/examples/source_bound_mn_matmul.mlir").read_bytes()
@@ -3122,14 +2671,14 @@ class NativeBindingTest(unittest.TestCase):
     def test_batched_source_tiles_compile_with_distinct_checked_boundaries(self) -> None:
         import numpy as np
         from atlas_mlir_native.binding import diagnostic_mxu0_f32_profile
-        from merlin.frontends.compile_inputs import (
+        from merlin.compiler.frontend.inputs import (
             load_compile_inputs,
             stage_compile_inputs,
         )
-        from merlin.semantic_compiler.precision_constants import (
+        from merlin.compiler.quantization.contraction.constants import (
             load_declared_static_operand,
         )
-        from merlin.targetgen.cli import main as targetgen_main
+        from merlin.development.targetgen.cli import main as targetgen_main
         from safetensors.numpy import save
 
         source = (ROOT / "test/examples/source_bound_batched_matmul.mlir").read_bytes()
@@ -3230,8 +2779,8 @@ class NativeBindingTest(unittest.TestCase):
                                              "--out", str(grid / f"tile-{index}-verification.json")]), 0)
         files, record = prepare_source_mn(
             grid, ROOT / "runtime/selected-host-map.json",
-            Path(MERLIN) / "merlin/runtime/c/row_major_k_window.h",
-            Path(MERLIN) / "merlin/runtime/c/finite_float_boundary.h",
+            Path(MERLIN) / "src/merlin/runtime/native/c/row_major_k_window.h",
+            Path(MERLIN) / "src/merlin/runtime/native/c/finite_float_boundary.h",
             staged_root=staged_path,
         )
         self.assertEqual(record["batch_count"], 2)
@@ -3272,8 +2821,8 @@ class NativeBindingTest(unittest.TestCase):
 
     def test_batched_source_grid_exports_one_checked_host_image(self) -> None:
         from atlas_mlir_native.binding import diagnostic_mxu0_f32_profile
-        from merlin.frontends.compile_inputs import stage_compile_inputs
-        from merlin.targetgen.cli import main as targetgen_main
+        from merlin.compiler.frontend.inputs import stage_compile_inputs
+        from merlin.development.targetgen.cli import main as targetgen_main
         from safetensors.numpy import save
 
         from tools.atlas_source_mn_host_data import prepare as prepare_source_mn
@@ -3346,8 +2895,8 @@ class NativeBindingTest(unittest.TestCase):
                                              "--out", str(receipt)]), 0)
         files, record = prepare_source_mn(
             grid, ROOT / "runtime/selected-host-map.json",
-            Path(MERLIN) / "merlin/runtime/c/row_major_k_window.h",
-            Path(MERLIN) / "merlin/runtime/c/finite_float_boundary.h",
+            Path(MERLIN) / "src/merlin/runtime/native/c/row_major_k_window.h",
+            Path(MERLIN) / "src/merlin/runtime/native/c/finite_float_boundary.h",
         )
         self.assertEqual(
             (record["batch_count"], record["tile_count"], record["matrix_tile_count"]),
@@ -3362,12 +2911,12 @@ class NativeBindingTest(unittest.TestCase):
         for name, payload in files.items():
             (bundle / name).write_bytes(payload)
         (bundle / "manifest.json").write_text(json.dumps(record, sort_keys=True) + "\n")
-        from merlin.frontends.linalg_mlir import parse_mlir_text
-        from merlin.semantic_compiler.precision_intake import (
+        from merlin.compiler.frontend.linalg_mlir import parse_mlir_text
+        from merlin.compiler.quantization.contraction.intake import (
             survey_source_f32_batched_matmuls,
         )
-        from merlin.targetgen.application_graph import _program_graph
-        from merlin.targetgen.contract.model_host_bridge import diagnostic_host_bridge
+        from merlin.compiler.ir.graph import _program_graph
+        from merlin.compiler.build.host_bridge import diagnostic_host_bridge
 
         from tools.atlas_source_mn_model_bridge import prepare as prepare_model_wrapper
 
@@ -3531,7 +3080,7 @@ class NativeBindingTest(unittest.TestCase):
                 probe=str(model_probe), host_check=str(host_check_path),
                 host_object=str(host_object), wrapper=[str(wrapper_dir)],
                 source_bundle=[str(bundle)],
-                merlin_runtime_include=str(Path(MERLIN) / "merlin/runtime/c"),
+                merlin_runtime_include=str(Path(MERLIN) / "src/merlin/runtime/native/c"),
                 clang=clang, nm=llvm_nm,
             ))
             self.assertEqual(linked["status"], "relocatable_link_checked")
@@ -3580,14 +3129,14 @@ class NativeBindingTest(unittest.TestCase):
             diagnostic_mxu0_f32_profile,
         )
         from atlas_mlir_native.precision_abi import pack_source_operand
-        from merlin.frontends.compile_inputs import (
+        from merlin.compiler.frontend.inputs import (
             StagedCompileInputs,
             load_compile_inputs,
             stage_compile_inputs,
         )
-        from merlin.semantic_compiler.linalg_bridge import LinalgBridgeError
-        from merlin.semantic_compiler.search import SearchLimits
-        from merlin.targetgen.cli import main as targetgen_main
+        from merlin.compiler.semantic.linalg.linalg_bridge import LinalgBridgeError
+        from merlin.compiler.semantic.search.exploration import SearchLimits
+        from merlin.development.targetgen.cli import main as targetgen_main
         from safetensors.numpy import save
 
         source = (ROOT / "test/examples/source_bound_mn_k72_matmul.mlir").read_text()
@@ -3803,8 +3352,8 @@ class NativeBindingTest(unittest.TestCase):
                                              "--out", str(receipt_path)]), 0)
         files, host_record = prepare_source_mn(
             grid, ROOT / "runtime/selected-host-map.json",
-            Path(MERLIN) / "merlin/runtime/c/row_major_k_window.h",
-            Path(MERLIN) / "merlin/runtime/c/finite_float_boundary.h",
+            Path(MERLIN) / "src/merlin/runtime/native/c/row_major_k_window.h",
+            Path(MERLIN) / "src/merlin/runtime/native/c/finite_float_boundary.h",
         )
         self.assertEqual((host_record["m_rows"], host_record["n_rows"],
                           host_record["k_columns"], host_record["tile_count"]),
@@ -3851,13 +3400,13 @@ class NativeBindingTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "require --compile-inputs"):
             prepare_source_mn(
                 static_grid, ROOT / "runtime/selected-host-map.json",
-                Path(MERLIN) / "merlin/runtime/c/row_major_k_window.h",
-                Path(MERLIN) / "merlin/runtime/c/finite_float_boundary.h",
+                Path(MERLIN) / "src/merlin/runtime/native/c/row_major_k_window.h",
+                Path(MERLIN) / "src/merlin/runtime/native/c/finite_float_boundary.h",
             )
         static_files, static_record = prepare_source_mn(
             static_grid, ROOT / "runtime/selected-host-map.json",
-            Path(MERLIN) / "merlin/runtime/c/row_major_k_window.h",
-            Path(MERLIN) / "merlin/runtime/c/finite_float_boundary.h",
+            Path(MERLIN) / "src/merlin/runtime/native/c/row_major_k_window.h",
+            Path(MERLIN) / "src/merlin/runtime/native/c/finite_float_boundary.h",
             staged_root=static_staged,
         )
         self.assertEqual(static_record["frozen_rhs"]["weight_key"], "rhs.weight")
@@ -3872,8 +3421,8 @@ class NativeBindingTest(unittest.TestCase):
             with self.assertRaises((ValueError, OSError)):
                 prepare_source_mn(
                     static_grid, ROOT / "runtime/selected-host-map.json",
-                    Path(MERLIN) / "merlin/runtime/c/row_major_k_window.h",
-                    Path(MERLIN) / "merlin/runtime/c/finite_float_boundary.h",
+                    Path(MERLIN) / "src/merlin/runtime/native/c/row_major_k_window.h",
+                    Path(MERLIN) / "src/merlin/runtime/native/c/finite_float_boundary.h",
                     staged_root=static_staged,
                 )
         finally:
@@ -3884,9 +3433,9 @@ class NativeBindingTest(unittest.TestCase):
             (static_bundle / name).write_bytes(payload)
         (static_bundle / "manifest.json").write_text(json.dumps(static_record, sort_keys=True) + "\n")
 
-        from merlin.frontends.linalg_mlir import parse_mlir_text
-        from merlin.targetgen.application_graph import _program_graph
-        from merlin.targetgen.contract.model_host_bridge import diagnostic_host_bridge
+        from merlin.compiler.frontend.linalg_mlir import parse_mlir_text
+        from merlin.compiler.ir.graph import _program_graph
+        from merlin.compiler.build.host_bridge import diagnostic_host_bridge
 
         from tools.atlas_source_mn_model_bridge import (
             prepare as prepare_source_model_wrapper,
@@ -4035,7 +3584,7 @@ class NativeBindingTest(unittest.TestCase):
                 probe=str(model_probe), host_check=str(host_check_path),
                 host_object=str(host_object), wrapper=[str(wrapper_dir)],
                 source_bundle=[str(static_bundle)],
-                merlin_runtime_include=str(Path(MERLIN) / "merlin/runtime/c"),
+                merlin_runtime_include=str(Path(MERLIN) / "src/merlin/runtime/native/c"),
                 clang=clang, nm=llvm_nm,
             ))
             self.assertEqual(linked["status"], "relocatable_link_checked")
@@ -4157,8 +3706,8 @@ class NativeBindingTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "unverified or changed"):
                 prepare_source_mn(
                     grid, ROOT / "runtime/selected-host-map.json",
-                    Path(MERLIN) / "merlin/runtime/c/row_major_k_window.h",
-                    Path(MERLIN) / "merlin/runtime/c/finite_float_boundary.h",
+                    Path(MERLIN) / "src/merlin/runtime/native/c/row_major_k_window.h",
+                    Path(MERLIN) / "src/merlin/runtime/native/c/finite_float_boundary.h",
                 )
         finally:
             changed.write_bytes(original)
@@ -4169,8 +3718,8 @@ class NativeBindingTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "stage changed"):
                 prepare_source_mn(
                     grid, ROOT / "runtime/selected-host-map.json",
-                    Path(MERLIN) / "merlin/runtime/c/row_major_k_window.h",
-                    Path(MERLIN) / "merlin/runtime/c/finite_float_boundary.h",
+                    Path(MERLIN) / "src/merlin/runtime/native/c/row_major_k_window.h",
+                    Path(MERLIN) / "src/merlin/runtime/native/c/finite_float_boundary.h",
                 )
         finally:
             changed_stage.write_bytes(original_stage)
@@ -4178,8 +3727,8 @@ class NativeBindingTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "verification receipts are missing"):
             prepare_source_mn(
                 grid, ROOT / "runtime/selected-host-map.json",
-                Path(MERLIN) / "merlin/runtime/c/row_major_k_window.h",
-                Path(MERLIN) / "merlin/runtime/c/finite_float_boundary.h",
+                Path(MERLIN) / "src/merlin/runtime/native/c/row_major_k_window.h",
+                Path(MERLIN) / "src/merlin/runtime/native/c/finite_float_boundary.h",
             )
 
     def test_finite_mxu1_candidate_is_separate_and_emits_scaled_tile(self) -> None:
@@ -4188,9 +3737,9 @@ class NativeBindingTest(unittest.TestCase):
             MXU1_FINITE_POLICY,
             diagnostic_mxu1_finite_f32_profile,
         )
-        from merlin.frontends.compile_inputs import StagedCompileInputs
-        from merlin.semantic_compiler.search import SearchLimits
-        from merlin.semantic_compiler.target_binding import (
+        from merlin.compiler.frontend.inputs import StagedCompileInputs
+        from merlin.compiler.semantic.search.exploration import SearchLimits
+        from merlin.compiler.semantic.target_binding import (
             NativeCompilationError,
         )
 
@@ -4248,8 +3797,8 @@ class NativeBindingTest(unittest.TestCase):
 
     def test_positive_zero_boundary_is_a_separate_source_policy(self) -> None:
         import numpy as np
-        from merlin.frontends.compile_inputs import StagedCompileInputs
-        from merlin.semantic_compiler.target_binding import NativeCompilationError
+        from merlin.compiler.frontend.inputs import StagedCompileInputs
+        from merlin.compiler.semantic.target_binding import NativeCompilationError
 
         examples = ROOT / "test/examples"
         source = (examples / "captured_attention_mlp32_linalg.mlir").read_bytes()
@@ -4283,8 +3832,8 @@ class NativeBindingTest(unittest.TestCase):
 
     def test_mixed_positive_zero_policy_keeps_both_mxu_arithmetic_contracts(self) -> None:
         import numpy as np
-        from merlin.frontends.compile_inputs import StagedCompileInputs
-        from merlin.semantic_compiler.search import SearchLimits
+        from merlin.compiler.frontend.inputs import StagedCompileInputs
+        from merlin.compiler.semantic.search.exploration import SearchLimits
 
         examples = ROOT / "test/examples"
         source = (examples / "captured_attention_mlp32_linalg.mlir").read_bytes()
@@ -4347,14 +3896,14 @@ class NativeBindingTest(unittest.TestCase):
             decode_source_result,
             pack_source_operand,
         )
-        from merlin.frontends.compile_inputs import (
+        from merlin.compiler.frontend.inputs import (
             load_compile_inputs,
             stage_compile_inputs,
         )
-        from merlin.semantic_compiler.precision_constants import (
+        from merlin.compiler.quantization.contraction.constants import (
             load_declared_static_operand,
         )
-        from merlin.targetgen.cli import main as targetgen_main
+        from merlin.development.targetgen.cli import main as targetgen_main
 
         examples = ROOT / "test/examples"
         source = (examples / "captured_attention_mlp32_linalg.mlir").read_bytes()
@@ -4523,7 +4072,7 @@ class NativeBindingTest(unittest.TestCase):
         host_library = self.work / "source-bound-host-conversion.so"
         subprocess.run(
             ["cc", "-std=c11", "-O2", "-Wall", "-Wextra", "-Werror", "-fPIC", "-shared",
-             "-I", str(Path(MERLIN) / "merlin/runtime/c"), "-I", str(self.work),
+             "-I", str(Path(MERLIN) / "src/merlin/runtime/native/c"), "-I", str(self.work),
              str(host_source), "-o", str(host_library)],
             check=True, capture_output=True, text=True,
         )
@@ -4659,7 +4208,7 @@ class NativeBindingTest(unittest.TestCase):
         )
         subprocess.run(
             ["cc", "-std=c11", "-O2", "-Wall", "-Wextra", "-Werror", "-fPIC", "-shared",
-             "-I", str(Path(MERLIN) / "merlin/runtime/c"), "-I", str(scaled_host),
+             "-I", str(Path(MERLIN) / "src/merlin/runtime/native/c"), "-I", str(scaled_host),
              str(scaled_host / "conversion.c"), "-o", str(scaled_host / "conversion.so")],
             check=True, capture_output=True, text=True,
         )
@@ -4690,82 +4239,6 @@ class NativeBindingTest(unittest.TestCase):
                                          "--out", str(changed)]), 2)
         self.assertEqual(json.loads(changed.read_text())["status"], "compile_error")
 
-    def test_native_mxu0_result_feeds_bf16_relu(self) -> None:
-        from dataclasses import replace
-
-        from atlas_mlir_native.binding import BF16_RELU_ATTRS, check_mxu0_stream
-        from merlin.semantic_compiler.model import (
-            KernelRequest,
-            SemanticNode,
-            TensorType,
-            pointwise_identity_maps,
-        )
-        from merlin.semantic_compiler.search import SearchLimits
-        from merlin.semantic_compiler.target_binding import (
-            NativeCompilationError,
-        )
-
-        base = self.mxu0_request()
-        relu = SemanticNode(
-            "z", "relu", ("y",), TensorType((32, 32), "bf16", "raw-bit-pattern"),
-            attrs=BF16_RELU_ATTRS, index_maps=pointwise_identity_maps(2, 1),
-        )
-        request = replace(base, nodes=(*base.nodes, relu), outputs=("z",))
-        fixture = KernelRequest.from_record(json.loads(
-            (ROOT / "test/examples/native_mxu0_relu_request.json").read_text()
-        ))
-        self.assertEqual(fixture.digest(), request.digest())
-        destination = self.work / "mxu0-relu"
-        manifest = self.compile_verified(
-            request, fixed_inputs={"x": 3, "w": 4},
-            fixed_outputs=(35,),
-            destination=destination, limits=SearchLimits(),
-        )
-        program = json.loads((destination / "physical-program.json").read_text())
-        pair, relu_pair = manifest["selected_registers"][2:4], manifest["selected_registers"][4:6]
-        self.assertNotEqual(pair, relu_pair)
-        self.assertEqual([row["operation"] for row in program["instructions"]].count("atlas.vpu_unary"), 1)
-        kwargs = {
-            "activation_address": 0x90001800, "weight_address": 0x90002000,
-            "output_address": 0x90011800,
-            "activation": manifest["selected_registers"][0],
-            "weight": manifest["selected_registers"][1],
-            "pair": pair[0], "relu_pair": relu_pair[0],
-        }
-        check_mxu0_stream(program, **kwargs)
-        changed = copy.deepcopy(program)
-        next(row for row in changed["instructions"] if row["operation"] == "atlas.vpu_unary")["fields"]["dst"] = pair[0]
-        with self.assertRaises(NativeCompilationError):
-            check_mxu0_stream(changed, **kwargs)
-        changed = copy.deepcopy(program)
-        next(row for row in changed["instructions"] if row["operation"] == "atlas.vpu_unary")["fields"]["src"] = relu_pair[0]
-        with self.assertRaises(NativeCompilationError):
-            check_mxu0_stream(changed, **kwargs)
-        plan = json.loads((destination / "execution_plan.json").read_text())
-        self.assertEqual((plan["operation"], plan["input_domain"], plan["output_numerical_policies"]),
-                         ("mxu0_bf16_dag", "per-operation-declared", ["bf16-sign-clamp-v1"]))
-        self.assertEqual(
-            {(row["input"], row["required_domain"]) for row in plan["boundary_domain_obligations"]},
-            {("x", "finite-normal-e4m3-or-positive-zero"),
-             ("w", "finite-normal-e4m3-or-positive-zero")},
-        )
-        self.assertEqual(plan["producer_domain_obligations"], [{
-            "producer": "y", "consumer": "z",
-            "required_domain": "finite-normal-or-zero-bf16",
-            "status": "caller_premise_unchecked",
-        }])
-        invalid = replace(request, nodes=(*base.nodes, replace(relu, attrs=())))
-        with self.assertRaises(NativeCompilationError):
-            self.binding.compile(
-                self.snapshot, invalid, fixed_inputs={"x": 3, "w": 4}, fixed_outputs=(35,),
-                target_source=ROOT, destination=self.work / "invalid-mxu0-relu", limits=SearchLimits(),
-            )
-        wrong_domain = replace(request, nodes=(replace(base.nodes[0], attrs=()), *request.nodes[1:]))
-        with self.assertRaises(NativeCompilationError):
-            self.binding.compile(
-                self.snapshot, wrong_domain, fixed_inputs={"x": 3, "w": 4}, fixed_outputs=(35,),
-                target_source=ROOT, destination=self.work / "invalid-mxu0-relu-domain", limits=SearchLimits(),
-            )
 
     def test_native_mxu0_result_feeds_bf16_multiply(self) -> None:
         from atlas_mlir_native.binding import (
@@ -4775,14 +4248,14 @@ class NativeBindingTest(unittest.TestCase):
             _mxu0_maps,
             check_mxu_bf16_binary_stream,
         )
-        from merlin.semantic_compiler.model import (
+        from merlin.compiler.semantic.model import (
             KernelRequest,
             SemanticNode,
             TensorType,
             pointwise_identity_maps,
         )
-        from merlin.semantic_compiler.search import SearchLimits
-        from merlin.semantic_compiler.target_binding import (
+        from merlin.compiler.semantic.search.exploration import SearchLimits
+        from merlin.compiler.semantic.target_binding import (
             NativeCompilationError,
         )
 
@@ -4830,7 +4303,7 @@ class NativeBindingTest(unittest.TestCase):
             "status": "caller_premise_unchecked",
         }])
 
-        from merlin.semantic_compiler.linalg_bridge import translate_linalg_text
+        from merlin.compiler.semantic.linalg.linalg_bridge import translate_linalg_text
 
         translated = translate_linalg_text(
             (ROOT / "test/examples/native_mxu0_bf16_mul_linalg.mlir").read_text(),
@@ -4893,11 +4366,11 @@ class NativeBindingTest(unittest.TestCase):
             MXU0_POLICY,
             check_mxu_bf16_binary_stream,
         )
-        from merlin.semantic_compiler.linalg_bridge import translate_linalg_text
-        from merlin.semantic_compiler.model import TensorType
-        from merlin.semantic_compiler.reference import TensorValue, evaluate_graph
-        from merlin.semantic_compiler.search import SearchLimits
-        from merlin.semantic_compiler.target_binding import (
+        from merlin.compiler.semantic.linalg.linalg_bridge import translate_linalg_text
+        from merlin.compiler.semantic.model import TensorType
+        from merlin.compiler.semantic.reference import TensorValue, evaluate_graph
+        from merlin.compiler.semantic.search.exploration import SearchLimits
+        from merlin.compiler.semantic.target_binding import (
             NativeCompilationError,
         )
 
@@ -5001,181 +4474,7 @@ class NativeBindingTest(unittest.TestCase):
                 source_ids=("arg0", "arg1", "arg2"), input_slots=(3, 4, 5), output_slot=35,
             )
 
-    def test_parsed_mxu0_add_relu_preserves_both_outputs(self) -> None:
-        from atlas_mlir_native.binding import (
-            BF16_ADD_ATTRS,
-            BF16_RELU_ATTRS,
-            check_mxu_bf16_dag_stream,
-        )
-        from merlin.semantic_compiler.linalg_bridge import translate_linalg_text
-        from merlin.semantic_compiler.search import SearchLimits
-        from merlin.semantic_compiler.target_binding import NativeCompilationError
 
-        from tools.atlas_virtual_evaluator import (
-            MemoryRegion,
-            RuntimeInputs,
-            Tile,
-            evaluate,
-            parse_program,
-        )
-
-        sys.path.insert(0, str(ROOT / "test"))
-        try:
-            from test_mxu_numerics import dot
-            from test_vpu_add_reference import _add_then_chop
-        finally:
-            sys.path.remove(str(ROOT / "test"))
-
-        translated = translate_linalg_text(
-            (ROOT / "test/examples/native_mxu0_add_relu_linalg.mlir").read_text(),
-            entry="mxu0_add_relu_tile", target_identity=self.binding.profile().target_identity,
-            lowering_policy="diagnostic",
-        )
-        request = translated.request
-        self.assertEqual(tuple(node.op for node in request.nodes),
-                         ("input", "input", "input", "matmul", "add_bf16", "relu"))
-        self.assertEqual(request.outputs, (request.nodes[4].id, request.nodes[5].id))
-        self.assertEqual((request.nodes[4].attrs, request.nodes[5].attrs),
-                         (BF16_ADD_ATTRS, BF16_RELU_ATTRS))
-
-        destination = self.work / "mxu0-add-relu-dag"
-        fixed_inputs = {"arg0": 3, "arg1": 4, "arg2": 5}
-        manifest = self.binding.compile(
-            self.snapshot, request, fixed_inputs=fixed_inputs, fixed_outputs=(35, 36),
-            target_source=ROOT, destination=destination, limits=SearchLimits(),
-        )
-        plan = json.loads((destination / "execution_plan.json").read_text())
-        self.assertEqual((plan["operation"], plan["input_payload_bytes"]),
-                         ("mxu0_bf16_dag", [1024, 1024, 2048]))
-        self.assertEqual(
-            [(item["producer"], item["consumer"]) for item in plan["producer_domain_obligations"]],
-            [(request.nodes[3].id, request.nodes[4].id),
-             (request.nodes[4].id, request.nodes[5].id)],
-        )
-        self.assertEqual(len(plan["output_addresses"]), 2)
-        program = json.loads((destination / "physical-program.json").read_text())
-        self.assertEqual((program["word_count"], len((destination / "program.bin").read_bytes())),
-                         (70, 280))
-        self.assertEqual(sum(row["operation"] == "atlas.vpu_binary"
-                             for row in program["instructions"]), 1)
-        self.assertEqual(sum(row["operation"] == "atlas.vpu_unary"
-                             for row in program["instructions"]), 1)
-
-        virtual = parse_program((destination / "atlas-virtual.mlir").read_text(),
-                                function="native_tile")
-        cell = dot((0x38,) * 32, (0x38,) * 32)
-        self.assertEqual(cell, 0x4200)
-        base = 0x90000000
-        guards = (MemoryRegion(base + 2 * 2048, b"\xa5" * 2048),
-                  MemoryRegion(base + 34 * 2048, b"\x5a" * 2048))
-        for bias in (0x3F00, 0xC280):
-            with self.subTest(bias=bias):
-                expected_sum = _add_then_chop(cell, bias)
-                expected_relu = 0 if expected_sum & 0x8000 else expected_sum
-                result = evaluate(virtual, RuntimeInputs(tiles={
-                    0: Tile("fp8", (0x38,) * 1024),
-                    1: Tile("fp8", (0x38,) * 1024),
-                    2: Tile("bf16", (bias,) * 1024),
-                }, memory=guards))
-                self.assertEqual(result.outputs[0].bits, (expected_sum,) * 1024)
-                self.assertEqual(result.outputs[1].bits, (expected_relu,) * 1024)
-                self.assertEqual(result.memory, guards)
-
-        selected = self.snapshot.select(
-            request, fixed_inputs=fixed_inputs, fixed_outputs=(35, 36),
-            limits=SearchLimits(),
-        )
-        self.assertEqual(selected.status, "selected")
-        assert selected.graph and selected.allocation and selected.rules
-        kwargs = {
-            "graph": selected.graph,
-            "order": selected.allocation.order,
-            "names": [selected.rules.symbols[value.symbol].get("descriptor", {}).get("name")
-                      for value in selected.graph.values],
-            "assignment": selected.allocation.addresses,
-            "source_ids": ("arg0", "arg1", "arg2"),
-            "mxu_inputs": {request.nodes[3].id: ("arg0", "arg1")},
-            "input_slots": (3, 4, 5),
-            "output_slots": (35, 36),
-        }
-        check_mxu_bf16_dag_stream(program, **kwargs)
-        for kind in ("wrong_relu_source", "wrong_output_half", "short_delay"):
-            changed = copy.deepcopy(program)
-            rows = changed["instructions"]
-            if kind == "wrong_relu_source":
-                next(row for row in rows if row["operation"] == "atlas.vpu_unary")["fields"]["src"] = 36
-            elif kind == "wrong_output_half":
-                stores = [row for row in rows if row["operation"] == "atlas.vstore"]
-                stores[-1]["fields"]["src"] = stores[0]["fields"]["src"]
-            else:
-                delays = [row for row in rows if row["operation"] == "atlas.delay"]
-                max(delays, key=lambda row: row["fields"]["cycles"])["fields"]["cycles"] = 0
-            with self.subTest(kind=kind), self.assertRaises(NativeCompilationError):
-                check_mxu_bf16_dag_stream(changed, **kwargs)
-
-        self.assertIn("native-selection.json", manifest["stage_artifacts"])
-
-    def test_mxu0_vpu_dag_keeps_requested_output_order_and_shared_readout(self) -> None:
-        from dataclasses import replace
-
-        from merlin.semantic_compiler.linalg_bridge import translate_linalg_text
-        from merlin.semantic_compiler.search import SearchLimits
-
-        from tools.atlas_virtual_evaluator import (
-            RuntimeInputs,
-            Tile,
-            evaluate,
-            parse_program,
-        )
-
-        parsed = translate_linalg_text(
-            (ROOT / "test/examples/native_mxu0_add_relu_linalg.mlir").read_text(),
-            entry="mxu0_add_relu_tile", target_identity=self.binding.profile().target_identity,
-            lowering_policy="diagnostic",
-        ).request
-        mxu, summed, relu = (node.id for node in parsed.nodes[-3:])
-        for label, outputs, expected, policies in (
-            (
-                "reversed", (relu, summed), (0, 0xC200),
-                ("bf16-sign-clamp-v1", "selected-f32-rne-bf16-chop-v1"),
-            ),
-            (
-                "shared-mxu", (mxu, summed, relu), (0x4200, 0xC200, 0),
-                ("mxu0-e4m3-ordered-bf16-finite-v1",
-                 "selected-f32-rne-bf16-chop-v1", "bf16-sign-clamp-v1"),
-            ),
-        ):
-            with self.subTest(label=label):
-                request = replace(parsed, outputs=outputs,
-                                  output_storages=("external",) * len(outputs))
-                destination = self.work / f"mxu-dag-{label}"
-                self.binding.compile(
-                    self.snapshot, request,
-                    fixed_inputs={"arg0": 3, "arg1": 4, "arg2": 5},
-                    fixed_outputs=tuple(range(35, 35 + len(outputs))),
-                    target_source=ROOT, destination=destination,
-                    limits=SearchLimits(),
-                )
-                selected = json.loads((destination / "native-selection.json").read_text())
-                self.assertEqual(sum(value["descriptor"] == "atlas.mxu0_reset_tile"
-                                     for value in selected["values"]), 1)
-                program = json.loads((destination / "physical-program.json").read_text())
-                self.assertEqual(sum(row["operation"] == "atlas.mxu_matmul"
-                                     for row in program["instructions"]), 1)
-                plan = json.loads((destination / "execution_plan.json").read_text())
-                self.assertEqual(plan["output_numerical_policies"], list(policies))
-                virtual = parse_program((destination / "atlas-virtual.mlir").read_text(),
-                                        function="native_tile")
-                result = evaluate(virtual, RuntimeInputs(tiles={
-                    0: Tile("fp8", (0x38,) * 1024),
-                    1: Tile("fp8", (0x38,) * 1024),
-                    2: Tile("bf16", (0xC280,) * 1024),
-                }))
-                self.assertEqual(tuple(result.outputs), tuple(range(len(outputs))))
-                self.assertEqual(tuple(result.outputs[index].bits[0] for index in result.outputs),
-                                 expected)
-                self.assertTrue(all(set(tile.bits) == {expected[index]}
-                                    for index, tile in result.outputs.items()))
 
     def test_two_mxu0_results_feed_one_vpu_add(self) -> None:
         from atlas_mlir_native.binding import (
@@ -5185,15 +4484,15 @@ class NativeBindingTest(unittest.TestCase):
             _mxu0_maps,
             check_mxu_bf16_dag_stream,
         )
-        from merlin.semantic_compiler.model import (
+        from merlin.compiler.semantic.model import (
             KernelRequest,
             SemanticNode,
             TensorType,
             pointwise_identity_maps,
         )
-        from merlin.semantic_compiler.reference import TensorValue, evaluate_graph
-        from merlin.semantic_compiler.search import SearchLimits
-        from merlin.semantic_compiler.target_binding import (
+        from merlin.compiler.semantic.reference import TensorValue, evaluate_graph
+        from merlin.compiler.semantic.search.exploration import SearchLimits
+        from merlin.compiler.semantic.target_binding import (
             NativeCompilationError,
         )
 
@@ -5301,15 +4600,15 @@ class NativeBindingTest(unittest.TestCase):
             check_mxu_bf16_dag_stream,
         )
         from atlas_mlir_native.reference import evaluate_unit_pack
-        from merlin.semantic_compiler.model import (
+        from merlin.compiler.semantic.model import (
             KernelRequest,
             SemanticNode,
             TensorType,
             pointwise_identity_maps,
         )
-        from merlin.semantic_compiler.reference import TensorValue, evaluate_graph
-        from merlin.semantic_compiler.search import SearchLimits
-        from merlin.semantic_compiler.target_binding import NativeCompilationError
+        from merlin.compiler.semantic.reference import TensorValue, evaluate_graph
+        from merlin.compiler.semantic.search.exploration import SearchLimits
+        from merlin.compiler.semantic.target_binding import NativeCompilationError
 
         from tools.atlas_virtual_evaluator import (
             RuntimeInputs,
@@ -5449,14 +4748,14 @@ class NativeBindingTest(unittest.TestCase):
             _mxu0_maps,
             check_mxu_bf16_dag_stream,
         )
-        from merlin.semantic_compiler.model import (
+        from merlin.compiler.semantic.model import (
             KernelRequest,
             SemanticNode,
             TensorType,
             pointwise_identity_maps,
         )
-        from merlin.semantic_compiler.search import SearchLimits
-        from merlin.semantic_compiler.target_binding import (
+        from merlin.compiler.semantic.search.exploration import SearchLimits
+        from merlin.compiler.semantic.target_binding import (
             NativeCompilationError,
         )
 
@@ -5547,8 +4846,8 @@ class NativeBindingTest(unittest.TestCase):
             check_mxu_bf16_dag_stream(changed, **arguments)
 
     def test_parsed_qk_pack_score_keeps_computed_weight(self) -> None:
-        from merlin.semantic_compiler.linalg_bridge import translate_linalg_text
-        from merlin.semantic_compiler.search import SearchLimits
+        from merlin.compiler.semantic.linalg.linalg_bridge import translate_linalg_text
+        from merlin.compiler.semantic.search.exploration import SearchLimits
 
         from tools.atlas_virtual_evaluator import (
             RuntimeInputs,
@@ -5596,15 +4895,15 @@ class NativeBindingTest(unittest.TestCase):
             _row_reduce_maps,
             check_mxu_bf16_dag_stream,
         )
-        from merlin.semantic_compiler.linalg_bridge import translate_linalg_text
-        from merlin.semantic_compiler.model import (
+        from merlin.compiler.semantic.linalg.linalg_bridge import translate_linalg_text
+        from merlin.compiler.semantic.model import (
             KernelRequest,
             SemanticNode,
             TensorType,
             pointwise_identity_maps,
         )
-        from merlin.semantic_compiler.search import SearchLimits
-        from merlin.semantic_compiler.target_binding import (
+        from merlin.compiler.semantic.search.exploration import SearchLimits
+        from merlin.compiler.semantic.target_binding import (
             NativeCompilationError,
         )
 
@@ -5811,7 +5110,7 @@ class NativeBindingTest(unittest.TestCase):
             2: Tile("fp8", (0x18,) * 1024),
         }))
         self.assertEqual(set(softmax_result.outputs[0].bits), {0x3D00})
-        from test.rtl.make_native_qk_softmax_fixture import _panel
+        from rtl.make_native_qk_softmax_fixture import _panel
 
         payloads, expected_physical = _panel("patterned")
         patterned_result = evaluate(softmax_virtual, RuntimeInputs(tiles={
@@ -5824,11 +5123,11 @@ class NativeBindingTest(unittest.TestCase):
         self.assertEqual(struct.pack("<1024H", *physical), expected_physical)
 
     def test_parsed_mxu0_pack_mxu0_compiles_without_losing_the_pack_edge(self) -> None:
-        from merlin.semantic_compiler.linalg_bridge import (
+        from merlin.compiler.semantic.linalg.linalg_bridge import (
             LinalgBridgeError,
             translate_linalg_text,
         )
-        from merlin.semantic_compiler.search import SearchLimits
+        from merlin.compiler.semantic.search.exploration import SearchLimits
 
         from tools.check_program_decode import audit_program
         from tools.check_variant_inventory import load_inventory
@@ -5880,99 +5179,6 @@ class NativeBindingTest(unittest.TestCase):
                     lowering_policy="diagnostic",
                 )
 
-    def test_parsed_mxu0_relu_pack_mxu0_preserves_both_outputs(self) -> None:
-        from atlas_mlir_native.binding import check_mxu_bf16_dag_stream
-        from merlin.semantic_compiler.linalg_bridge import (
-            LinalgBridgeError,
-            translate_linalg_text,
-        )
-        from merlin.semantic_compiler.search import SearchLimits
-        from merlin.semantic_compiler.target_binding import (
-            NativeCompilationError,
-        )
-
-        from tools.atlas_virtual_evaluator import (
-            RuntimeInputs,
-            Tile,
-            evaluate,
-            parse_program,
-        )
-        from tools.check_program_decode import audit_program
-        from tools.check_variant_inventory import load_inventory
-
-        source = (ROOT / "test/examples/native_mxu0_relu_pack_mxu0_linalg.mlir").read_text()
-        request = translate_linalg_text(
-            source, entry="mxu0_relu_pack_mxu0_tile",
-            target_identity=self.binding.profile().target_identity,
-            lowering_policy="diagnostic",
-        ).request
-        self.assertEqual(tuple(node.op for node in request.nodes), (
-            "input", "input", "input", "matmul", "relu", "pack_fp8", "matmul",
-        ))
-        self.assertEqual(len(request.outputs), 2)
-        fixed_inputs = {"arg0": 3, "arg1": 4, "arg2": 5}
-        destination = self.work / "parsed-mxu0-relu-pack-mxu0"
-        self.compile_verified(
-            request, fixed_inputs=fixed_inputs,
-            fixed_outputs=(35, 36),
-            destination=destination, limits=SearchLimits(),
-        )
-        program = json.loads((destination / "physical-program.json").read_text())
-        operations = [row["operation"] for row in program["instructions"]]
-        self.assertEqual(operations.count("atlas.mxu_matmul"), 2)
-        self.assertEqual(operations.count("atlas.vpu_unary"), 1)
-        self.assertEqual(operations.count("atlas.vpu_pack"), 2)
-        self.assertEqual(audit_program(
-            load_inventory(), program, (destination / "program.bin").read_bytes(),
-        )["status"], "PASS")
-        plan = json.loads((destination / "execution_plan.json").read_text())
-        self.assertEqual(len(plan["producer_domain_obligations"]), 3)
-        self.assertEqual({entry["status"] for entry in plan["producer_domain_obligations"]},
-                         {"caller_premise_unchecked"})
-
-        virtual = parse_program((destination / "atlas-virtual.mlir").read_text(),
-                                function="native_tile")
-        for first_weight, expected in ((0x10, (0x3f80, 0x4200)),
-                                       (0x90, (0, 0))):
-            with self.subTest(first_weight=first_weight):
-                result = evaluate(virtual, RuntimeInputs(tiles={
-                    0: Tile("fp8", (0x38,) * 1024),
-                    1: Tile("fp8", (first_weight,) * 1024),
-                    2: Tile("fp8", (0x38,) * 1024),
-                }))
-                self.assertEqual(tuple(result.outputs), (0, 1))
-                for index, bits in enumerate(expected):
-                    self.assertEqual(set(result.outputs[index].bits), {bits})
-
-        selected = self.snapshot.select(
-            request, fixed_inputs=fixed_inputs, fixed_outputs=(35, 36),
-            limits=SearchLimits(),
-        )
-        self.assertEqual(selected.status, "selected")
-        assert selected.graph and selected.allocation and selected.rules
-        arguments = {
-            "graph": selected.graph, "order": selected.allocation.order,
-            "names": [selected.rules.symbols[value.symbol].get("descriptor", {}).get("name")
-                      for value in selected.graph.values],
-            "assignment": selected.allocation.addresses,
-            "source_ids": tuple(fixed_inputs),
-            "mxu_inputs": {node.id: node.inputs for node in request.nodes if node.op == "matmul"},
-            "input_slots": tuple(fixed_inputs.values()), "output_slots": (35, 36),
-        }
-        check_mxu_bf16_dag_stream(program, **arguments)
-        changed_program = copy.deepcopy(program)
-        next(row for row in changed_program["instructions"]
-             if row["operation"] == "atlas.vpu_pack")["word_u32"] ^= 1 << 19
-        with self.assertRaises(NativeCompilationError):
-            check_mxu_bf16_dag_stream(changed_program, **arguments)
-        changed_source = source.replace('"bf16-sign-clamp-v1"', '"raw-bit-pattern"')
-        self.assertNotEqual(changed_source, source)
-        with self.assertRaises(LinalgBridgeError):
-            translate_linalg_text(
-                changed_source, entry="mxu0_relu_pack_mxu0_tile",
-                target_identity=self.binding.profile().target_identity,
-                lowering_policy="diagnostic",
-            )
 
     def test_scaled_interlayer_pack_keeps_its_code_and_computed_operand(self) -> None:
         from atlas_mlir_native.binding import (
@@ -5981,11 +5187,11 @@ class NativeBindingTest(unittest.TestCase):
             check_mxu_bf16_dag_stream,
         )
         from atlas_mlir_native.reference import evaluate_scaled_pack
-        from merlin.semantic_compiler.linalg_bridge import translate_linalg_text
-        from merlin.semantic_compiler.model import TensorType
-        from merlin.semantic_compiler.reference import TensorValue, evaluate_graph
-        from merlin.semantic_compiler.search import SearchLimits
-        from merlin.semantic_compiler.target_binding import NativeCompilationError
+        from merlin.compiler.semantic.linalg.linalg_bridge import translate_linalg_text
+        from merlin.compiler.semantic.model import TensorType
+        from merlin.compiler.semantic.reference import TensorValue, evaluate_graph
+        from merlin.compiler.semantic.search.exploration import SearchLimits
+        from merlin.compiler.semantic.target_binding import NativeCompilationError
 
         from tools.atlas_virtual_evaluator import (
             RuntimeInputs,
@@ -6057,7 +5263,7 @@ class NativeBindingTest(unittest.TestCase):
                                 function="native_tile")
         with self.assertRaises(UnsupportedVirtualMode):
             parse_program((destination / "atlas-virtual.mlir").read_text().replace(
-                "scale_code = 122 : i32", "scale_code = 121 : i32"
+                "scale_code = 122 : i32", "scale_code = 256 : i32"
             ), function="native_tile")
         executed = evaluate(virtual, RuntimeInputs(tiles={
             0: Tile("fp8", inputs["arg0"].elements),
@@ -6108,8 +5314,8 @@ class NativeBindingTest(unittest.TestCase):
             check_mxu_bf16_dag_stream(changed, **arguments)
 
     def test_parsed_two_mxu0_results_share_one_weight_load(self) -> None:
-        from merlin.semantic_compiler.linalg_bridge import translate_linalg_text
-        from merlin.semantic_compiler.search import SearchLimits
+        from merlin.compiler.semantic.linalg.linalg_bridge import translate_linalg_text
+        from merlin.compiler.semantic.search.exploration import SearchLimits
 
         from tools.check_program_decode import audit_program
         from tools.check_variant_inventory import load_inventory
@@ -6149,16 +5355,14 @@ class NativeBindingTest(unittest.TestCase):
             load_inventory(), program, (destination / "program.bin").read_bytes(),
         )["status"], "PASS")
 
-    def test_parsed_ordered_fp8_linalg_reaches_native_mxu0_and_relu(self) -> None:
-        from merlin.semantic_compiler.linalg_bridge import translate_linalg_text
-        from merlin.semantic_compiler.model import KernelRequest
-        from merlin.semantic_compiler.search import SearchLimits
-        from merlin.semantic_compiler.target_binding import verify_native_publication
+    def test_parsed_ordered_fp8_linalg_reaches_native_mxu0(self) -> None:
+        from merlin.compiler.semantic.linalg.linalg_bridge import translate_linalg_text
+        from merlin.compiler.semantic.model import KernelRequest
+        from merlin.compiler.semantic.search.exploration import SearchLimits
+        from merlin.compiler.semantic.target_binding import verify_native_publication
 
         for filename, entry, operations, words in (
             ("native_mxu0_ordered_linalg.mlir", "mxu0_tile", ("atlas.mxu_matmul",), 38),
-            ("native_mxu0_relu_linalg.mlir", "mxu0_relu_tile",
-             ("atlas.mxu_matmul", "atlas.vpu_unary"), 40),
         ):
             with self.subTest(filename=filename):
                 source = (ROOT / "test/examples" / filename).read_text()
@@ -6169,7 +5373,7 @@ class NativeBindingTest(unittest.TestCase):
                 request = translated.request
                 self.assertEqual(request.source_identity, hashlib.sha256(source.encode()).hexdigest())
                 self.assertEqual(tuple(node.op for node in request.nodes),
-                                 ("input", "input", "matmul") + (("relu",) if "relu" in filename else ()))
+                                 ("input", "input", "matmul"))
                 self.assertEqual(len(translated.constants), 0)
                 destination = self.work / filename.removesuffix(".mlir")
                 manifest = self.binding.compile(
@@ -6186,12 +5390,7 @@ class NativeBindingTest(unittest.TestCase):
                 emitted = [row["operation"] for row in program["instructions"]]
                 for operation in operations:
                     self.assertEqual(emitted.count(operation), 1)
-                if "relu" in filename:
-                    baseline = KernelRequest.from_record(json.loads(
-                        (ROOT / "test/examples/native_mxu0_relu_request.json").read_text()
-                    ))
-                else:
-                    baseline = self.mxu0_request()
+                baseline = self.mxu0_request()
                 baseline_destination = self.work / (filename.removesuffix(".mlir") + "-typed")
                 self.binding.compile(
                     self.snapshot, baseline, fixed_inputs={"x": 3, "w": 4},
@@ -6201,57 +5400,6 @@ class NativeBindingTest(unittest.TestCase):
                 self.assertEqual((destination / "program.bin").read_bytes(),
                                  (baseline_destination / "program.bin").read_bytes())
 
-    def test_parsed_mxu0_relu_graph_against_exact_numeric_reference(self) -> None:
-        from dataclasses import replace
-        from functools import lru_cache
-
-        from atlas_mlir_native.binding import MXU0_POLICY, _mxu0_maps
-        from merlin.semantic_compiler.linalg_bridge import translate_linalg_text
-        from merlin.semantic_compiler.model import TensorType
-        from merlin.semantic_compiler.reference import TensorValue, evaluate_graph
-
-        sys.path.insert(0, str(ROOT / "test"))
-        try:
-            from test_mxu_numerics import dot
-        finally:
-            sys.path.remove(str(ROOT / "test"))
-
-        source = (ROOT / "test/examples/native_mxu0_relu_linalg.mlir").read_text()
-        request = translate_linalg_text(
-            source, entry="mxu0_relu_tile", target_identity=self.binding.profile().target_identity,
-            lowering_policy="diagnostic",
-        ).request
-        request = replace(request, outputs=(request.nodes[2].id, request.nodes[3].id),
-                          output_storages=("external", "external"))
-        activation = tuple(0x38 if row % 2 == 0 else 0xB8
-                           for row in range(32) for _ in range(32))
-        weight = tuple(0x38 if col < 16 else 0xB8
-                       for col in range(32) for _ in range(32))
-        fp8_type = TensorType((32, 32), "fp8_e4m3", "raw-bit-pattern")
-
-        @lru_cache(maxsize=4)
-        def ordered_dot(acts: tuple[int, ...], weights: tuple[int, ...]) -> int:
-            return dot(weights, acts)
-
-        def verify_matmul(node, operands):
-            self.assertEqual((node.op, node.type.numerical_policy, node.index_maps),
-                             ("matmul", MXU0_POLICY, _mxu0_maps()))
-            a, w = operands
-            self.assertEqual((a.type, w.type), (fp8_type, fp8_type))
-            result = tuple(ordered_dot(a.elements[32 * row:32 * row + 32],
-                                       w.elements[32 * col:32 * col + 32])
-                           for row in range(32) for col in range(32))
-            return TensorValue(node.type, result)
-
-        matmul, relu = evaluate_graph(
-            request, {"arg0": TensorValue(fp8_type, activation),
-                      "arg1": TensorValue(fp8_type, weight)},
-            primitives={("matmul", MXU0_POLICY): verify_matmul},
-        )
-        expected = tuple(0x4200 if (row % 2 == 0) == (col < 16) else 0xC200
-                         for row in range(32) for col in range(32))
-        self.assertEqual(matmul.elements, expected)
-        self.assertEqual(relu.elements, tuple(0 if bits & 0x8000 else bits for bits in expected))
 
     def test_native_two_outputs_share_one_physical_producer(self) -> None:
         from atlas_mlir_native.binding import (
@@ -6259,9 +5407,9 @@ class NativeBindingTest(unittest.TestCase):
             check_bf16_tile_stream,
             check_copy_twice_stream,
         )
-        from merlin.semantic_compiler.linalg_bridge import translate_linalg_text
-        from merlin.semantic_compiler.search import SearchLimits
-        from merlin.semantic_compiler.target_binding import (
+        from merlin.compiler.semantic.linalg.linalg_bridge import translate_linalg_text
+        from merlin.compiler.semantic.search.exploration import SearchLimits
+        from merlin.compiler.semantic.target_binding import (
             NativeCompilationError,
         )
 
@@ -6336,9 +5484,9 @@ class NativeBindingTest(unittest.TestCase):
 
     def test_native_two_inputs_reuse_pair_after_first_output(self) -> None:
         from atlas_mlir_native.binding import check_bf16_tile_stream
-        from merlin.semantic_compiler.linalg_bridge import translate_linalg_text
-        from merlin.semantic_compiler.search import SearchLimits
-        from merlin.semantic_compiler.target_binding import (
+        from merlin.compiler.semantic.linalg.linalg_bridge import translate_linalg_text
+        from merlin.compiler.semantic.search.exploration import SearchLimits
+        from merlin.compiler.semantic.target_binding import (
             NativeCompilationError,
         )
 
@@ -6436,9 +5584,9 @@ class NativeBindingTest(unittest.TestCase):
 
     def test_physical_rejection_tries_another_checked_order(self) -> None:
         from atlas_mlir_native import binding as atlas_binding
-        from merlin.semantic_compiler.linalg_bridge import translate_linalg_text
-        from merlin.semantic_compiler.search import SearchLimits
-        from merlin.semantic_compiler.target_binding import (
+        from merlin.compiler.semantic.linalg.linalg_bridge import translate_linalg_text
+        from merlin.compiler.semantic.search.exploration import SearchLimits
+        from merlin.compiler.semantic.target_binding import (
             NativeCompilationError,
             verify_native_publication,
         )
@@ -6494,12 +5642,12 @@ class NativeBindingTest(unittest.TestCase):
             FP8_DRAM_TILE_LAYOUT,
             check_copy_transpose_stream,
         )
-        from merlin.semantic_compiler.linalg_bridge import translate_linalg_text
-        from merlin.semantic_compiler.search import SearchLimits
-        from merlin.semantic_compiler.target_binding import (
+        from merlin.compiler.semantic.linalg.linalg_bridge import translate_linalg_text
+        from merlin.compiler.semantic.search.exploration import SearchLimits
+        from merlin.compiler.semantic.target_binding import (
             NativeCompilationError,
         )
-        from merlin.targetgen.cli import main as targetgen_main
+        from merlin.development.targetgen.cli import main as targetgen_main
 
         source = ROOT / "test/examples/native_fp8_copy_transpose_linalg.mlir"
         translated = translate_linalg_text(
@@ -6618,7 +5766,7 @@ class NativeBindingTest(unittest.TestCase):
 
     def test_native_mxu0_reset_selects_and_emits_explicit_handles(self) -> None:
         from atlas_mlir_native.binding import check_mxu0_stream
-        from merlin.semantic_compiler.search import SearchLimits
+        from merlin.compiler.semantic.search.exploration import SearchLimits
 
         request = self.mxu0_request()
         destination = self.work / "mxu0"
@@ -6648,8 +5796,8 @@ class NativeBindingTest(unittest.TestCase):
             MXU1_POLICY,
             check_mxu_stream,
         )
-        from merlin.semantic_compiler.search import SearchLimits
-        from merlin.semantic_compiler.target_binding import NativeCompilationError
+        from merlin.compiler.semantic.search.exploration import SearchLimits
+        from merlin.compiler.semantic.target_binding import NativeCompilationError
 
         from tools.check_program_decode import audit_program
         from tools.check_variant_inventory import load_inventory
@@ -6706,12 +5854,12 @@ class NativeBindingTest(unittest.TestCase):
     def test_native_mxu1_binary_on_selected_standalone_core(self) -> None:
         import random
 
-        from merlin.semantic_compiler.search import SearchLimits
+        from merlin.compiler.semantic.search.exploration import SearchLimits
         from test_mxu1_reference import _expected
 
         keys = ("ATLAS_ARC_MODEL", "ATLAS_ARC_STATE", "ATLAS_MODELIR_ROOT")
         if not all(os.environ.get(key) for key in keys):
-            self.skipTest("set selected-source-linked standalone AtlasCore paths")
+            self.fail("native execution requires selected-source-linked standalone AtlasCore paths")
         request = self.mxu1_request()
         destination = self.work / "mxu1-selected-core"
         self.binding.compile(
@@ -6777,9 +5925,9 @@ class NativeBindingTest(unittest.TestCase):
         from dataclasses import replace
 
         from atlas_mlir_native.binding import _mxu0_maps, check_mxu0_stream
-        from merlin.semantic_compiler.model import IndexMap
-        from merlin.semantic_compiler.search import SearchLimits
-        from merlin.semantic_compiler.target_binding import NativeCompilationError
+        from merlin.compiler.semantic.model import IndexMap
+        from merlin.compiler.semantic.search.exploration import SearchLimits
+        from merlin.compiler.semantic.target_binding import NativeCompilationError
 
         wrong_map = list(_mxu0_maps())
         wrong_map[1] = IndexMap(3, ((0, 0, 1), (0, 1, 0)), (0, 0))
@@ -6827,11 +5975,11 @@ class NativeBindingTest(unittest.TestCase):
                                   activation=0, weight=1, pair=32)
 
     def test_native_mxu0_binary_on_selected_standalone_core(self) -> None:
-        from merlin.semantic_compiler.search import SearchLimits
+        from merlin.compiler.semantic.search.exploration import SearchLimits
 
         keys = ("ATLAS_ARC_MODEL", "ATLAS_ARC_STATE", "ATLAS_MODELIR_ROOT")
         if not all(os.environ.get(key) for key in keys):
-            self.skipTest("set selected-source-linked standalone AtlasCore paths")
+            self.fail("native execution requires selected-source-linked standalone AtlasCore paths")
         from test.test_mxu_reference import _tile
 
         destination = self.work / "mxu0-selected-core"
@@ -6888,7 +6036,7 @@ class NativeBindingTest(unittest.TestCase):
             sys.path.remove(str(modelir))
 
     def test_native_selection_matches_oot_physical_pair_and_binary(self) -> None:
-        from merlin.semantic_compiler.search import SearchLimits
+        from merlin.compiler.semantic.search.exploration import SearchLimits
 
         request = self.request()
         destination = self.work / "emitted"
@@ -6919,7 +6067,7 @@ class NativeBindingTest(unittest.TestCase):
 
     def test_relocated_dram_slots_regenerate_addresses(self) -> None:
         from atlas_mlir_native.binding import check_copy_stream
-        from merlin.semantic_compiler.search import SearchLimits
+        from merlin.compiler.semantic.search.exploration import SearchLimits
 
         request = self.request()
         baseline = self.work / "baseline"
@@ -6943,8 +6091,8 @@ class NativeBindingTest(unittest.TestCase):
 
     def test_native_fp8_transpose_selects_xlu_and_emits_checked_stream(self) -> None:
         from atlas_mlir_native.binding import check_transpose_stream
-        from merlin.semantic_compiler.linalg_bridge import translate_linalg_text
-        from merlin.semantic_compiler.search import SearchLimits
+        from merlin.compiler.semantic.linalg.linalg_bridge import translate_linalg_text
+        from merlin.compiler.semantic.search.exploration import SearchLimits
 
         translated = translate_linalg_text(
             (ROOT / "test/examples/native_fp8_transpose_linalg.mlir").read_text(),
@@ -6988,14 +6136,14 @@ class NativeBindingTest(unittest.TestCase):
             _transpose_maps,
             check_mxu_bf16_dag_stream,
         )
-        from merlin.semantic_compiler.model import (
+        from merlin.compiler.semantic.model import (
             KernelRequest,
             SemanticNode,
             TensorType,
             pointwise_identity_maps,
         )
-        from merlin.semantic_compiler.search import SearchLimits
-        from merlin.semantic_compiler.target_binding import NativeCompilationError
+        from merlin.compiler.semantic.search.exploration import SearchLimits
+        from merlin.compiler.semantic.target_binding import NativeCompilationError
 
         from tools.atlas_virtual_evaluator import (
             RuntimeInputs,
@@ -7133,13 +6281,13 @@ class NativeBindingTest(unittest.TestCase):
             _mxu0_maps,
             _transpose_maps,
         )
-        from merlin.semantic_compiler.model import (
+        from merlin.compiler.semantic.model import (
             KernelRequest,
             SemanticNode,
             TensorType,
             pointwise_identity_maps,
         )
-        from merlin.semantic_compiler.search import SearchLimits
+        from merlin.compiler.semantic.search.exploration import SearchLimits
 
         from tools.atlas_virtual_evaluator import (
             RuntimeInputs,
@@ -7209,8 +6357,8 @@ class NativeBindingTest(unittest.TestCase):
         self.assertEqual(set(result.outputs[0].bits), {0x3F80})
 
     def test_native_attention_mlp_two_outputs_use_one_selected_graph(self) -> None:
-        from merlin.semantic_compiler.model import KernelRequest
-        from merlin.semantic_compiler.search import SearchLimits
+        from merlin.compiler.semantic.model import KernelRequest
+        from merlin.compiler.semantic.search.exploration import SearchLimits
 
         from tools.atlas_virtual_evaluator import (
             RuntimeInputs,
@@ -7228,7 +6376,7 @@ class NativeBindingTest(unittest.TestCase):
             (ROOT / "test/examples/native_attention_mlp_request.json").read_text()
         ))
         self.assertEqual(request.nodes[:len(attention.nodes)], attention.nodes)
-        self.assertEqual(request.outputs, ("mlp_relu", "mlp_output"))
+        self.assertEqual(request.outputs, ("mlp_hidden", "mlp_output"))
         self.assertEqual(sum(node.op == "matmul" for node in request.nodes), 7)
         self.assertEqual(sum(node.op == "pack_fp8" for node in request.nodes), 6)
         self.assertEqual(sum(node.op == "transpose" for node in request.nodes), 1)
@@ -7287,8 +6435,8 @@ class NativeBindingTest(unittest.TestCase):
 
     def test_transpose_checker_rejects_register_scratch_and_wait_mutations(self) -> None:
         from atlas_mlir_native.binding import check_transpose_stream
-        from merlin.semantic_compiler.search import SearchLimits
-        from merlin.semantic_compiler.target_binding import NativeCompilationError
+        from merlin.compiler.semantic.search.exploration import SearchLimits
+        from merlin.compiler.semantic.target_binding import NativeCompilationError
 
         destination = self.work / "transpose-checker"
         self.binding.compile(
@@ -7318,9 +6466,9 @@ class NativeBindingTest(unittest.TestCase):
 
     def test_fp8_transpose_refuses_wrong_maps_and_policy(self) -> None:
         from atlas_mlir_native.binding import _transpose_maps
-        from merlin.semantic_compiler.model import IndexMap
-        from merlin.semantic_compiler.search import SearchLimits
-        from merlin.semantic_compiler.target_binding import NativeCompilationError
+        from merlin.compiler.semantic.model import IndexMap
+        from merlin.compiler.semantic.search.exploration import SearchLimits
+        from merlin.compiler.semantic.target_binding import NativeCompilationError
 
         wrong_maps = (_transpose_maps()[1], _transpose_maps()[0])
         for index, request in enumerate((
@@ -7339,8 +6487,8 @@ class NativeBindingTest(unittest.TestCase):
             self.assertFalse(destination.exists())
 
     def test_unqualified_and_unsupported_requests_refuse_before_emission(self) -> None:
-        from merlin.semantic_compiler.search import SearchLimits
-        from merlin.semantic_compiler.target_binding import NativeCompilationError
+        from merlin.compiler.semantic.search.exploration import SearchLimits
+        from merlin.compiler.semantic.target_binding import NativeCompilationError
 
         cases = (
             (self.request(mode="strict-native"), {"x": 0}, (32,), "unqualified_target"),
@@ -7359,8 +6507,8 @@ class NativeBindingTest(unittest.TestCase):
 
     def test_emitted_stream_checker_rejects_changed_address_pair_scratch_wait_and_completion(self) -> None:
         from atlas_mlir_native.binding import check_copy_stream
-        from merlin.semantic_compiler.search import SearchLimits
-        from merlin.semantic_compiler.target_binding import NativeCompilationError
+        from merlin.compiler.semantic.search.exploration import SearchLimits
+        from merlin.compiler.semantic.target_binding import NativeCompilationError
 
         destination = self.work / "checker-source"
         self.binding.compile(
@@ -7399,15 +6547,15 @@ class NativeBindingTest(unittest.TestCase):
             pack_bf16_pair_halves,
             unpack_bf16_pair_halves,
         )
-        from merlin.semantic_compiler.model import (
+        from merlin.compiler.semantic.model import (
             ConstantBinding,
             KernelRequest,
             SemanticNode,
             TensorType,
             pointwise_identity_maps,
         )
-        from merlin.semantic_compiler.search import SearchLimits
-        from merlin.semantic_compiler.target_binding import (
+        from merlin.compiler.semantic.search.exploration import SearchLimits
+        from merlin.compiler.semantic.target_binding import (
             NativeCompilationError,
             verify_native_publication,
         )
@@ -7500,8 +6648,8 @@ class NativeBindingTest(unittest.TestCase):
     def test_native_copy_executes_on_selected_standalone_core(self) -> None:
         keys = ("ATLAS_ARC_MODEL", "ATLAS_ARC_STATE", "ATLAS_MODELIR_ROOT")
         if not all(os.environ.get(key) for key in keys):
-            self.skipTest("set selected-source-linked standalone AtlasCore paths")
-        from merlin.semantic_compiler.search import SearchLimits
+            self.fail("native execution requires selected-source-linked standalone AtlasCore paths")
+        from merlin.compiler.semantic.search.exploration import SearchLimits
 
         destination = self.work / "executed"
         self.binding.compile(

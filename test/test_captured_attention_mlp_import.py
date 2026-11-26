@@ -155,7 +155,7 @@ class CapturedAttentionMLPImportTest(unittest.TestCase):
             ):
                 imported(changed)
 
-    def test_integer_zero_compare_select_relu_pattern(self) -> None:
+    def test_ordered_compare_select_relu_has_no_device_lowering(self) -> None:
         old = ("      %83 = arith.constant 0.000000e+00 : f32\n"
                "      %84 = arith.maximumf %81, %83 : f32\n"
                "      linalg.yield %84 : f32")
@@ -165,18 +165,9 @@ class CapturedAttentionMLPImportTest(unittest.TestCase):
                "      %relu = arith.select %lt, %z, %81 : f32\n"
                "      linalg.yield %relu : f32")
         self.assertIn(old, SOURCE)
-        source = SOURCE.replace(old, new, 1)
-        self.assertEqual(imported(source)[0], imported()[0])
-
-        for changed in (
-            source.replace("arith.constant 0 : i64", "arith.constant 1 : i64", 1),
-            source.replace("arith.cmpf olt", "arith.cmpf ogt", 1),
-            source.replace("arith.select %lt, %z, %81", "arith.select %lt, %81, %z", 1),
-        ):
-            with self.subTest(changed=changed), self.assertRaisesRegex(
-                UnsupportedLinalg, "ReLU compare/select region"
-            ):
-                imported(changed)
+        # The select keeps -0 and NaN; device ReLU clears the sign bit.
+        with self.assertRaisesRegex(UnsupportedLinalg, "no exact device lowering"):
+            imported(SOURCE.replace(old, new, 1))
 
     def test_declared_pack_and_weight_scales_follow_the_matmul_edges(self) -> None:
         virtual, report = imported(policy=SCALED_POLICY)

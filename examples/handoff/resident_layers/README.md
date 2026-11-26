@@ -34,7 +34,7 @@ export CARGO_BUILD_JOBS=2
 COMPILER_PYTHON=/path/to/compiler-venv/bin/python
 RUN="$ATLAS_ROOT/out/resident-layers"
 mkdir -p "$RUN"
-"$COMPILER_PYTHON" -m merlin.targetgen.cli native-build \
+"$COMPILER_PYTHON" -m merlin.development.targetgen.cli native-build \
   --engine merlin_native --support atlas --io-memory-bytes 1048576 \
   --source-revision "$(git -C "$MERLIN_ROOT" rev-parse HEAD)" \
   --cargo-target-dir "$RUN/cargo" --out "$RUN/snapshot"
@@ -84,7 +84,7 @@ ATTENTION_MLP_HIDDEN=288 "$CAPTURE_PYTHON" \
   --m2m-dir "$MODEL2MLIR_ROOT" \
   --loader examples/workloads/attention_mlp/loader.py \
   --dtype fp32 --seed 0 --materialize-bundle --out "$RUN/attention-capture"
-"$COMPILER_PYTHON" -m merlin.targetgen.cli stage-capture \
+"$COMPILER_PYTHON" -m merlin.development.targetgen.cli stage-capture \
   --capture "$RUN/attention-capture" --out "$RUN/attention-inputs"
 cd "$ATLAS_ROOT"
 "$COMPILER_PYTHON" examples/handoff/resident_layers/build.py \

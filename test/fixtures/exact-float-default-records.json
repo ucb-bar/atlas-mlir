@@ -1,0 +1,216 @@
+{
+  "bf16_add": {
+    "arithmetic_routes": [
+      "qualified-residual-vector",
+      "pair-row-sum-vector",
+      "exceptional-scalar"
+    ],
+    "boundary_transport_layout": "contiguous-full-tile-DMA-with-private-zero-padding",
+    "input_addresses": [
+      2415919104,
+      2415919232
+    ],
+    "input_node_ids": [
+      "a",
+      "b"
+    ],
+    "input_payload_bytes": [
+      128,
+      128
+    ],
+    "launches_per_invocation": 1,
+    "logical_output_bytes": 70,
+    "operation": "bf16_add",
+    "output_addresses": [
+      2415919360
+    ],
+    "output_bytes": 160,
+    "output_node_ids": [
+      "out"
+    ],
+    "result_buffer_bytes": 128,
+    "runtime_arithmetic": "none",
+    "schema": "atlas.exact_float.v1",
+    "source_request_digest": "8e2d7fdc51ee60b8bc36394a2e93a50e242a943b3d2dbe3218148df0bdcec6c6",
+    "status_address": 2415919488,
+    "vector_admission": {
+      "pair": "normal-or-signed-zero inputs except both-negative-zero; private result must be normal or provably exact zero",
+      "qualified": "signed-zero or abs-code2f80..4f80"
+    },
+    "verification": "common-virtual-scheduling-allocation-and-all-generated-contracts",
+    "workspace_bytes": 416
+  },
+  "bf16_neg": {
+    "arithmetic_routes": [
+      "scalar-bit-arithmetic"
+    ],
+    "boundary_transport_layout": "contiguous-full-tile-DMA-with-private-zero-padding",
+    "input_addresses": [
+      2415919104
+    ],
+    "input_node_ids": [
+      "a"
+    ],
+    "input_payload_bytes": [
+      128
+    ],
+    "launches_per_invocation": 1,
+    "logical_output_bytes": 70,
+    "operation": "bf16_neg",
+    "output_addresses": [
+      2415919232
+    ],
+    "output_bytes": 160,
+    "output_node_ids": [
+      "out"
+    ],
+    "result_buffer_bytes": 128,
+    "runtime_arithmetic": "none",
+    "schema": "atlas.exact_float.v1",
+    "source_request_digest": "c902b7f91c0c0717bc05ef7fdefd066b94b31a7f589e739a89916cb3f61a23f0",
+    "status_address": 2415919360,
+    "vector_admission": null,
+    "verification": "common-virtual-scheduling-allocation-and-all-generated-contracts",
+    "workspace_bytes": 288
+  },
+  "bf16_sub": {
+    "arithmetic_routes": [
+      "qualified-residual-vector",
+      "pair-row-sum-vector",
+      "exceptional-scalar"
+    ],
+    "boundary_transport_layout": "contiguous-full-tile-DMA-with-private-zero-padding",
+    "input_addresses": [
+      2415919104,
+      2415919232
+    ],
+    "input_node_ids": [
+      "a",
+      "b"
+    ],
+    "input_payload_bytes": [
+      128,
+      128
+    ],
+    "launches_per_invocation": 1,
+    "logical_output_bytes": 70,
+    "operation": "bf16_sub",
+    "output_addresses": [
+      2415919360
+    ],
+    "output_bytes": 160,
+    "output_node_ids": [
+      "out"
+    ],
+    "result_buffer_bytes": 128,
+    "runtime_arithmetic": "none",
+    "schema": "atlas.exact_float.v1",
+    "source_request_digest": "c75403be8ad21279232107c6c517642433c155bb20c361519d0bf81e8705b906",
+    "status_address": 2415919488,
+    "vector_admission": {
+      "pair": "normal-or-signed-zero inputs except both-negative-zero; private result must be normal or provably exact zero",
+      "qualified": "signed-zero or abs-code2f80..4f80"
+    },
+    "verification": "common-virtual-scheduling-allocation-and-all-generated-contracts",
+    "workspace_bytes": 416
+  },
+  "bf16_to_f32": {
+    "arithmetic_routes": [
+      "scalar-bit-arithmetic"
+    ],
+    "boundary_transport_layout": "contiguous-full-tile-DMA-with-private-zero-padding",
+    "input_addresses": [
+      2415919104
+    ],
+    "input_node_ids": [
+      "a"
+    ],
+    "input_payload_bytes": [
+      128
+    ],
+    "launches_per_invocation": 1,
+    "logical_output_bytes": 140,
+    "operation": "bf16_to_f32",
+    "output_addresses": [
+      2415919232
+    ],
+    "output_bytes": 288,
+    "output_node_ids": [
+      "out"
+    ],
+    "result_buffer_bytes": 256,
+    "runtime_arithmetic": "none",
+    "schema": "atlas.exact_float.v1",
+    "source_request_digest": "a863aafbcd44505ab77a96a0cbb88feda5b448c744f0d7675f61d7073b9d80c2",
+    "status_address": 2415919488,
+    "vector_admission": null,
+    "verification": "common-virtual-scheduling-allocation-and-all-generated-contracts",
+    "workspace_bytes": 416
+  },
+  "f32_neg": {
+    "arithmetic_routes": [
+      "scalar-bit-arithmetic"
+    ],
+    "boundary_transport_layout": "contiguous-full-tile-DMA-with-private-zero-padding",
+    "input_addresses": [
+      2415919104
+    ],
+    "input_node_ids": [
+      "a"
+    ],
+    "input_payload_bytes": [
+      256
+    ],
+    "launches_per_invocation": 1,
+    "logical_output_bytes": 140,
+    "operation": "f32_neg",
+    "output_addresses": [
+      2415919360
+    ],
+    "output_bytes": 288,
+    "output_node_ids": [
+      "out"
+    ],
+    "result_buffer_bytes": 256,
+    "runtime_arithmetic": "none",
+    "schema": "atlas.exact_float.v1",
+    "source_request_digest": "27d52a0afb53a3de700fe0d2ca9cf04d0c08fbf647f976e282a476b59518cbb1",
+    "status_address": 2415919616,
+    "vector_admission": null,
+    "verification": "common-virtual-scheduling-allocation-and-all-generated-contracts",
+    "workspace_bytes": 544
+  },
+  "f32_to_bf16": {
+    "arithmetic_routes": [
+      "scalar-bit-arithmetic"
+    ],
+    "boundary_transport_layout": "contiguous-full-tile-DMA-with-private-zero-padding",
+    "input_addresses": [
+      2415919104
+    ],
+    "input_node_ids": [
+      "a"
+    ],
+    "input_payload_bytes": [
+      256
+    ],
+    "launches_per_invocation": 1,
+    "logical_output_bytes": 70,
+    "operation": "f32_to_bf16",
+    "output_addresses": [
+      2415919360
+    ],
+    "output_bytes": 160,
+    "output_node_ids": [
+      "out"
+    ],
+    "result_buffer_bytes": 128,
+    "runtime_arithmetic": "none",
+    "schema": "atlas.exact_float.v1",
+    "source_request_digest": "ea06b59bd7b89463df5b46c0fa994cec47fbc7c2febe20b00f4a17bdec77935f",
+    "status_address": 2415919488,
+    "vector_admission": null,
+    "verification": "common-virtual-scheduling-allocation-and-all-generated-contracts",
+    "workspace_bytes": 416
+  }
+}

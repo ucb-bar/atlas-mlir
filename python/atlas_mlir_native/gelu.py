@@ -3,15 +3,15 @@
 from dataclasses import dataclass, replace
 from math import prod
 
-from merlin.semantic_compiler.model import (
+from merlin.compiler.semantic.model import (
     ConstantBinding,
     KernelRequest,
     SemanticNode,
     TensorType,
     pointwise_identity_maps,
 )
-from merlin.semantic_compiler.pointwise_tiling import PointwiseTiling
-from merlin.semantic_compiler.precision_values import FloatBoundarySpec
+from merlin.compiler.transforms.pointwise import PointwiseTiling
+from merlin.compiler.quantization.contraction.values import FloatBoundarySpec
 
 from .binding import (
     BF16_ACTIVATION_DOMAIN,

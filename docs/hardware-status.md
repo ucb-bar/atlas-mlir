@@ -6,9 +6,10 @@ actually compute there, and where the RTL disagrees with `npu_model`.
 All results are for the pinned RTL, `atlas-npu`
 `0079c0541111197741a231c002e3843fa6f545b2` (its `sp26-fp-units` submodule is
 at `9a0cc09c41ab918a3548580185f39cca8d559e0d`). The software model it is
-compared against is `npu_model-atlas`
-`5bb08624d6bdc05ee5ea6e6f73b9c44c02f1459d`. Later revisions of either may
-behave differently.
+compared against is `npu_model`
+`b97b2f5a97e432141c4ef8504bec396651d77a8f`, the revision pinned in
+`python/atlas_mlir/provenance.py`. Later revisions of either may behave
+differently.
 
 "Tested on the RTL" means: the test builds a short Atlas program from the
 dialect, checks that its words match both the RTL repo's own assembler
@@ -46,7 +47,7 @@ round the same way, so a compiler must pick one numerical rule per unit.
 | `VMATMUL.MXU0` (reset) | Works | Adds each FP8 x FP8 product to a BF16 accumulator in K order, rounding to BF16 nearest-even after every step. Checked on every finite normal E4M3 code, mixed tiles, and `+0`/`-0` activations (`-0` behaves like `+0`). | [test_mxu_numerics.py](../test/test_mxu_numerics.py), [test_mxu0_signed_zero_reference.py](../test/test_mxu0_signed_zero_reference.py) |
 | `VMATMUL.ACC.MXU0` | Works | Continues from the stored BF16 accumulator with the same per-step rounding. Two K tiles of 32 checked. | [test_mxu_k2_reference.py](../test/test_mxu_k2_reference.py) |
 | MXU0 K head padding | Works | Padding a short K tile with leading FP8 `+0` does not change the result (K=31 and K=65 cases). | [HeadPadDiagnosticTest.scala](../test/rtl/HeadPadDiagnosticTest.scala) |
-| `VMATMUL.MXU1` (reset) | Limited | Aligns all 32 products to one exponent anchor, sums them as integers, rounds once to BF16. Small products can be shifted out: 30 products of (1/64)^2 next to large cancelling terms give `0x0000`, not `0x3bf0`. The compiler only accepts E4M3 codes {0, ±1, ±2} for MXU1. | [test_mxu1_reference.py](../test/test_mxu1_reference.py), [AnchorDiagnosticTest.scala](../test/rtl/AnchorDiagnosticTest.scala), [test_mxu1_bounded_reference.py](../test/test_mxu1_bounded_reference.py) |
+| `VMATMUL.MXU1` (reset) | Limited | Aligns all 32 products to one exponent anchor, sums them as integers, rounds once to BF16. Small products can be shifted out: 30 products of (1/64)^2 next to large cancelling terms give `0x0000`, not `0x3bf0`. For MXU1 the compiler admits only the E4M3 bytes `{0} ∪ [8,126] ∪ [136,254]`: positive zero and the finite normal codes up to magnitude 448 (`python/atlas_mlir_native/fp8_contract.py`). Negative zero, subnormals, and NaN refuse. | [test_mxu1_reference.py](../test/test_mxu1_reference.py), [AnchorDiagnosticTest.scala](../test/rtl/AnchorDiagnosticTest.scala), [test_mxu1_bounded_reference.py](../test/test_mxu1_bounded_reference.py) |
 | `VMATMUL.ACC.MXU1` | Limited | Rounds to BF16 once per K tile, not once over the whole K. Checked with zero, ±1 and ±1/16 inputs. | [test_mxu1_continuation_reference.py](../test/test_mxu1_continuation_reference.py) |
 | `VMATPOP.BF16`, both units | Works | Pops a BF16 pair (two 16-column halves). | (all matmul tests) |
 | `VMATPUSH.ABF16`, `VMATPOP.FP8`, both units | Untested | | |
@@ -96,8 +97,10 @@ A BF16 register pair holds a 32x32 tile as two 32-row registers of 16 lanes
 | `VLOAD`, `VSTORE` | Works | Raw byte copy between VMEM and a matrix register. The RTL needs a 1 KiB aligned base and a transfer inside one VMEM bank; the verifier does not check this, so the compiler must. | [test_vload_vstore_reference.py](../test/test_vload_vstore_reference.py) |
 | `VLI.ALL` | Works | Writes the raw 16-bit immediate (no conversion) to every lane of both registers in the pair. | [test_vli_all_reference.py](../test/test_vli_all_reference.py) |
 | `VLI.ROW`, `VLI.COL`, `VLI.ONE` | Works | Raw 16-bit immediate. ROW fills row 0 of both registers in the pair. COL fills lane 0 of every row and ONE fills row 0, lane 0, each in one register only; all other lanes of that register become zero. | [test_vli_selective_reference.py](../test/test_vli_selective_reference.py) |
-| `VFP8PACK`, `VFP8UNPACK` | Limited | E8M0 scale code `c` means 2^(c-127), set with `SELI`. Pack joins two consecutive physical BF16 rows into one 32-byte FP8 row: packed row 0 is rows 0 and 1 of the first register. Only powers of two and zero checked. | [test_vpu_e8m0_pack_reference.py](../test/test_vpu_e8m0_pack_reference.py) |
+| `VFP8PACK`, `VFP8UNPACK` | Limited | Raw scale code `c` means 2^min(c-127,127), set with `SELI`. Pack joins two consecutive physical BF16 rows into one 32-byte FP8 row: packed row 0 is rows 0 and 1 of the first register. Only powers of two and zero checked. | [test_vpu_e8m0_pack_reference.py](../test/test_vpu_e8m0_pack_reference.py) |
 | `VTRPOSE.XLU` | Works | 32x32 byte transpose. Reads the whole source before writing, so source and destination may be the same register. | [test_xlu_reference.py](../test/test_xlu_reference.py) |
+
+The later [raw PACK scale audit](pack-scale-domain.md) establishes all byte codes 0..255 by source and npu_model execution. The exponent shift clamps at +127, so raw 255 aliases 254. The checked-in hardware PACK test uses codes 126 and 128; the wider software admission is not additional hardware execution evidence. FP8 pop has the opposite scale direction and a reserved-code difference described in that audit.
 
 ## Scalar control
 

@@ -74,7 +74,8 @@ struct LowerAtlasVirtualBoundaryToDMAPass
     if (failed(verifyAtlasVirtualModule(module)))
       return signalPassFailure();
     for (auto function : module.getOps<func::FuncOp>()) {
-      reuseAtlasImmutableWeights(function);
+      if (failed(reuseAtlasImmutableWeights(function)))
+        return signalPassFailure();
       FailureOr<Boundary> boundary = readBoundary(function);
       if (failed(boundary))
         return signalPassFailure();

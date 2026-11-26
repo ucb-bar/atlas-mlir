@@ -17,7 +17,7 @@ def pack_request(shape=(32, 288), code=127):
         ROUNDED_PACK_POLICY,
         TARGET_IDENTITY,
     )
-    from merlin.semantic_compiler.model import (
+    from merlin.compiler.semantic.model import (
         KernelRequest,
         SemanticNode,
         TensorType,
@@ -51,8 +51,7 @@ def pack_request(shape=(32, 288), code=127):
 
 
 def connected_request(hidden):
-    from atlas_mlir_native.binding import BF16_RELU_ATTRS
-    from merlin.semantic_compiler.model import (
+    from merlin.compiler.semantic.model import (
         SemanticNode,
         TensorType,
         pointwise_identity_maps,
@@ -62,23 +61,16 @@ def connected_request(hidden):
     last = source_request(32, 32, hidden)
     a, w1, dot = first.nodes
     w2 = replace(last.nodes[1], id="w2")
-    activation = SemanticNode(
-        "hidden",
-        "relu",
-        (dot.id,),
-        TensorType((32, hidden), "bf16", "raw-bit-pattern"),
-        BF16_RELU_ATTRS,
-        index_maps=pointwise_identity_maps(2, 1),
-    )
+    dot = replace(dot, id="hidden")
     pack = replace(
-        pack_request((32, hidden)).nodes[1], id="packed", inputs=(activation.id,)
+        pack_request((32, hidden)).nodes[1], id="packed", inputs=(dot.id,)
     )
     result = replace(last.nodes[-1], id="final", inputs=(pack.id, w2.id))
     return replace(
         first,
-        nodes=(a, w1, w2, dot, activation, pack, result),
+        nodes=(a, w1, w2, dot, pack, result),
         input_storages=((a.id, "external"), (w1.id, "external"), (w2.id, "external")),
-        outputs=(activation.id, result.id),
+        outputs=(dot.id, result.id),
         output_storages=("external", "external"),
     )
 
@@ -93,7 +85,7 @@ class ResidentGraphTest(unittest.TestCase):
         from atlas_mlir_native.layout import pack_bf16_matrix
         from atlas_mlir_native.pointwise import prepare_plan
         from atlas_mlir_native.resident_graph import boundary_request, memory_plan
-        from merlin.semantic_compiler.model import (
+        from merlin.compiler.semantic.model import (
             ConstantBinding,
             SemanticNode,
             TensorType,
@@ -101,7 +93,7 @@ class ResidentGraphTest(unittest.TestCase):
         )
 
         request = connected_request(64)
-        a, w1, w2, dot, activation, packed, result = request.nodes
+        a, w1, w2, dot, packed, result = request.nodes
         attrs = BF16_BINARY_ATTRS["mul_bf16_zero"]
         constant = SemanticNode(
             "scale",
@@ -128,10 +120,10 @@ class ResidentGraphTest(unittest.TestCase):
                 constant,
                 dot,
                 multiply,
-                replace(activation, inputs=(multiply.id,)),
-                packed,
+                replace(packed, inputs=(multiply.id,)),
                 result,
             ),
+            outputs=(multiply.id, result.id),
             constants=(ConstantBinding(constant.id, "bf16-le-raw", "003f" * 2048),),
         )
         cuts, _, sizes = memory_plan(request)
@@ -156,7 +148,7 @@ class ResidentGraphTest(unittest.TestCase):
             cuts, slots, sizes = memory_plan(request)
             self.assertEqual(
                 [tuple(n.op for n in r.nodes if n.effect == "pure") for r in cuts],
-                [("matmul", "relu"), ("pack_fp8",), ("matmul",)],
+                [("matmul",), ("pack_fp8",), ("matmul",)],
             )
             self.assertEqual(sizes["hidden"], 32 * width * 2)
             self.assertEqual(sizes["packed"], 32 * width)
@@ -170,7 +162,7 @@ class ResidentGraphTest(unittest.TestCase):
 
     def test_internal_tails_and_excess_memory_are_explicit_refusals(self):
         from atlas_mlir_native.resident_graph import memory_plan
-        from merlin.semantic_compiler.target_binding import NativeCompilationError
+        from merlin.compiler.semantic.target_binding import NativeCompilationError
 
         for width, status in ((65, "unsupported_semantics"), (2048, "resource_limit")):
             with self.assertRaises(NativeCompilationError) as caught:
@@ -179,14 +171,14 @@ class ResidentGraphTest(unittest.TestCase):
 
     def test_pack_layout_size_and_signature_mutations(self):
         from atlas_mlir_native.pack_tiling import prepare_plan, virtual_program
-        from merlin.semantic_compiler.target_binding import NativeCompilationError
+        from merlin.compiler.semantic.target_binding import NativeCompilationError
 
         request = pack_request()
         plan = prepare_plan(request)
         self.assertEqual(plan.buffer_bytes, (18432, 9216))
         self.assertEqual(plan.tiles, 9)
         self.assertEqual(plan.body_request().nodes[0].type.shape, (32, 32))
-        for code in (122, 127, 128):
+        for code in (0, 117, 119, 120, 122, 127, 128, 129, 254, 255):
             current = prepare_plan(pack_request(code=code))
             self.assertEqual(
                 run(
@@ -196,8 +188,9 @@ class ResidentGraphTest(unittest.TestCase):
                 ).returncode,
                 0,
             )
-        with self.assertRaises(NativeCompilationError):
-            prepare_plan(pack_request(code=129))
+        for code in (-1, 256, True):
+            with self.subTest(invalid_scale=code), self.assertRaises(NativeCompilationError):
+                prepare_plan(pack_request(code=code))
         wrong = replace(
             request.nodes[-1],
             type=replace(request.nodes[-1].type, numerical_policy="raw-bit-pattern"),
@@ -209,8 +202,8 @@ class ResidentGraphTest(unittest.TestCase):
 
     def test_pack_body_uses_the_native_selector(self):
         from atlas_mlir_native.pack_tiling import prepare_plan, select_body
-        from merlin.semantic_compiler.search import SearchLimits
-        from merlin.semantic_compiler.snapshot import open_native_snapshot
+        from merlin.compiler.semantic.search.exploration import SearchLimits
+        from merlin.compiler.semantic.target_binding import open_native_snapshot
         from test_looped_mnk import build_snapshot
 
         with tempfile.TemporaryDirectory(dir=os.environ.get("TMPDIR")) as directory:

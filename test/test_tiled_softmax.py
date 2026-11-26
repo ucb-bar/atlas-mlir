@@ -22,7 +22,7 @@ def source_request(shape, masked=False):
     from atlas_mlir_native.binding import TARGET_IDENTITY
     from atlas_mlir_native.row_softmax import SOFTMAX_DOMAIN, SOFTMAX_POLICY
 
-    from merlin.semantic_compiler.model import KernelRequest, SemanticNode, TensorType
+    from merlin.compiler.semantic.model import KernelRequest, SemanticNode, TensorType
 
     request = KernelRequest(
         (
@@ -136,8 +136,8 @@ def build_case(snapshot, root, shape, panel, *, masked=False, candidate_nodes=12
     from atlas_mlir_native.binding import AtlasNativeBinding
     from atlas_mlir_native.row_softmax import prepare_inputs, prepare_row_softmax
 
-    from merlin.semantic_compiler.search import SearchLimits
-    from merlin.semantic_compiler.target_binding import verify_native_publication
+    from merlin.compiler.semantic.search.exploration import SearchLimits
+    from merlin.compiler.semantic.target_binding import verify_native_publication
 
     source = source_request(shape, masked=masked)
     plan = prepare_row_softmax(source)
@@ -240,7 +240,7 @@ class TiledSoftmaxTest(unittest.TestCase):
         self.assertEqual(np.count_nonzero(codes == 0), codes.size - plan.tile_type.shape[0])
         with self.assertRaisesRegex(ValueError, "tiling differs"):
             prepare_inputs(dataclasses.replace(plan, pad_element=b"\0\0"), bytes(65 * 2))
-        from merlin.semantic_compiler.target_binding import NativeCompilationError
+        from merlin.compiler.semantic.target_binding import NativeCompilationError
 
         with self.assertRaises(NativeCompilationError):
             prepare_row_softmax(
@@ -256,7 +256,7 @@ class TiledSoftmaxTest(unittest.TestCase):
         source = self.root / "source.json"
         source.write_text(json.dumps(source_request((33, 65)).record()))
         limits = self.root / "limits.json"
-        from merlin.semantic_compiler.search import SearchLimits
+        from merlin.compiler.semantic.search.exploration import SearchLimits
 
         limits.write_text(json.dumps(SearchLimits(candidate_nodes=128).record()))
         common = [
@@ -277,7 +277,7 @@ class TiledSoftmaxTest(unittest.TestCase):
         command = [
             sys.executable,
             "-m",
-            "merlin.targetgen.cli",
+            "merlin.development.targetgen.cli",
             "native-compile",
             *common,
             "--abi",
@@ -294,7 +294,7 @@ class TiledSoftmaxTest(unittest.TestCase):
         verification = [
             sys.executable,
             "-m",
-            "merlin.targetgen.cli",
+            "merlin.development.targetgen.cli",
             "native-verify",
             *common,
             "--artifact",

@@ -1,0 +1,37 @@
+"""Explicit invocation scope for optional deterministic native receipts."""
+
+from contextlib import contextmanager
+from contextvars import ContextVar
+
+from .work_budget import TOOL_HANG_GUARD_SECONDS
+
+
+_deterministic_receipts = ContextVar("atlas_deterministic_receipts", default=False)
+
+
+def deterministic_receipts_enabled():
+    return _deterministic_receipts.get()
+
+
+@contextmanager
+def publication_options(*, deterministic_receipts=False):
+    """Keep normal publication bytes unless the caller explicitly opts in."""
+    if type(deterministic_receipts) is not bool:
+        raise TypeError("deterministic_receipts must be a boolean")
+    token = _deterministic_receipts.set(deterministic_receipts)
+    try:
+        yield
+    finally:
+        _deterministic_receipts.reset(token)
+
+
+def valid_receipt_timing(receipt):
+    """Require bounded timing, or the declared deterministic mode with no timing.
+
+    The receipt's own mode decides, because verification may run in a later
+    invocation than the compile that wrote the receipt.
+    """
+    if "receipt_mode" in receipt:
+        return receipt["receipt_mode"] == "deterministic-v1" and "elapsed_s" not in receipt
+    elapsed = receipt.get("elapsed_s")
+    return type(elapsed) in (int, float) and 0 <= elapsed <= TOOL_HANG_GUARD_SECONDS

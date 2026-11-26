@@ -1,0 +1,378 @@
+{
+  "constants": [],
+  "input_storages": {
+    "arg0": "external",
+    "arg1": "external",
+    "arg2": "external",
+    "arg3": "external"
+  },
+  "lowering_policy": "diagnostic",
+  "nodes": [
+    {
+      "attrs": {},
+      "effect": "input",
+      "id": "arg0",
+      "index_maps": [],
+      "inputs": [],
+      "op": "input",
+      "type": {
+        "dtype": "bf16",
+        "numerical_policy": "raw-bit-pattern",
+        "shape": [
+          32
+        ]
+      }
+    },
+    {
+      "attrs": {},
+      "effect": "input",
+      "id": "arg1",
+      "index_maps": [],
+      "inputs": [],
+      "op": "input",
+      "type": {
+        "dtype": "i8",
+        "numerical_policy": "signed-i8",
+        "shape": [
+          32,
+          32
+        ]
+      }
+    },
+    {
+      "attrs": {},
+      "effect": "input",
+      "id": "arg2",
+      "index_maps": [],
+      "inputs": [],
+      "op": "input",
+      "type": {
+        "dtype": "i32",
+        "numerical_policy": "i32-wrap-k-ascending",
+        "shape": [
+          32,
+          1
+        ]
+      }
+    },
+    {
+      "attrs": {},
+      "effect": "input",
+      "id": "arg3",
+      "index_maps": [],
+      "inputs": [],
+      "op": "input",
+      "type": {
+        "dtype": "bf16",
+        "numerical_policy": "raw-bit-pattern",
+        "shape": [
+          32,
+          32
+        ]
+      }
+    },
+    {
+      "attrs": {
+        "code_dtype": "uint8",
+        "dequantization": "e4m3(code)*2^exponent",
+        "exponent_dtype": "int32",
+        "mode": "static",
+        "prov._pattern_hint": "quantize",
+        "prov.aten": "atlas.quantize_act.default",
+        "prov.fqn": "linear",
+        "prov.module": "linear",
+        "prov.op": "quantize",
+        "prov.orig_dtype": "uint8",
+        "prov.origin_node_ids": "[\"g:original:root:n6\", \"g:quantized:root:n6\"]",
+        "prov.source_node_ids": "[\"g:prepared:root:n5\"]",
+        "prov.trace_role": "lowering",
+        "reduce": "tensor",
+        "rows": 32,
+        "rule": "ref",
+        "semantic_kind": "static_activation_quantizer",
+        "static_exp": -7,
+        "tag": "",
+        "weight_format": "atlas_e4m3"
+      },
+      "effect": "pure",
+      "id": "op0r0",
+      "index_maps": [],
+      "inputs": [
+        "arg3"
+      ],
+      "op": "atlas.quantize_act.codes",
+      "type": {
+        "dtype": "i8",
+        "numerical_policy": "signed-i8",
+        "shape": [
+          32,
+          32
+        ]
+      }
+    },
+    {
+      "attrs": {
+        "code_dtype": "uint8",
+        "dequantization": "e4m3(code)*2^exponent",
+        "exponent_dtype": "int32",
+        "mode": "static",
+        "prov._pattern_hint": "quantize",
+        "prov.aten": "atlas.quantize_act.default",
+        "prov.fqn": "linear",
+        "prov.module": "linear",
+        "prov.op": "quantize",
+        "prov.orig_dtype": "uint8",
+        "prov.origin_node_ids": "[\"g:original:root:n6\", \"g:quantized:root:n6\"]",
+        "prov.source_node_ids": "[\"g:prepared:root:n5\"]",
+        "prov.trace_role": "lowering",
+        "reduce": "tensor",
+        "rows": 32,
+        "rule": "ref",
+        "semantic_kind": "static_activation_quantizer",
+        "static_exp": -7,
+        "tag": "",
+        "weight_format": "atlas_e4m3"
+      },
+      "effect": "pure",
+      "id": "op0r1",
+      "index_maps": [],
+      "inputs": [
+        "arg3"
+      ],
+      "op": "atlas.quantize_act.exponent",
+      "type": {
+        "dtype": "i32",
+        "numerical_policy": "i32-wrap-k-ascending",
+        "shape": []
+      }
+    },
+    {
+      "attrs": {
+        "bias_order": "after_output_cast",
+        "code_dtype": "uint8",
+        "dequantization": "e4m3(code)*2^exponent",
+        "exponent_dtype": "int32",
+        "numerical.contraction": "{\"accumulation\":\"mxu1-model47-anchor-bf16-ordered-k32\",\"activation\":\"none\",\"bias_rounding\":\"none\",\"readout\":\"bf16-normal-exponent-restore\",\"schema\":\"merlin.contraction_numerics.v1\",\"stages\":[\"k32-reset\",\"ordered-bf16-seeded-continuation\",\"bf16-readout\",\"restore-signed-exponent-sum\",\"output-bf16\"]}",
+        "output_dtype": "bfloat16",
+        "output_rescale": "2^(lhs_exp+rhs_exp)",
+        "prov._pattern_hint": "matmul",
+        "prov.aten": "atlas.qlinear.default",
+        "prov.family": "contraction",
+        "prov.fqn": "linear",
+        "prov.module": "linear",
+        "prov.op": "matmul",
+        "prov.orig_dtype": "bfloat16",
+        "prov.origin_node_ids": "[\"g:original:root:n9\", \"g:quantized:root:n9\"]",
+        "prov.source_node_ids": "[\"g:prepared:root:n8\"]",
+        "prov.trace_role": "lowering",
+        "rhs_transposed": "true",
+        "semantic_kind": "prequantized_contraction",
+        "weight_format": "atlas_e4m3"
+      },
+      "effect": "pure",
+      "id": "op1r0.readout",
+      "index_maps": [],
+      "inputs": [
+        "op0r0",
+        "op0r1",
+        "arg1",
+        "arg2"
+      ],
+      "op": "atlas.qlinear",
+      "type": {
+        "dtype": "bf16",
+        "numerical_policy": "raw-bit-pattern",
+        "shape": [
+          32,
+          32
+        ]
+      }
+    },
+    {
+      "attrs": {},
+      "effect": "pure",
+      "id": "op1r0.bias",
+      "index_maps": [
+        {
+          "coefficients": [
+            [
+              0,
+              1
+            ]
+          ],
+          "loop_rank": 2,
+          "offsets": [
+            0
+          ]
+        },
+        {
+          "coefficients": [
+            [
+              1,
+              0
+            ],
+            [
+              0,
+              1
+            ]
+          ],
+          "loop_rank": 2,
+          "offsets": [
+            0,
+            0
+          ]
+        }
+      ],
+      "inputs": [
+        "arg0"
+      ],
+      "op": "gather",
+      "type": {
+        "dtype": "bf16",
+        "numerical_policy": "raw-bit-pattern",
+        "shape": [
+          32,
+          32
+        ]
+      }
+    },
+    {
+      "attrs": {
+        "numeric_semantics": "ieee754-bf16-add-rne-v1"
+      },
+      "effect": "pure",
+      "id": "op1r0",
+      "index_maps": [
+        {
+          "coefficients": [
+            [
+              1,
+              0
+            ],
+            [
+              0,
+              1
+            ]
+          ],
+          "loop_rank": 2,
+          "offsets": [
+            0,
+            0
+          ]
+        },
+        {
+          "coefficients": [
+            [
+              1,
+              0
+            ],
+            [
+              0,
+              1
+            ]
+          ],
+          "loop_rank": 2,
+          "offsets": [
+            0,
+            0
+          ]
+        },
+        {
+          "coefficients": [
+            [
+              1,
+              0
+            ],
+            [
+              0,
+              1
+            ]
+          ],
+          "loop_rank": 2,
+          "offsets": [
+            0,
+            0
+          ]
+        }
+      ],
+      "inputs": [
+        "op1r0.readout",
+        "op1r0.bias"
+      ],
+      "op": "bf16_add",
+      "type": {
+        "dtype": "bf16",
+        "numerical_policy": "raw-bit-pattern",
+        "shape": [
+          32,
+          32
+        ]
+      }
+    },
+    {
+      "attrs": {
+        "input_domain": "all-bf16-bit-patterns",
+        "numeric_semantics": "bf16-ordered-lt-positive-zero-select-v1"
+      },
+      "effect": "pure",
+      "id": "op3r0",
+      "index_maps": [
+        {
+          "coefficients": [
+            [
+              1,
+              0
+            ],
+            [
+              0,
+              1
+            ]
+          ],
+          "loop_rank": 2,
+          "offsets": [
+            0,
+            0
+          ]
+        },
+        {
+          "coefficients": [
+            [
+              1,
+              0
+            ],
+            [
+              0,
+              1
+            ]
+          ],
+          "loop_rank": 2,
+          "offsets": [
+            0,
+            0
+          ]
+        }
+      ],
+      "inputs": [
+        "op1r0"
+      ],
+      "op": "relu",
+      "type": {
+        "dtype": "bf16",
+        "numerical_policy": "raw-bit-pattern",
+        "shape": [
+          32,
+          32
+        ]
+      }
+    }
+  ],
+  "output_storages": [
+    "external"
+  ],
+  "outputs": [
+    "op3r0"
+  ],
+  "schema": "merlin.semantic_kernel.v2",
+  "source_identity": "fbce4e2974438cc09a701d503ae89af31e53606e67549e44f003cadd85b76585",
+  "target_identity": "atlas-rtl-0079c0541111197741a231c002e3843fa6f545b2:movement-mxu01-vpu-pack-tile-v24"
+}

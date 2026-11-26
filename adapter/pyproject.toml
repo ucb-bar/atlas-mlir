@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "atlas-m2m-adapter"
+version = "0.0.1"
+description = "Immutable Atlas export intake for model2MLIR"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = ["torch>=2.4", "m2m"]
+
+[project.entry-points."m2m.quantization_adapters"]
+atlas_fp8 = "atlas_m2m_adapter:atlas_fp8_adapter"
+
+[tool.setuptools.packages.find]
+include = ["atlas_m2m_adapter*"]
